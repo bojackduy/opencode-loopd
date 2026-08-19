@@ -2,15 +2,13 @@
 // src/tui/dashboard.tsx
 import { createSignal, For, Show, onCleanup } from "solid-js";
 
-// src/infrastructure/state-store.ts
+// src/infrastructure/state-repository.ts
 import { promises as fs } from "fs";
 import path from "path";
-import os from "os";
-var STATE_VERSION = 1;
+var CURRENT_VERSION = 2;
 function emptyState() {
-  return { version: STATE_VERSION, revision: 0, goals: [], runtimes: [] };
+  return { version: CURRENT_VERSION, revision: 0, goals: [], runtimes: [], commandLedger: [] };
 }
-var EMPTY_STATE = emptyState();
 function loopDir(directory) {
   return path.join(directory, ".opencode", "loopd");
 }
@@ -28,7 +26,7 @@ async function readState(directory) {
       const raw = await fs.readFile(target, "utf8");
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object" && Array.isArray(parsed.goals)) {
-        return parsed;
+        return migrate(parsed);
       }
       return emptyState();
     } catch (error) {
@@ -42,10 +40,31 @@ async function readState(directory) {
   }
   return emptyState();
 }
+function migrate(state) {
+  if (state.version === CURRENT_VERSION)
+    return state;
+  let result = { ...state };
+  if (result.version < 2) {
+    result.version = 2;
+    if (!result.commandLedger)
+      result.commandLedger = [];
+    result.runtimes = result.runtimes.map((rt) => ({
+      ...rt,
+      progressDuringTurn: rt.progressDuringTurn ?? false
+    }));
+    result.goals = result.goals.map((g) => ({
+      ...g,
+      lastProgress: g.lastProgress ?? undefined,
+      completionEvidence: g.completionEvidence ?? undefined,
+      blocker: g.blocker ?? undefined
+    }));
+  }
+  return result;
+}
 async function writeAtomic(target, contents) {
   const dir = path.dirname(target);
   await fs.mkdir(dir, { recursive: true });
-  const temp = path.join(os.tmpdir(), `loopd-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
+  const temp = path.join(dir, `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   await fs.writeFile(temp, contents, "utf8");
   try {
     for (let attempt = 0;attempt < 5; attempt++) {
@@ -147,45 +166,250 @@ function parseCommand(input) {
   const trimmed = input.trim();
   if (!trimmed)
     return null;
-  const parts = trimmed.split(/\s+/);
-  const command = parts[0] || "";
+  const tokens = tokenize(trimmed);
+  if (tokens.length === 0)
+    return null;
+  const command = tokens[0];
   const args = {};
-  for (let i = 1;i < parts.length; i++) {
-    const part = parts[i];
-    if (part.startsWith("--")) {
-      const eqIdx = part.indexOf("=");
+  const positional = [];
+  for (let i = 1;i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.startsWith("--")) {
+      const eqIdx = token.indexOf("=");
       if (eqIdx > 0) {
-        args[part.slice(2, eqIdx)] = part.slice(eqIdx + 1);
+        args[token.slice(2, eqIdx)] = token.slice(eqIdx + 1);
+      } else if (i + 1 < tokens.length && !tokens[i + 1].startsWith("--")) {
+        args[token.slice(2)] = tokens[++i];
       } else {
-        args[part.slice(2)] = "true";
+        args[token.slice(2)] = "true";
       }
-    } else if (part.includes("=")) {
-      const eqIdx = part.indexOf("=");
-      args[part.slice(0, eqIdx)] = part.slice(eqIdx + 1);
     } else {
-      args[`_${i}`] = part;
+      positional.push(token);
     }
   }
-  return { command, args, raw: trimmed };
+  return { command, args, positional, raw: trimmed };
+}
+function tokenize(input) {
+  const tokens = [];
+  let current = "";
+  let inQuote = null;
+  let escape = false;
+  for (const char of input) {
+    if (escape) {
+      current += char;
+      escape = false;
+      continue;
+    }
+    if (char === "\\") {
+      escape = true;
+      continue;
+    }
+    if (inQuote) {
+      if (char === inQuote) {
+        inQuote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      inQuote = char;
+      continue;
+    }
+    if (char === " " || char === "\t") {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (current)
+    tokens.push(current);
+  return tokens;
 }
 function commandHelp() {
   return [
     "Commands:",
-    "  :goal start <name> --objective <text>  Create a new goal",
-    "  :pause                                 Pause the selected goal",
-    "  :resume                                Resume the selected goal",
-    "  :retry                                 Retry the blocked goal",
-    "  :clear                                 Clear the selected goal",
-    "  :logs                                  Toggle log view",
-    "  :inspect state                         Show raw state",
-    "  :q / :close                            Close dashboard",
-    "  :help                                  Show this help"
+    '  :goal start <name> --objective "<text>"  Create a new goal',
+    "  :pause                                    Pause the selected goal",
+    "  :resume                                   Resume the selected goal",
+    "  :retry                                    Retry the blocked goal",
+    "  :clear                                    Clear the selected goal",
+    "  :logs                                     Toggle log view",
+    "  :help                                     Show this help",
+    "  :q / :close                               Close dashboard"
   ].join(`
 `);
 }
 
-// src/tui/dashboard.tsx
+// src/tui/controller.ts
 import { randomUUID } from "crypto";
+function createDashboardController(client) {
+  async function refresh() {
+    const s = await client.getState();
+    const activeGoals = s.goals.filter((g) => g.status !== "complete");
+    return {
+      goals: s.goals,
+      selected: 0,
+      activeGoals,
+      selectedGoal: activeGoals[0] || null,
+      statusText: "",
+      showLogs: false
+    };
+  }
+  function moveDown(state) {
+    if (state.activeGoals.length === 0)
+      return state;
+    const next = Math.min(state.selected + 1, state.activeGoals.length - 1);
+    return { ...state, selected: next, selectedGoal: state.activeGoals[next] || null };
+  }
+  function moveUp(state) {
+    if (state.activeGoals.length === 0)
+      return state;
+    const next = Math.max(state.selected - 1, 0);
+    return { ...state, selected: next, selectedGoal: state.activeGoals[next] || null };
+  }
+  function moveFirst(state) {
+    return { ...state, selected: 0, selectedGoal: state.activeGoals[0] || null };
+  }
+  function moveLast(state) {
+    if (state.activeGoals.length === 0)
+      return state;
+    const last = state.activeGoals.length - 1;
+    return { ...state, selected: last, selectedGoal: state.activeGoals[last] || null };
+  }
+  async function startGoal(ownerSessionID, name, objective) {
+    const result = await client.execute({
+      version: 1,
+      requestID: randomUUID(),
+      requestedAt: new Date().toISOString(),
+      command: "start",
+      args: { name, objective, config: {}, ownerSessionID }
+    });
+    return {
+      statusText: result.ok ? result.message : `Error: ${result.message}`,
+      needsRefresh: true
+    };
+  }
+  async function pauseGoal(goal) {
+    const result = await client.execute({
+      version: 1,
+      requestID: randomUUID(),
+      requestedAt: new Date().toISOString(),
+      command: "pause",
+      goalID: goal.id
+    });
+    return {
+      statusText: result.ok ? result.message : `Error: ${result.message}`,
+      needsRefresh: true
+    };
+  }
+  async function resumeGoal(goal) {
+    const result = await client.execute({
+      version: 1,
+      requestID: randomUUID(),
+      requestedAt: new Date().toISOString(),
+      command: "resume",
+      goalID: goal.id
+    });
+    return {
+      statusText: result.ok ? result.message : `Error: ${result.message}`,
+      needsRefresh: true
+    };
+  }
+  async function retryGoal(goal) {
+    const result = await client.execute({
+      version: 1,
+      requestID: randomUUID(),
+      requestedAt: new Date().toISOString(),
+      command: "retry",
+      goalID: goal.id
+    });
+    return {
+      statusText: result.ok ? result.message : `Error: ${result.message}`,
+      needsRefresh: true
+    };
+  }
+  async function clearGoal(goal) {
+    const result = await client.execute({
+      version: 1,
+      requestID: randomUUID(),
+      requestedAt: new Date().toISOString(),
+      command: "clear",
+      goalID: goal.id
+    });
+    return {
+      statusText: result.ok ? result.message : `Error: ${result.message}`,
+      needsRefresh: true
+    };
+  }
+  function toggleLogs(state) {
+    return { ...state, showLogs: !state.showLogs };
+  }
+  async function executeCommand(command, args, positional, state, ownerSessionID) {
+    switch (command) {
+      case "goal": {
+        if (positional[0] === "start") {
+          const name = positional[1] || args.name || "unnamed";
+          const objective = args.objective || positional[2] || "";
+          return startGoal(ownerSessionID, name, objective);
+        }
+        return { statusText: "Usage: :goal start <name> --objective <text>", needsRefresh: false };
+      }
+      case "pause": {
+        if (!state.selectedGoal)
+          return { statusText: "No goal selected", needsRefresh: false };
+        return pauseGoal(state.selectedGoal);
+      }
+      case "resume": {
+        if (!state.selectedGoal)
+          return { statusText: "No goal selected", needsRefresh: false };
+        return resumeGoal(state.selectedGoal);
+      }
+      case "retry": {
+        if (!state.selectedGoal)
+          return { statusText: "No goal selected", needsRefresh: false };
+        return retryGoal(state.selectedGoal);
+      }
+      case "clear": {
+        if (!state.selectedGoal)
+          return { statusText: "No goal selected", needsRefresh: false };
+        return clearGoal(state.selectedGoal);
+      }
+      case "logs": {
+        return { statusText: "", needsRefresh: false };
+      }
+      case "help": {
+        return { statusText: "", needsRefresh: false };
+      }
+      case "q":
+      case "close": {
+        return { statusText: "close", needsRefresh: false };
+      }
+      default: {
+        return { statusText: `Unknown command: ${command}. Type :help for available commands.`, needsRefresh: false };
+      }
+    }
+  }
+  return {
+    refresh,
+    moveDown,
+    moveUp,
+    moveFirst,
+    moveLast,
+    startGoal,
+    pauseGoal,
+    resumeGoal,
+    retryGoal,
+    clearGoal,
+    toggleLogs,
+    executeCommand
+  };
+}
+
+// src/tui/dashboard.tsx
 import { jsxDEV, Fragment } from "@opentui/solid/jsx-dev-runtime";
 function statusColor(status, theme) {
   switch (status) {
@@ -247,8 +471,8 @@ function LoopDashboard(props) {
   const [events, setEvents] = createSignal([]);
   const [selectedGoal, setSelectedGoal] = createSignal(null);
   const [showLogs, setShowLogs] = createSignal(false);
-  const [confirmAction, setConfirmAction] = createSignal(null);
   const client = createControlClient(props.directory);
+  const ctrl = createDashboardController(client);
   async function refresh() {
     try {
       const s = await client.getState();
@@ -272,111 +496,16 @@ function LoopDashboard(props) {
     const parsed = parseCommand(cmd);
     if (!parsed)
       return;
+    const route = props.api.route.current;
+    const ownerSessionID = route.name === "session" ? route.params?.sessionID || "main" : "main";
     try {
-      switch (parsed.command) {
-        case "goal": {
-          if (parsed.args._1 === "start") {
-            const name = parsed.args._2 || parsed.args.name || "unnamed";
-            const objective = parsed.args.objective || parsed.args._3 || "";
-            const result = await client.execute({
-              version: 1,
-              requestID: randomUUID(),
-              requestedAt: new Date().toISOString(),
-              command: "start",
-              args: { name, objective, config: {} }
-            });
-            setStatusText(result.ok ? result.message : `Error: ${result.message}`);
-          }
-          break;
-        }
-        case "pause": {
-          const goal = selectedGoal();
-          if (!goal) {
-            setStatusText("No goal selected");
-            break;
-          }
-          const result = await client.execute({
-            version: 1,
-            requestID: randomUUID(),
-            requestedAt: new Date().toISOString(),
-            command: "pause",
-            goalID: goal.id
-          });
-          setStatusText(result.ok ? result.message : `Error: ${result.message}`);
-          break;
-        }
-        case "resume": {
-          const goal = selectedGoal();
-          if (!goal) {
-            setStatusText("No goal selected");
-            break;
-          }
-          const result = await client.execute({
-            version: 1,
-            requestID: randomUUID(),
-            requestedAt: new Date().toISOString(),
-            command: "resume",
-            goalID: goal.id
-          });
-          setStatusText(result.ok ? result.message : `Error: ${result.message}`);
-          break;
-        }
-        case "retry": {
-          const goal = selectedGoal();
-          if (!goal) {
-            setStatusText("No goal selected");
-            break;
-          }
-          const result = await client.execute({
-            version: 1,
-            requestID: randomUUID(),
-            requestedAt: new Date().toISOString(),
-            command: "retry",
-            goalID: goal.id
-          });
-          setStatusText(result.ok ? result.message : `Error: ${result.message}`);
-          break;
-        }
-        case "clear": {
-          const goal = selectedGoal();
-          if (!goal) {
-            setStatusText("No goal selected");
-            break;
-          }
-          setConfirmAction(() => async () => {
-            const result = await client.execute({
-              version: 1,
-              requestID: randomUUID(),
-              requestedAt: new Date().toISOString(),
-              command: "clear",
-              goalID: goal.id
-            });
-            setStatusText(result.ok ? result.message : `Error: ${result.message}`);
-          });
-          setMode("confirm");
-          break;
-        }
-        case "logs": {
-          setShowLogs(!showLogs());
-          break;
-        }
-        case "help": {
-          setMode("help");
-          break;
-        }
-        case "q":
-        case "close": {
-          props.api.ui.dialog.clear();
-          return;
-        }
-        default: {
-          setStatusText(`Unknown command: ${parsed.command}. Type :help for available commands.`);
-        }
-      }
+      const result = await ctrl.executeCommand(parsed.command, parsed.args, parsed.positional, { goals: state()?.goals || [], selected: selected(), activeGoals: state()?.goals.filter((g) => g.status !== "complete") || [], selectedGoal: selectedGoal(), statusText: statusText(), showLogs: showLogs() }, ownerSessionID);
+      setStatusText(result.statusText);
+      if (result.needsRefresh)
+        await refresh();
     } catch (e) {
       setStatusText(`Error: ${e instanceof Error ? e.message : String(e)}`);
     }
-    await refresh();
   }
   props.api.keymap.registerLayer({
     mode: "modal",
@@ -396,6 +525,7 @@ function LoopDashboard(props) {
       { key: "x", cmd: "loopd.clear", desc: "Clear selected goal" },
       { key: "L", cmd: "loopd.logs", desc: "Toggle log view" },
       { key: ":", cmd: "loopd.command", desc: "Enter command mode" },
+      { key: "?", cmd: "loopd.help", desc: "Show help" },
       { key: "q", cmd: "loopd.close", desc: "Close dashboard" }
     ]
   });
@@ -564,6 +694,46 @@ function LoopDashboard(props) {
                   selectedGoal().config.progressFile
                 ]
               }, undefined, true, undefined, this)
+            }, undefined, false, undefined, this),
+            selectedGoal().lastProgress && /* @__PURE__ */ jsxDEV("text", {
+              children: /* @__PURE__ */ jsxDEV("span", {
+                style: { fg: theme().textMuted },
+                children: [
+                  "last progress: ",
+                  selectedGoal().lastProgress.summary.slice(0, 80)
+                ]
+              }, undefined, true, undefined, this)
+            }, undefined, false, undefined, this)
+          ]
+        }, undefined, true, undefined, this)
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV(Show, {
+        when: showLogs() && events().length > 0,
+        children: /* @__PURE__ */ jsxDEV("box", {
+          flexDirection: "column",
+          border: true,
+          borderColor: "gray",
+          padding: 1,
+          maxHeight: 8,
+          children: [
+            /* @__PURE__ */ jsxDEV("text", {
+              children: /* @__PURE__ */ jsxDEV("span", {
+                style: { fg: theme().primary, bold: true },
+                children: "Recent Events"
+              }, undefined, false, undefined, this)
+            }, undefined, false, undefined, this),
+            /* @__PURE__ */ jsxDEV(For, {
+              each: events().slice(-10),
+              children: (event) => /* @__PURE__ */ jsxDEV("text", {
+                children: /* @__PURE__ */ jsxDEV("span", {
+                  style: { fg: theme().textMuted },
+                  children: [
+                    event.type,
+                    " ",
+                    event.goalID?.slice(0, 8)
+                  ]
+                }, undefined, true, undefined, this)
+              }, undefined, false, undefined, this)
             }, undefined, false, undefined, this)
           ]
         }, undefined, true, undefined, this)

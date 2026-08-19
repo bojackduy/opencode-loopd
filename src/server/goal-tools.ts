@@ -1,12 +1,19 @@
 // ─── Server: Goal Tools ──────────────────────────────────────────────────────
-// Real goal tools that read/update goal state. Called by the worker session.
+// Authoritative goal tools. Requires exact worker-session matching.
+// Returns structured JSON for get_goal. Validates transitions.
 
 import { randomUUID } from "crypto"
 import { tool } from "@opencode-ai/plugin/tool"
-import { readState, writeState, appendEvent } from "../infrastructure/state-store"
+import { readState, writeState, appendEvent } from "../infrastructure/state-repository"
 import type { Goal, GoalID } from "../domain/goal"
+import { canTransition } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
+import { markProgress } from "../domain/runtime"
 import type { LoopEvent } from "../domain/events"
+import { exec as execChild } from "child_process"
+import { promisify } from "util"
+
+const execAsync = promisify(execChild)
 
 export function goalTools(dir: string, hostSessionID?: string) {
   return {
@@ -19,14 +26,13 @@ export function goalTools(dir: string, hostSessionID?: string) {
         const state = await readState(dir)
         const workerID = context?.sessionID || hostSessionID
 
-        // Find goal by worker session ID or owner session
-        const goal = findGoalBySession(state, workerID)
+        const goal = findGoalByWorkerSession(state, workerID)
         if (!goal) {
           return {
             title: "No active goal",
             output: JSON.stringify({
               status: "none",
-              message: "No active goal found for this session.",
+              message: "No active goal found for this worker session.",
             }),
           }
         }
@@ -35,7 +41,7 @@ export function goalTools(dir: string, hostSessionID?: string) {
 
         return {
           title: `Goal: ${goal.name}`,
-          output: formatGoalForModel(goal, runtime),
+          output: formatGoalStructured(goal, runtime),
         }
       },
     }),
@@ -52,18 +58,30 @@ export function goalTools(dir: string, hostSessionID?: string) {
       execute: async (args, context) => {
         const state = await readState(dir)
         const workerID = context?.sessionID || hostSessionID
-        const goal = findGoalBySession(state, workerID)
+        const goal = findGoalByWorkerSession(state, workerID)
         if (!goal) {
           return { title: "No goal", output: "No active goal to report progress for." }
         }
 
+        if (goal.status !== "active") {
+          return { title: "Invalid state", output: `Goal is ${goal.status}, not active. Cannot report progress.` }
+        }
+
         const runtime = state.runtimes.find((r) => r.goalID === goal.id)
         if (runtime) {
+          Object.assign(runtime, markProgress(runtime))
           runtime.noProgressCount = 0
-          runtime.lastProgressAt = new Date().toISOString()
           runtime.consecutiveFailures = 0
-          await writeState(dir, state)
         }
+
+        // Persist progress on goal
+        goal.lastProgress = {
+          summary: args.summary,
+          next: args.next,
+          at: new Date().toISOString(),
+        }
+
+        await writeState(dir, state)
 
         const event: LoopEvent = {
           version: 1,
@@ -79,39 +97,64 @@ export function goalTools(dir: string, hostSessionID?: string) {
 
         return {
           title: "Progress recorded",
-          output: `Progress on "${goal.name}": ${args.summary}\nNext: ${args.next}`,
+          output: JSON.stringify({
+            goalName: goal.name,
+            summary: args.summary,
+            next: args.next,
+            turn: runtime?.turnCount,
+          }),
         }
       },
     }),
 
-    update_goal: tool({
+    complete_goal: tool({
       description:
-        "Mark the current goal as completed or blocked. " +
-        "Use complete only when all acceptance criteria pass with concrete evidence. " +
-        "Use blocked only for a real external blocker requiring user intervention.",
+        "Mark the current goal as completed. " +
+        "Use only when all acceptance criteria pass with concrete evidence. " +
+        "Runs configured completion checks before accepting.",
       args: {
-        status: tool.schema.enum(["complete", "blocked"]).describe("Terminal status."),
-        summary: tool.schema.string().describe("What was completed or why blocked."),
-        evidence: tool.schema.string().describe("Concrete evidence."),
-        needed: tool.schema.string().describe("For blocked: what is needed to unblock."),
+        summary: tool.schema.string().describe("What was completed."),
+        evidence: tool.schema.string().describe("Concrete evidence of completion."),
       },
       execute: async (args, context) => {
         const state = await readState(dir)
         const workerID = context?.sessionID || hostSessionID
-        const goal = findGoalBySession(state, workerID)
+        const goal = findGoalByWorkerSession(state, workerID)
         if (!goal) {
-          return { title: "No goal", output: "No active goal to update." }
+          return { title: "No goal", output: "No active goal to complete." }
         }
 
-        const from = goal.status
-        goal.status = args.status as GoalStatus
+        if (!canTransition(goal.status, "complete", "model")) {
+          return { title: "Invalid transition", output: `Cannot complete goal in ${goal.status} state.` }
+        }
+
+        // Run completion checks
+        if (goal.config.checks?.length) {
+          const checkResults = await runCompletionChecks(goal.config.checks)
+          if (!checkResults.passed) {
+            return {
+              title: "Checks failed",
+              output: JSON.stringify({
+                passed: false,
+                failedChecks: checkResults.failures,
+                message: "Completion checks failed. Fix issues and try again.",
+              }),
+            }
+          }
+        }
+
+        goal.status = "complete"
         goal.updatedAt = new Date().toISOString()
+        goal.completionEvidence = {
+          summary: args.summary,
+          evidence: args.evidence,
+          at: new Date().toISOString(),
+        }
 
         const runtime = state.runtimes.find((r) => r.goalID === goal.id)
         if (runtime) {
           runtime.phase = "idle"
           runtime.lastError = undefined
-          runtime.updatedAt = new Date().toISOString()
         }
 
         await writeState(dir, state)
@@ -120,18 +163,82 @@ export function goalTools(dir: string, hostSessionID?: string) {
           version: 1,
           eventID: randomUUID(),
           goalID: goal.id,
-          type: args.status === "complete" ? "goal.completed" : "goal.blocked",
-          ...(args.status === "complete"
-            ? { summary: args.summary, evidence: args.evidence || "" }
-            : { reason: args.summary, needed: args.needed || "" }),
+          type: "goal.completed",
+          summary: args.summary,
+          evidence: args.evidence,
           timestamp: new Date().toISOString(),
           revision: state.revision,
-        } as LoopEvent
+        }
         await appendEvent(dir, event)
 
         return {
-          title: `Goal ${args.status}`,
-          output: `Goal "${goal.name}" marked as ${args.status}.\nSummary: ${args.summary}\nEvidence: ${args.evidence || "none"}`,
+          title: "Goal completed",
+          output: JSON.stringify({
+            goalName: goal.name,
+            status: "complete",
+            summary: args.summary,
+            evidence: args.evidence,
+          }),
+        }
+      },
+    }),
+
+    block_goal: tool({
+      description:
+        "Mark the current goal as blocked. " +
+        "Use only for a real external blocker requiring user intervention.",
+      args: {
+        reason: tool.schema.string().describe("Why the goal is blocked."),
+        needed: tool.schema.string().describe("What is needed to unblock."),
+      },
+      execute: async (args, context) => {
+        const state = await readState(dir)
+        const workerID = context?.sessionID || hostSessionID
+        const goal = findGoalByWorkerSession(state, workerID)
+        if (!goal) {
+          return { title: "No goal", output: "No active goal to block." }
+        }
+
+        if (!canTransition(goal.status, "blocked", "model")) {
+          return { title: "Invalid transition", output: `Cannot block goal in ${goal.status} state.` }
+        }
+
+        goal.status = "blocked"
+        goal.updatedAt = new Date().toISOString()
+        goal.blocker = {
+          reason: args.reason,
+          needed: args.needed,
+          at: new Date().toISOString(),
+        }
+
+        const runtime = state.runtimes.find((r) => r.goalID === goal.id)
+        if (runtime) {
+          runtime.phase = "idle"
+          runtime.lastError = undefined
+        }
+
+        await writeState(dir, state)
+
+        const event: LoopEvent = {
+          version: 1,
+          eventID: randomUUID(),
+          goalID: goal.id,
+          type: "goal.blocked",
+          reason: args.reason,
+          needed: args.needed,
+          timestamp: new Date().toISOString(),
+          revision: state.revision,
+        }
+        await appendEvent(dir, event)
+
+        return {
+          title: "Goal blocked",
+          output: JSON.stringify({
+            goalName: goal.name,
+            status: "blocked",
+            reason: args.reason,
+            needed: args.needed,
+          }),
         }
       },
     }),
@@ -140,51 +247,83 @@ export function goalTools(dir: string, hostSessionID?: string) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function findGoalBySession(
+function findGoalByWorkerSession(
   state: { goals: Goal[]; runtimes: GoalRuntimeState[] },
   sessionID?: string,
 ): Goal | undefined {
-  if (!sessionID) {
-    // Fall back to first active/blocked goal
-    return state.goals.find((g) => g.status === "active" || g.status === "blocked")
-  }
+  if (!sessionID) return undefined
 
-  // Match by worker session ID
-  const byWorker = state.goals.find(
-    (g) => g.workerSessionID === sessionID && (g.status === "active" || g.status === "blocked"),
-  )
-  if (byWorker) return byWorker
-
-  // Match by owner session ID
+  // Match by worker session ID (exact match required)
   return state.goals.find(
-    (g) => g.ownerSessionID === sessionID && (g.status === "active" || g.status === "blocked"),
+    (g) => g.workerSessionID === sessionID && (g.status === "active" || g.status === "blocked"),
   )
 }
 
-function formatGoalForModel(goal: Goal, runtime?: GoalRuntimeState): string {
-  const lines = [
-    `Goal: ${goal.name}`,
-    `Objective: ${goal.objective}`,
-    `Status: ${goal.status}`,
-  ]
-
-  if (goal.config.progressFile) {
-    lines.push(`Progress file: ${goal.config.progressFile}`)
-  }
-
-  if (goal.config.checks?.length) {
-    lines.push(`Checks: ${goal.config.checks.join(", ")}`)
+function formatGoalStructured(goal: Goal, runtime?: GoalRuntimeState): string {
+  const output: Record<string, any> = {
+    id: goal.id,
+    name: goal.name,
+    objective: goal.objective,
+    status: goal.status,
+    ownerSessionID: goal.ownerSessionID,
+    workerSessionID: goal.workerSessionID,
+    config: {
+      promptFile: goal.config.promptFile,
+      progressFile: goal.config.progressFile,
+      includeFiles: goal.config.includeFiles,
+      checks: goal.config.checks,
+      maxTurns: goal.config.maxTurns,
+      maxNoProgress: goal.config.maxNoProgress,
+      maxFailures: goal.config.maxFailures,
+      compactEvery: goal.config.compactEvery,
+      timeoutMs: goal.config.timeoutMs,
+    },
+    lastProgress: goal.lastProgress,
+    completionEvidence: goal.completionEvidence,
+    blocker: goal.blocker,
+    tokensUsed: goal.tokensUsed,
+    timeUsedSeconds: goal.timeUsedSeconds,
   }
 
   if (runtime) {
-    lines.push(`Turn: ${runtime.turnCount}`)
-    lines.push(`Failures: ${runtime.consecutiveFailures}`)
-    if (runtime.lastError) {
-      lines.push(`Last error: ${runtime.lastError}`)
+    output.runtime = {
+      phase: runtime.phase,
+      turnCount: runtime.turnCount,
+      runCount: runtime.runCount,
+      consecutiveFailures: runtime.consecutiveFailures,
+      noProgressCount: runtime.noProgressCount,
+      lastError: runtime.lastError,
+      lastProgressAt: runtime.lastProgressAt,
+      lastRunAt: runtime.lastRunAt,
+      lastCompactAt: runtime.lastCompactAt,
     }
   }
 
-  return lines.join("\n")
+  return JSON.stringify(output, null, 2)
 }
 
-type GoalStatus = Goal["status"]
+interface CheckResult {
+  passed: boolean
+  failures: Array<{ command: string; exitCode: number; stderr: string }>
+}
+
+async function runCompletionChecks(checks: string[]): Promise<CheckResult> {
+  const failures: CheckResult["failures"] = []
+
+  for (const cmd of checks) {
+    try {
+      await execAsync(cmd, { timeout: 30_000 })
+    } catch (error: any) {
+      failures.push({
+        command: cmd,
+        exitCode: error.code || 1,
+        stderr: error.stderr || error.message || "unknown error",
+      })
+    }
+  }
+
+  return {
+    passed: failures.length === 0,
+    failures,
+  }
+}

@@ -13,8 +13,8 @@ import {
   readState,
   writeState,
   appendEvent,
-} from "../infrastructure/state-store"
-import type { StoreState } from "../infrastructure/state-store"
+} from "../infrastructure/state-repository"
+import type { StoreState } from "../infrastructure/state-repository"
 
 export interface ControlService {
   execute(directory: string, command: LoopCommand): Promise<ControlResponse>
@@ -126,6 +126,7 @@ export function createControlService(): ControlService {
       type: "goal.created",
       name: cmd.args.name,
       objective: cmd.args.objective,
+      ownerSessionID: "main",
       timestamp: new Date().toISOString(),
       revision: state.revision,
     }

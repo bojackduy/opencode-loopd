@@ -35,6 +35,27 @@ export interface Goal {
   /** Config files — read-only references the engine injects into steering. */
   config: GoalConfig
 
+  /** Latest progress summary persisted by the model. */
+  lastProgress?: {
+    summary: string
+    next?: string
+    at: string
+  }
+
+  /** Completion evidence persisted by the model. */
+  completionEvidence?: {
+    summary: string
+    evidence: string
+    at: string
+  }
+
+  /** Blocker details persisted by the model. */
+  blocker?: {
+    reason: string
+    needed: string
+    at: string
+  }
+
   createdAt: string
   updatedAt: string
 }
@@ -112,6 +133,14 @@ export function canTransition(
         ? USER_TRANSITIONS
         : SYSTEM_TRANSITIONS
   return table[current]?.includes(target) ?? false
+}
+
+export function isTerminal(status: GoalStatus): boolean {
+  return status === "complete"
+}
+
+export function isRunning(status: GoalStatus): boolean {
+  return status === "active" || status === "blocked" || status === "budget_limited" || status === "usage_limited"
 }
 
 export function createGoal(

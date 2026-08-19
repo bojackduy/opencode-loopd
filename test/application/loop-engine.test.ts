@@ -1,0 +1,229 @@
+import { describe, it, expect, beforeEach, afterEach } from "bun:test"
+import { promises as fs } from "fs"
+import path from "path"
+import os from "os"
+import { createLoopEngine } from "../../src/application/loop-engine"
+import { createGoalService } from "../../src/application/goal-service"
+import { createFakeHost } from "../../src/server/host-adapter"
+import { readState } from "../../src/infrastructure/state-repository"
+import type { GoalID } from "../../src/domain/goal"
+
+function tmpDir(): string {
+  return path.join(os.tmpdir(), `loopd-engine-test-${crypto.randomUUID()}`)
+}
+
+describe("Loop Engine", () => {
+  let dir: string
+  let host: ReturnType<typeof createFakeHost>
+  let goalService: ReturnType<typeof createGoalService>
+  let engine: ReturnType<typeof createLoopEngine>
+
+  beforeEach(async () => {
+    dir = tmpDir()
+    await fs.mkdir(dir, { recursive: true })
+    host = createFakeHost()
+    goalService = createGoalService(host)
+    engine = createLoopEngine({
+      directory: dir,
+      host,
+      goalService,
+      pollIntervalMs: 100,
+    })
+    engine.start()
+  })
+
+  afterEach(async () => {
+    engine.stop()
+    await fs.rm(dir, { recursive: true, force: true })
+  })
+
+  describe("handleEvent", () => {
+    it("ignores events without session ID", async () => {
+      const result = await engine.handleEvent({ type: "session.idle" })
+      expect(result).toBe(false)
+    })
+
+    it("ignores events for unknown sessions", async () => {
+      const result = await engine.handleEvent({
+        type: "session.idle",
+        properties: { sessionID: "unknown-session" },
+      })
+      expect(result).toBe(false)
+    })
+
+    it("handles session.idle for active goal", async () => {
+      // Create a goal with a worker
+      const { goal } = await goalService.start(dir, {
+        name: "test",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+      })
+
+      // Simulate session.idle event
+      const result = await engine.handleEvent({
+        type: "session.idle",
+        properties: { sessionID: goal.workerSessionID },
+      })
+
+      expect(result).toBe(true)
+    })
+
+    it("ignores session.idle for paused goal", async () => {
+      const { goal } = await goalService.start(dir, {
+        name: "test",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+      })
+
+      await goalService.pause(dir, goal.id)
+
+      const result = await engine.handleEvent({
+        type: "session.idle",
+        properties: { sessionID: goal.workerSessionID },
+      })
+
+      expect(result).toBe(false)
+    })
+
+    it("handles session.error and increments failures", async () => {
+      const { goal } = await goalService.start(dir, {
+        name: "test",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+      })
+
+      const result = await engine.handleEvent({
+        type: "session.error",
+        properties: {
+          sessionID: goal.workerSessionID,
+          error: { message: "test error" },
+        },
+      })
+
+      expect(result).toBe(true)
+
+      const state = await readState(dir)
+      const runtime = state.runtimes.find((r) => r.goalID === goal.id)
+      expect(runtime?.consecutiveFailures).toBe(1)
+      expect(runtime?.lastError).toBe("test error")
+    })
+
+    it("blocks goal after max failures", async () => {
+      const { goal } = await goalService.start(dir, {
+        name: "test",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { maxFailures: 2 },
+      })
+
+      // First failure
+      await engine.handleEvent({
+        type: "session.error",
+        properties: {
+          sessionID: goal.workerSessionID,
+          error: { message: "error 1" },
+        },
+      })
+
+      // Second failure
+      await engine.handleEvent({
+        type: "session.error",
+        properties: {
+          sessionID: goal.workerSessionID,
+          error: { message: "error 2" },
+        },
+      })
+
+      const state = await readState(dir)
+      expect(state.goals[0].status).toBe("blocked")
+    })
+
+    it("handles session.compacted", async () => {
+      const { goal } = await goalService.start(dir, {
+        name: "test",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+      })
+
+      const result = await engine.handleEvent({
+        type: "session.compacted",
+        properties: { sessionID: goal.workerSessionID },
+      })
+
+      expect(result).toBe(true)
+
+      const state = await readState(dir)
+      const runtime = state.runtimes.find((r) => r.goalID === goal.id)
+      expect(runtime?.lastCompactAt).toBeTruthy()
+    })
+
+    it("handles session.status updates", async () => {
+      const { goal } = await goalService.start(dir, {
+        name: "test",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+      })
+
+      const result = await engine.handleEvent({
+        type: "session.status",
+        properties: {
+          sessionID: goal.workerSessionID,
+          status: { type: "busy" },
+        },
+      })
+
+      expect(result).toBe(true)
+
+      const state = await readState(dir)
+      const runtime = state.runtimes.find((r) => r.goalID === goal.id)
+      expect(runtime?.lastWorkerStatus).toBe("busy")
+    })
+  })
+
+  describe("limits", () => {
+    it("blocks on max turns", async () => {
+      const { goal } = await goalService.start(dir, {
+        name: "test",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { maxTurns: 1 },
+      })
+
+      // Simulate that the worker has already completed 1 turn
+      // by sending an idle event which will trigger the limit check
+      const state = await readState(dir)
+      const runtime = state.runtimes.find((r) => r.goalID === goal.id)
+      if (runtime) {
+        runtime.turnCount = 2 // Exceed maxTurns
+        await fs.writeFile(
+          path.join(dir, ".opencode", "loopd", "state.json"),
+          JSON.stringify(state, null, 2),
+        )
+      }
+
+      // Simulate idle to trigger limit check
+      await engine.handleEvent({
+        type: "session.idle",
+        properties: { sessionID: goal.workerSessionID },
+      })
+
+      const updatedState = await readState(dir)
+      expect(updatedState.goals[0].status).toBe("blocked")
+    })
+  })
+
+  describe("lifecycle", () => {
+    it("starts and stops cleanly", () => {
+      expect(engine.isRunning()).toBe(true)
+      engine.stop()
+      expect(engine.isRunning()).toBe(false)
+    })
+
+    it("can be restarted", () => {
+      engine.stop()
+      expect(engine.isRunning()).toBe(false)
+      engine.start()
+      expect(engine.isRunning()).toBe(true)
+    })
+  })
+})

@@ -1,9 +1,10 @@
 // ─── TUI: Command Parser ─────────────────────────────────────────────────────
-// Parses `:` commands in the dashboard.
+// Parses `:` commands in the dashboard with proper quoting support.
 
 export interface ParsedCommand {
   command: string
   args: Record<string, string>
+  positional: string[]
   raw: string
 }
 
@@ -11,43 +12,84 @@ export function parseCommand(input: string): ParsedCommand | null {
   const trimmed = input.trim()
   if (!trimmed) return null
 
-  const parts = trimmed.split(/\s+/)
-  const command = parts[0] || ""
-  const args: Record<string, string> = {}
+  const tokens = tokenize(trimmed)
+  if (tokens.length === 0) return null
 
-  // Parse key=value pairs and flags
-  for (let i = 1; i < parts.length; i++) {
-    const part = parts[i]!
-    if (part.startsWith("--")) {
-      const eqIdx = part.indexOf("=")
+  const command = tokens[0]!
+  const args: Record<string, string> = {}
+  const positional: string[] = []
+
+  for (let i = 1; i < tokens.length; i++) {
+    const token = tokens[i]!
+    if (token.startsWith("--")) {
+      const eqIdx = token.indexOf("=")
       if (eqIdx > 0) {
-        args[part.slice(2, eqIdx)] = part.slice(eqIdx + 1)
+        args[token.slice(2, eqIdx)] = token.slice(eqIdx + 1)
+      } else if (i + 1 < tokens.length && !tokens[i + 1]!.startsWith("--")) {
+        args[token.slice(2)] = tokens[++i]!
       } else {
-        args[part.slice(2)] = "true"
+        args[token.slice(2)] = "true"
       }
-    } else if (part.includes("=")) {
-      const eqIdx = part.indexOf("=")
-      args[part.slice(0, eqIdx)] = part.slice(eqIdx + 1)
     } else {
-      // Positional args
-      args[`_${i}`] = part
+      positional.push(token)
     }
   }
 
-  return { command, args, raw: trimmed }
+  return { command, args, positional, raw: trimmed }
+}
+
+function tokenize(input: string): string[] {
+  const tokens: string[] = []
+  let current = ""
+  let inQuote: string | null = null
+  let escape = false
+
+  for (const char of input) {
+    if (escape) {
+      current += char
+      escape = false
+      continue
+    }
+    if (char === "\\") {
+      escape = true
+      continue
+    }
+    if (inQuote) {
+      if (char === inQuote) {
+        inQuote = null
+      } else {
+        current += char
+      }
+      continue
+    }
+    if (char === '"' || char === "'") {
+      inQuote = char
+      continue
+    }
+    if (char === " " || char === "\t") {
+      if (current) {
+        tokens.push(current)
+        current = ""
+      }
+      continue
+    }
+    current += char
+  }
+  if (current) tokens.push(current)
+
+  return tokens
 }
 
 export function commandHelp(): string {
   return [
     "Commands:",
-    "  :goal start <name> --objective <text>  Create a new goal",
-    "  :pause                                 Pause the selected goal",
-    "  :resume                                Resume the selected goal",
-    "  :retry                                 Retry the blocked goal",
-    "  :clear                                 Clear the selected goal",
-    "  :logs                                  Toggle log view",
-    "  :inspect state                         Show raw state",
-    "  :q / :close                            Close dashboard",
-    "  :help                                  Show this help",
+    '  :goal start <name> --objective "<text>"  Create a new goal',
+    "  :pause                                    Pause the selected goal",
+    "  :resume                                   Resume the selected goal",
+    "  :retry                                    Retry the blocked goal",
+    "  :clear                                    Clear the selected goal",
+    "  :logs                                     Toggle log view",
+    "  :help                                     Show this help",
+    "  :q / :close                               Close dashboard",
   ].join("\n")
 }

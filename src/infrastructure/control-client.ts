@@ -2,8 +2,6 @@
 // TUI-side: writes control requests, polls for responses, subscribes to events.
 
 import { randomUUID } from "crypto"
-import { promises as fs } from "fs"
-import path from "path"
 import {
   writeControlRequest,
   readControlResponse,
@@ -12,7 +10,7 @@ import {
   type ControlRequest,
   type ControlResponse,
   type StoreState,
-} from "./state-store"
+} from "./state-repository"
 import type { LoopCommand } from "../domain/commands"
 
 export interface ControlClient {

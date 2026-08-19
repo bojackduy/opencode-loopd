@@ -2,34 +2,13 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test"
 import { promises as fs } from "fs"
 import path from "path"
 import os from "os"
-import { randomUUID } from "crypto"
 import { createControlClient } from "../../src/infrastructure/control-client"
 import { createControlWorker } from "../../src/application/control-worker"
-import { readState } from "../../src/infrastructure/state-store"
-import type { LoopHost } from "../../src/server/host-adapter"
+import { readState } from "../../src/infrastructure/state-repository"
+import { createFakeHost } from "../../src/server/host-adapter"
 
 function tmpDir(): string {
-  return path.join(os.tmpdir(), `loopd-bus-test-${randomUUID()}`)
-}
-
-function createFakeHost(): LoopHost & { sessions: Map<string, string[]> } {
-  const sessions = new Map<string, string[]>()
-  return {
-    sessions,
-    async createWorker({ parentID, title }) {
-      const id = `worker-${randomUUID().slice(0, 8)}`
-      sessions.set(id, [])
-      return id
-    },
-    async promptWorker({ sessionID, prompt }) {
-      const msgs = sessions.get(sessionID) || []
-      msgs.push(prompt)
-      sessions.set(sessionID, msgs)
-    },
-    async sessionStatus() { return "idle" },
-    async abortSession(sessionID) { sessions.delete(sessionID) },
-    async readMessages() { return [] },
-  }
+  return path.join(os.tmpdir(), `loopd-bus-test-${crypto.randomUUID()}`)
 }
 
 describe("Control Bus", () => {
@@ -48,17 +27,17 @@ describe("Control Bus", () => {
   })
 
   afterEach(async () => {
-    worker.stop()
+    await worker.stop()
     await fs.rm(dir, { recursive: true, force: true })
   })
 
   it("executes a start command through the bus", async () => {
     const result = await client.execute({
       version: 1,
-      requestID: randomUUID(),
+      requestID: crypto.randomUUID(),
       requestedAt: new Date().toISOString(),
       command: "start",
-      args: { name: "bus-test", objective: "test objective", config: {} },
+      args: { name: "bus-test", objective: "test objective", config: {}, ownerSessionID: "main" },
     })
 
     expect(result.ok).toBe(true)
@@ -72,10 +51,10 @@ describe("Control Bus", () => {
   it("creates a worker session for start", async () => {
     await client.execute({
       version: 1,
-      requestID: randomUUID(),
+      requestID: crypto.randomUUID(),
       requestedAt: new Date().toISOString(),
       command: "start",
-      args: { name: "w", objective: "o", config: {} },
+      args: { name: "w", objective: "o", config: {}, ownerSessionID: "main" },
     })
 
     const state = await client.getState()
@@ -86,10 +65,10 @@ describe("Control Bus", () => {
   it("sends continuation prompt on start", async () => {
     await client.execute({
       version: 1,
-      requestID: randomUUID(),
+      requestID: crypto.randomUUID(),
       requestedAt: new Date().toISOString(),
       command: "start",
-      args: { name: "w", objective: "o", config: {} },
+      args: { name: "w", objective: "o", config: {}, ownerSessionID: "main" },
     })
 
     const state = await client.getState()
@@ -102,10 +81,10 @@ describe("Control Bus", () => {
   it("pauses and aborts worker", async () => {
     await client.execute({
       version: 1,
-      requestID: randomUUID(),
+      requestID: crypto.randomUUID(),
       requestedAt: new Date().toISOString(),
       command: "start",
-      args: { name: "p", objective: "o", config: {} },
+      args: { name: "p", objective: "o", config: {}, ownerSessionID: "main" },
     })
 
     const state = await readState(dir)
@@ -113,7 +92,7 @@ describe("Control Bus", () => {
 
     const result = await client.execute({
       version: 1,
-      requestID: randomUUID(),
+      requestID: crypto.randomUUID(),
       requestedAt: new Date().toISOString(),
       command: "pause",
       goalID,
@@ -127,14 +106,26 @@ describe("Control Bus", () => {
   it("receives events through the bus", async () => {
     await client.execute({
       version: 1,
-      requestID: randomUUID(),
+      requestID: crypto.randomUUID(),
       requestedAt: new Date().toISOString(),
       command: "start",
-      args: { name: "ev", objective: "o", config: {} },
+      args: { name: "ev", objective: "o", config: {}, ownerSessionID: "main" },
     })
 
     const events = await client.getEvents()
     expect(events.length).toBeGreaterThan(0)
     expect(events.some((e) => e.type === "goal.created")).toBe(true)
+  })
+
+  it("rejects unknown commands", async () => {
+    const result = await client.execute({
+      version: 1,
+      requestID: crypto.randomUUID(),
+      requestedAt: new Date().toISOString(),
+      command: "nonexistent" as any,
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.errorCode).toBe("unknown_command")
   })
 })

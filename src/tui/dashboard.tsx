@@ -1,19 +1,20 @@
 // ─── TUI: Dashboard Component ────────────────────────────────────────────────
 // Functional modal dashboard with Neovim-style keybindings.
-// Modes: NORMAL, COMMAND, FORM, CONFIRM, HELP
+// Uses the controller for all actions. Renders state reactively.
 
 /** @jsxImportSource @opentui/solid */
-import { createSignal, For, Show, onCleanup, onMount } from "solid-js"
+import { createSignal, For, Show, onCleanup, onMount, batch } from "solid-js"
 import type { TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
-import { readState, readEvents } from "../infrastructure/state-store"
+import { readEvents } from "../infrastructure/state-repository"
 import { createControlClient } from "../infrastructure/control-client"
-import type { StoreState } from "../infrastructure/state-store"
+import type { StoreState } from "../infrastructure/state-repository"
 import type { Goal, GoalStatus } from "../domain/goal"
 import type { GoalRuntimeState, RuntimePhase } from "../domain/runtime"
 import { parseCommand, commandHelp } from "./command-parser"
+import { createDashboardController, type DashboardState } from "./controller"
 import { randomUUID } from "crypto"
 
-type Mode = "normal" | "command" | "form" | "confirm" | "help"
+type Mode = "normal" | "command" | "confirm" | "help"
 
 interface Props {
   api: TuiPluginApi
@@ -68,9 +69,9 @@ export function LoopDashboard(props: Props) {
   const [events, setEvents] = createSignal<Record<string, unknown>[]>([])
   const [selectedGoal, setSelectedGoal] = createSignal<Goal | null>(null)
   const [showLogs, setShowLogs] = createSignal(false)
-  const [confirmAction, setConfirmAction] = createSignal<(() => Promise<void>) | null>(null)
 
   const client = createControlClient(props.directory)
+  const ctrl = createDashboardController(client)
 
   // ─── State Refresh ───────────────────────────────────────────────────────
 
@@ -102,100 +103,22 @@ export function LoopDashboard(props: Props) {
     const parsed = parseCommand(cmd)
     if (!parsed) return
 
+    const route = props.api.route.current
+    const ownerSessionID = route.name === "session" ? (route.params?.sessionID as string || "main") : "main"
+
     try {
-      switch (parsed.command) {
-        case "goal": {
-          if (parsed.args._1 === "start") {
-            const name = parsed.args._2 || parsed.args.name || "unnamed"
-            const objective = parsed.args.objective || parsed.args._3 || ""
-            const result = await client.execute({
-              version: 1,
-              requestID: randomUUID(),
-              requestedAt: new Date().toISOString(),
-              command: "start",
-              args: { name, objective, config: {} },
-            })
-            setStatusText(result.ok ? result.message : `Error: ${result.message}`)
-          }
-          break
-        }
-        case "pause": {
-          const goal = selectedGoal()
-          if (!goal) { setStatusText("No goal selected"); break }
-          const result = await client.execute({
-            version: 1,
-            requestID: randomUUID(),
-            requestedAt: new Date().toISOString(),
-            command: "pause",
-            goalID: goal.id,
-          })
-          setStatusText(result.ok ? result.message : `Error: ${result.message}`)
-          break
-        }
-        case "resume": {
-          const goal = selectedGoal()
-          if (!goal) { setStatusText("No goal selected"); break }
-          const result = await client.execute({
-            version: 1,
-            requestID: randomUUID(),
-            requestedAt: new Date().toISOString(),
-            command: "resume",
-            goalID: goal.id,
-          })
-          setStatusText(result.ok ? result.message : `Error: ${result.message}`)
-          break
-        }
-        case "retry": {
-          const goal = selectedGoal()
-          if (!goal) { setStatusText("No goal selected"); break }
-          const result = await client.execute({
-            version: 1,
-            requestID: randomUUID(),
-            requestedAt: new Date().toISOString(),
-            command: "retry",
-            goalID: goal.id,
-          })
-          setStatusText(result.ok ? result.message : `Error: ${result.message}`)
-          break
-        }
-        case "clear": {
-          const goal = selectedGoal()
-          if (!goal) { setStatusText("No goal selected"); break }
-          setConfirmAction(() => async () => {
-            const result = await client.execute({
-              version: 1,
-              requestID: randomUUID(),
-              requestedAt: new Date().toISOString(),
-              command: "clear",
-              goalID: goal.id,
-            })
-            setStatusText(result.ok ? result.message : `Error: ${result.message}`)
-          })
-          setMode("confirm")
-          break
-        }
-        case "logs": {
-          setShowLogs(!showLogs())
-          break
-        }
-        case "help": {
-          setMode("help")
-          break
-        }
-        case "q":
-        case "close": {
-          props.api.ui.dialog.clear()
-          return
-        }
-        default: {
-          setStatusText(`Unknown command: ${parsed.command}. Type :help for available commands.`)
-        }
-      }
+      const result = await ctrl.executeCommand(
+        parsed.command,
+        parsed.args,
+        parsed.positional,
+        { goals: state()?.goals || [], selected: selected(), activeGoals: state()?.goals.filter((g) => g.status !== "complete") || [], selectedGoal: selectedGoal(), statusText: statusText(), showLogs: showLogs() },
+        ownerSessionID,
+      )
+      setStatusText(result.statusText)
+      if (result.needsRefresh) await refresh()
     } catch (e) {
       setStatusText(`Error: ${e instanceof Error ? e.message : String(e)}`)
     }
-
-    await refresh()
   }
 
   // ─── Keyboard ────────────────────────────────────────────────────────────
@@ -218,6 +141,7 @@ export function LoopDashboard(props: Props) {
       { key: "x", cmd: "loopd.clear", desc: "Clear selected goal" },
       { key: "L", cmd: "loopd.logs", desc: "Toggle log view" },
       { key: ":", cmd: "loopd.command", desc: "Enter command mode" },
+      { key: "?", cmd: "loopd.help", desc: "Show help" },
       { key: "q", cmd: "loopd.close", desc: "Close dashboard" },
     ],
   })
@@ -332,6 +256,29 @@ export function LoopDashboard(props: Props) {
               </span>
             </text>
           )}
+          {selectedGoal()!.lastProgress && (
+            <text>
+              <span style={{ fg: theme().textMuted }}>
+                last progress: {selectedGoal()!.lastProgress!.summary.slice(0, 80)}
+              </span>
+            </text>
+          )}
+        </box>
+      </Show>
+
+      {/* Event log */}
+      <Show when={showLogs() && events().length > 0}>
+        <box flexDirection="column" border={true} borderColor="gray" padding={1} maxHeight={8}>
+          <text><span style={{ fg: theme().primary, bold: true }}>Recent Events</span></text>
+          <For each={events().slice(-10)}>
+            {(event) => (
+              <text>
+                <span style={{ fg: theme().textMuted }}>
+                  {(event as any).type} {(event as any).goalID?.slice(0, 8)}
+                </span>
+              </text>
+            )}
+          </For>
         </box>
       </Show>
 

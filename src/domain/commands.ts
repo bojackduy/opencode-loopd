@@ -21,6 +21,7 @@ export interface StartGoalCommand extends BaseCommand {
     name: string
     objective: string
     config: GoalConfig
+    ownerSessionID: string
   }
 }
 

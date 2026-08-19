@@ -1,6 +1,7 @@
 // ─── Application: Control Worker ─────────────────────────────────────────────
 // Server-side: watches for control requests, processes them, writes responses.
 // Integrates with GoalService for real goal lifecycle.
+// Supports idempotency via command ledger and response caching.
 
 import { promises as fs } from "fs"
 import path from "path"
@@ -8,19 +9,19 @@ import {
   listPendingRequests,
   claimControlRequest,
   writeControlResponse,
+  readControlResponse,
   recoverStaleProcessing,
   readState,
   writeState,
   appendEvent,
   type ControlRequest,
   type ControlResponse,
-} from "../infrastructure/state-store"
-import { createControlService, type ControlService } from "./control-service"
+} from "../infrastructure/state-repository"
 import { createGoalService, type GoalService } from "./goal-service"
-import type { LoopCommand } from "../domain/commands"
 import type { LoopHost } from "../server/host-adapter"
-import type { LoopEvent } from "../domain/events"
-import { randomUUID } from "crypto"
+
+const MAX_LEDGER_SIZE = 100
+const RESPONSE_CLEANUP_AGE_MS = 60 * 60 * 1000 // 1 hour
 
 export interface ControlWorkerOptions {
   directory: string
@@ -32,7 +33,7 @@ export interface ControlWorkerOptions {
 
 export interface ControlWorker {
   start(): void
-  stop(): void
+  stop(): Promise<void>
   isRunning(): boolean
 }
 
@@ -44,19 +45,25 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
   let running = false
   let pollTimer: ReturnType<typeof setInterval> | undefined
   let processing = new Set<string>()
+  let lastProcessDone = true
 
   function start() {
     if (running) return
     running = true
-    recoverStaleProcessing(directory).catch(() => {})
+    // Process immediately on start, then on interval
+    processPending()
     pollTimer = setInterval(() => {
-      if (running) processPending()
+      if (running && lastProcessDone) {
+        lastProcessDone = false
+        processPending().then(() => { lastProcessDone = true })
+      }
     }, pollMs)
   }
 
-  function stop() {
+  async function stop() {
     running = false
     if (pollTimer) clearInterval(pollTimer)
+    pollTimer = undefined
     processing.clear()
   }
 
@@ -94,6 +101,26 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
   }
 
   async function handleRequest(request: ControlRequest): Promise<ControlResponse> {
+    // Check idempotency: if we already have a response, return it
+    const existingResponse = await readControlResponse(directory, request.requestID)
+    if (existingResponse) {
+      return existingResponse
+    }
+
+    // Check command ledger for accepted commands
+    const state = await readState(directory)
+    const ledgerEntry = state.commandLedger?.find((e) => e.requestID === request.requestID)
+    if (ledgerEntry?.completedAt) {
+      // Command was already processed, return cached response
+      return {
+        requestID: request.requestID,
+        ok: true,
+        message: `command "${request.command}" already processed`,
+        stateRevision: state.revision,
+        completedAt: ledgerEntry.completedAt,
+      }
+    }
+
     const base = {
       requestID: request.requestID,
       ok: true as boolean,
@@ -103,102 +130,109 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
       completedAt: new Date().toISOString(),
     }
 
+    let response: ControlResponse
+
     switch (request.command) {
       case "start": {
-        const args = request.args as { name: string; objective: string; config?: any }
+        const args = request.args as { name: string; objective: string; config?: any; ownerSessionID?: string }
         const { goal } = await goalSvc.start(directory, {
           name: args.name,
           objective: args.objective,
-          ownerSessionID: "main",
+          ownerSessionID: args.ownerSessionID || "main",
           config: args.config,
         })
         const state = await readState(directory)
-        return {
+        response = {
           ...base,
           message: `goal "${args.name}" created (${goal.id.slice(0, 8)}...)`,
           stateRevision: state.revision,
         }
+        break
       }
 
       case "pause": {
         await goalSvc.pause(directory, request.goalID as any)
         const state = await readState(directory)
         const goal = state.goals.find((g) => g.id === request.goalID)
-        return {
+        response = {
           ...base,
           message: `goal "${goal?.name || request.goalID}" paused`,
           stateRevision: state.revision,
         }
+        break
       }
 
       case "resume": {
         await goalSvc.resume(directory, request.goalID as any)
         const state = await readState(directory)
         const goal = state.goals.find((g) => g.id === request.goalID)
-        return {
+        response = {
           ...base,
           message: `goal "${goal?.name || request.goalID}" resumed`,
           stateRevision: state.revision,
         }
+        break
       }
 
       case "retry": {
         await goalSvc.retry(directory, request.goalID as any)
         const state = await readState(directory)
         const goal = state.goals.find((g) => g.id === request.goalID)
-        return {
+        response = {
           ...base,
           message: `goal "${goal?.name || request.goalID}" retried`,
           stateRevision: state.revision,
         }
+        break
       }
 
       case "clear": {
         await goalSvc.clear(directory, request.goalID as any)
         const state = await readState(directory)
-        return {
+        response = {
           ...base,
           message: `goal cleared`,
           stateRevision: state.revision,
         }
+        break
       }
 
       default: {
-        // Delegate simple commands to the basic control service
-        const cmd = buildBasicCommand(request)
-        const svc = createControlService()
-        const result = await svc.execute(directory, cmd)
-        return {
+        response = {
           requestID: request.requestID,
-          ok: result.ok,
-          message: result.message,
-          stateRevision: result.stateRevision,
-          errorCode: result.errorCode,
+          ok: false,
+          message: `command "${request.command}" not implemented in worker`,
+          errorCode: "unknown_command",
           completedAt: new Date().toISOString(),
         }
       }
     }
+
+    // Record in command ledger
+    await recordInLedger(directory, request)
+
+    return response
   }
 
-  function buildBasicCommand(request: ControlRequest): LoopCommand {
-    const base = {
-      version: 1 as const,
+  async function recordInLedger(directory: string, request: ControlRequest) {
+    const state = await readState(directory)
+    if (!state.commandLedger) state.commandLedger = []
+
+    state.commandLedger.push({
       requestID: request.requestID,
-      requestedAt: request.requestedAt,
+      command: request.command,
+      goalID: request.goalID,
+      acceptedAt: request.requestedAt,
+      completedAt: new Date().toISOString(),
+    })
+
+    // Trim to max size
+    if (state.commandLedger.length > MAX_LEDGER_SIZE) {
+      state.commandLedger = state.commandLedger.slice(-MAX_LEDGER_SIZE)
     }
-    switch (request.command) {
-      case "update":
-        return { ...base, command: "update", goalID: request.goalID as any, args: request.args as any }
-      case "inspect":
-        return { ...base, command: "inspect", args: request.args as any }
-      case "open_worker":
-        return { ...base, command: "open_worker" }
-      case "compact":
-        return { ...base, command: "compact" }
-      default:
-        return { ...base, command: request.command as any }
-    }
+
+    await writeState(directory, state)
   }
 
-  return { start, stop, isRunning: () => running }
+  return { start, stop: async () => { await stop() }, isRunning: () => running }
 }

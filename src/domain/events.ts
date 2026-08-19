@@ -20,6 +20,7 @@ export interface GoalCreatedEvent extends BaseEvent {
   type: "goal.created"
   name: string
   objective: string
+  ownerSessionID: string
 }
 
 export interface GoalStatusChangedEvent extends BaseEvent {

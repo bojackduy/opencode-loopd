@@ -11,7 +11,16 @@ export interface SessionMessage {
   role: "user" | "assistant"
   content: string
   timestamp?: string
+  messageID?: string
 }
+
+export interface SessionUsage {
+  inputTokens?: number
+  outputTokens?: number
+  totalTokens?: number
+}
+
+export type SessionStatusType = "idle" | "busy" | "retry"
 
 export interface LoopHost {
   createWorker(input: { parentID: string; title: string }): Promise<string>
@@ -21,10 +30,13 @@ export interface LoopHost {
     model?: ModelRef
     agent?: string
   }): Promise<void>
-  sessionStatus(sessionID: string): Promise<"idle" | "busy" | "retry">
+  sessionStatus(sessionID: string): Promise<SessionStatusType>
   abortSession(sessionID: string): Promise<void>
   readMessages(sessionID: string, limit?: number): Promise<SessionMessage[]>
+  compactSession(sessionID: string): Promise<void>
 }
+
+// ─── Real Host (SDK-backed) ─────────────────────────────────────────────────
 
 export function createRealHost(client: any): LoopHost {
   return {
@@ -56,14 +68,20 @@ export function createRealHost(client: any): LoopHost {
         if (!data || typeof data !== "object") return "idle"
         const status = data[sessionID]
         if (!status || typeof status !== "object") return "idle"
-        return status.type || "idle"
+        const type = status.type as string
+        if (type === "busy" || type === "retry") return type
+        return "idle"
       } catch {
         return "idle"
       }
     },
 
     async abortSession(sessionID) {
-      await client.session.abort({ path: { id: sessionID } })
+      try {
+        await client.session.abort({ path: { id: sessionID } })
+      } catch {
+        // Best-effort abort
+      }
     },
 
     async readMessages(sessionID, limit = 10) {
@@ -83,10 +101,65 @@ export function createRealHost(client: any): LoopHost {
           timestamp: m.info?.time?.completed
             ? new Date(m.info.time.completed).toISOString()
             : undefined,
+          messageID: m.id,
         }))
       } catch {
         return []
       }
+    },
+
+    async compactSession(sessionID) {
+      try {
+        await client.session.compact({ sessionID })
+      } catch {
+        // Best-effort compaction
+      }
+    },
+  }
+}
+
+// ─── Fake Host (testing) ────────────────────────────────────────────────────
+
+export interface FakeHostOptions {
+  workerDelay?: number
+}
+
+export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
+  sessions: Map<string, string[]>
+  prompts: string[]
+} {
+  const sessions = new Map<string, string[]>()
+  const prompts: string[] = []
+
+  return {
+    sessions,
+    prompts,
+    async createWorker({ parentID, title }) {
+      const id = `worker-${crypto.randomUUID().slice(0, 8)}`
+      sessions.set(id, [])
+      return id
+    },
+    async promptWorker({ sessionID, prompt }) {
+      const msgs = sessions.get(sessionID) || []
+      msgs.push(prompt)
+      sessions.set(sessionID, msgs)
+      prompts.push(prompt)
+      if (options.workerDelay) {
+        await new Promise((r) => setTimeout(r, options.workerDelay))
+      }
+    },
+    async sessionStatus(sessionID) {
+      if (sessions.has(sessionID)) return "idle"
+      return "idle"
+    },
+    async abortSession(sessionID) {
+      sessions.delete(sessionID)
+    },
+    async readMessages(sessionID) {
+      return []
+    },
+    async compactSession(sessionID) {
+      // No-op for fake host
     },
   }
 }

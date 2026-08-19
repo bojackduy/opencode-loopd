@@ -3,7 +3,7 @@
 
 import type { GoalID, Goal } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
-import { createRuntimeState, acquireLease, releaseLease } from "../domain/runtime"
+import { acquireLease, releaseLease } from "../domain/runtime"
 import type { LoopHost } from "./host-adapter"
 
 const CONTINUATION_PROMPT = `You are a worker for an active goal.
@@ -34,6 +34,9 @@ export interface WorkerManager {
 
   /** Abort the worker. */
   abortWorker(workerSessionID: string): Promise<void>
+
+  /** Compact a worker session. */
+  compactWorker(workerSessionID: string): Promise<void>
 }
 
 export function createWorkerManager(host: LoopHost): WorkerManager {
@@ -67,14 +70,18 @@ export function createWorkerManager(host: LoopHost): WorkerManager {
     async abortWorker(workerSessionID: string) {
       await host.abortSession(workerSessionID)
     },
+
+    async compactWorker(workerSessionID: string) {
+      await host.compactSession(workerSessionID)
+    },
   }
 }
 
 function buildContinuationPrompt(goal: Goal, runtime: GoalRuntimeState): string {
   const parts = [CONTINUATION_PROMPT]
 
-  if (runtime.turnCount > 0) {
-    parts.push(`\nThis is turn ${runtime.turnCount + 1}.`)
+  if (runtime.turnCount > 1) {
+    parts.push(`\nThis is turn ${runtime.turnCount}.`)
   }
 
   if (runtime.consecutiveFailures > 0) {

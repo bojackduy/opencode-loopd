@@ -4,14 +4,16 @@
   "description": "Codex-inspired goal engine for OpenCode with modal TUI dashboard.",
   "type": "module",
   "exports": {
-    "./server": "./src/server/plugin.ts",
-    "./tui": "./src/tui/plugin.tsx"
+    "./server": "./dist/server.js",
+    "./tui": "./dist/tui.js"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build:server": "bun build src/server/plugin.ts --outfile dist/server.js --target bun --external @opencode-ai/plugin --external @opencode-ai/plugin/tool",
     "build:tui": "bun build src/tui/plugin.tsx --outfile dist/tui.js --target bun --external @opencode-ai/plugin/tui --external @opentui/core --external @opentui/solid --external solid-js",
     "build": "bun run build:server && bun run build:tui",
+    "clean": "rm -rf dist",
+    "prepack": "npm run typecheck && npm test && npm run build",
     "test": "bun test"
   },
   "peerDependencies": {
@@ -26,7 +28,7 @@
     "typescript": "^5.7.0"
   },
   "files": [
-    "src"
+    "dist"
   ],
   "license": "MIT"
 }

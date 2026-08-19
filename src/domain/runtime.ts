@@ -23,6 +23,9 @@ export interface GoalRuntimeState {
   /** Lease prevents concurrent turns. Expires after timeoutMs. */
   leaseExpiresAt?: string
 
+  /** When the current turn started (ISO timestamp). */
+  turnStartedAt?: string
+
   /** Consecutive failures on current stage. Reset on success. */
   consecutiveFailures: number
 
@@ -41,6 +44,15 @@ export interface GoalRuntimeState {
   /** Progress count from the no-progress guard. */
   noProgressCount: number
 
+  /** Whether progress occurred during the current turn. */
+  progressDuringTurn: boolean
+
+  /** Last observed worker status from SDK. */
+  lastWorkerStatus?: "idle" | "busy" | "retry"
+
+  /** Number of tokens consumed during current turn. */
+  turnTokensUsed?: number
+
   /** Timestamps. */
   lastRunAt?: string
   lastProgressAt?: string
@@ -58,6 +70,7 @@ export function createRuntimeState(goalID: GoalID): GoalRuntimeState {
     runCount: 0,
     turnCount: 0,
     noProgressCount: 0,
+    progressDuringTurn: false,
     createdAt: now,
     updatedAt: now,
   }
@@ -66,14 +79,32 @@ export function createRuntimeState(goalID: GoalID): GoalRuntimeState {
 export function acquireLease(rt: GoalRuntimeState, timeoutMs: number): GoalRuntimeState {
   const now = Date.now()
   const expires = new Date(now + timeoutMs).toISOString()
-  return { ...rt, phase: "running", leaseExpiresAt: expires, updatedAt: new Date(now).toISOString() }
+  return {
+    ...rt,
+    phase: "running",
+    leaseExpiresAt: expires,
+    turnStartedAt: new Date(now).toISOString(),
+    progressDuringTurn: false,
+    turnTokensUsed: 0,
+    updatedAt: new Date(now).toISOString(),
+  }
 }
 
 export function releaseLease(rt: GoalRuntimeState): GoalRuntimeState {
-  return { ...rt, phase: "idle", leaseExpiresAt: undefined, updatedAt: new Date().toISOString() }
+  return {
+    ...rt,
+    phase: "idle",
+    leaseExpiresAt: undefined,
+    turnStartedAt: undefined,
+    updatedAt: new Date().toISOString(),
+  }
 }
 
 export function leaseIsValid(rt: GoalRuntimeState): boolean {
   if (!rt.leaseExpiresAt) return false
   return Date.now() < Date.parse(rt.leaseExpiresAt)
+}
+
+export function markProgress(rt: GoalRuntimeState): GoalRuntimeState {
+  return { ...rt, progressDuringTurn: true, lastProgressAt: new Date().toISOString() }
 }

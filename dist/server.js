@@ -1,13 +1,11 @@
 // @bun
-// src/infrastructure/state-store.ts
+// src/infrastructure/state-repository.ts
 import { promises as fs } from "fs";
 import path from "path";
-import os from "os";
-var STATE_VERSION = 1;
+var CURRENT_VERSION = 2;
 function emptyState() {
-  return { version: STATE_VERSION, revision: 0, goals: [], runtimes: [] };
+  return { version: CURRENT_VERSION, revision: 0, goals: [], runtimes: [], commandLedger: [] };
 }
-var EMPTY_STATE = emptyState();
 function loopDir(directory) {
   return path.join(directory, ".opencode", "loopd");
 }
@@ -25,7 +23,7 @@ async function readState(directory) {
       const raw = await fs.readFile(target, "utf8");
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object" && Array.isArray(parsed.goals)) {
-        return parsed;
+        return migrate(parsed);
       }
       return emptyState();
     } catch (error) {
@@ -39,10 +37,31 @@ async function readState(directory) {
   }
   return emptyState();
 }
+function migrate(state) {
+  if (state.version === CURRENT_VERSION)
+    return state;
+  let result = { ...state };
+  if (result.version < 2) {
+    result.version = 2;
+    if (!result.commandLedger)
+      result.commandLedger = [];
+    result.runtimes = result.runtimes.map((rt) => ({
+      ...rt,
+      progressDuringTurn: rt.progressDuringTurn ?? false
+    }));
+    result.goals = result.goals.map((g) => ({
+      ...g,
+      lastProgress: g.lastProgress ?? undefined,
+      completionEvidence: g.completionEvidence ?? undefined,
+      blocker: g.blocker ?? undefined
+    }));
+  }
+  return result;
+}
 async function writeAtomic(target, contents) {
   const dir = path.dirname(target);
   await fs.mkdir(dir, { recursive: true });
-  const temp = path.join(os.tmpdir(), `loopd-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
+  const temp = path.join(dir, `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   await fs.writeFile(temp, contents, "utf8");
   try {
     for (let attempt = 0;attempt < 5; attempt++) {
@@ -107,6 +126,14 @@ async function writeControlResponse(directory, response) {
     await fs.rm(processingFile(directory, response.requestID), { force: true });
   } catch {}
 }
+async function readControlResponse(directory, requestID) {
+  try {
+    const raw = await fs.readFile(responseFile(directory, requestID), "utf8");
+    return JSON.parse(raw);
+  } catch {
+    return;
+  }
+}
 async function listPendingRequests(directory) {
   const dir = path.join(controlDir(directory), "requests");
   try {
@@ -125,33 +152,11 @@ async function listPendingRequests(directory) {
     return [];
   }
 }
-async function recoverStaleProcessing(directory) {
-  const dir = path.join(controlDir(directory), "processing");
-  try {
-    const files = await fs.readdir(dir);
-    const recovered = [];
-    for (const file of files) {
-      if (!file.endsWith(".json"))
-        continue;
-      const processingPath = path.join(dir, file);
-      const requestPath = path.join(controlDir(directory), "requests", file);
-      try {
-        const raw = await fs.readFile(processingPath, "utf8");
-        const request = JSON.parse(raw);
-        await fs.rename(processingPath, requestPath);
-        recovered.push(request);
-      } catch {}
-    }
-    return recovered;
-  } catch {
-    return [];
-  }
-}
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// src/application/control-service.ts
+// src/application/goal-service.ts
 import { randomUUID } from "crypto";
 
 // src/domain/goal.ts
@@ -183,6 +188,9 @@ function canTransition(current, target, caller) {
   const table = caller === "model" ? MODEL_TRANSITIONS : caller === "user" ? USER_TRANSITIONS : SYSTEM_TRANSITIONS;
   return table[current]?.includes(target) ?? false;
 }
+function isTerminal(status) {
+  return status === "complete";
+}
 function createGoal(input) {
   const now = new Date().toISOString();
   return { ...input, tokensUsed: 0, timeUsedSeconds: 0, createdAt: now, updatedAt: now };
@@ -198,6 +206,7 @@ function createRuntimeState(goalID) {
     runCount: 0,
     turnCount: 0,
     noProgressCount: 0,
+    progressDuringTurn: false,
     createdAt: now,
     updatedAt: now
   };
@@ -205,222 +214,33 @@ function createRuntimeState(goalID) {
 function acquireLease(rt, timeoutMs) {
   const now = Date.now();
   const expires = new Date(now + timeoutMs).toISOString();
-  return { ...rt, phase: "running", leaseExpiresAt: expires, updatedAt: new Date(now).toISOString() };
+  return {
+    ...rt,
+    phase: "running",
+    leaseExpiresAt: expires,
+    turnStartedAt: new Date(now).toISOString(),
+    progressDuringTurn: false,
+    turnTokensUsed: 0,
+    updatedAt: new Date(now).toISOString()
+  };
 }
 function releaseLease(rt) {
-  return { ...rt, phase: "idle", leaseExpiresAt: undefined, updatedAt: new Date().toISOString() };
+  return {
+    ...rt,
+    phase: "idle",
+    leaseExpiresAt: undefined,
+    turnStartedAt: undefined,
+    updatedAt: new Date().toISOString()
+  };
 }
 function leaseIsValid(rt) {
   if (!rt.leaseExpiresAt)
     return false;
   return Date.now() < Date.parse(rt.leaseExpiresAt);
 }
-
-// src/application/control-service.ts
-function createControlService() {
-  const locks = new Map;
-  async function withLock(key, fn) {
-    const prev = locks.get(key) || Promise.resolve();
-    let release;
-    const current = new Promise((r) => {
-      release = r;
-    });
-    const next = prev.catch(() => {}).then(() => current);
-    locks.set(key, next);
-    await prev.catch(() => {});
-    try {
-      return await fn();
-    } finally {
-      release();
-      if (locks.get(key) === next)
-        locks.delete(key);
-    }
-  }
-  async function execute(directory, command) {
-    return withLock(directory, async () => {
-      const state = await readState(directory);
-      try {
-        switch (command.command) {
-          case "start":
-            return await handleStart(directory, state, command);
-          case "pause":
-            return await handleTransition(directory, state, command, "paused", "user");
-          case "resume":
-            return await handleTransition(directory, state, command, "active", "user");
-          case "retry":
-            return await handleRetry(directory, state, command);
-          case "clear":
-            return await handleClear(directory, state, command);
-          case "update":
-            return await handleUpdate(directory, state, command);
-          case "inspect":
-            return { ok: true, requestID: command.requestID, message: "inspect not yet implemented" };
-          case "open_worker":
-            return { ok: true, requestID: command.requestID, message: "open_worker not yet implemented" };
-          case "compact":
-            return { ok: true, requestID: command.requestID, message: "compact not yet implemented" };
-          default: {
-            const req = command;
-            return {
-              ok: false,
-              requestID: req.requestID,
-              message: `unknown command: ${req.command}`,
-              errorCode: "unknown_command"
-            };
-          }
-        }
-      } finally {
-        await writeState(directory, state);
-      }
-    });
-  }
-  async function handleStart(directory, state, cmd) {
-    const id = randomUUID();
-    const existing = state.goals.find((g) => g.name === cmd.args.name && g.status !== "complete" && g.status !== "paused");
-    if (existing) {
-      return {
-        ok: false,
-        requestID: cmd.requestID,
-        message: `goal "${cmd.args.name}" already exists (${existing.status})`,
-        errorCode: "goal_exists"
-      };
-    }
-    const goal = createGoal({
-      id,
-      name: cmd.args.name,
-      objective: cmd.args.objective,
-      status: "active",
-      ownerSessionID: "main",
-      config: cmd.args.config
-    });
-    state.goals.push(goal);
-    state.runtimes.push(createRuntimeState(id));
-    const event = {
-      version: 1,
-      eventID: randomUUID(),
-      goalID: id,
-      type: "goal.created",
-      name: cmd.args.name,
-      objective: cmd.args.objective,
-      timestamp: new Date().toISOString(),
-      revision: state.revision
-    };
-    await appendEvent(directory, event);
-    return {
-      ok: true,
-      requestID: cmd.requestID,
-      message: `goal "${cmd.args.name}" created and active`,
-      stateRevision: state.revision
-    };
-  }
-  async function handleTransition(directory, state, cmd, target, caller) {
-    const goal = findGoal(state, cmd.goalID);
-    if (!goal) {
-      return { ok: false, requestID: cmd.requestID, message: "goal not found", errorCode: "goal_not_found" };
-    }
-    if (!canTransition(goal.status, target, caller)) {
-      return {
-        ok: false,
-        requestID: cmd.requestID,
-        message: `cannot transition from ${goal.status} to ${target} (caller: ${caller})`,
-        errorCode: "invalid_transition"
-      };
-    }
-    const from = goal.status;
-    goal.status = target;
-    goal.updatedAt = new Date().toISOString();
-    const event = {
-      version: 1,
-      eventID: randomUUID(),
-      goalID: goal.id,
-      type: "goal.status_changed",
-      from,
-      to: target,
-      timestamp: new Date().toISOString(),
-      revision: state.revision
-    };
-    await appendEvent(directory, event);
-    return {
-      ok: true,
-      requestID: cmd.requestID,
-      message: `goal "${goal.name}" ${target}`,
-      stateRevision: state.revision
-    };
-  }
-  async function handleRetry(directory, state, cmd) {
-    const goal = findGoal(state, cmd.goalID);
-    if (!goal) {
-      return { ok: false, requestID: cmd.requestID, message: "goal not found", errorCode: "goal_not_found" };
-    }
-    if (goal.status !== "blocked") {
-      return { ok: false, requestID: cmd.requestID, message: "can only retry blocked goals", errorCode: "invalid_transition" };
-    }
-    goal.status = "active";
-    goal.updatedAt = new Date().toISOString();
-    const runtime = findRuntime(state, goal.id);
-    if (runtime) {
-      runtime.consecutiveFailures = 0;
-      runtime.lastError = undefined;
-      runtime.phase = "idle";
-      runtime.updatedAt = new Date().toISOString();
-    }
-    const event = {
-      version: 1,
-      eventID: randomUUID(),
-      goalID: goal.id,
-      type: "goal.status_changed",
-      from: "blocked",
-      to: "active",
-      timestamp: new Date().toISOString(),
-      revision: state.revision
-    };
-    await appendEvent(directory, event);
-    return { ok: true, requestID: cmd.requestID, message: `goal "${goal.name}" retried`, stateRevision: state.revision };
-  }
-  async function handleClear(directory, state, cmd) {
-    const goal = findGoal(state, cmd.goalID);
-    if (!goal) {
-      return { ok: false, requestID: cmd.requestID, message: "goal not found", errorCode: "goal_not_found" };
-    }
-    const event = {
-      version: 1,
-      eventID: randomUUID(),
-      goalID: goal.id,
-      type: "goal.cleared",
-      timestamp: new Date().toISOString(),
-      revision: state.revision
-    };
-    await appendEvent(directory, event);
-    state.goals = state.goals.filter((g) => g.id !== goal.id);
-    state.runtimes = state.runtimes.filter((r) => r.goalID !== goal.id);
-    return { ok: true, requestID: cmd.requestID, message: `goal "${goal.name}" cleared`, stateRevision: state.revision };
-  }
-  async function handleUpdate(directory, state, cmd) {
-    const goal = findGoal(state, cmd.goalID);
-    if (!goal) {
-      return { ok: false, requestID: cmd.requestID, message: "goal not found", errorCode: "goal_not_found" };
-    }
-    if (cmd.args.objective !== undefined)
-      goal.objective = cmd.args.objective;
-    if (cmd.args.config !== undefined) {
-      goal.config = { ...goal.config, ...cmd.args.config };
-    }
-    goal.updatedAt = new Date().toISOString();
-    return { ok: true, requestID: cmd.requestID, message: `goal "${goal.name}" updated`, stateRevision: state.revision };
-  }
-  function findGoal(state, id) {
-    if (id)
-      return state.goals.find((g) => g.id === id);
-    return state.goals.find((g) => g.status === "active" || g.status === "blocked");
-  }
-  function findRuntime(state, goalID) {
-    return state.runtimes.find((r) => r.goalID === goalID);
-  }
-  return { execute };
+function markProgress(rt) {
+  return { ...rt, progressDuringTurn: true, lastProgressAt: new Date().toISOString() };
 }
-
-// src/application/goal-service.ts
-import { randomUUID as randomUUID2 } from "crypto";
 
 // src/server/worker-session.ts
 var CONTINUATION_PROMPT = `You are a worker for an active goal.
@@ -458,14 +278,17 @@ function createWorkerManager(host) {
     },
     async abortWorker(workerSessionID) {
       await host.abortSession(workerSessionID);
+    },
+    async compactWorker(workerSessionID) {
+      await host.compactSession(workerSessionID);
     }
   };
 }
 function buildContinuationPrompt(goal, runtime) {
   const parts = [CONTINUATION_PROMPT];
-  if (runtime.turnCount > 0) {
+  if (runtime.turnCount > 1) {
     parts.push(`
-This is turn ${runtime.turnCount + 1}.`);
+This is turn ${runtime.turnCount}.`);
   }
   if (runtime.consecutiveFailures > 0) {
     parts.push(`
@@ -481,7 +304,7 @@ function createGoalService(host) {
   const sessions = new Map;
   async function start(directory, input) {
     const state = await readState(directory);
-    const id = randomUUID2();
+    const id = randomUUID();
     const goal = createGoal({
       id,
       name: input.name,
@@ -492,23 +315,29 @@ function createGoalService(host) {
     });
     state.goals.push(goal);
     state.runtimes.push(createRuntimeState(id));
+    const runtime = state.runtimes.find((r) => r.goalID === id);
+    if (runtime) {
+      runtime.phase = "queued";
+      await writeState(directory, state);
+    }
     const worker = await workers.createWorker(goal);
     sessions.set(id, worker);
     goal.workerSessionID = worker.workerSessionID;
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID(),
       goalID: id,
       type: "goal.created",
       name: input.name,
       objective: input.objective,
+      ownerSessionID: input.ownerSessionID,
       timestamp: new Date().toISOString(),
       revision: state.revision
     });
-    const runtime = state.runtimes.find((r) => r.goalID === id);
     if (runtime) {
       runtime.turnCount = 1;
+      runtime.runCount = 1;
       runtime.lastRunAt = new Date().toISOString();
       runtime.phase = "running";
       await writeState(directory, state);
@@ -519,15 +348,25 @@ function createGoalService(host) {
   async function continueTurn(directory, goalID) {
     const state = await readState(directory);
     const goal = state.goals.find((g) => g.id === goalID);
-    if (!goal || goal.status !== "active")
+    if (!goal || isTerminal(goal.status))
       return;
     const runtime = state.runtimes.find((r) => r.goalID === goalID);
     if (!runtime)
       return;
     if (runtime.phase === "running" && leaseIsValid(runtime))
       return;
-    const session = sessions.get(goalID);
-    if (session && !await workers.isIdle(session.workerSessionID))
+    let session = sessions.get(goalID);
+    if (!session && goal.workerSessionID) {
+      session = {
+        goalID: goal.id,
+        workerSessionID: goal.workerSessionID,
+        startedAt: goal.createdAt
+      };
+      sessions.set(goalID, session);
+    }
+    if (!session)
+      return;
+    if (!await workers.isIdle(session.workerSessionID))
       return;
     const timeoutMs = goal.config.timeoutMs || 300000;
     const leased = acquireLease(runtime, timeoutMs);
@@ -535,9 +374,7 @@ function createGoalService(host) {
     runtime.turnCount += 1;
     runtime.lastRunAt = new Date().toISOString();
     await writeState(directory, state);
-    if (session) {
-      await workers.continueWorker(session, goal, runtime);
-    }
+    await workers.continueWorker(session, goal, runtime);
   }
   async function pause(directory, goalID) {
     const state = await readState(directory);
@@ -548,7 +385,11 @@ function createGoalService(host) {
       return;
     goal.status = "paused";
     goal.updatedAt = new Date().toISOString();
-    const session = sessions.get(goalID);
+    const session = sessions.get(goalID) || (goal.workerSessionID ? {
+      goalID: goal.id,
+      workerSessionID: goal.workerSessionID,
+      startedAt: goal.createdAt
+    } : undefined);
     if (session) {
       await workers.abortWorker(session.workerSessionID);
       sessions.delete(goalID);
@@ -560,7 +401,7 @@ function createGoalService(host) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID(),
       goalID,
       type: "goal.status_changed",
       from: "active",
@@ -578,15 +419,16 @@ function createGoalService(host) {
       return;
     goal.status = "active";
     goal.updatedAt = new Date().toISOString();
-    if (!sessions.has(goalID)) {
-      const worker = await workers.createWorker(goal);
-      sessions.set(goalID, worker);
-      goal.workerSessionID = worker.workerSessionID;
+    let session = sessions.get(goalID);
+    if (!session) {
+      session = await workers.createWorker(goal);
+      sessions.set(goalID, session);
+      goal.workerSessionID = session.workerSessionID;
     }
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID(),
       goalID,
       type: "goal.status_changed",
       from: "paused",
@@ -613,7 +455,7 @@ function createGoalService(host) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID(),
       goalID,
       type: "goal.status_changed",
       from: "blocked",
@@ -628,14 +470,18 @@ function createGoalService(host) {
     const goal = state.goals.find((g) => g.id === goalID);
     if (!goal)
       return;
-    const session = sessions.get(goalID);
+    const session = sessions.get(goalID) || (goal.workerSessionID ? {
+      goalID: goal.id,
+      workerSessionID: goal.workerSessionID,
+      startedAt: goal.createdAt
+    } : undefined);
     if (session) {
       await workers.abortWorker(session.workerSessionID);
       sessions.delete(goalID);
     }
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID(),
       goalID,
       type: "goal.cleared",
       timestamp: new Date().toISOString(),
@@ -645,10 +491,53 @@ function createGoalService(host) {
     state.runtimes = state.runtimes.filter((r) => r.goalID !== goalID);
     await writeState(directory, state);
   }
-  return { start, continueTurn, pause, resume, retry, clear };
+  function getWorker(goalID) {
+    return sessions.get(goalID);
+  }
+  function getActiveWorkers() {
+    return new Map(sessions);
+  }
+  async function reconcile(directory) {
+    const state = await readState(directory);
+    for (const goal of state.goals) {
+      if (isTerminal(goal.status))
+        continue;
+      if (goal.status === "paused")
+        continue;
+      if (!goal.workerSessionID) {
+        try {
+          const worker = await workers.createWorker(goal);
+          sessions.set(goal.id, worker);
+          goal.workerSessionID = worker.workerSessionID;
+          goal.updatedAt = new Date().toISOString();
+        } catch {
+          continue;
+        }
+      }
+      if (goal.workerSessionID && !sessions.has(goal.id)) {
+        sessions.set(goal.id, {
+          goalID: goal.id,
+          workerSessionID: goal.workerSessionID,
+          startedAt: goal.createdAt
+        });
+      }
+      const runtime = state.runtimes.find((r) => r.goalID === goal.id);
+      if (runtime?.phase === "running" && !leaseIsValid(runtime)) {
+        const session = sessions.get(goal.id);
+        if (session && await workers.isIdle(session.workerSessionID)) {
+          Object.assign(runtime, releaseLease(runtime));
+          goal.updatedAt = new Date().toISOString();
+        }
+      }
+    }
+    await writeState(directory, state);
+  }
+  return { start, continueTurn, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile };
 }
 
 // src/application/control-worker.ts
+var MAX_LEDGER_SIZE = 100;
+var RESPONSE_CLEANUP_AGE_MS = 60 * 60 * 1000;
 function createControlWorker(options) {
   const directory = options.directory;
   const pollMs = options.pollIntervalMs ?? 500;
@@ -656,20 +545,26 @@ function createControlWorker(options) {
   let running = false;
   let pollTimer;
   let processing = new Set;
+  let lastProcessDone = true;
   function start() {
     if (running)
       return;
     running = true;
-    recoverStaleProcessing(directory).catch(() => {});
+    processPending();
     pollTimer = setInterval(() => {
-      if (running)
-        processPending();
+      if (running && lastProcessDone) {
+        lastProcessDone = false;
+        processPending().then(() => {
+          lastProcessDone = true;
+        });
+      }
     }, pollMs);
   }
-  function stop() {
+  async function stop() {
     running = false;
     if (pollTimer)
       clearInterval(pollTimer);
+    pollTimer = undefined;
     processing.clear();
   }
   async function processPending() {
@@ -704,6 +599,21 @@ function createControlWorker(options) {
     }
   }
   async function handleRequest(request) {
+    const existingResponse = await readControlResponse(directory, request.requestID);
+    if (existingResponse) {
+      return existingResponse;
+    }
+    const state = await readState(directory);
+    const ledgerEntry = state.commandLedger?.find((e) => e.requestID === request.requestID);
+    if (ledgerEntry?.completedAt) {
+      return {
+        requestID: request.requestID,
+        ok: true,
+        message: `command "${request.command}" already processed`,
+        stateRevision: state.revision,
+        completedAt: ledgerEntry.completedAt
+      };
+    }
     const base = {
       requestID: request.requestID,
       ok: true,
@@ -712,96 +622,393 @@ function createControlWorker(options) {
       errorCode: undefined,
       completedAt: new Date().toISOString()
     };
+    let response;
     switch (request.command) {
       case "start": {
         const args = request.args;
         const { goal } = await goalSvc.start(directory, {
           name: args.name,
           objective: args.objective,
-          ownerSessionID: "main",
+          ownerSessionID: args.ownerSessionID || "main",
           config: args.config
         });
-        const state = await readState(directory);
-        return {
+        const state2 = await readState(directory);
+        response = {
           ...base,
           message: `goal "${args.name}" created (${goal.id.slice(0, 8)}...)`,
-          stateRevision: state.revision
+          stateRevision: state2.revision
         };
+        break;
       }
       case "pause": {
         await goalSvc.pause(directory, request.goalID);
-        const state = await readState(directory);
-        const goal = state.goals.find((g) => g.id === request.goalID);
-        return {
+        const state2 = await readState(directory);
+        const goal = state2.goals.find((g) => g.id === request.goalID);
+        response = {
           ...base,
           message: `goal "${goal?.name || request.goalID}" paused`,
-          stateRevision: state.revision
+          stateRevision: state2.revision
         };
+        break;
       }
       case "resume": {
         await goalSvc.resume(directory, request.goalID);
-        const state = await readState(directory);
-        const goal = state.goals.find((g) => g.id === request.goalID);
-        return {
+        const state2 = await readState(directory);
+        const goal = state2.goals.find((g) => g.id === request.goalID);
+        response = {
           ...base,
           message: `goal "${goal?.name || request.goalID}" resumed`,
-          stateRevision: state.revision
+          stateRevision: state2.revision
         };
+        break;
       }
       case "retry": {
         await goalSvc.retry(directory, request.goalID);
-        const state = await readState(directory);
-        const goal = state.goals.find((g) => g.id === request.goalID);
-        return {
+        const state2 = await readState(directory);
+        const goal = state2.goals.find((g) => g.id === request.goalID);
+        response = {
           ...base,
           message: `goal "${goal?.name || request.goalID}" retried`,
-          stateRevision: state.revision
+          stateRevision: state2.revision
         };
+        break;
       }
       case "clear": {
         await goalSvc.clear(directory, request.goalID);
-        const state = await readState(directory);
-        return {
+        const state2 = await readState(directory);
+        response = {
           ...base,
           message: `goal cleared`,
-          stateRevision: state.revision
+          stateRevision: state2.revision
         };
+        break;
       }
       default: {
-        const cmd = buildBasicCommand(request);
-        const svc = createControlService();
-        const result = await svc.execute(directory, cmd);
-        return {
+        response = {
           requestID: request.requestID,
-          ok: result.ok,
-          message: result.message,
-          stateRevision: result.stateRevision,
-          errorCode: result.errorCode,
+          ok: false,
+          message: `command "${request.command}" not implemented in worker`,
+          errorCode: "unknown_command",
           completedAt: new Date().toISOString()
         };
       }
     }
+    await recordInLedger(directory, request);
+    return response;
   }
-  function buildBasicCommand(request) {
-    const base = {
-      version: 1,
+  async function recordInLedger(directory2, request) {
+    const state = await readState(directory2);
+    if (!state.commandLedger)
+      state.commandLedger = [];
+    state.commandLedger.push({
       requestID: request.requestID,
-      requestedAt: request.requestedAt
-    };
-    switch (request.command) {
-      case "update":
-        return { ...base, command: "update", goalID: request.goalID, args: request.args };
-      case "inspect":
-        return { ...base, command: "inspect", args: request.args };
-      case "open_worker":
-        return { ...base, command: "open_worker" };
-      case "compact":
-        return { ...base, command: "compact" };
+      command: request.command,
+      goalID: request.goalID,
+      acceptedAt: request.requestedAt,
+      completedAt: new Date().toISOString()
+    });
+    if (state.commandLedger.length > MAX_LEDGER_SIZE) {
+      state.commandLedger = state.commandLedger.slice(-MAX_LEDGER_SIZE);
+    }
+    await writeState(directory2, state);
+  }
+  return { start, stop: async () => {
+    await stop();
+  }, isRunning: () => running };
+}
+
+// src/application/loop-engine.ts
+import { randomUUID as randomUUID2 } from "crypto";
+function createLoopEngine(options) {
+  const { directory, host, goalService } = options;
+  const maintenanceMs = options.pollIntervalMs ?? 5000;
+  let running = false;
+  let maintenanceTimer;
+  const inflightContinuations = new Set;
+  function start() {
+    if (running)
+      return;
+    running = true;
+    goalService.reconcile(directory).catch(() => {});
+    maintenanceTimer = setInterval(() => {
+      if (running)
+        maintenance().catch(() => {});
+    }, maintenanceMs);
+  }
+  function stop() {
+    running = false;
+    if (maintenanceTimer)
+      clearInterval(maintenanceTimer);
+    maintenanceTimer = undefined;
+    inflightContinuations.clear();
+  }
+  function isRunning() {
+    return running;
+  }
+  async function handleEvent(event) {
+    if (!running || !event || typeof event !== "object")
+      return false;
+    const type = event.type;
+    if (!type)
+      return false;
+    const sessionID = event.properties?.sessionID;
+    if (!sessionID)
+      return false;
+    const state = await readState(directory);
+    const goal = state.goals.find((g) => g.workerSessionID === sessionID);
+    if (!goal)
+      return false;
+    if (isTerminal(goal.status) || goal.status === "paused")
+      return false;
+    switch (type) {
+      case "session.idle":
+        return await handleSessionIdle(state, goal);
+      case "session.status":
+        return await handleSessionStatus(state, goal, event);
+      case "session.error":
+        return await handleSessionError(state, goal, event);
+      case "session.compacted":
+        return await handleSessionCompacted(state, goal);
       default:
-        return { ...base, command: request.command };
+        return false;
     }
   }
-  return { start, stop, isRunning: () => running };
+  async function handleSessionIdle(state, goal) {
+    const runtime = state.runtimes.find((r) => r.goalID === goal.id);
+    if (!runtime)
+      return false;
+    if (inflightContinuations.has(goal.id))
+      return false;
+    if (runtime.phase === "running") {
+      Object.assign(runtime, releaseLease(runtime));
+      runtime.lastWorkerStatus = "idle";
+      await writeState(directory, state);
+    }
+    if (goal.status !== "active")
+      return false;
+    const limitResult = enforceLimits(goal, runtime);
+    if (limitResult.blocked) {
+      await writeState(directory, state);
+      if (limitResult.event === "goal.blocked") {
+        await appendEvent(directory, {
+          version: 1,
+          eventID: randomUUID2(),
+          goalID: goal.id,
+          type: "goal.blocked",
+          reason: limitResult.reason,
+          needed: limitResult.reason,
+          timestamp: new Date().toISOString(),
+          revision: state.revision
+        });
+      } else {
+        await appendEvent(directory, {
+          version: 1,
+          eventID: randomUUID2(),
+          goalID: goal.id,
+          type: "goal.status_changed",
+          from: "active",
+          to: goal.status,
+          timestamp: new Date().toISOString(),
+          revision: state.revision
+        });
+      }
+      return true;
+    }
+    if (shouldCompact(goal, runtime)) {
+      await doCompact(goal, runtime);
+      return true;
+    }
+    inflightContinuations.add(goal.id);
+    try {
+      await goalService.continueTurn(directory, goal.id);
+    } finally {
+      inflightContinuations.delete(goal.id);
+    }
+    return true;
+  }
+  async function handleSessionStatus(state, goal, event) {
+    const runtime = state.runtimes.find((r) => r.goalID === goal.id);
+    if (!runtime)
+      return false;
+    const status = event.properties?.status;
+    const statusType = status?.type;
+    if (!statusType)
+      return false;
+    runtime.lastWorkerStatus = statusType;
+    runtime.updatedAt = new Date().toISOString();
+    await writeState(directory, state);
+    return true;
+  }
+  async function handleSessionError(state, goal, event) {
+    const runtime = state.runtimes.find((r) => r.goalID === goal.id);
+    if (!runtime)
+      return false;
+    const error = event.properties?.error;
+    const message = error?.message || error?.toString() || "unknown error";
+    runtime.consecutiveFailures += 1;
+    runtime.lastError = message;
+    runtime.updatedAt = new Date().toISOString();
+    if (runtime.phase === "running") {
+      Object.assign(runtime, releaseLease(runtime));
+    }
+    await appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID2(),
+      goalID: goal.id,
+      type: "run.failed",
+      runID: runtime.activeRunID || "unknown",
+      error: message,
+      consecutiveFailures: runtime.consecutiveFailures,
+      timestamp: new Date().toISOString(),
+      revision: state.revision
+    });
+    const maxFailures = goal.config?.maxFailures || 5;
+    if (runtime.consecutiveFailures >= maxFailures) {
+      goal.status = "blocked";
+      goal.updatedAt = new Date().toISOString();
+      goal.blocker = {
+        reason: `Failed ${runtime.consecutiveFailures} times. Last error: ${message}`,
+        needed: "User intervention required. Use retry to attempt again.",
+        at: new Date().toISOString()
+      };
+      await appendEvent(directory, {
+        version: 1,
+        eventID: randomUUID2(),
+        goalID: goal.id,
+        type: "goal.blocked",
+        reason: `Failed ${runtime.consecutiveFailures} times`,
+        needed: "User intervention required",
+        timestamp: new Date().toISOString(),
+        revision: state.revision
+      });
+    } else {
+      const backoffMs = Math.min(30000, 1000 * Math.pow(2, runtime.consecutiveFailures));
+      runtime.retryAfter = new Date(Date.now() + backoffMs).toISOString();
+      runtime.phase = "waiting_retry";
+    }
+    await writeState(directory, state);
+    return true;
+  }
+  async function handleSessionCompacted(state, goal) {
+    const runtime = state.runtimes.find((r) => r.goalID === goal.id);
+    if (!runtime)
+      return false;
+    runtime.lastCompactAt = new Date().toISOString();
+    runtime.updatedAt = new Date().toISOString();
+    await writeState(directory, state);
+    await appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID2(),
+      goalID: goal.id,
+      type: "compaction.completed",
+      timestamp: new Date().toISOString(),
+      revision: state.revision
+    });
+    return true;
+  }
+  function enforceLimits(goal, runtime) {
+    const noResult = { blocked: false, event: "goal.status_changed", reason: "" };
+    const maxTurns = goal.config?.maxTurns;
+    if (maxTurns && runtime.turnCount >= maxTurns) {
+      goal.status = "blocked";
+      goal.updatedAt = new Date().toISOString();
+      goal.blocker = {
+        reason: `Reached max turns (${maxTurns})`,
+        needed: "Use retry to reset turns and continue.",
+        at: new Date().toISOString()
+      };
+      return {
+        blocked: true,
+        event: "goal.blocked",
+        reason: `Reached max turns (${maxTurns})`
+      };
+    }
+    const maxNoProgress = goal.config?.maxNoProgress;
+    if (maxNoProgress && runtime.noProgressCount >= maxNoProgress) {
+      goal.status = "blocked";
+      goal.updatedAt = new Date().toISOString();
+      goal.blocker = {
+        reason: `No progress for ${runtime.noProgressCount} consecutive turns`,
+        needed: "Use retry to reset and continue.",
+        at: new Date().toISOString()
+      };
+      return {
+        blocked: true,
+        event: "goal.blocked",
+        reason: `No progress for ${runtime.noProgressCount} consecutive turns`
+      };
+    }
+    if (goal.tokenBudget && goal.tokensUsed >= goal.tokenBudget) {
+      goal.status = "budget_limited";
+      goal.updatedAt = new Date().toISOString();
+      return {
+        blocked: true,
+        event: "goal.status_changed",
+        reason: `Token budget exhausted (${goal.tokensUsed}/${goal.tokenBudget})`
+      };
+    }
+    return noResult;
+  }
+  function shouldCompact(goal, runtime) {
+    const compactEvery = goal.config?.compactEvery;
+    if (!compactEvery)
+      return false;
+    return runtime.turnCount > 0 && runtime.turnCount % compactEvery === 0;
+  }
+  async function doCompact(goal, runtime) {
+    if (!goal.workerSessionID)
+      return;
+    const prevPhase = runtime.phase;
+    runtime.phase = "compacting";
+    runtime.lastCompactAt = new Date().toISOString();
+    const state = await readState(directory);
+    await writeState(directory, state);
+    await appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID2(),
+      goalID: goal.id,
+      type: "compaction.started",
+      timestamp: new Date().toISOString(),
+      revision: state.revision
+    });
+    try {
+      await host.compactSession(goal.workerSessionID);
+    } catch {}
+    const updatedState = await readState(directory);
+    const updatedRuntime = updatedState.runtimes.find((r) => r.goalID === goal.id);
+    if (updatedRuntime) {
+      updatedRuntime.phase = prevPhase;
+      await writeState(directory, updatedState);
+    }
+  }
+  async function maintenance() {
+    const state = await readState(directory);
+    for (const goal of state.goals) {
+      if (isTerminal(goal.status) || goal.status === "paused")
+        continue;
+      const runtime = state.runtimes.find((r) => r.goalID === goal.id);
+      if (!runtime)
+        continue;
+      if (runtime.phase === "waiting_retry" && runtime.retryAfter) {
+        if (Date.now() >= Date.parse(runtime.retryAfter)) {
+          runtime.retryAfter = undefined;
+          runtime.phase = "idle";
+          await writeState(directory, state);
+          goalService.continueTurn(directory, goal.id).catch(() => {});
+        }
+      }
+      if (runtime.phase === "running" && !leaseIsValid(runtime)) {
+        const session = goalService.getWorker(goal.id);
+        if (session && await host.sessionStatus(session.workerSessionID) === "idle") {
+          Object.assign(runtime, releaseLease(runtime));
+          runtime.lastWorkerStatus = "idle";
+          await writeState(directory, state);
+          goalService.continueTurn(directory, goal.id).catch(() => {});
+        }
+      }
+    }
+  }
+  return { start, stop, isRunning, handleEvent };
 }
 
 // src/server/host-adapter.ts
@@ -838,13 +1045,18 @@ function createRealHost(client) {
         const status = data[sessionID];
         if (!status || typeof status !== "object")
           return "idle";
-        return status.type || "idle";
+        const type = status.type;
+        if (type === "busy" || type === "retry")
+          return type;
+        return "idle";
       } catch {
         return "idle";
       }
     },
     async abortSession(sessionID) {
-      await client.session.abort({ path: { id: sessionID } });
+      try {
+        await client.session.abort({ path: { id: sessionID } });
+      } catch {}
     },
     async readMessages(sessionID, limit = 10) {
       try {
@@ -859,11 +1071,17 @@ function createRealHost(client) {
           role: m.info?.role || "assistant",
           content: m.parts?.filter((p) => p.type === "text").map((p) => p.text).join(`
 `) || "",
-          timestamp: m.info?.time?.completed ? new Date(m.info.time.completed).toISOString() : undefined
+          timestamp: m.info?.time?.completed ? new Date(m.info.time.completed).toISOString() : undefined,
+          messageID: m.id
         }));
       } catch {
         return [];
       }
+    },
+    async compactSession(sessionID) {
+      try {
+        await client.session.compact({ sessionID });
+      } catch {}
     }
   };
 }
@@ -871,6 +1089,9 @@ function createRealHost(client) {
 // src/server/goal-tools.ts
 import { randomUUID as randomUUID3 } from "crypto";
 import { tool } from "@opencode-ai/plugin/tool";
+import { exec as execChild } from "child_process";
+import { promisify } from "util";
+var execAsync = promisify(execChild);
 function goalTools(dir, hostSessionID) {
   return {
     get_goal: tool({
@@ -879,20 +1100,20 @@ function goalTools(dir, hostSessionID) {
       execute: async (_args, context) => {
         const state = await readState(dir);
         const workerID = context?.sessionID || hostSessionID;
-        const goal = findGoalBySession(state, workerID);
+        const goal = findGoalByWorkerSession(state, workerID);
         if (!goal) {
           return {
             title: "No active goal",
             output: JSON.stringify({
               status: "none",
-              message: "No active goal found for this session."
+              message: "No active goal found for this worker session."
             })
           };
         }
         const runtime = state.runtimes.find((r) => r.goalID === goal.id);
         return {
           title: `Goal: ${goal.name}`,
-          output: formatGoalForModel(goal, runtime)
+          output: formatGoalStructured(goal, runtime)
         };
       }
     }),
@@ -906,17 +1127,25 @@ function goalTools(dir, hostSessionID) {
       execute: async (args, context) => {
         const state = await readState(dir);
         const workerID = context?.sessionID || hostSessionID;
-        const goal = findGoalBySession(state, workerID);
+        const goal = findGoalByWorkerSession(state, workerID);
         if (!goal) {
           return { title: "No goal", output: "No active goal to report progress for." };
         }
+        if (goal.status !== "active") {
+          return { title: "Invalid state", output: `Goal is ${goal.status}, not active. Cannot report progress.` };
+        }
         const runtime = state.runtimes.find((r) => r.goalID === goal.id);
         if (runtime) {
+          Object.assign(runtime, markProgress(runtime));
           runtime.noProgressCount = 0;
-          runtime.lastProgressAt = new Date().toISOString();
           runtime.consecutiveFailures = 0;
-          await writeState(dir, state);
         }
+        goal.lastProgress = {
+          summary: args.summary,
+          next: args.next,
+          at: new Date().toISOString()
+        };
+        await writeState(dir, state);
         const event = {
           version: 1,
           eventID: randomUUID3(),
@@ -930,105 +1159,223 @@ function goalTools(dir, hostSessionID) {
         await appendEvent(dir, event);
         return {
           title: "Progress recorded",
-          output: `Progress on "${goal.name}": ${args.summary}
-Next: ${args.next}`
+          output: JSON.stringify({
+            goalName: goal.name,
+            summary: args.summary,
+            next: args.next,
+            turn: runtime?.turnCount
+          })
         };
       }
     }),
-    update_goal: tool({
-      description: "Mark the current goal as completed or blocked. " + "Use complete only when all acceptance criteria pass with concrete evidence. " + "Use blocked only for a real external blocker requiring user intervention.",
+    complete_goal: tool({
+      description: "Mark the current goal as completed. " + "Use only when all acceptance criteria pass with concrete evidence. " + "Runs configured completion checks before accepting.",
       args: {
-        status: tool.schema.enum(["complete", "blocked"]).describe("Terminal status."),
-        summary: tool.schema.string().describe("What was completed or why blocked."),
-        evidence: tool.schema.string().describe("Concrete evidence."),
-        needed: tool.schema.string().describe("For blocked: what is needed to unblock.")
+        summary: tool.schema.string().describe("What was completed."),
+        evidence: tool.schema.string().describe("Concrete evidence of completion.")
       },
       execute: async (args, context) => {
         const state = await readState(dir);
         const workerID = context?.sessionID || hostSessionID;
-        const goal = findGoalBySession(state, workerID);
+        const goal = findGoalByWorkerSession(state, workerID);
         if (!goal) {
-          return { title: "No goal", output: "No active goal to update." };
+          return { title: "No goal", output: "No active goal to complete." };
         }
-        const from = goal.status;
-        goal.status = args.status;
+        if (!canTransition(goal.status, "complete", "model")) {
+          return { title: "Invalid transition", output: `Cannot complete goal in ${goal.status} state.` };
+        }
+        if (goal.config.checks?.length) {
+          const checkResults = await runCompletionChecks(goal.config.checks);
+          if (!checkResults.passed) {
+            return {
+              title: "Checks failed",
+              output: JSON.stringify({
+                passed: false,
+                failedChecks: checkResults.failures,
+                message: "Completion checks failed. Fix issues and try again."
+              })
+            };
+          }
+        }
+        goal.status = "complete";
         goal.updatedAt = new Date().toISOString();
+        goal.completionEvidence = {
+          summary: args.summary,
+          evidence: args.evidence,
+          at: new Date().toISOString()
+        };
         const runtime = state.runtimes.find((r) => r.goalID === goal.id);
         if (runtime) {
           runtime.phase = "idle";
           runtime.lastError = undefined;
-          runtime.updatedAt = new Date().toISOString();
         }
         await writeState(dir, state);
         const event = {
           version: 1,
           eventID: randomUUID3(),
           goalID: goal.id,
-          type: args.status === "complete" ? "goal.completed" : "goal.blocked",
-          ...args.status === "complete" ? { summary: args.summary, evidence: args.evidence || "" } : { reason: args.summary, needed: args.needed || "" },
+          type: "goal.completed",
+          summary: args.summary,
+          evidence: args.evidence,
           timestamp: new Date().toISOString(),
           revision: state.revision
         };
         await appendEvent(dir, event);
         return {
-          title: `Goal ${args.status}`,
-          output: `Goal "${goal.name}" marked as ${args.status}.
-Summary: ${args.summary}
-Evidence: ${args.evidence || "none"}`
+          title: "Goal completed",
+          output: JSON.stringify({
+            goalName: goal.name,
+            status: "complete",
+            summary: args.summary,
+            evidence: args.evidence
+          })
+        };
+      }
+    }),
+    block_goal: tool({
+      description: "Mark the current goal as blocked. " + "Use only for a real external blocker requiring user intervention.",
+      args: {
+        reason: tool.schema.string().describe("Why the goal is blocked."),
+        needed: tool.schema.string().describe("What is needed to unblock.")
+      },
+      execute: async (args, context) => {
+        const state = await readState(dir);
+        const workerID = context?.sessionID || hostSessionID;
+        const goal = findGoalByWorkerSession(state, workerID);
+        if (!goal) {
+          return { title: "No goal", output: "No active goal to block." };
+        }
+        if (!canTransition(goal.status, "blocked", "model")) {
+          return { title: "Invalid transition", output: `Cannot block goal in ${goal.status} state.` };
+        }
+        goal.status = "blocked";
+        goal.updatedAt = new Date().toISOString();
+        goal.blocker = {
+          reason: args.reason,
+          needed: args.needed,
+          at: new Date().toISOString()
+        };
+        const runtime = state.runtimes.find((r) => r.goalID === goal.id);
+        if (runtime) {
+          runtime.phase = "idle";
+          runtime.lastError = undefined;
+        }
+        await writeState(dir, state);
+        const event = {
+          version: 1,
+          eventID: randomUUID3(),
+          goalID: goal.id,
+          type: "goal.blocked",
+          reason: args.reason,
+          needed: args.needed,
+          timestamp: new Date().toISOString(),
+          revision: state.revision
+        };
+        await appendEvent(dir, event);
+        return {
+          title: "Goal blocked",
+          output: JSON.stringify({
+            goalName: goal.name,
+            status: "blocked",
+            reason: args.reason,
+            needed: args.needed
+          })
         };
       }
     })
   };
 }
-function findGoalBySession(state, sessionID) {
-  if (!sessionID) {
-    return state.goals.find((g) => g.status === "active" || g.status === "blocked");
-  }
-  const byWorker = state.goals.find((g) => g.workerSessionID === sessionID && (g.status === "active" || g.status === "blocked"));
-  if (byWorker)
-    return byWorker;
-  return state.goals.find((g) => g.ownerSessionID === sessionID && (g.status === "active" || g.status === "blocked"));
+function findGoalByWorkerSession(state, sessionID) {
+  if (!sessionID)
+    return;
+  return state.goals.find((g) => g.workerSessionID === sessionID && (g.status === "active" || g.status === "blocked"));
 }
-function formatGoalForModel(goal, runtime) {
-  const lines = [
-    `Goal: ${goal.name}`,
-    `Objective: ${goal.objective}`,
-    `Status: ${goal.status}`
-  ];
-  if (goal.config.progressFile) {
-    lines.push(`Progress file: ${goal.config.progressFile}`);
-  }
-  if (goal.config.checks?.length) {
-    lines.push(`Checks: ${goal.config.checks.join(", ")}`);
-  }
+function formatGoalStructured(goal, runtime) {
+  const output = {
+    id: goal.id,
+    name: goal.name,
+    objective: goal.objective,
+    status: goal.status,
+    ownerSessionID: goal.ownerSessionID,
+    workerSessionID: goal.workerSessionID,
+    config: {
+      promptFile: goal.config.promptFile,
+      progressFile: goal.config.progressFile,
+      includeFiles: goal.config.includeFiles,
+      checks: goal.config.checks,
+      maxTurns: goal.config.maxTurns,
+      maxNoProgress: goal.config.maxNoProgress,
+      maxFailures: goal.config.maxFailures,
+      compactEvery: goal.config.compactEvery,
+      timeoutMs: goal.config.timeoutMs
+    },
+    lastProgress: goal.lastProgress,
+    completionEvidence: goal.completionEvidence,
+    blocker: goal.blocker,
+    tokensUsed: goal.tokensUsed,
+    timeUsedSeconds: goal.timeUsedSeconds
+  };
   if (runtime) {
-    lines.push(`Turn: ${runtime.turnCount}`);
-    lines.push(`Failures: ${runtime.consecutiveFailures}`);
-    if (runtime.lastError) {
-      lines.push(`Last error: ${runtime.lastError}`);
+    output.runtime = {
+      phase: runtime.phase,
+      turnCount: runtime.turnCount,
+      runCount: runtime.runCount,
+      consecutiveFailures: runtime.consecutiveFailures,
+      noProgressCount: runtime.noProgressCount,
+      lastError: runtime.lastError,
+      lastProgressAt: runtime.lastProgressAt,
+      lastRunAt: runtime.lastRunAt,
+      lastCompactAt: runtime.lastCompactAt
+    };
+  }
+  return JSON.stringify(output, null, 2);
+}
+async function runCompletionChecks(checks) {
+  const failures = [];
+  for (const cmd of checks) {
+    try {
+      await execAsync(cmd, { timeout: 30000 });
+    } catch (error) {
+      failures.push({
+        command: cmd,
+        exitCode: error.code || 1,
+        stderr: error.stderr || error.message || "unknown error"
+      });
     }
   }
-  return lines.join(`
-`);
+  return {
+    passed: failures.length === 0,
+    failures
+  };
 }
 
 // src/server/plugin.ts
 var PLUGIN_ID = "opencode-loopd.server";
-var worker;
 var server = async ({ client, directory }) => {
   const host = createRealHost(client);
-  worker = createControlWorker({
+  const goalService = createGoalService(host);
+  const worker = createControlWorker({
     directory,
     host,
     pollIntervalMs: 500
   });
   worker.start();
+  const engine = createLoopEngine({
+    directory,
+    host,
+    goalService,
+    pollIntervalMs: 5000
+  });
+  engine.start();
   return {
-    event: async ({ event }) => {},
+    event: async ({ event }) => {
+      await engine.handleEvent(event);
+    },
     tool: goalTools(directory),
     "tool.execute.after": async (input, output) => {},
     dispose: async () => {
-      worker?.stop();
+      engine.stop();
+      await worker.stop();
     }
   };
 };

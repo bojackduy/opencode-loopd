@@ -1,14 +1,15 @@
 // ─── Server: Goal Service ────────────────────────────────────────────────────
 // Manages goal lifecycle: start, pause, resume, retry, clear.
 // Creates worker sessions, drives continuation, handles completion.
+// Worker registry is persisted; in-memory map is a cache only.
 
 import { randomUUID } from "crypto"
 import type { Goal, GoalID } from "../domain/goal"
-import { createGoal, canTransition } from "../domain/goal"
+import { createGoal, canTransition, isTerminal } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
-import { createRuntimeState, acquireLease, releaseLease, leaseIsValid } from "../domain/runtime"
-import { readState, writeState, appendEvent } from "../infrastructure/state-store"
-import type { StoreState } from "../infrastructure/state-store"
+import { createRuntimeState, acquireLease, releaseLease, leaseIsValid, markProgress } from "../domain/runtime"
+import { readState, writeState, appendEvent } from "../infrastructure/state-repository"
+import type { StoreState } from "../infrastructure/state-repository"
 import type { LoopHost } from "../server/host-adapter"
 import { createWorkerManager, type WorkerManager, type WorkerSession } from "../server/worker-session"
 import type { LoopEvent } from "../domain/events"
@@ -36,10 +37,21 @@ export interface GoalService {
 
   /** Clear a goal and abort its worker. */
   clear(directory: string, goalID: GoalID): Promise<void>
+
+  /** Get the worker session for a goal (for engine to check status). */
+  getWorker(goalID: GoalID): WorkerSession | undefined
+
+  /** Get all active worker sessions. */
+  getActiveWorkers(): Map<GoalID, WorkerSession>
+
+  /** Reconcile partially started goals after restart. */
+  reconcile(directory: string): Promise<void>
 }
 
 export function createGoalService(host: LoopHost): GoalService {
   const workers: WorkerManager = createWorkerManager(host)
+  // In-memory cache: goalID -> worker session
+  // Persisted source of truth: goal.workerSessionID in state.json
   const sessions = new Map<GoalID, WorkerSession>()
 
   async function start(directory: string, input: {
@@ -63,12 +75,21 @@ export function createGoalService(host: LoopHost): GoalService {
     state.goals.push(goal)
     state.runtimes.push(createRuntimeState(id))
 
+    // Persist state with goal in queued phase before creating worker
+    const runtime = state.runtimes.find((r) => r.goalID === id)
+    if (runtime) {
+      runtime.phase = "queued"
+      await writeState(directory, state)
+    }
+
     // Create worker session
     const worker = await workers.createWorker(goal)
     sessions.set(id, worker)
     goal.workerSessionID = worker.workerSessionID
 
+    // Persist worker session ID before prompting
     await writeState(directory, state)
+
     await appendEvent(directory, {
       version: 1,
       eventID: randomUUID(),
@@ -76,14 +97,15 @@ export function createGoalService(host: LoopHost): GoalService {
       type: "goal.created",
       name: input.name,
       objective: input.objective,
+      ownerSessionID: input.ownerSessionID,
       timestamp: new Date().toISOString(),
       revision: state.revision,
     } satisfies LoopEvent)
 
     // Send first continuation
-    const runtime = state.runtimes.find((r) => r.goalID === id)
     if (runtime) {
       runtime.turnCount = 1
+      runtime.runCount = 1
       runtime.lastRunAt = new Date().toISOString()
       runtime.phase = "running"
       await writeState(directory, state)
@@ -96,7 +118,7 @@ export function createGoalService(host: LoopHost): GoalService {
   async function continueTurn(directory: string, goalID: GoalID) {
     const state = await readState(directory)
     const goal = state.goals.find((g) => g.id === goalID)
-    if (!goal || goal.status !== "active") return
+    if (!goal || isTerminal(goal.status)) return
 
     const runtime = state.runtimes.find((r) => r.goalID === goalID)
     if (!runtime) return
@@ -104,9 +126,20 @@ export function createGoalService(host: LoopHost): GoalService {
     // Check lease
     if (runtime.phase === "running" && leaseIsValid(runtime)) return
 
+    // Get worker from cache or reconstruct from persisted state
+    let session = sessions.get(goalID)
+    if (!session && goal.workerSessionID) {
+      session = {
+        goalID: goal.id,
+        workerSessionID: goal.workerSessionID,
+        startedAt: goal.createdAt,
+      }
+      sessions.set(goalID, session)
+    }
+    if (!session) return
+
     // Check worker idle
-    const session = sessions.get(goalID)
-    if (session && !(await workers.isIdle(session.workerSessionID))) return
+    if (!(await workers.isIdle(session.workerSessionID))) return
 
     // Acquire lease
     const timeoutMs = goal.config.timeoutMs || 300_000
@@ -117,9 +150,7 @@ export function createGoalService(host: LoopHost): GoalService {
     await writeState(directory, state)
 
     // Send continuation
-    if (session) {
-      await workers.continueWorker(session, goal, runtime)
-    }
+    await workers.continueWorker(session, goal, runtime)
   }
 
   async function pause(directory: string, goalID: GoalID) {
@@ -132,8 +163,12 @@ export function createGoalService(host: LoopHost): GoalService {
     goal.status = "paused"
     goal.updatedAt = new Date().toISOString()
 
-    // Abort worker
-    const session = sessions.get(goalID)
+    // Abort worker from cache or persisted state
+    const session = sessions.get(goalID) || (goal.workerSessionID ? {
+      goalID: goal.id,
+      workerSessionID: goal.workerSessionID,
+      startedAt: goal.createdAt,
+    } : undefined)
     if (session) {
       await workers.abortWorker(session.workerSessionID)
       sessions.delete(goalID)
@@ -168,11 +203,12 @@ export function createGoalService(host: LoopHost): GoalService {
     goal.status = "active"
     goal.updatedAt = new Date().toISOString()
 
-    // Recreate worker if needed
-    if (!sessions.has(goalID)) {
-      const worker = await workers.createWorker(goal)
-      sessions.set(goalID, worker)
-      goal.workerSessionID = worker.workerSessionID
+    // Get or recreate worker
+    let session = sessions.get(goalID)
+    if (!session) {
+      session = await workers.createWorker(goal)
+      sessions.set(goalID, session)
+      goal.workerSessionID = session.workerSessionID
     }
 
     await writeState(directory, state)
@@ -227,8 +263,12 @@ export function createGoalService(host: LoopHost): GoalService {
     const goal = state.goals.find((g) => g.id === goalID)
     if (!goal) return
 
-    // Abort worker
-    const session = sessions.get(goalID)
+    // Abort worker from cache or persisted state
+    const session = sessions.get(goalID) || (goal.workerSessionID ? {
+      goalID: goal.id,
+      workerSessionID: goal.workerSessionID,
+      startedAt: goal.createdAt,
+    } : undefined)
     if (session) {
       await workers.abortWorker(session.workerSessionID)
       sessions.delete(goalID)
@@ -249,5 +289,56 @@ export function createGoalService(host: LoopHost): GoalService {
     await writeState(directory, state)
   }
 
-  return { start, continueTurn, pause, resume, retry, clear }
+  function getWorker(goalID: GoalID): WorkerSession | undefined {
+    return sessions.get(goalID)
+  }
+
+  function getActiveWorkers(): Map<GoalID, WorkerSession> {
+    return new Map(sessions)
+  }
+
+  async function reconcile(directory: string) {
+    const state = await readState(directory)
+
+    for (const goal of state.goals) {
+      if (isTerminal(goal.status)) continue
+      if (goal.status === "paused") continue
+
+      // Active goal without worker ID: create a worker
+      if (!goal.workerSessionID) {
+        try {
+          const worker = await workers.createWorker(goal)
+          sessions.set(goal.id, worker)
+          goal.workerSessionID = worker.workerSessionID
+          goal.updatedAt = new Date().toISOString()
+        } catch {
+          // Worker creation failed — leave goal as-is for retry
+          continue
+        }
+      }
+
+      // Active goal with worker ID: cache the worker session
+      if (goal.workerSessionID && !sessions.has(goal.id)) {
+        sessions.set(goal.id, {
+          goalID: goal.id,
+          workerSessionID: goal.workerSessionID,
+          startedAt: goal.createdAt,
+        })
+      }
+
+      // Active goal with expired lease and idle worker: release and resume
+      const runtime = state.runtimes.find((r) => r.goalID === goal.id)
+      if (runtime?.phase === "running" && !leaseIsValid(runtime)) {
+        const session = sessions.get(goal.id)
+        if (session && await workers.isIdle(session.workerSessionID)) {
+          Object.assign(runtime, releaseLease(runtime))
+          goal.updatedAt = new Date().toISOString()
+        }
+      }
+    }
+
+    await writeState(directory, state)
+  }
+
+  return { start, continueTurn, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile }
 }

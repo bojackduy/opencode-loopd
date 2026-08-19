@@ -3,38 +3,12 @@ import { promises as fs } from "fs"
 import path from "path"
 import os from "os"
 import { createGoalService } from "../../src/application/goal-service"
-import { readState } from "../../src/infrastructure/state-store"
-import type { LoopHost, SessionMessage } from "../../src/server/host-adapter"
+import { readState } from "../../src/infrastructure/state-repository"
+import { createFakeHost } from "../../src/server/host-adapter"
 import type { GoalID } from "../../src/domain/goal"
 
 function tmpDir(): string {
   return path.join(os.tmpdir(), `loopd-goal-test-${crypto.randomUUID()}`)
-}
-
-function createFakeHost(): LoopHost & { sessions: Map<string, string[]> } {
-  const sessions = new Map<string, string[]>()
-  return {
-    sessions,
-    async createWorker({ parentID, title }) {
-      const id = `worker-${crypto.randomUUID().slice(0, 8)}`
-      sessions.set(id, [])
-      return id
-    },
-    async promptWorker({ sessionID, prompt }) {
-      const msgs = sessions.get(sessionID) || []
-      msgs.push(prompt)
-      sessions.set(sessionID, msgs)
-    },
-    async sessionStatus(sessionID) {
-      return "idle"
-    },
-    async abortSession(sessionID) {
-      sessions.delete(sessionID)
-    },
-    async readMessages(sessionID) {
-      return []
-    },
-  }
 }
 
 describe("Goal Service", () => {
@@ -82,6 +56,17 @@ describe("Goal Service", () => {
       expect(msgs.length).toBeGreaterThan(0)
       expect(msgs[0]).toContain("get_goal")
     })
+
+    it("records owner session ID", async () => {
+      await svc.start(dir, {
+        name: "test",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+      })
+
+      const state = await readState(dir)
+      expect(state.goals[0].ownerSessionID).toBe("owner-1")
+    })
   })
 
   describe("pause / resume", () => {
@@ -126,6 +111,44 @@ describe("Goal Service", () => {
       const state = await readState(dir)
       expect(state.goals).toHaveLength(0)
       expect(host.sessions.has(worker.workerSessionID)).toBe(false)
+    })
+  })
+
+  describe("getWorker", () => {
+    it("returns worker for active goal", async () => {
+      const { goal } = await svc.start(dir, {
+        name: "w",
+        objective: "o",
+        ownerSessionID: "owner-1",
+      })
+
+      const worker = svc.getWorker(goal.id)
+      expect(worker).toBeTruthy()
+      expect(worker?.goalID).toBe(goal.id)
+    })
+
+    it("returns undefined for unknown goal", () => {
+      expect(svc.getWorker("unknown" as GoalID)).toBeUndefined()
+    })
+  })
+
+  describe("getActiveWorkers", () => {
+    it("returns all active workers", async () => {
+      const { goal: g1 } = await svc.start(dir, {
+        name: "w1",
+        objective: "o1",
+        ownerSessionID: "owner-1",
+      })
+      const { goal: g2 } = await svc.start(dir, {
+        name: "w2",
+        objective: "o2",
+        ownerSessionID: "owner-2",
+      })
+
+      const workers = svc.getActiveWorkers()
+      expect(workers.size).toBe(2)
+      expect(workers.has(g1.id)).toBe(true)
+      expect(workers.has(g2.id)).toBe(true)
     })
   })
 })
