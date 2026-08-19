@@ -1,24 +1,23 @@
 // ─── Application: Control Service ────────────────────────────────────────────
-// Receives typed commands from TUI, validates, mutates state, emits events.
+// Receives typed commands, validates, mutates state, emits events.
+// State is per-project (directory), not per-session.
 
 import { randomUUID } from "crypto"
 import type { Goal, GoalID, GoalConfig } from "../domain/goal"
 import { createGoal, canTransition } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
-import { createRuntimeState, acquireLease, releaseLease } from "../domain/runtime"
+import { createRuntimeState } from "../domain/runtime"
 import type { LoopCommand, StartGoalCommand } from "../domain/commands"
 import type { LoopEvent } from "../domain/events"
 import {
   readState,
   writeState,
   appendEvent,
-  readEvents,
-  type StoreState,
 } from "../infrastructure/state-store"
+import type { StoreState } from "../infrastructure/state-store"
 
-export interface ControlContext {
-  directory: string
-  sessionID: string
+export interface ControlService {
+  execute(directory: string, command: LoopCommand): Promise<ControlResponse>
 }
 
 export interface ControlResponse {
@@ -29,14 +28,7 @@ export interface ControlResponse {
   errorCode?: string
 }
 
-export interface ControlService {
-  execute(ctx: ControlContext, command: LoopCommand): Promise<ControlResponse>
-  getState(ctx: ControlContext): Promise<StoreState>
-  getEvents(ctx: ControlContext, limit?: number): Promise<Record<string, unknown>[]>
-}
-
 export function createControlService(): ControlService {
-  // In-memory lock per session to serialize mutations
   const locks = new Map<string, Promise<void>>()
 
   async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
@@ -55,25 +47,25 @@ export function createControlService(): ControlService {
   }
 
   async function execute(
-    ctx: ControlContext,
+    directory: string,
     command: LoopCommand,
   ): Promise<ControlResponse> {
-    return withLock(ctx.sessionID, async () => {
-      const state = await readState(ctx.directory, ctx.sessionID)
+    return withLock(directory, async () => {
+      const state = await readState(directory)
       try {
         switch (command.command) {
           case "start":
-            return await handleStart(ctx, state, command)
+            return await handleStart(directory, state, command)
           case "pause":
-            return await handleTransition(ctx, state, command, "paused", "user")
+            return await handleTransition(directory, state, command, "paused", "user")
           case "resume":
-            return await handleTransition(ctx, state, command, "active", "user")
+            return await handleTransition(directory, state, command, "active", "user")
           case "retry":
-            return await handleRetry(ctx, state, command)
+            return await handleRetry(directory, state, command)
           case "clear":
-            return await handleClear(ctx, state, command)
+            return await handleClear(directory, state, command)
           case "update":
-            return await handleUpdate(ctx, state, command)
+            return await handleUpdate(directory, state, command)
           case "inspect":
             return { ok: true, requestID: command.requestID, message: "inspect not yet implemented" }
           case "open_worker":
@@ -91,19 +83,18 @@ export function createControlService(): ControlService {
           }
         }
       } finally {
-        await writeState(ctx.directory, ctx.sessionID, state)
+        await writeState(directory, state)
       }
     })
   }
 
   async function handleStart(
-    ctx: ControlContext,
+    directory: string,
     state: StoreState,
     cmd: StartGoalCommand,
   ): Promise<ControlResponse> {
     const id = randomUUID() as GoalID
 
-    // Check if a goal with this name already exists
     const existing = state.goals.find(
       (g) => g.name === cmd.args.name && g.status !== "complete" && g.status !== "paused",
     )
@@ -121,7 +112,7 @@ export function createControlService(): ControlService {
       name: cmd.args.name,
       objective: cmd.args.objective,
       status: "active",
-      ownerSessionID: ctx.sessionID,
+      ownerSessionID: "main",
       config: cmd.args.config,
     })
 
@@ -138,7 +129,7 @@ export function createControlService(): ControlService {
       timestamp: new Date().toISOString(),
       revision: state.revision,
     }
-    await appendEvent(ctx.directory, ctx.sessionID, event)
+    await appendEvent(directory, event)
 
     return {
       ok: true,
@@ -149,7 +140,7 @@ export function createControlService(): ControlService {
   }
 
   async function handleTransition(
-    ctx: ControlContext,
+    directory: string,
     state: StoreState,
     cmd: { requestID: string; goalID?: GoalID },
     target: "paused" | "active",
@@ -157,12 +148,7 @@ export function createControlService(): ControlService {
   ): Promise<ControlResponse> {
     const goal = findGoal(state, cmd.goalID)
     if (!goal) {
-      return {
-        ok: false,
-        requestID: cmd.requestID,
-        message: "goal not found",
-        errorCode: "goal_not_found",
-      }
+      return { ok: false, requestID: cmd.requestID, message: "goal not found", errorCode: "goal_not_found" }
     }
 
     if (!canTransition(goal.status, target, caller)) {
@@ -188,7 +174,7 @@ export function createControlService(): ControlService {
       timestamp: new Date().toISOString(),
       revision: state.revision,
     }
-    await appendEvent(ctx.directory, ctx.sessionID, event)
+    await appendEvent(directory, event)
 
     return {
       ok: true,
@@ -199,7 +185,7 @@ export function createControlService(): ControlService {
   }
 
   async function handleRetry(
-    ctx: ControlContext,
+    directory: string,
     state: StoreState,
     cmd: { requestID: string; goalID?: GoalID },
   ): Promise<ControlResponse> {
@@ -232,13 +218,13 @@ export function createControlService(): ControlService {
       timestamp: new Date().toISOString(),
       revision: state.revision,
     }
-    await appendEvent(ctx.directory, ctx.sessionID, event)
+    await appendEvent(directory, event)
 
     return { ok: true, requestID: cmd.requestID, message: `goal "${goal.name}" retried`, stateRevision: state.revision }
   }
 
   async function handleClear(
-    ctx: ControlContext,
+    directory: string,
     state: StoreState,
     cmd: { requestID: string; goalID?: GoalID },
   ): Promise<ControlResponse> {
@@ -255,9 +241,8 @@ export function createControlService(): ControlService {
       timestamp: new Date().toISOString(),
       revision: state.revision,
     }
-    await appendEvent(ctx.directory, ctx.sessionID, event)
+    await appendEvent(directory, event)
 
-    // Remove goal and runtime
     state.goals = state.goals.filter((g) => g.id !== goal.id)
     state.runtimes = state.runtimes.filter((r) => r.goalID !== goal.id)
 
@@ -265,7 +250,7 @@ export function createControlService(): ControlService {
   }
 
   async function handleUpdate(
-    ctx: ControlContext,
+    directory: string,
     state: StoreState,
     cmd: { requestID: string; goalID?: GoalID; args: { objective?: string; config?: Partial<GoalConfig> } },
   ): Promise<ControlResponse> {
@@ -285,7 +270,6 @@ export function createControlService(): ControlService {
 
   function findGoal(state: StoreState, id?: GoalID): Goal | undefined {
     if (id) return state.goals.find((g) => g.id === id)
-    // Find the first active or blocked goal
     return state.goals.find((g) => g.status === "active" || g.status === "blocked")
   }
 
@@ -293,13 +277,5 @@ export function createControlService(): ControlService {
     return state.runtimes.find((r) => r.goalID === goalID)
   }
 
-  async function getState(ctx: ControlContext): Promise<StoreState> {
-    return readState(ctx.directory, ctx.sessionID)
-  }
-
-  async function getEvents(ctx: ControlContext, limit?: number): Promise<Record<string, unknown>[]> {
-    return readEvents(ctx.directory, ctx.sessionID, limit)
-  }
-
-  return { execute, getState, getEvents }
+  return { execute }
 }

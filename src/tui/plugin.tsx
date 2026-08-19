@@ -5,7 +5,7 @@
 import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { LoopDashboard } from "./dashboard"
 
-const PLUGIN_ID = "opencode-loopd-tui"
+const PLUGIN_ID = "opencode-loopd.tui"
 
 const tui: TuiPlugin = async (api) => {
   const directory = api.state.path.directory

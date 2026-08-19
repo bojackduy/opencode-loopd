@@ -1,5 +1,6 @@
 // ─── Infrastructure: State Store ─────────────────────────────────────────────
 // Atomic, revisioned JSON persistence for goal + runtime state.
+// Single state.json per project, NDJSON event log alongside.
 
 import { promises as fs } from "fs"
 import path from "path"
@@ -16,33 +17,28 @@ export interface StoreState {
   runtimes: GoalRuntimeState[]
 }
 
-const EMPTY_STATE: StoreState = {
-  version: STATE_VERSION,
-  revision: 0,
-  goals: [],
-  runtimes: [],
+function emptyState(): StoreState {
+  return { version: STATE_VERSION, revision: 0, goals: [], runtimes: [] }
 }
 
-function stateDir(directory: string): string {
+const EMPTY_STATE: StoreState = emptyState()
+
+function loopDir(directory: string): string {
   return path.join(directory, ".opencode", "loopd")
 }
 
-function statePath(directory: string, sessionID: string): string {
-  return path.join(stateDir(directory), `${safeID(sessionID)}.json`)
+function stateFile(directory: string): string {
+  return path.join(loopDir(directory), "state.json")
 }
 
-function eventsPath(directory: string, sessionID: string): string {
-  return path.join(stateDir(directory), `${safeID(sessionID)}-events.ndjson`)
-}
-
-function safeID(id: string): string {
-  return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128)
+function eventsFile(directory: string): string {
+  return path.join(loopDir(directory), "events.ndjson")
 }
 
 // ─── Read ────────────────────────────────────────────────────────────────────
 
-async function readRaw(directory: string, sessionID: string): Promise<StoreState> {
-  const target = statePath(directory, sessionID)
+export async function readState(directory: string): Promise<StoreState> {
+  const target = stateFile(directory)
   const attempts = 5
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
@@ -51,9 +47,9 @@ async function readRaw(directory: string, sessionID: string): Promise<StoreState
       if (parsed && typeof parsed === "object" && Array.isArray(parsed.goals)) {
         return parsed as StoreState
       }
-      return { ...EMPTY_STATE }
+      return emptyState()
     } catch (error: any) {
-      if (error?.code === "ENOENT") return { ...EMPTY_STATE }
+      if (error?.code === "ENOENT") return emptyState()
       const transient =
         error instanceof SyntaxError ||
         error?.code === "EPERM" ||
@@ -63,19 +59,14 @@ async function readRaw(directory: string, sessionID: string): Promise<StoreState
       await delay(25 * (attempt + 1))
     }
   }
-  return { ...EMPTY_STATE }
-}
-
-export async function readState(
-  directory: string,
-  sessionID: string,
-): Promise<StoreState> {
-  return await readRaw(directory, sessionID)
+  return emptyState()
 }
 
 // ─── Write ───────────────────────────────────────────────────────────────────
 
 async function writeAtomic(target: string, contents: string): Promise<void> {
+  const dir = path.dirname(target)
+  await fs.mkdir(dir, { recursive: true })
   const temp = path.join(
     os.tmpdir(),
     `loopd-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`,
@@ -101,47 +92,173 @@ async function writeAtomic(target: string, contents: string): Promise<void> {
     }
     await fs.copyFile(temp, target)
   } finally {
-    try {
-      await fs.rm(temp, { force: true })
-    } catch {}
+    try { await fs.rm(temp, { force: true }) } catch {}
   }
 }
 
 export async function writeState(
   directory: string,
-  sessionID: string,
   state: StoreState,
 ): Promise<void> {
-  const target = statePath(directory, sessionID)
-  await fs.mkdir(path.dirname(target), { recursive: true })
   state.revision += 1
   const payload = JSON.stringify(state, null, 2)
-  await writeAtomic(target, payload)
+  await writeAtomic(stateFile(directory), payload)
 }
 
 // ─── Events Log ──────────────────────────────────────────────────────────────
 
 export async function appendEvent(
   directory: string,
-  sessionID: string,
   event: unknown,
 ): Promise<void> {
-  const target = eventsPath(directory, sessionID)
-  await fs.mkdir(path.dirname(target), { recursive: true })
+  await fs.mkdir(loopDir(directory), { recursive: true })
   const line = JSON.stringify(event as object) + "\n"
-  await fs.appendFile(target, line, "utf8")
+  await fs.appendFile(eventsFile(directory), line, "utf8")
 }
 
 export async function readEvents(
   directory: string,
-  sessionID: string,
   limit = 50,
 ): Promise<Record<string, unknown>[]> {
-  const target = eventsPath(directory, sessionID)
   try {
-    const raw = await fs.readFile(target, "utf8")
+    const raw = await fs.readFile(eventsFile(directory), "utf8")
     const lines = raw.trim().split("\n").filter(Boolean)
     return lines.slice(-limit).map((l) => JSON.parse(l) as Record<string, unknown>)
+  } catch {
+    return []
+  }
+}
+
+// ─── Control Mailbox ─────────────────────────────────────────────────────────
+
+export interface ControlRequest {
+  requestID: string
+  command: string
+  goalID?: string
+  args?: Record<string, unknown>
+  requestedAt: string
+}
+
+export interface ControlResponse {
+  requestID: string
+  ok: boolean
+  message: string
+  stateRevision?: number
+  errorCode?: string
+  completedAt: string
+}
+
+function controlDir(directory: string): string {
+  return path.join(loopDir(directory), "control")
+}
+
+function requestFile(directory: string, requestID: string): string {
+  return path.join(controlDir(directory), "requests", `${requestID}.json`)
+}
+
+function processingFile(directory: string, requestID: string): string {
+  return path.join(controlDir(directory), "processing", `${requestID}.json`)
+}
+
+function responseFile(directory: string, requestID: string): string {
+  return path.join(controlDir(directory), "responses", `${requestID}.json`)
+}
+
+export async function writeControlRequest(
+  directory: string,
+  request: ControlRequest,
+): Promise<void> {
+  const dir = path.join(controlDir(directory), "requests")
+  await fs.mkdir(dir, { recursive: true })
+  await writeAtomic(requestFile(directory, request.requestID), JSON.stringify(request, null, 2))
+}
+
+export async function readControlRequest(
+  directory: string,
+  requestID: string,
+): Promise<ControlRequest | undefined> {
+  try {
+    const raw = await fs.readFile(requestFile(directory, requestID), "utf8")
+    return JSON.parse(raw) as ControlRequest
+  } catch {
+    return undefined
+  }
+}
+
+export async function claimControlRequest(
+  directory: string,
+  requestID: string,
+): Promise<boolean> {
+  const src = requestFile(directory, requestID)
+  const dst = processingFile(directory, requestID)
+  try {
+    await fs.mkdir(path.dirname(dst), { recursive: true })
+    await fs.rename(src, dst)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export async function writeControlResponse(
+  directory: string,
+  response: ControlResponse,
+): Promise<void> {
+  const dir = path.join(controlDir(directory), "responses")
+  await fs.mkdir(dir, { recursive: true })
+  await writeAtomic(responseFile(directory, response.requestID), JSON.stringify(response, null, 2))
+  // Clean up processing file
+  try { await fs.rm(processingFile(directory, response.requestID), { force: true }) } catch {}
+}
+
+export async function readControlResponse(
+  directory: string,
+  requestID: string,
+): Promise<ControlResponse | undefined> {
+  try {
+    const raw = await fs.readFile(responseFile(directory, requestID), "utf8")
+    return JSON.parse(raw) as ControlResponse
+  } catch {
+    return undefined
+  }
+}
+
+export async function listPendingRequests(directory: string): Promise<ControlRequest[]> {
+  const dir = path.join(controlDir(directory), "requests")
+  try {
+    const files = await fs.readdir(dir)
+    const requests: ControlRequest[] = []
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue
+      try {
+        const raw = await fs.readFile(path.join(dir, file), "utf8")
+        requests.push(JSON.parse(raw) as ControlRequest)
+      } catch {}
+    }
+    return requests.sort((a, b) => a.requestedAt.localeCompare(b.requestedAt))
+  } catch {
+    return []
+  }
+}
+
+export async function recoverStaleProcessing(directory: string): Promise<ControlRequest[]> {
+  const dir = path.join(controlDir(directory), "processing")
+  try {
+    const files = await fs.readdir(dir)
+    const recovered: ControlRequest[] = []
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue
+      const processingPath = path.join(dir, file)
+      const requestPath = path.join(controlDir(directory), "requests", file)
+      try {
+        const raw = await fs.readFile(processingPath, "utf8")
+        const request = JSON.parse(raw) as ControlRequest
+        // Move back to requests
+        await fs.rename(processingPath, requestPath)
+        recovered.push(request)
+      } catch {}
+    }
+    return recovered
   } catch {
     return []
   }
