@@ -59,6 +59,9 @@ describe("Loop Engine", () => {
         ownerSessionID: "owner-1",
       })
 
+      // Preload worker sessions into engine cache
+      await engine.preloadWorkerSessions()
+
       // Simulate session.idle event
       const result = await engine.handleEvent({
         type: "session.idle",

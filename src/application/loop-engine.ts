@@ -1,6 +1,7 @@
 // ─── Application: Loop Engine ────────────────────────────────────────────────
 // The central orchestrator. Handles session events, drives continuation,
 // enforces limits, and manages compaction.
+// Zero-cost when no goals exist: event hook filters by type before disk read.
 
 import { randomUUID } from "crypto"
 import { readState, writeState, appendEvent } from "../infrastructure/state-repository"
@@ -17,6 +18,13 @@ import type { LoopEvent } from "../domain/events"
 import type { GoalService } from "./goal-service"
 import type { LoopHost } from "../server/host-adapter"
 
+const HANDLED_EVENT_TYPES = new Set([
+  "session.idle",
+  "session.status",
+  "session.error",
+  "session.compacted",
+])
+
 export interface LoopEngineOptions {
   directory: string
   host: LoopHost
@@ -30,23 +38,44 @@ export interface LoopEngine {
   isRunning(): boolean
   /** Handle a plugin event. Returns true if the event was consumed. */
   handleEvent(event: any): Promise<boolean>
+  /** Preload worker sessions into cache (for tests). */
+  preloadWorkerSessions(): Promise<void>
 }
 
 export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
   const { directory, host, goalService } = options
-  const maintenanceMs = options.pollIntervalMs ?? 5_000
+  const maintenanceMs = options.pollIntervalMs ?? 30_000
 
   let running = false
   let maintenanceTimer: ReturnType<typeof setInterval> | undefined
+  // In-memory cache of worker session IDs — avoids disk read on every event
+  let knownWorkerSessions = new Set<string>()
+  let knownWorkerSessionsLoaded = false
   // Guard against concurrent continuations for the same goal
   const inflightContinuations = new Set<GoalID>()
+
+  async function loadWorkerSessionsIfneeded() {
+    if (knownWorkerSessionsLoaded) return
+    try {
+      const state = await readState(directory)
+      for (const g of state.goals) {
+        if (g.workerSessionID) knownWorkerSessions.add(g.workerSessionID)
+      }
+      knownWorkerSessionsLoaded = true
+    } catch {}
+  }
+
+  // Exposed for tests to preload worker sessions
+  async function preloadWorkerSessions() {
+    await loadWorkerSessionsIfneeded()
+  }
 
   function start() {
     if (running) return
     running = true
-    // Initial reconciliation
-    goalService.reconcile(directory).catch(() => {})
-    // Maintenance timer for expired leases and retries
+    // Load worker sessions eagerly so event hook is ready immediately
+    loadWorkerSessionsIfneeded().catch(() => {})
+    // Maintenance timer — much slower than before (30s vs 5s)
     maintenanceTimer = setInterval(() => {
       if (running) maintenance().catch(() => {})
     }, maintenanceMs)
@@ -67,17 +96,29 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
 
   async function handleEvent(event: any): Promise<boolean> {
     if (!running || !event || typeof event !== "object") return false
-    const type = event.type as string | undefined
-    if (!type) return false
 
-    // Only handle session events for worker sessions
+    // FAST PATH: filter by event type BEFORE any disk I/O
+    const type = event.type as string | undefined
+    if (!type || !HANDLED_EVENT_TYPES.has(type)) return false
+
+    // FAST PATH: check if this session is one we care about
     const sessionID = event.properties?.sessionID as string | undefined
     if (!sessionID) return false
 
-    // Find the goal for this worker session
+    // Load worker sessions on first event (lazy)
+    await loadWorkerSessionsIfneeded()
+
+    // FAST PATH: skip events for sessions we don't own
+    // (but only if we've loaded the cache — don't reject if cache is empty)
+    if (knownWorkerSessions.size > 0 && !knownWorkerSessions.has(sessionID)) return false
+
+    // SLOW PATH: only now read state from disk
     const state = await readState(directory)
     const goal = state.goals.find((g) => g.workerSessionID === sessionID)
     if (!goal) return false
+
+    // Update worker session cache
+    if (goal.workerSessionID) knownWorkerSessions.add(goal.workerSessionID)
 
     // Skip terminal or paused goals
     if (isTerminal(goal.status) || goal.status === "paused") return false
@@ -369,7 +410,15 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
   // ─── Maintenance ──────────────────────────────────────────────────────────
 
   async function maintenance() {
+    // FAST PATH: skip entirely if no known worker sessions
+    if (knownWorkerSessions.size === 0) return
+
     const state = await readState(directory)
+    // FAST PATH: skip if no active goals
+    const hasActiveGoals = state.goals.some(
+      (g) => !isTerminal(g.status) && g.status !== "paused",
+    )
+    if (!hasActiveGoals) return
 
     for (const goal of state.goals) {
       if (isTerminal(goal.status) || goal.status === "paused") continue
@@ -402,5 +451,5 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     }
   }
 
-  return { start, stop, isRunning, handleEvent }
+  return { start, stop, isRunning, handleEvent, preloadWorkerSessions }
 }

@@ -45,7 +45,9 @@ function eventsFile(directory: string): string {
 }
 
 function lockDir(directory: string): string {
-  return path.join(loopDir(directory), ".locks")
+  // Lock files go in /tmp, not inside the project, to avoid snapshot noise
+  const projectHash = Buffer.from(directory).toString("base64url").slice(0, 32)
+  return path.join(os.tmpdir(), "loopd-locks", projectHash)
 }
 
 function lockFile(directory: string, key: string): string {

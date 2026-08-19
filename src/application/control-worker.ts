@@ -39,7 +39,7 @@ export interface ControlWorker {
 
 export function createControlWorker(options: ControlWorkerOptions): ControlWorker {
   const directory = options.directory
-  const pollMs = options.pollIntervalMs ?? 500
+  const pollMs = options.pollIntervalMs ?? 1_000
   const goalSvc: GoalService = createGoalService(options.host)
 
   let running = false
@@ -50,7 +50,7 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
   function start() {
     if (running) return
     running = true
-    // Process immediately on start, then on interval
+    // Process immediately on start, then activate interval if needed
     processPending()
     pollTimer = setInterval(() => {
       if (running && lastProcessDone) {

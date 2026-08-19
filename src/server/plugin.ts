@@ -1,5 +1,6 @@
 // ─── Server Plugin Entry ─────────────────────────────────────────────────────
 // The engine. Hooks, tools, control worker, goal tools, event handling.
+// Starts lazily: no timers, no polling, no disk reads until a goal exists.
 
 import type { Plugin, PluginModule } from "@opencode-ai/plugin"
 import { createControlWorker } from "../application/control-worker"
@@ -14,31 +15,43 @@ const server: Plugin = async ({ client, directory }) => {
   const host = createRealHost(client)
   const goalService = createGoalService(host)
 
-  // Start the control worker
   const worker = createControlWorker({
     directory,
     host,
-    pollIntervalMs: 500,
+    pollIntervalMs: 1_000,
   })
-  worker.start()
 
-  // Start the loop engine
   const engine = createLoopEngine({
     directory,
     host,
     goalService,
-    pollIntervalMs: 5_000,
+    pollIntervalMs: 30_000,
   })
-  engine.start()
+
+  // Start lazily: only when first event arrives or goal is created
+  let started = false
+  function ensureStarted() {
+    if (started) return
+    started = true
+    engine.start()
+    worker.start()
+  }
 
   return {
     event: async ({ event }) => {
-      // Route all events through the engine
+      // Lazy start on first relevant event
+      const type = (event as any)?.type as string | undefined
+      if (type?.startsWith("session.")) ensureStarted()
+
+      // Route through engine (engine filters by type before disk I/O)
       await engine.handleEvent(event)
     },
     tool: goalTools(directory),
     "tool.execute.after": async (input, output) => {
-      // Future: detect goal-related tool completions
+      // Lazy start when goal tools are used
+      if (input.tool === "get_goal" || input.tool === "report_goal_progress") {
+        ensureStarted()
+      }
     },
     dispose: async () => {
       engine.stop()

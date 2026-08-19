@@ -540,7 +540,7 @@ var MAX_LEDGER_SIZE = 100;
 var RESPONSE_CLEANUP_AGE_MS = 60 * 60 * 1000;
 function createControlWorker(options) {
   const directory = options.directory;
-  const pollMs = options.pollIntervalMs ?? 500;
+  const pollMs = options.pollIntervalMs ?? 1000;
   const goalSvc = createGoalService(options.host);
   let running = false;
   let pollTimer;
@@ -719,17 +719,40 @@ function createControlWorker(options) {
 
 // src/application/loop-engine.ts
 import { randomUUID as randomUUID2 } from "crypto";
+var HANDLED_EVENT_TYPES = new Set([
+  "session.idle",
+  "session.status",
+  "session.error",
+  "session.compacted"
+]);
 function createLoopEngine(options) {
   const { directory, host, goalService } = options;
-  const maintenanceMs = options.pollIntervalMs ?? 5000;
+  const maintenanceMs = options.pollIntervalMs ?? 30000;
   let running = false;
   let maintenanceTimer;
+  let knownWorkerSessions = new Set;
+  let knownWorkerSessionsLoaded = false;
   const inflightContinuations = new Set;
+  async function loadWorkerSessionsIfneeded() {
+    if (knownWorkerSessionsLoaded)
+      return;
+    try {
+      const state = await readState(directory);
+      for (const g of state.goals) {
+        if (g.workerSessionID)
+          knownWorkerSessions.add(g.workerSessionID);
+      }
+      knownWorkerSessionsLoaded = true;
+    } catch {}
+  }
+  async function preloadWorkerSessions() {
+    await loadWorkerSessionsIfneeded();
+  }
   function start() {
     if (running)
       return;
     running = true;
-    goalService.reconcile(directory).catch(() => {});
+    loadWorkerSessionsIfneeded().catch(() => {});
     maintenanceTimer = setInterval(() => {
       if (running)
         maintenance().catch(() => {});
@@ -749,15 +772,20 @@ function createLoopEngine(options) {
     if (!running || !event || typeof event !== "object")
       return false;
     const type = event.type;
-    if (!type)
+    if (!type || !HANDLED_EVENT_TYPES.has(type))
       return false;
     const sessionID = event.properties?.sessionID;
     if (!sessionID)
+      return false;
+    await loadWorkerSessionsIfneeded();
+    if (knownWorkerSessions.size > 0 && !knownWorkerSessions.has(sessionID))
       return false;
     const state = await readState(directory);
     const goal = state.goals.find((g) => g.workerSessionID === sessionID);
     if (!goal)
       return false;
+    if (goal.workerSessionID)
+      knownWorkerSessions.add(goal.workerSessionID);
     if (isTerminal(goal.status) || goal.status === "paused")
       return false;
     switch (type) {
@@ -982,7 +1010,12 @@ function createLoopEngine(options) {
     }
   }
   async function maintenance() {
+    if (knownWorkerSessions.size === 0)
+      return;
     const state = await readState(directory);
+    const hasActiveGoals = state.goals.some((g) => !isTerminal(g.status) && g.status !== "paused");
+    if (!hasActiveGoals)
+      return;
     for (const goal of state.goals) {
       if (isTerminal(goal.status) || goal.status === "paused")
         continue;
@@ -1008,7 +1041,7 @@ function createLoopEngine(options) {
       }
     }
   }
-  return { start, stop, isRunning, handleEvent };
+  return { start, stop, isRunning, handleEvent, preloadWorkerSessions };
 }
 
 // src/server/host-adapter.ts
@@ -1357,22 +1390,35 @@ var server = async ({ client, directory }) => {
   const worker = createControlWorker({
     directory,
     host,
-    pollIntervalMs: 500
+    pollIntervalMs: 1000
   });
-  worker.start();
   const engine = createLoopEngine({
     directory,
     host,
     goalService,
-    pollIntervalMs: 5000
+    pollIntervalMs: 30000
   });
-  engine.start();
+  let started = false;
+  function ensureStarted() {
+    if (started)
+      return;
+    started = true;
+    engine.start();
+    worker.start();
+  }
   return {
     event: async ({ event }) => {
+      const type = event?.type;
+      if (type?.startsWith("session."))
+        ensureStarted();
       await engine.handleEvent(event);
     },
     tool: goalTools(directory),
-    "tool.execute.after": async (input, output) => {},
+    "tool.execute.after": async (input, output) => {
+      if (input.tool === "get_goal" || input.tool === "report_goal_progress") {
+        ensureStarted();
+      }
+    },
     dispose: async () => {
       engine.stop();
       await worker.stop();
