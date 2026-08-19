@@ -1,0 +1,31 @@
+{
+  "name": "opencode-loopd",
+  "version": "0.1.0",
+  "description": "Codex-inspired goal engine for OpenCode with modal TUI dashboard.",
+  "type": "module",
+  "exports": {
+    ".": "./src/server/plugin.ts",
+    "./server": "./src/server/plugin.ts",
+    "./tui": "./src/tui/plugin.tsx"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "bun build src/server/plugin.ts src/tui/plugin.tsx --outdir dist --target bun",
+    "test": "bun test"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.4.0 <2"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.18.15",
+    "@opentui/core": "latest",
+    "@opentui/solid": "latest",
+    "@types/node": "^26.2.0",
+    "solid-js": "^1.9.13",
+    "typescript": "^5.7.0"
+  },
+  "files": [
+    "src"
+  ],
+  "license": "MIT"
+}
