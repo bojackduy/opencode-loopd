@@ -17,15 +17,15 @@ import {
   type ControlRequest,
   type ControlResponse,
 } from "../infrastructure/state-repository"
-import { createGoalService, type GoalService } from "./goal-service"
-import type { LoopHost } from "../server/host-adapter"
+import type { GoalService } from "./goal-service"
+import { describeError, logServerEvent, SERVER_LOG_FILE } from "../infrastructure/server-log"
 
 const MAX_LEDGER_SIZE = 100
 const RESPONSE_CLEANUP_AGE_MS = 60 * 60 * 1000 // 1 hour
 
 export interface ControlWorkerOptions {
   directory: string
-  host: LoopHost
+  goalService: GoalService
   pollIntervalMs?: number
   onRequest?: (request: ControlRequest) => void
   onResponse?: (response: ControlResponse) => void
@@ -40,7 +40,7 @@ export interface ControlWorker {
 export function createControlWorker(options: ControlWorkerOptions): ControlWorker {
   const directory = options.directory
   const pollMs = options.pollIntervalMs ?? 1_000
-  const goalSvc: GoalService = createGoalService(options.host)
+  const goalSvc = options.goalService
 
   let running = false
   let pollTimer: ReturnType<typeof setInterval> | undefined
@@ -85,10 +85,17 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
         await writeControlResponse(directory, response)
         options.onResponse?.(response)
       } catch (error) {
+        const detail = describeError(error)
+        await logServerEvent(directory, "control.request.failed", {
+          requestID: request.requestID,
+          command: request.command,
+          goalID: request.goalID,
+          detail,
+        })
         const response: ControlResponse = {
           requestID: request.requestID,
           ok: false,
-          message: `internal error: ${error instanceof Error ? error.message : String(error)}`,
+          message: `internal error: ${detail}. Diagnostics: ${SERVER_LOG_FILE}`,
           errorCode: "internal_error",
           completedAt: new Date().toISOString(),
         }
@@ -135,10 +142,19 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
     switch (request.command) {
       case "start": {
         const args = request.args as { name: string; objective: string; config?: any; ownerSessionID?: string }
+        if (!args.ownerSessionID || args.ownerSessionID === "main") {
+          response = {
+            ...base,
+            ok: false,
+            message: "cannot start goal without a valid owner session; open /loop from an active OpenCode session",
+            errorCode: "invalid_owner_session",
+          }
+          break
+        }
         const { goal } = await goalSvc.start(directory, {
           name: args.name,
           objective: args.objective,
-          ownerSessionID: args.ownerSessionID || "main",
+          ownerSessionID: args.ownerSessionID,
           config: args.config,
         })
         const state = await readState(directory)

@@ -5,18 +5,88 @@
 import { randomUUID } from "crypto"
 import { tool } from "@opencode-ai/plugin/tool"
 import { readState, writeState, appendEvent } from "../infrastructure/state-repository"
-import type { Goal, GoalID } from "../domain/goal"
+import type { Goal, GoalID, GoalConfig } from "../domain/goal"
 import { canTransition } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
 import { markProgress } from "../domain/runtime"
 import type { LoopEvent } from "../domain/events"
 import { exec as execChild } from "child_process"
 import { promisify } from "util"
+import type { GoalService } from "../application/goal-service"
+import { SERVER_LOG_FILE } from "../infrastructure/server-log"
 
 const execAsync = promisify(execChild)
 
-export function goalTools(dir: string, hostSessionID?: string) {
+export function goalTools(dir: string, goalService: GoalService, hostSessionID?: string) {
   return {
+    loopd_create_goal: tool({
+      description:
+        "Create a new background loop goal. The engine spawns a dedicated worker session " +
+        "that does the work autonomously — it never runs in this chat. " +
+        "Call this after clarifying the goal name, objective, and any config with the user. " +
+        "The goal immediately starts in the background; the user can monitor it via /loop.",
+      args: {
+        name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
+        objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
+        checks: tool.schema.array(tool.schema.string()).optional().describe("Shell commands that must pass for completion to be accepted. E.g. [\"npm test\"]."),
+        progressFile: tool.schema.string().optional().describe("Markdown file the worker reads/writes as its transaction state."),
+        maxTurns: tool.schema.number().optional().describe("Max turns before auto-block."),
+        maxNoProgress: tool.schema.number().optional().describe("Block after N turns without progress."),
+        maxFailures: tool.schema.number().optional().describe("Block after N consecutive failures."),
+        compactEvery: tool.schema.number().optional().describe("Compact the worker session every N turns."),
+        timeoutMs: tool.schema.number().optional().describe("Per-turn timeout in ms."),
+      },
+      execute: async (args, context) => {
+        const sessionID = context?.sessionID || hostSessionID
+        if (!sessionID || sessionID === "main") {
+          return {
+            title: "Goal not created",
+            output: JSON.stringify({
+              ok: false,
+              message: "A valid owner session is required. Run /goal from an active OpenCode session.",
+            }),
+          }
+        }
+        const config: GoalConfig = {}
+        if (args.checks) config.checks = args.checks
+        if (args.progressFile) config.progressFile = args.progressFile
+        if (args.maxTurns !== undefined) config.maxTurns = args.maxTurns
+        if (args.maxNoProgress !== undefined) config.maxNoProgress = args.maxNoProgress
+        if (args.maxFailures !== undefined) config.maxFailures = args.maxFailures
+        if (args.compactEvery !== undefined) config.compactEvery = args.compactEvery
+        if (args.timeoutMs !== undefined) config.timeoutMs = args.timeoutMs
+
+        try {
+          const { goal, worker } = await goalService.start(dir, {
+            name: args.name,
+            objective: args.objective,
+            ownerSessionID: sessionID,
+            config,
+          })
+          return {
+            title: "Goal created",
+            output: JSON.stringify({
+              ok: true,
+              goalID: goal.id,
+              workerSessionID: worker.workerSessionID,
+              name: args.name,
+              message: `Goal "${args.name}" created and started in the background. Monitor with /loop (Ctrl+Shift+L).`,
+            }),
+          }
+        } catch (error) {
+          return {
+            title: "Goal creation failed",
+            output: JSON.stringify({
+              ok: false,
+              name: args.name,
+              message: error instanceof Error ? error.message : String(error),
+              diagnostics: SERVER_LOG_FILE,
+            }),
+          }
+        }
+      },
+    }),
+
     get_goal: tool({
       description:
         "Get the current goal state. Call at the start of every continuation turn " +

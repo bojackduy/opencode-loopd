@@ -2,6 +2,8 @@
 // Wraps the OpenCode SDK client behind a testable interface.
 // Production uses the real client; tests use a fake.
 
+import { describeError, logServerEvent } from "../infrastructure/server-log"
+
 export interface ModelRef {
   providerID: string
   modelID: string
@@ -38,15 +40,29 @@ export interface LoopHost {
 
 // ─── Real Host (SDK-backed) ─────────────────────────────────────────────────
 
-export function createRealHost(client: any): LoopHost {
+export function createRealHost(client: any, directory: string): LoopHost {
   return {
     async createWorker({ parentID, title }) {
-      const result = await client.session.create({
-        body: { parentID, title },
-      })
-      const data = result?.data
-      if (!data?.id) throw new Error("failed to create worker session")
-      return data.id
+      try {
+        const result = await withTimeout<any>(
+          client.session.create({ body: { parentID, title } }),
+          10_000,
+          "OpenCode session.create",
+        )
+        const data = result?.data
+        if (result?.error || !data?.id) {
+          const detail = describeError(result?.error || "response contained no session ID")
+          await logServerEvent(directory, "worker.create.failed", { parentID, title, detail })
+          throw new Error(`OpenCode session.create failed for parent "${parentID}": ${detail}`)
+        }
+        await logServerEvent(directory, "worker.created", { parentID, workerSessionID: data.id, title })
+        return data.id
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("OpenCode session.create failed")) throw error
+        const detail = describeError(error)
+        await logServerEvent(directory, "worker.create.failed", { parentID, title, detail })
+        throw new Error(`OpenCode session.create failed for parent "${parentID}": ${detail}`)
+      }
     },
 
     async promptWorker({ sessionID, prompt, model, agent }) {
@@ -55,10 +71,20 @@ export function createRealHost(client: any): LoopHost {
       }
       if (model) body.model = model
       if (agent) body.agent = agent
-      await client.session.promptAsync({
-        path: { id: sessionID },
-        body,
-      })
+      const result = await withTimeout<any>(
+        client.session.promptAsync({
+          path: { id: sessionID },
+          body,
+        }),
+        10_000,
+        "OpenCode session.promptAsync",
+      )
+      if (result?.error) {
+        const detail = describeError(result.error)
+        await logServerEvent(directory, "worker.prompt.failed", { sessionID, detail })
+        throw new Error(`OpenCode session.promptAsync failed for worker "${sessionID}": ${detail}`)
+      }
+      await logServerEvent(directory, "worker.prompted", { sessionID })
     },
 
     async sessionStatus(sessionID) {
@@ -115,6 +141,20 @@ export function createRealHost(client: any): LoopHost {
         // Best-effort compaction
       }
     },
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operation: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${operation} timed out after ${timeoutMs}ms`)), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
   }
 }
 

@@ -11,8 +11,8 @@ const CONTINUATION_PROMPT = `You are a worker for an active goal.
 Call get_goal to retrieve the authoritative objective, current state, acceptance criteria, and recent failures. Perform one meaningful batch of work. After durable verification:
 
 - Call report_goal_progress if work remains.
-- Call update_goal with status "complete" only if all acceptance criteria pass with concrete evidence.
-- Call update_goal with status "blocked" only for a real external blocker requiring user intervention.
+- Call complete_goal only if all acceptance criteria pass with concrete evidence.
+- Call block_goal only for a real external blocker requiring user intervention.
 
 Do not ask questions. Make reasonable assumptions. Work directly.`
 

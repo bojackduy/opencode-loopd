@@ -7,6 +7,7 @@ import { createControlClient } from "../../src/infrastructure/control-client"
 import { createControlWorker } from "../../src/application/control-worker"
 import { readState } from "../../src/infrastructure/state-repository"
 import { createFakeHost } from "../../src/server/host-adapter"
+import { createGoalService } from "../../src/application/goal-service"
 
 function tmpDir(): string {
   return path.join(os.tmpdir(), `loopd-controller-test-${crypto.randomUUID()}`)
@@ -24,7 +25,7 @@ describe("Dashboard Controller", () => {
     await fs.mkdir(dir, { recursive: true })
     host = createFakeHost()
     client = createControlClient(dir)
-    worker = createControlWorker({ directory: dir, host, pollIntervalMs: 50 })
+    worker = createControlWorker({ directory: dir, goalService: createGoalService(host), pollIntervalMs: 50 })
     worker.start()
     ctrl = createDashboardController(client)
   })

@@ -156,383 +156,36 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// src/application/goal-service.ts
-import { randomUUID } from "crypto";
-
-// src/domain/goal.ts
-var MODEL_TRANSITIONS = {
-  active: ["complete", "blocked"],
-  paused: [],
-  blocked: [],
-  budget_limited: ["complete", "blocked"],
-  usage_limited: [],
-  complete: []
-};
-var USER_TRANSITIONS = {
-  active: ["paused"],
-  paused: ["active"],
-  blocked: ["active"],
-  budget_limited: ["active"],
-  usage_limited: ["active"],
-  complete: ["active"]
-};
-var SYSTEM_TRANSITIONS = {
-  active: ["budget_limited", "usage_limited"],
-  paused: [],
-  blocked: [],
-  budget_limited: [],
-  usage_limited: [],
-  complete: []
-};
-function canTransition(current, target, caller) {
-  const table = caller === "model" ? MODEL_TRANSITIONS : caller === "user" ? USER_TRANSITIONS : SYSTEM_TRANSITIONS;
-  return table[current]?.includes(target) ?? false;
-}
-function isTerminal(status) {
-  return status === "complete";
-}
-function createGoal(input) {
-  const now = new Date().toISOString();
-  return { ...input, tokensUsed: 0, timeUsedSeconds: 0, createdAt: now, updatedAt: now };
-}
-
-// src/domain/runtime.ts
-function createRuntimeState(goalID) {
-  const now = new Date().toISOString();
-  return {
-    goalID,
-    phase: "idle",
-    consecutiveFailures: 0,
-    runCount: 0,
-    turnCount: 0,
-    noProgressCount: 0,
-    progressDuringTurn: false,
-    createdAt: now,
-    updatedAt: now
-  };
-}
-function acquireLease(rt, timeoutMs) {
-  const now = Date.now();
-  const expires = new Date(now + timeoutMs).toISOString();
-  return {
-    ...rt,
-    phase: "running",
-    leaseExpiresAt: expires,
-    turnStartedAt: new Date(now).toISOString(),
-    progressDuringTurn: false,
-    turnTokensUsed: 0,
-    updatedAt: new Date(now).toISOString()
-  };
-}
-function releaseLease(rt) {
-  return {
-    ...rt,
-    phase: "idle",
-    leaseExpiresAt: undefined,
-    turnStartedAt: undefined,
-    updatedAt: new Date().toISOString()
-  };
-}
-function leaseIsValid(rt) {
-  if (!rt.leaseExpiresAt)
-    return false;
-  return Date.now() < Date.parse(rt.leaseExpiresAt);
-}
-function markProgress(rt) {
-  return { ...rt, progressDuringTurn: true, lastProgressAt: new Date().toISOString() };
-}
-
-// src/server/worker-session.ts
-var CONTINUATION_PROMPT = `You are a worker for an active goal.
-
-Call get_goal to retrieve the authoritative objective, current state, acceptance criteria, and recent failures. Perform one meaningful batch of work. After durable verification:
-
-- Call report_goal_progress if work remains.
-- Call update_goal with status "complete" only if all acceptance criteria pass with concrete evidence.
-- Call update_goal with status "blocked" only for a real external blocker requiring user intervention.
-
-Do not ask questions. Make reasonable assumptions. Work directly.`;
-function createWorkerManager(host) {
-  return {
-    async createWorker(goal) {
-      const workerSessionID = await host.createWorker({
-        parentID: goal.ownerSessionID,
-        title: `loopd: ${goal.name}`
-      });
-      return {
-        goalID: goal.id,
-        workerSessionID,
-        startedAt: new Date().toISOString()
-      };
-    },
-    async continueWorker(worker, goal, runtime) {
-      const prompt = buildContinuationPrompt(goal, runtime);
-      await host.promptWorker({
-        sessionID: worker.workerSessionID,
-        prompt
-      });
-    },
-    async isIdle(workerSessionID) {
-      const status = await host.sessionStatus(workerSessionID);
-      return status === "idle";
-    },
-    async abortWorker(workerSessionID) {
-      await host.abortSession(workerSessionID);
-    },
-    async compactWorker(workerSessionID) {
-      await host.compactSession(workerSessionID);
-    }
-  };
-}
-function buildContinuationPrompt(goal, runtime) {
-  const parts = [CONTINUATION_PROMPT];
-  if (runtime.turnCount > 1) {
-    parts.push(`
-This is turn ${runtime.turnCount}.`);
-  }
-  if (runtime.consecutiveFailures > 0) {
-    parts.push(`
-Warning: ${runtime.consecutiveFailures} consecutive failure(s). Last error: ${runtime.lastError || "unknown"}.`);
-  }
-  return parts.join(`
+// src/infrastructure/server-log.ts
+import { appendFile } from "fs/promises";
+var SERVER_LOG_FILE = "/tmp/loopd-server.log";
+async function logServerEvent(directory, event, details = {}) {
+  try {
+    await appendFile(SERVER_LOG_FILE, `${JSON.stringify({
+      timestamp: new Date().toISOString(),
+      directory,
+      event,
+      ...details
+    }, errorReplacer)}
 `);
+  } catch {}
 }
-
-// src/application/goal-service.ts
-function createGoalService(host) {
-  const workers = createWorkerManager(host);
-  const sessions = new Map;
-  async function start(directory, input) {
-    const state = await readState(directory);
-    const id = randomUUID();
-    const goal = createGoal({
-      id,
-      name: input.name,
-      objective: input.objective,
-      status: "active",
-      ownerSessionID: input.ownerSessionID,
-      config: input.config || {}
-    });
-    state.goals.push(goal);
-    state.runtimes.push(createRuntimeState(id));
-    const runtime = state.runtimes.find((r) => r.goalID === id);
-    if (runtime) {
-      runtime.phase = "queued";
-      await writeState(directory, state);
-    }
-    const worker = await workers.createWorker(goal);
-    sessions.set(id, worker);
-    goal.workerSessionID = worker.workerSessionID;
-    await writeState(directory, state);
-    await appendEvent(directory, {
-      version: 1,
-      eventID: randomUUID(),
-      goalID: id,
-      type: "goal.created",
-      name: input.name,
-      objective: input.objective,
-      ownerSessionID: input.ownerSessionID,
-      timestamp: new Date().toISOString(),
-      revision: state.revision
-    });
-    if (runtime) {
-      runtime.turnCount = 1;
-      runtime.runCount = 1;
-      runtime.lastRunAt = new Date().toISOString();
-      runtime.phase = "running";
-      await writeState(directory, state);
-      await workers.continueWorker(worker, goal, runtime);
-    }
-    return { goal, worker };
+function describeError(value) {
+  if (value instanceof Error)
+    return value.message;
+  if (typeof value === "string")
+    return value;
+  try {
+    return JSON.stringify(value, errorReplacer);
+  } catch {
+    return String(value);
   }
-  async function continueTurn(directory, goalID) {
-    const state = await readState(directory);
-    const goal = state.goals.find((g) => g.id === goalID);
-    if (!goal || isTerminal(goal.status))
-      return;
-    const runtime = state.runtimes.find((r) => r.goalID === goalID);
-    if (!runtime)
-      return;
-    if (runtime.phase === "running" && leaseIsValid(runtime))
-      return;
-    let session = sessions.get(goalID);
-    if (!session && goal.workerSessionID) {
-      session = {
-        goalID: goal.id,
-        workerSessionID: goal.workerSessionID,
-        startedAt: goal.createdAt
-      };
-      sessions.set(goalID, session);
-    }
-    if (!session)
-      return;
-    if (!await workers.isIdle(session.workerSessionID))
-      return;
-    const timeoutMs = goal.config.timeoutMs || 300000;
-    const leased = acquireLease(runtime, timeoutMs);
-    Object.assign(runtime, leased);
-    runtime.turnCount += 1;
-    runtime.lastRunAt = new Date().toISOString();
-    await writeState(directory, state);
-    await workers.continueWorker(session, goal, runtime);
+}
+function errorReplacer(_key, value) {
+  if (value instanceof Error) {
+    return { name: value.name, message: value.message, stack: value.stack };
   }
-  async function pause(directory, goalID) {
-    const state = await readState(directory);
-    const goal = state.goals.find((g) => g.id === goalID);
-    if (!goal)
-      return;
-    if (!canTransition(goal.status, "paused", "user"))
-      return;
-    goal.status = "paused";
-    goal.updatedAt = new Date().toISOString();
-    const session = sessions.get(goalID) || (goal.workerSessionID ? {
-      goalID: goal.id,
-      workerSessionID: goal.workerSessionID,
-      startedAt: goal.createdAt
-    } : undefined);
-    if (session) {
-      await workers.abortWorker(session.workerSessionID);
-      sessions.delete(goalID);
-    }
-    const runtime = state.runtimes.find((r) => r.goalID === goalID);
-    if (runtime) {
-      Object.assign(runtime, releaseLease(runtime));
-    }
-    await writeState(directory, state);
-    await appendEvent(directory, {
-      version: 1,
-      eventID: randomUUID(),
-      goalID,
-      type: "goal.status_changed",
-      from: "active",
-      to: "paused",
-      timestamp: new Date().toISOString(),
-      revision: state.revision
-    });
-  }
-  async function resume(directory, goalID) {
-    const state = await readState(directory);
-    const goal = state.goals.find((g) => g.id === goalID);
-    if (!goal)
-      return;
-    if (!canTransition(goal.status, "active", "user"))
-      return;
-    goal.status = "active";
-    goal.updatedAt = new Date().toISOString();
-    let session = sessions.get(goalID);
-    if (!session) {
-      session = await workers.createWorker(goal);
-      sessions.set(goalID, session);
-      goal.workerSessionID = session.workerSessionID;
-    }
-    await writeState(directory, state);
-    await appendEvent(directory, {
-      version: 1,
-      eventID: randomUUID(),
-      goalID,
-      type: "goal.status_changed",
-      from: "paused",
-      to: "active",
-      timestamp: new Date().toISOString(),
-      revision: state.revision
-    });
-    await continueTurn(directory, goalID);
-  }
-  async function retry(directory, goalID) {
-    const state = await readState(directory);
-    const goal = state.goals.find((g) => g.id === goalID);
-    if (!goal || goal.status !== "blocked")
-      return;
-    goal.status = "active";
-    goal.updatedAt = new Date().toISOString();
-    const runtime = state.runtimes.find((r) => r.goalID === goalID);
-    if (runtime) {
-      runtime.consecutiveFailures = 0;
-      runtime.lastError = undefined;
-      runtime.phase = "idle";
-      runtime.updatedAt = new Date().toISOString();
-    }
-    await writeState(directory, state);
-    await appendEvent(directory, {
-      version: 1,
-      eventID: randomUUID(),
-      goalID,
-      type: "goal.status_changed",
-      from: "blocked",
-      to: "active",
-      timestamp: new Date().toISOString(),
-      revision: state.revision
-    });
-    await continueTurn(directory, goalID);
-  }
-  async function clear(directory, goalID) {
-    const state = await readState(directory);
-    const goal = state.goals.find((g) => g.id === goalID);
-    if (!goal)
-      return;
-    const session = sessions.get(goalID) || (goal.workerSessionID ? {
-      goalID: goal.id,
-      workerSessionID: goal.workerSessionID,
-      startedAt: goal.createdAt
-    } : undefined);
-    if (session) {
-      await workers.abortWorker(session.workerSessionID);
-      sessions.delete(goalID);
-    }
-    await appendEvent(directory, {
-      version: 1,
-      eventID: randomUUID(),
-      goalID,
-      type: "goal.cleared",
-      timestamp: new Date().toISOString(),
-      revision: state.revision
-    });
-    state.goals = state.goals.filter((g) => g.id !== goalID);
-    state.runtimes = state.runtimes.filter((r) => r.goalID !== goalID);
-    await writeState(directory, state);
-  }
-  function getWorker(goalID) {
-    return sessions.get(goalID);
-  }
-  function getActiveWorkers() {
-    return new Map(sessions);
-  }
-  async function reconcile(directory) {
-    const state = await readState(directory);
-    for (const goal of state.goals) {
-      if (isTerminal(goal.status))
-        continue;
-      if (goal.status === "paused")
-        continue;
-      if (!goal.workerSessionID) {
-        try {
-          const worker = await workers.createWorker(goal);
-          sessions.set(goal.id, worker);
-          goal.workerSessionID = worker.workerSessionID;
-          goal.updatedAt = new Date().toISOString();
-        } catch {
-          continue;
-        }
-      }
-      if (goal.workerSessionID && !sessions.has(goal.id)) {
-        sessions.set(goal.id, {
-          goalID: goal.id,
-          workerSessionID: goal.workerSessionID,
-          startedAt: goal.createdAt
-        });
-      }
-      const runtime = state.runtimes.find((r) => r.goalID === goal.id);
-      if (runtime?.phase === "running" && !leaseIsValid(runtime)) {
-        const session = sessions.get(goal.id);
-        if (session && await workers.isIdle(session.workerSessionID)) {
-          Object.assign(runtime, releaseLease(runtime));
-          goal.updatedAt = new Date().toISOString();
-        }
-      }
-    }
-    await writeState(directory, state);
-  }
-  return { start, continueTurn, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile };
+  return value;
 }
 
 // src/application/control-worker.ts
@@ -541,7 +194,7 @@ var RESPONSE_CLEANUP_AGE_MS = 60 * 60 * 1000;
 function createControlWorker(options) {
   const directory = options.directory;
   const pollMs = options.pollIntervalMs ?? 1000;
-  const goalSvc = createGoalService(options.host);
+  const goalSvc = options.goalService;
   let running = false;
   let pollTimer;
   let processing = new Set;
@@ -584,10 +237,17 @@ function createControlWorker(options) {
         await writeControlResponse(directory, response);
         options.onResponse?.(response);
       } catch (error) {
+        const detail = describeError(error);
+        await logServerEvent(directory, "control.request.failed", {
+          requestID: request.requestID,
+          command: request.command,
+          goalID: request.goalID,
+          detail
+        });
         const response = {
           requestID: request.requestID,
           ok: false,
-          message: `internal error: ${error instanceof Error ? error.message : String(error)}`,
+          message: `internal error: ${detail}. Diagnostics: ${SERVER_LOG_FILE}`,
           errorCode: "internal_error",
           completedAt: new Date().toISOString()
         };
@@ -626,10 +286,19 @@ function createControlWorker(options) {
     switch (request.command) {
       case "start": {
         const args = request.args;
+        if (!args.ownerSessionID || args.ownerSessionID === "main") {
+          response = {
+            ...base,
+            ok: false,
+            message: "cannot start goal without a valid owner session; open /loop from an active OpenCode session",
+            errorCode: "invalid_owner_session"
+          };
+          break;
+        }
         const { goal } = await goalSvc.start(directory, {
           name: args.name,
           objective: args.objective,
-          ownerSessionID: args.ownerSessionID || "main",
+          ownerSessionID: args.ownerSessionID,
           config: args.config
         });
         const state2 = await readState(directory);
@@ -718,7 +387,92 @@ function createControlWorker(options) {
 }
 
 // src/application/loop-engine.ts
-import { randomUUID as randomUUID2 } from "crypto";
+import { randomUUID } from "crypto";
+
+// src/domain/goal.ts
+var MODEL_TRANSITIONS = {
+  active: ["complete", "blocked"],
+  paused: [],
+  blocked: [],
+  budget_limited: ["complete", "blocked"],
+  usage_limited: [],
+  complete: []
+};
+var USER_TRANSITIONS = {
+  active: ["paused"],
+  paused: ["active"],
+  blocked: ["active"],
+  budget_limited: ["active"],
+  usage_limited: ["active"],
+  complete: ["active"]
+};
+var SYSTEM_TRANSITIONS = {
+  active: ["budget_limited", "usage_limited"],
+  paused: [],
+  blocked: [],
+  budget_limited: [],
+  usage_limited: [],
+  complete: []
+};
+function canTransition(current, target, caller) {
+  const table = caller === "model" ? MODEL_TRANSITIONS : caller === "user" ? USER_TRANSITIONS : SYSTEM_TRANSITIONS;
+  return table[current]?.includes(target) ?? false;
+}
+function isTerminal(status) {
+  return status === "complete";
+}
+function createGoal(input) {
+  const now = new Date().toISOString();
+  return { ...input, tokensUsed: 0, timeUsedSeconds: 0, createdAt: now, updatedAt: now };
+}
+
+// src/domain/runtime.ts
+function createRuntimeState(goalID) {
+  const now = new Date().toISOString();
+  return {
+    goalID,
+    phase: "idle",
+    consecutiveFailures: 0,
+    runCount: 0,
+    turnCount: 0,
+    noProgressCount: 0,
+    progressDuringTurn: false,
+    createdAt: now,
+    updatedAt: now
+  };
+}
+function acquireLease(rt, timeoutMs) {
+  const now = Date.now();
+  const expires = new Date(now + timeoutMs).toISOString();
+  return {
+    ...rt,
+    phase: "running",
+    leaseExpiresAt: expires,
+    turnStartedAt: new Date(now).toISOString(),
+    progressDuringTurn: false,
+    turnTokensUsed: 0,
+    updatedAt: new Date(now).toISOString()
+  };
+}
+function releaseLease(rt) {
+  return {
+    ...rt,
+    phase: "idle",
+    leaseExpiresAt: undefined,
+    turnStartedAt: undefined,
+    updatedAt: new Date().toISOString()
+  };
+}
+function leaseIsValid(rt) {
+  if (!rt.leaseExpiresAt)
+    return false;
+  return Date.now() < Date.parse(rt.leaseExpiresAt);
+}
+function markProgress(rt) {
+  return { ...rt, progressDuringTurn: true, lastProgressAt: new Date().toISOString() };
+}
+
+// src/application/loop-engine.ts
 var HANDLED_EVENT_TYPES = new Set([
   "session.idle",
   "session.status",
@@ -745,8 +499,14 @@ function createLoopEngine(options) {
       knownWorkerSessionsLoaded = true;
     } catch {}
   }
+  function syncWorkerSessionsFromService() {
+    for (const worker of goalService.getActiveWorkers().values()) {
+      knownWorkerSessions.add(worker.workerSessionID);
+    }
+  }
   async function preloadWorkerSessions() {
     await loadWorkerSessionsIfneeded();
+    syncWorkerSessionsFromService();
   }
   function start() {
     if (running)
@@ -778,6 +538,9 @@ function createLoopEngine(options) {
     if (!sessionID)
       return false;
     await loadWorkerSessionsIfneeded();
+    syncWorkerSessionsFromService();
+    if (knownWorkerSessionsLoaded && knownWorkerSessions.size === 0)
+      return false;
     if (knownWorkerSessions.size > 0 && !knownWorkerSessions.has(sessionID))
       return false;
     const state = await readState(directory);
@@ -820,7 +583,7 @@ function createLoopEngine(options) {
       if (limitResult.event === "goal.blocked") {
         await appendEvent(directory, {
           version: 1,
-          eventID: randomUUID2(),
+          eventID: randomUUID(),
           goalID: goal.id,
           type: "goal.blocked",
           reason: limitResult.reason,
@@ -831,7 +594,7 @@ function createLoopEngine(options) {
       } else {
         await appendEvent(directory, {
           version: 1,
-          eventID: randomUUID2(),
+          eventID: randomUUID(),
           goalID: goal.id,
           type: "goal.status_changed",
           from: "active",
@@ -881,7 +644,7 @@ function createLoopEngine(options) {
     }
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID(),
       goalID: goal.id,
       type: "run.failed",
       runID: runtime.activeRunID || "unknown",
@@ -901,7 +664,7 @@ function createLoopEngine(options) {
       };
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID2(),
+        eventID: randomUUID(),
         goalID: goal.id,
         type: "goal.blocked",
         reason: `Failed ${runtime.consecutiveFailures} times`,
@@ -926,7 +689,7 @@ function createLoopEngine(options) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID(),
       goalID: goal.id,
       type: "compaction.completed",
       timestamp: new Date().toISOString(),
@@ -993,7 +756,7 @@ function createLoopEngine(options) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID(),
       goalID: goal.id,
       type: "compaction.started",
       timestamp: new Date().toISOString(),
@@ -1044,17 +807,368 @@ function createLoopEngine(options) {
   return { start, stop, isRunning, handleEvent, preloadWorkerSessions };
 }
 
+// src/application/goal-service.ts
+import { randomUUID as randomUUID2 } from "crypto";
+
+// src/server/worker-session.ts
+var CONTINUATION_PROMPT = `You are a worker for an active goal.
+
+Call get_goal to retrieve the authoritative objective, current state, acceptance criteria, and recent failures. Perform one meaningful batch of work. After durable verification:
+
+- Call report_goal_progress if work remains.
+- Call complete_goal only if all acceptance criteria pass with concrete evidence.
+- Call block_goal only for a real external blocker requiring user intervention.
+
+Do not ask questions. Make reasonable assumptions. Work directly.`;
+function createWorkerManager(host) {
+  return {
+    async createWorker(goal) {
+      const workerSessionID = await host.createWorker({
+        parentID: goal.ownerSessionID,
+        title: `loopd: ${goal.name}`
+      });
+      return {
+        goalID: goal.id,
+        workerSessionID,
+        startedAt: new Date().toISOString()
+      };
+    },
+    async continueWorker(worker, goal, runtime) {
+      const prompt = buildContinuationPrompt(goal, runtime);
+      await host.promptWorker({
+        sessionID: worker.workerSessionID,
+        prompt
+      });
+    },
+    async isIdle(workerSessionID) {
+      const status = await host.sessionStatus(workerSessionID);
+      return status === "idle";
+    },
+    async abortWorker(workerSessionID) {
+      await host.abortSession(workerSessionID);
+    },
+    async compactWorker(workerSessionID) {
+      await host.compactSession(workerSessionID);
+    }
+  };
+}
+function buildContinuationPrompt(goal, runtime) {
+  const parts = [CONTINUATION_PROMPT];
+  if (runtime.turnCount > 1) {
+    parts.push(`
+This is turn ${runtime.turnCount}.`);
+  }
+  if (runtime.consecutiveFailures > 0) {
+    parts.push(`
+Warning: ${runtime.consecutiveFailures} consecutive failure(s). Last error: ${runtime.lastError || "unknown"}.`);
+  }
+  return parts.join(`
+`);
+}
+
+// src/application/goal-service.ts
+function createGoalService(host) {
+  const workers = createWorkerManager(host);
+  const sessions = new Map;
+  async function start(directory, input) {
+    const state = await readState(directory);
+    const id = randomUUID2();
+    const goal = createGoal({
+      id,
+      name: input.name,
+      objective: input.objective,
+      status: "active",
+      ownerSessionID: input.ownerSessionID,
+      config: input.config || {}
+    });
+    state.goals.push(goal);
+    state.runtimes.push(createRuntimeState(id));
+    const runtime = state.runtimes.find((r) => r.goalID === id);
+    if (runtime) {
+      runtime.phase = "queued";
+      await writeState(directory, state);
+    }
+    let worker;
+    try {
+      worker = await workers.createWorker(goal);
+    } catch (error) {
+      const detail = describeError(error);
+      goal.status = "blocked";
+      goal.updatedAt = new Date().toISOString();
+      goal.blocker = {
+        reason: detail,
+        needed: "Start the goal again from a valid OpenCode session after correcting the worker creation error.",
+        at: new Date().toISOString()
+      };
+      if (runtime) {
+        runtime.phase = "idle";
+        runtime.lastError = detail;
+        runtime.updatedAt = new Date().toISOString();
+      }
+      await writeState(directory, state);
+      await appendEvent(directory, {
+        version: 1,
+        eventID: randomUUID2(),
+        goalID: id,
+        type: "goal.blocked",
+        reason: detail,
+        needed: goal.blocker.needed,
+        timestamp: new Date().toISOString(),
+        revision: state.revision
+      });
+      await logServerEvent(directory, "goal.start.failed", { goalID: id, ownerSessionID: input.ownerSessionID, detail });
+      throw error;
+    }
+    sessions.set(id, worker);
+    goal.workerSessionID = worker.workerSessionID;
+    await writeState(directory, state);
+    await appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID2(),
+      goalID: id,
+      type: "goal.created",
+      name: input.name,
+      objective: input.objective,
+      ownerSessionID: input.ownerSessionID,
+      timestamp: new Date().toISOString(),
+      revision: state.revision
+    });
+    if (runtime) {
+      runtime.turnCount = 1;
+      runtime.runCount = 1;
+      runtime.lastRunAt = new Date().toISOString();
+      runtime.phase = "running";
+      await writeState(directory, state);
+      await workers.continueWorker(worker, goal, runtime);
+    }
+    return { goal, worker };
+  }
+  async function continueTurn(directory, goalID) {
+    const state = await readState(directory);
+    const goal = state.goals.find((g) => g.id === goalID);
+    if (!goal || isTerminal(goal.status))
+      return;
+    const runtime = state.runtimes.find((r) => r.goalID === goalID);
+    if (!runtime)
+      return;
+    if (runtime.phase === "running" && leaseIsValid(runtime))
+      return;
+    let session = sessions.get(goalID);
+    if (!session && goal.workerSessionID) {
+      session = {
+        goalID: goal.id,
+        workerSessionID: goal.workerSessionID,
+        startedAt: goal.createdAt
+      };
+      sessions.set(goalID, session);
+    }
+    if (!session)
+      return;
+    if (!await workers.isIdle(session.workerSessionID))
+      return;
+    const timeoutMs = goal.config.timeoutMs || 300000;
+    const leased = acquireLease(runtime, timeoutMs);
+    Object.assign(runtime, leased);
+    runtime.turnCount += 1;
+    runtime.lastRunAt = new Date().toISOString();
+    await writeState(directory, state);
+    await workers.continueWorker(session, goal, runtime);
+  }
+  async function pause(directory, goalID) {
+    const state = await readState(directory);
+    const goal = state.goals.find((g) => g.id === goalID);
+    if (!goal)
+      return;
+    if (!canTransition(goal.status, "paused", "user"))
+      return;
+    goal.status = "paused";
+    goal.updatedAt = new Date().toISOString();
+    const session = sessions.get(goalID) || (goal.workerSessionID ? {
+      goalID: goal.id,
+      workerSessionID: goal.workerSessionID,
+      startedAt: goal.createdAt
+    } : undefined);
+    if (session) {
+      await workers.abortWorker(session.workerSessionID);
+      sessions.delete(goalID);
+    }
+    const runtime = state.runtimes.find((r) => r.goalID === goalID);
+    if (runtime) {
+      Object.assign(runtime, releaseLease(runtime));
+    }
+    await writeState(directory, state);
+    await appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID2(),
+      goalID,
+      type: "goal.status_changed",
+      from: "active",
+      to: "paused",
+      timestamp: new Date().toISOString(),
+      revision: state.revision
+    });
+  }
+  async function resume(directory, goalID) {
+    const state = await readState(directory);
+    const goal = state.goals.find((g) => g.id === goalID);
+    if (!goal)
+      return;
+    if (!canTransition(goal.status, "active", "user"))
+      return;
+    goal.status = "active";
+    goal.updatedAt = new Date().toISOString();
+    let session = sessions.get(goalID);
+    if (!session) {
+      session = await workers.createWorker(goal);
+      sessions.set(goalID, session);
+      goal.workerSessionID = session.workerSessionID;
+    }
+    await writeState(directory, state);
+    await appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID2(),
+      goalID,
+      type: "goal.status_changed",
+      from: "paused",
+      to: "active",
+      timestamp: new Date().toISOString(),
+      revision: state.revision
+    });
+    await continueTurn(directory, goalID);
+  }
+  async function retry(directory, goalID) {
+    const state = await readState(directory);
+    const goal = state.goals.find((g) => g.id === goalID);
+    if (!goal || goal.status !== "blocked")
+      return;
+    goal.status = "active";
+    goal.updatedAt = new Date().toISOString();
+    const runtime = state.runtimes.find((r) => r.goalID === goalID);
+    if (runtime) {
+      runtime.consecutiveFailures = 0;
+      runtime.lastError = undefined;
+      runtime.phase = "idle";
+      runtime.updatedAt = new Date().toISOString();
+    }
+    await writeState(directory, state);
+    await appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID2(),
+      goalID,
+      type: "goal.status_changed",
+      from: "blocked",
+      to: "active",
+      timestamp: new Date().toISOString(),
+      revision: state.revision
+    });
+    await continueTurn(directory, goalID);
+  }
+  async function clear(directory, goalID) {
+    const state = await readState(directory);
+    const goal = state.goals.find((g) => g.id === goalID);
+    if (!goal)
+      return;
+    const session = sessions.get(goalID) || (goal.workerSessionID ? {
+      goalID: goal.id,
+      workerSessionID: goal.workerSessionID,
+      startedAt: goal.createdAt
+    } : undefined);
+    if (session) {
+      await workers.abortWorker(session.workerSessionID);
+      sessions.delete(goalID);
+    }
+    await appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID2(),
+      goalID,
+      type: "goal.cleared",
+      timestamp: new Date().toISOString(),
+      revision: state.revision
+    });
+    state.goals = state.goals.filter((g) => g.id !== goalID);
+    state.runtimes = state.runtimes.filter((r) => r.goalID !== goalID);
+    await writeState(directory, state);
+  }
+  function getWorker(goalID) {
+    return sessions.get(goalID);
+  }
+  function getActiveWorkers() {
+    return new Map(sessions);
+  }
+  async function reconcile(directory) {
+    const state = await readState(directory);
+    for (const goal of state.goals) {
+      if (isTerminal(goal.status))
+        continue;
+      if (goal.status === "paused")
+        continue;
+      if (!goal.workerSessionID) {
+        try {
+          const worker = await workers.createWorker(goal);
+          sessions.set(goal.id, worker);
+          goal.workerSessionID = worker.workerSessionID;
+          goal.updatedAt = new Date().toISOString();
+        } catch (error) {
+          const detail = describeError(error);
+          goal.status = "blocked";
+          goal.updatedAt = new Date().toISOString();
+          goal.blocker = {
+            reason: detail,
+            needed: "Clear this goal and start it again from a valid OpenCode session.",
+            at: new Date().toISOString()
+          };
+          const runtime2 = state.runtimes.find((item) => item.goalID === goal.id);
+          if (runtime2) {
+            runtime2.phase = "idle";
+            runtime2.lastError = detail;
+            runtime2.updatedAt = new Date().toISOString();
+          }
+          await logServerEvent(directory, "goal.reconcile.failed", { goalID: goal.id, ownerSessionID: goal.ownerSessionID, detail });
+          continue;
+        }
+      }
+      if (goal.workerSessionID && !sessions.has(goal.id)) {
+        sessions.set(goal.id, {
+          goalID: goal.id,
+          workerSessionID: goal.workerSessionID,
+          startedAt: goal.createdAt
+        });
+      }
+      const runtime = state.runtimes.find((r) => r.goalID === goal.id);
+      if (runtime?.phase === "running" && !leaseIsValid(runtime)) {
+        const session = sessions.get(goal.id);
+        if (session && await workers.isIdle(session.workerSessionID)) {
+          Object.assign(runtime, releaseLease(runtime));
+          goal.updatedAt = new Date().toISOString();
+        }
+      }
+    }
+    await writeState(directory, state);
+  }
+  return { start, continueTurn, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile };
+}
+
 // src/server/host-adapter.ts
-function createRealHost(client) {
+function createRealHost(client, directory) {
   return {
     async createWorker({ parentID, title }) {
-      const result = await client.session.create({
-        body: { parentID, title }
-      });
-      const data = result?.data;
-      if (!data?.id)
-        throw new Error("failed to create worker session");
-      return data.id;
+      try {
+        const result = await withTimeout(client.session.create({ body: { parentID, title } }), 1e4, "OpenCode session.create");
+        const data = result?.data;
+        if (result?.error || !data?.id) {
+          const detail = describeError(result?.error || "response contained no session ID");
+          await logServerEvent(directory, "worker.create.failed", { parentID, title, detail });
+          throw new Error(`OpenCode session.create failed for parent "${parentID}": ${detail}`);
+        }
+        await logServerEvent(directory, "worker.created", { parentID, workerSessionID: data.id, title });
+        return data.id;
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("OpenCode session.create failed"))
+          throw error;
+        const detail = describeError(error);
+        await logServerEvent(directory, "worker.create.failed", { parentID, title, detail });
+        throw new Error(`OpenCode session.create failed for parent "${parentID}": ${detail}`);
+      }
     },
     async promptWorker({ sessionID, prompt, model, agent }) {
       const body = {
@@ -1064,10 +1178,16 @@ function createRealHost(client) {
         body.model = model;
       if (agent)
         body.agent = agent;
-      await client.session.promptAsync({
+      const result = await withTimeout(client.session.promptAsync({
         path: { id: sessionID },
         body
-      });
+      }), 1e4, "OpenCode session.promptAsync");
+      if (result?.error) {
+        const detail = describeError(result.error);
+        await logServerEvent(directory, "worker.prompt.failed", { sessionID, detail });
+        throw new Error(`OpenCode session.promptAsync failed for worker "${sessionID}": ${detail}`);
+      }
+      await logServerEvent(directory, "worker.prompted", { sessionID });
     },
     async sessionStatus(sessionID) {
       try {
@@ -1118,6 +1238,20 @@ function createRealHost(client) {
     }
   };
 }
+async function withTimeout(promise, timeoutMs, operation) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${operation} timed out after ${timeoutMs}ms`)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer)
+      clearTimeout(timer);
+  }
+}
 
 // src/server/goal-tools.ts
 import { randomUUID as randomUUID3 } from "crypto";
@@ -1125,8 +1259,77 @@ import { tool } from "@opencode-ai/plugin/tool";
 import { exec as execChild } from "child_process";
 import { promisify } from "util";
 var execAsync = promisify(execChild);
-function goalTools(dir, hostSessionID) {
+function goalTools(dir, goalService, hostSessionID) {
   return {
+    loopd_create_goal: tool({
+      description: "Create a new background loop goal. The engine spawns a dedicated worker session " + "that does the work autonomously \u2014 it never runs in this chat. " + "Call this after clarifying the goal name, objective, and any config with the user. " + "The goal immediately starts in the background; the user can monitor it via /loop.",
+      args: {
+        name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
+        objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
+        checks: tool.schema.array(tool.schema.string()).optional().describe('Shell commands that must pass for completion to be accepted. E.g. ["npm test"].'),
+        progressFile: tool.schema.string().optional().describe("Markdown file the worker reads/writes as its transaction state."),
+        maxTurns: tool.schema.number().optional().describe("Max turns before auto-block."),
+        maxNoProgress: tool.schema.number().optional().describe("Block after N turns without progress."),
+        maxFailures: tool.schema.number().optional().describe("Block after N consecutive failures."),
+        compactEvery: tool.schema.number().optional().describe("Compact the worker session every N turns."),
+        timeoutMs: tool.schema.number().optional().describe("Per-turn timeout in ms.")
+      },
+      execute: async (args, context) => {
+        const sessionID = context?.sessionID || hostSessionID;
+        if (!sessionID || sessionID === "main") {
+          return {
+            title: "Goal not created",
+            output: JSON.stringify({
+              ok: false,
+              message: "A valid owner session is required. Run /goal from an active OpenCode session."
+            })
+          };
+        }
+        const config = {};
+        if (args.checks)
+          config.checks = args.checks;
+        if (args.progressFile)
+          config.progressFile = args.progressFile;
+        if (args.maxTurns !== undefined)
+          config.maxTurns = args.maxTurns;
+        if (args.maxNoProgress !== undefined)
+          config.maxNoProgress = args.maxNoProgress;
+        if (args.maxFailures !== undefined)
+          config.maxFailures = args.maxFailures;
+        if (args.compactEvery !== undefined)
+          config.compactEvery = args.compactEvery;
+        if (args.timeoutMs !== undefined)
+          config.timeoutMs = args.timeoutMs;
+        try {
+          const { goal, worker } = await goalService.start(dir, {
+            name: args.name,
+            objective: args.objective,
+            ownerSessionID: sessionID,
+            config
+          });
+          return {
+            title: "Goal created",
+            output: JSON.stringify({
+              ok: true,
+              goalID: goal.id,
+              workerSessionID: worker.workerSessionID,
+              name: args.name,
+              message: `Goal "${args.name}" created and started in the background. Monitor with /loop (Ctrl+Shift+L).`
+            })
+          };
+        } catch (error) {
+          return {
+            title: "Goal creation failed",
+            output: JSON.stringify({
+              ok: false,
+              name: args.name,
+              message: error instanceof Error ? error.message : String(error),
+              diagnostics: SERVER_LOG_FILE
+            })
+          };
+        }
+      }
+    }),
     get_goal: tool({
       description: "Get the current goal state. Call at the start of every continuation turn " + "to retrieve the objective, current state, acceptance criteria, and recent failures.",
       args: {},
@@ -1385,11 +1588,11 @@ async function runCompletionChecks(checks) {
 // src/server/plugin.ts
 var PLUGIN_ID = "opencode-loopd.server";
 var server = async ({ client, directory }) => {
-  const host = createRealHost(client);
+  const host = createRealHost(client, directory);
   const goalService = createGoalService(host);
   const worker = createControlWorker({
     directory,
-    host,
+    goalService,
     pollIntervalMs: 1000
   });
   const engine = createLoopEngine({
@@ -1399,6 +1602,7 @@ var server = async ({ client, directory }) => {
     pollIntervalMs: 30000
   });
   let started = false;
+  let reconciliationStarted = false;
   function ensureStarted() {
     if (started)
       return;
@@ -1406,17 +1610,28 @@ var server = async ({ client, directory }) => {
     engine.start();
     worker.start();
   }
+  function reconcileInBackground() {
+    if (reconciliationStarted)
+      return;
+    reconciliationStarted = true;
+    logServerEvent(directory, "reconcile.started");
+    goalService.reconcile(directory).then(() => logServerEvent(directory, "reconcile.completed"), (error) => logServerEvent(directory, "reconcile.failed", { detail: describeError(error) }));
+  }
   return {
     event: async ({ event }) => {
       const type = event?.type;
-      if (type?.startsWith("session."))
+      if (type?.startsWith("session.")) {
         ensureStarted();
+      }
       await engine.handleEvent(event);
+      if (type?.startsWith("session."))
+        reconcileInBackground();
     },
-    tool: goalTools(directory),
+    tool: goalTools(directory, goalService),
     "tool.execute.after": async (input, output) => {
-      if (input.tool === "get_goal" || input.tool === "report_goal_progress") {
+      if (input.tool === "loopd_create_goal" || input.tool === "get_goal" || input.tool === "report_goal_progress") {
         ensureStarted();
+        reconcileInBackground();
       }
     },
     dispose: async () => {

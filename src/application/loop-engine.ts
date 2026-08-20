@@ -65,9 +65,16 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     } catch {}
   }
 
+  function syncWorkerSessionsFromService() {
+    for (const worker of goalService.getActiveWorkers().values()) {
+      knownWorkerSessions.add(worker.workerSessionID)
+    }
+  }
+
   // Exposed for tests to preload worker sessions
   async function preloadWorkerSessions() {
     await loadWorkerSessionsIfneeded()
+    syncWorkerSessionsFromService()
   }
 
   function start() {
@@ -107,9 +114,12 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
 
     // Load worker sessions on first event (lazy)
     await loadWorkerSessionsIfneeded()
+    syncWorkerSessionsFromService()
+
+    // FAST PATH: if we know there are no worker sessions, skip without disk read
+    if (knownWorkerSessionsLoaded && knownWorkerSessions.size === 0) return false
 
     // FAST PATH: skip events for sessions we don't own
-    // (but only if we've loaded the cache — don't reject if cache is empty)
     if (knownWorkerSessions.size > 0 && !knownWorkerSessions.has(sessionID)) return false
 
     // SLOW PATH: only now read state from disk

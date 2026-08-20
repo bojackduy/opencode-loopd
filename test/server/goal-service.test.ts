@@ -55,6 +55,8 @@ describe("Goal Service", () => {
       const msgs = host.sessions.get(worker.workerSessionID) || []
       expect(msgs.length).toBeGreaterThan(0)
       expect(msgs[0]).toContain("get_goal")
+      expect(msgs[0]).toContain("complete_goal")
+      expect(msgs[0]).toContain("block_goal")
     })
 
     it("records owner session ID", async () => {
@@ -66,6 +68,24 @@ describe("Goal Service", () => {
 
       const state = await readState(dir)
       expect(state.goals[0].ownerSessionID).toBe("owner-1")
+    })
+
+    it("blocks the goal and preserves the error when worker creation fails", async () => {
+      host.createWorker = async () => {
+        throw new Error("parent session not found")
+      }
+
+      await expect(svc.start(dir, {
+        name: "broken",
+        objective: "do something",
+        ownerSessionID: "missing-parent",
+      })).rejects.toThrow("parent session not found")
+
+      const state = await readState(dir)
+      expect(state.goals[0].status).toBe("blocked")
+      expect(state.goals[0].blocker?.reason).toContain("parent session not found")
+      expect(state.runtimes[0].phase).toBe("idle")
+      expect(state.runtimes[0].lastError).toContain("parent session not found")
     })
   })
 

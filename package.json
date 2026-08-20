@@ -10,7 +10,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build:server": "bun build src/server/plugin.ts --outfile dist/server.js --target bun --external @opencode-ai/plugin --external @opencode-ai/plugin/tool",
-    "build:tui": "bun build src/tui/plugin.tsx --outfile dist/tui.js --target bun --external @opencode-ai/plugin/tui --external @opentui/core --external @opentui/solid --external solid-js",
+    "build:tui": "bun scripts/build-tui.ts",
     "build": "bun run build:server && bun run build:tui",
     "clean": "rm -rf dist",
     "prepack": "npm run typecheck && npm test && npm run build",

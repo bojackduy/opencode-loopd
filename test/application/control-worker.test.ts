@@ -6,6 +6,7 @@ import { createControlClient } from "../../src/infrastructure/control-client"
 import { createControlWorker } from "../../src/application/control-worker"
 import { readState } from "../../src/infrastructure/state-repository"
 import { createFakeHost } from "../../src/server/host-adapter"
+import { createGoalService } from "../../src/application/goal-service"
 
 function tmpDir(): string {
   return path.join(os.tmpdir(), `loopd-bus-test-${crypto.randomUUID()}`)
@@ -22,7 +23,7 @@ describe("Control Bus", () => {
     await fs.mkdir(dir, { recursive: true })
     host = createFakeHost()
     client = createControlClient(dir)
-    worker = createControlWorker({ directory: dir, host, pollIntervalMs: 50 })
+    worker = createControlWorker({ directory: dir, goalService: createGoalService(host), pollIntervalMs: 50 })
     worker.start()
   })
 
@@ -37,7 +38,7 @@ describe("Control Bus", () => {
       requestID: crypto.randomUUID(),
       requestedAt: new Date().toISOString(),
       command: "start",
-      args: { name: "bus-test", objective: "test objective", config: {}, ownerSessionID: "main" },
+      args: { name: "bus-test", objective: "test objective", config: {}, ownerSessionID: "owner-1" },
     })
 
     expect(result.ok).toBe(true)
@@ -48,13 +49,27 @@ describe("Control Bus", () => {
     expect(state.goals[0].name).toBe("bus-test")
   })
 
+  it("rejects a start command without a real owner session", async () => {
+    const result = await client.execute({
+      version: 1,
+      requestID: crypto.randomUUID(),
+      requestedAt: new Date().toISOString(),
+      command: "start",
+      args: { name: "invalid", objective: "test", config: {}, ownerSessionID: "main" },
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.errorCode).toBe("invalid_owner_session")
+    expect((await client.getState()).goals).toHaveLength(0)
+  })
+
   it("creates a worker session for start", async () => {
     await client.execute({
       version: 1,
       requestID: crypto.randomUUID(),
       requestedAt: new Date().toISOString(),
       command: "start",
-      args: { name: "w", objective: "o", config: {}, ownerSessionID: "main" },
+      args: { name: "w", objective: "o", config: {}, ownerSessionID: "owner-1" },
     })
 
     const state = await client.getState()
@@ -68,7 +83,7 @@ describe("Control Bus", () => {
       requestID: crypto.randomUUID(),
       requestedAt: new Date().toISOString(),
       command: "start",
-      args: { name: "w", objective: "o", config: {}, ownerSessionID: "main" },
+      args: { name: "w", objective: "o", config: {}, ownerSessionID: "owner-1" },
     })
 
     const state = await client.getState()
@@ -84,7 +99,7 @@ describe("Control Bus", () => {
       requestID: crypto.randomUUID(),
       requestedAt: new Date().toISOString(),
       command: "start",
-      args: { name: "p", objective: "o", config: {}, ownerSessionID: "main" },
+      args: { name: "p", objective: "o", config: {}, ownerSessionID: "owner-1" },
     })
 
     const state = await readState(dir)
@@ -109,7 +124,7 @@ describe("Control Bus", () => {
       requestID: crypto.randomUUID(),
       requestedAt: new Date().toISOString(),
       command: "start",
-      args: { name: "ev", objective: "o", config: {}, ownerSessionID: "main" },
+      args: { name: "ev", objective: "o", config: {}, ownerSessionID: "owner-1" },
     })
 
     const events = await client.getEvents()

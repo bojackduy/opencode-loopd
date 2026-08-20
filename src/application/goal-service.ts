@@ -13,6 +13,7 @@ import type { StoreState } from "../infrastructure/state-repository"
 import type { LoopHost } from "../server/host-adapter"
 import { createWorkerManager, type WorkerManager, type WorkerSession } from "../server/worker-session"
 import type { LoopEvent } from "../domain/events"
+import { describeError, logServerEvent } from "../infrastructure/server-log"
 
 export interface GoalService {
   /** Start a goal: create goal + worker session + first continuation. */
@@ -83,7 +84,37 @@ export function createGoalService(host: LoopHost): GoalService {
     }
 
     // Create worker session
-    const worker = await workers.createWorker(goal)
+    let worker: WorkerSession
+    try {
+      worker = await workers.createWorker(goal)
+    } catch (error) {
+      const detail = describeError(error)
+      goal.status = "blocked"
+      goal.updatedAt = new Date().toISOString()
+      goal.blocker = {
+        reason: detail,
+        needed: "Start the goal again from a valid OpenCode session after correcting the worker creation error.",
+        at: new Date().toISOString(),
+      }
+      if (runtime) {
+        runtime.phase = "idle"
+        runtime.lastError = detail
+        runtime.updatedAt = new Date().toISOString()
+      }
+      await writeState(directory, state)
+      await appendEvent(directory, {
+        version: 1,
+        eventID: randomUUID(),
+        goalID: id,
+        type: "goal.blocked",
+        reason: detail,
+        needed: goal.blocker.needed,
+        timestamp: new Date().toISOString(),
+        revision: state.revision,
+      } satisfies LoopEvent)
+      await logServerEvent(directory, "goal.start.failed", { goalID: id, ownerSessionID: input.ownerSessionID, detail })
+      throw error
+    }
     sessions.set(id, worker)
     goal.workerSessionID = worker.workerSessionID
 
@@ -311,8 +342,22 @@ export function createGoalService(host: LoopHost): GoalService {
           sessions.set(goal.id, worker)
           goal.workerSessionID = worker.workerSessionID
           goal.updatedAt = new Date().toISOString()
-        } catch {
-          // Worker creation failed — leave goal as-is for retry
+        } catch (error) {
+          const detail = describeError(error)
+          goal.status = "blocked"
+          goal.updatedAt = new Date().toISOString()
+          goal.blocker = {
+            reason: detail,
+            needed: "Clear this goal and start it again from a valid OpenCode session.",
+            at: new Date().toISOString(),
+          }
+          const runtime = state.runtimes.find((item) => item.goalID === goal.id)
+          if (runtime) {
+            runtime.phase = "idle"
+            runtime.lastError = detail
+            runtime.updatedAt = new Date().toISOString()
+          }
+          await logServerEvent(directory, "goal.reconcile.failed", { goalID: goal.id, ownerSessionID: goal.ownerSessionID, detail })
           continue
         }
       }
