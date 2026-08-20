@@ -181,6 +181,46 @@ describe("Loop Engine", () => {
       const runtime = state.runtimes.find((r) => r.goalID === goal.id)
       expect(runtime?.lastWorkerStatus).toBe("busy")
     })
+
+    it("continues immediately when session.status reports idle", async () => {
+      const { goal } = await goalService.start(dir, {
+        name: "idle-status",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+      })
+
+      await engine.preloadWorkerSessions()
+      const result = await engine.handleEvent({
+        type: "session.status",
+        properties: {
+          sessionID: goal.workerSessionID,
+          status: { type: "idle" },
+        },
+      })
+
+      expect(result).toBe(true)
+      expect(host.prompts).toHaveLength(2)
+      const runtime = (await readState(dir)).runtimes[0]
+      expect(runtime.turnCount).toBe(2)
+      expect(runtime.runCount).toBe(2)
+    })
+  })
+
+  describe("maintenance", () => {
+    it("polls an idle worker before its lease expires", async () => {
+      engine.stop()
+      engine = createLoopEngine({ directory: dir, host, goalService, pollIntervalMs: 20 })
+      engine.start()
+
+      await goalService.start(dir, {
+        name: "poll-idle",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+      })
+
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      expect(host.prompts.length).toBeGreaterThan(1)
+    })
   })
 
   describe("limits", () => {

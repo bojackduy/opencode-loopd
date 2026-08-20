@@ -528,6 +528,17 @@ function createLoopEngine(options) {
   function isRunning() {
     return running;
   }
+  async function continueGoal(goalID) {
+    if (inflightContinuations.has(goalID))
+      return false;
+    inflightContinuations.add(goalID);
+    try {
+      await goalService.continueTurn(directory, goalID);
+      return true;
+    } finally {
+      inflightContinuations.delete(goalID);
+    }
+  }
   async function handleEvent(event) {
     if (!running || !event || typeof event !== "object")
       return false;
@@ -571,9 +582,22 @@ function createLoopEngine(options) {
     if (inflightContinuations.has(goal.id))
       return false;
     if (runtime.phase === "running") {
+      const completedRunID = runtime.activeRunID;
       Object.assign(runtime, releaseLease(runtime));
+      runtime.activeRunID = undefined;
       runtime.lastWorkerStatus = "idle";
       await writeState(directory, state);
+      if (completedRunID) {
+        await appendEvent(directory, {
+          version: 1,
+          eventID: randomUUID(),
+          goalID: goal.id,
+          type: "run.completed",
+          runID: completedRunID,
+          timestamp: new Date().toISOString(),
+          revision: state.revision
+        });
+      }
     }
     if (goal.status !== "active")
       return false;
@@ -609,12 +633,7 @@ function createLoopEngine(options) {
       await doCompact(goal, runtime);
       return true;
     }
-    inflightContinuations.add(goal.id);
-    try {
-      await goalService.continueTurn(directory, goal.id);
-    } finally {
-      inflightContinuations.delete(goal.id);
-    }
+    await continueGoal(goal.id);
     return true;
   }
   async function handleSessionStatus(state, goal, event) {
@@ -625,6 +644,8 @@ function createLoopEngine(options) {
     const statusType = status?.type;
     if (!statusType)
       return false;
+    if (statusType === "idle")
+      return handleSessionIdle(state, goal);
     runtime.lastWorkerStatus = statusType;
     runtime.updatedAt = new Date().toISOString();
     await writeState(directory, state);
@@ -773,6 +794,7 @@ function createLoopEngine(options) {
     }
   }
   async function maintenance() {
+    syncWorkerSessionsFromService();
     if (knownWorkerSessions.size === 0)
       return;
     const state = await readState(directory);
@@ -793,13 +815,11 @@ function createLoopEngine(options) {
           goalService.continueTurn(directory, goal.id).catch(() => {});
         }
       }
-      if (runtime.phase === "running" && !leaseIsValid(runtime)) {
-        const session = goalService.getWorker(goal.id);
-        if (session && await host.sessionStatus(session.workerSessionID) === "idle") {
-          Object.assign(runtime, releaseLease(runtime));
-          runtime.lastWorkerStatus = "idle";
-          await writeState(directory, state);
-          goalService.continueTurn(directory, goal.id).catch(() => {});
+      if (runtime.phase === "running" && goal.workerSessionID) {
+        const status = await host.sessionStatus(goal.workerSessionID);
+        if (status === "idle") {
+          await handleSessionIdle(state, goal);
+          continue;
         }
       }
     }
@@ -934,11 +954,23 @@ function createGoalService(host) {
       revision: state.revision
     });
     if (runtime) {
+      const runID = randomUUID2();
+      Object.assign(runtime, acquireLease(runtime, goal.config.timeoutMs || 300000));
+      runtime.activeRunID = runID;
       runtime.turnCount = 1;
       runtime.runCount = 1;
       runtime.lastRunAt = new Date().toISOString();
-      runtime.phase = "running";
       await writeState(directory, state);
+      await appendEvent(directory, {
+        version: 1,
+        eventID: randomUUID2(),
+        goalID: id,
+        type: "run.started",
+        runID,
+        turnCount: runtime.turnCount,
+        timestamp: new Date().toISOString(),
+        revision: state.revision
+      });
       await workers.continueWorker(worker, goal, runtime);
     }
     return { goal, worker };
@@ -969,9 +1001,22 @@ function createGoalService(host) {
     const timeoutMs = goal.config.timeoutMs || 300000;
     const leased = acquireLease(runtime, timeoutMs);
     Object.assign(runtime, leased);
+    const runID = randomUUID2();
+    runtime.activeRunID = runID;
     runtime.turnCount += 1;
+    runtime.runCount += 1;
     runtime.lastRunAt = new Date().toISOString();
     await writeState(directory, state);
+    await appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID2(),
+      goalID,
+      type: "run.started",
+      runID,
+      turnCount: runtime.turnCount,
+      timestamp: new Date().toISOString(),
+      revision: state.revision
+    });
     await workers.continueWorker(session, goal, runtime);
   }
   async function pause(directory, goalID) {

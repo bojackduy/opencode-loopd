@@ -6,7 +6,7 @@
 import { randomUUID } from "crypto"
 import type { Goal, GoalID } from "../domain/goal"
 import { createGoal, canTransition, isTerminal } from "../domain/goal"
-import type { GoalRuntimeState } from "../domain/runtime"
+import type { GoalRuntimeState, RunID } from "../domain/runtime"
 import { createRuntimeState, acquireLease, releaseLease, leaseIsValid, markProgress } from "../domain/runtime"
 import { readState, writeState, appendEvent } from "../infrastructure/state-repository"
 import type { StoreState } from "../infrastructure/state-repository"
@@ -135,11 +135,23 @@ export function createGoalService(host: LoopHost): GoalService {
 
     // Send first continuation
     if (runtime) {
+      const runID = randomUUID() as RunID
+      Object.assign(runtime, acquireLease(runtime, goal.config.timeoutMs || 300_000))
+      runtime.activeRunID = runID
       runtime.turnCount = 1
       runtime.runCount = 1
       runtime.lastRunAt = new Date().toISOString()
-      runtime.phase = "running"
       await writeState(directory, state)
+      await appendEvent(directory, {
+        version: 1,
+        eventID: randomUUID(),
+        goalID: id,
+        type: "run.started",
+        runID,
+        turnCount: runtime.turnCount,
+        timestamp: new Date().toISOString(),
+        revision: state.revision,
+      } satisfies LoopEvent)
       await workers.continueWorker(worker, goal, runtime)
     }
 
@@ -176,9 +188,22 @@ export function createGoalService(host: LoopHost): GoalService {
     const timeoutMs = goal.config.timeoutMs || 300_000
     const leased = acquireLease(runtime, timeoutMs)
     Object.assign(runtime, leased)
+    const runID = randomUUID() as RunID
+    runtime.activeRunID = runID
     runtime.turnCount += 1
+    runtime.runCount += 1
     runtime.lastRunAt = new Date().toISOString()
     await writeState(directory, state)
+    await appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID(),
+      goalID,
+      type: "run.started",
+      runID,
+      turnCount: runtime.turnCount,
+      timestamp: new Date().toISOString(),
+      revision: state.revision,
+    } satisfies LoopEvent)
 
     // Send continuation
     await workers.continueWorker(session, goal, runtime)

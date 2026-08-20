@@ -9,9 +9,7 @@ import type { StoreState } from "../infrastructure/state-repository"
 import { isTerminal } from "../domain/goal"
 import type { GoalID } from "../domain/goal"
 import {
-  leaseIsValid,
   releaseLease,
-  acquireLease,
   type GoalRuntimeState,
 } from "../domain/runtime"
 import type { LoopEvent } from "../domain/events"
@@ -99,6 +97,17 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     return running
   }
 
+  async function continueGoal(goalID: GoalID): Promise<boolean> {
+    if (inflightContinuations.has(goalID)) return false
+    inflightContinuations.add(goalID)
+    try {
+      await goalService.continueTurn(directory, goalID)
+      return true
+    } finally {
+      inflightContinuations.delete(goalID)
+    }
+  }
+
   // ─── Event Handling ───────────────────────────────────────────────────────
 
   async function handleEvent(event: any): Promise<boolean> {
@@ -158,9 +167,22 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
 
     // Release current lease
     if (runtime.phase === "running") {
+      const completedRunID = runtime.activeRunID
       Object.assign(runtime, releaseLease(runtime))
+      runtime.activeRunID = undefined
       runtime.lastWorkerStatus = "idle"
       await writeState(directory, state)
+      if (completedRunID) {
+        await appendEvent(directory, {
+          version: 1,
+          eventID: randomUUID(),
+          goalID: goal.id,
+          type: "run.completed",
+          runID: completedRunID,
+          timestamp: new Date().toISOString(),
+          revision: state.revision,
+        } satisfies LoopEvent)
+      }
     }
 
     // Check if goal is still active
@@ -203,12 +225,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     }
 
     // Schedule next turn
-    inflightContinuations.add(goal.id)
-    try {
-      await goalService.continueTurn(directory, goal.id)
-    } finally {
-      inflightContinuations.delete(goal.id)
-    }
+    await continueGoal(goal.id)
 
     return true
   }
@@ -222,6 +239,8 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     const status = event.properties?.status
     const statusType = status?.type as string | undefined
     if (!statusType) return false
+
+    if (statusType === "idle") return handleSessionIdle(state, goal)
 
     runtime.lastWorkerStatus = statusType as any
     runtime.updatedAt = new Date().toISOString()
@@ -420,6 +439,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
   // ─── Maintenance ──────────────────────────────────────────────────────────
 
   async function maintenance() {
+    syncWorkerSessionsFromService()
     // FAST PATH: skip entirely if no known worker sessions
     if (knownWorkerSessions.size === 0) return
 
@@ -447,15 +467,13 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
         }
       }
 
-      // Handle expired leases
-      if (runtime.phase === "running" && !leaseIsValid(runtime)) {
-        const session = goalService.getWorker(goal.id)
-        if (session && await host.sessionStatus(session.workerSessionID) === "idle") {
-          Object.assign(runtime, releaseLease(runtime))
-          runtime.lastWorkerStatus = "idle"
-          await writeState(directory, state)
-          // Trigger continuation
-          goalService.continueTurn(directory, goal.id).catch(() => {})
+      // Some OpenCode transports miss the idle event. Poll active workers so a
+      // completed turn is continued on the maintenance cadence, not lease expiry.
+      if (runtime.phase === "running" && goal.workerSessionID) {
+        const status = await host.sessionStatus(goal.workerSessionID)
+        if (status === "idle") {
+          await handleSessionIdle(state, goal)
+          continue
         }
       }
     }

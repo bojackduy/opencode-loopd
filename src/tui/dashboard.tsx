@@ -66,6 +66,15 @@ function statusIcon(status: GoalStatus): string {
   }
 }
 
+function ageLabel(timestamp: string | undefined, now: number): string {
+  if (!timestamp) return "never"
+  const seconds = Math.max(0, Math.floor((now - Date.parse(timestamp)) / 1000))
+  if (seconds < 60) return `${seconds}s ago`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  return `${Math.floor(minutes / 60)}h ago`
+}
+
 export function LoopDashboard(props: Props) {
   const theme = () => props.api.theme.current
   const [mode, setMode] = createSignal<Mode>("normal")
@@ -77,6 +86,7 @@ export function LoopDashboard(props: Props) {
   const [selectedGoal, setSelectedGoal] = createSignal<Goal | null>(null)
   const [showLogs, setShowLogs] = createSignal(false)
   const [showHelp, setShowHelp] = createSignal(false)
+  const [clock, setClock] = createSignal(Date.now())
   let inputEl: InputRenderable | undefined
   let focusTimer: ReturnType<typeof setTimeout> | undefined
   const client = createControlClient(props.directory)
@@ -110,6 +120,7 @@ export function LoopDashboard(props: Props) {
     props.api.event.on("session.error", () => refresh()),
     props.api.event.on("session.compacted", () => refresh()),
     setInterval(refresh, 10000),
+    setInterval(() => setClock(Date.now()), 500),
   ]
   onCleanup(() => {
     popMode()
@@ -210,6 +221,8 @@ export function LoopDashboard(props: Props) {
   }
 
   const activeGoals = () => state()?.goals.filter((g) => g.status !== "complete") || []
+  const runningCount = () => state()?.runtimes.filter((runtime) => runtime.phase === "running").length || 0
+  const runningFrame = () => ["|", "/", "-", "\\"][Math.floor(clock() / 500) % 4]
 
   createEffect(() => setSelectedGoal(activeGoals()[selected()] || null))
 
@@ -222,6 +235,7 @@ export function LoopDashboard(props: Props) {
             <span style={{ fg: theme().textMuted }}>{" │ "}</span>
             <span style={{ fg: mode() === "normal" ? theme().success : theme().warning }}>{mode().toUpperCase()}</span>
             <span style={{ fg: theme().textMuted }}>{" │ goals: "}</span><span style={{ fg: theme().text }}>{activeGoals().length}</span>
+            <span style={{ fg: theme().textMuted }}>{" │ "}</span><span style={{ fg: runningCount() > 0 ? theme().success : theme().textMuted, bold: runningCount() > 0 }}>{runningCount() > 0 ? runningFrame() : "○"} {runningCount()} RUNNING</span>
             <span style={{ fg: theme().textMuted }}>{" │ verified: "}</span><span style={{ fg: theme().info }}>{state()?.goals.filter((g) => g.status === "complete").length || 0}</span>
           </text>
         </box>
@@ -243,7 +257,7 @@ export function LoopDashboard(props: Props) {
                   <box flexDirection="row" paddingLeft={1} paddingRight={1} backgroundColor={isActive() ? theme().backgroundElement : undefined}>
                     <text>
                       <span style={{ fg: statusColor(goal.status, theme()), bold: isActive() }}>{statusIcon(goal.status)} {goal.name}</span><span style={{ fg: theme().textMuted }}>{" │ "}</span><span style={{ fg: statusColor(goal.status, theme()) }}>{goal.status}</span>
-                      {runtime() && <><span style={{ fg: theme().textMuted }}>{" │ "}</span><span style={{ fg: theme().text }}>{phaseIcon(runtime()!.phase)} turn {runtime()!.turnCount}</span>{runtime()!.consecutiveFailures > 0 && <span style={{ fg: theme().error }}>{" │ "}{runtime()!.consecutiveFailures} failures</span>}</>}
+                      {runtime() && <><span style={{ fg: theme().textMuted }}>{" │ "}</span><span style={{ fg: runtime()!.phase === "running" ? theme().success : theme().text, bold: runtime()!.phase === "running" }}>{runtime()!.phase === "running" ? runningFrame() : phaseIcon(runtime()!.phase)} {runtime()!.phase.toUpperCase()} turn {runtime()!.turnCount}</span><span style={{ fg: theme().textMuted }}> {ageLabel(runtime()!.lastProgressAt || runtime()!.lastRunAt, clock())}</span>{runtime()!.consecutiveFailures > 0 && <span style={{ fg: theme().error }}>{" │ "}{runtime()!.consecutiveFailures} failures</span>}</>}
                     </text>
                   </box>
                 )
@@ -257,6 +271,7 @@ export function LoopDashboard(props: Props) {
             <box flexDirection="column" border={true} borderColor="gray" padding={1} flexShrink={0}>
               <text><span style={{ fg: theme().primary, bold: true }}>{goal().name}</span></text>
               <text><span style={{ fg: theme().textMuted }}>{goal().objective.slice(0, 120)}</span></text>
+              {goal().workerSessionID && <text><span style={{ fg: theme().textMuted }}>worker: {goal().workerSessionID} · last activity {ageLabel(state()?.runtimes.find((runtime) => runtime.goalID === goal().id)?.lastProgressAt || state()?.runtimes.find((runtime) => runtime.goalID === goal().id)?.lastRunAt, clock())}</span></text>}
               {goal().config.progressFile && <text><span style={{ fg: theme().textMuted }}>progress: {goal().config.progressFile}</span></text>}
               {goal().lastProgress && <text><span style={{ fg: theme().textMuted }}>last progress: {goal().lastProgress!.summary.slice(0, 80)}</span></text>}
               {goal().blocker && <text><span style={{ fg: theme().error }}>blocked: {goal().blocker!.reason.slice(0, 140)}</span></text>}
