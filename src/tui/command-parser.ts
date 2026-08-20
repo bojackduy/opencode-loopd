@@ -82,7 +82,7 @@ function tokenize(input: string): string[] {
 
 export function commandHelp(): string {
   return [
-    "Modes: : command, Esc normal, ? help",
+    "Modes: : insert, Ctrl+N normal, ? toggle help",
     "Commands:",
     '  :goal start <name> --objective "<text>"  Create a new goal',
     "  :pause                                    Pause the selected goal",

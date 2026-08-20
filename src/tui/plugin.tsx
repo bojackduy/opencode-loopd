@@ -11,8 +11,10 @@ const tui: TuiPlugin = async (api) => {
   const directory = api.state.path.directory
 
   const open = () => {
+    const previousFocus = api.renderer.currentFocusedRenderable
     api.ui.dialog.replace(() => <LoopDashboard api={api} directory={directory} />)
     api.ui.dialog.setSize("xlarge")
+    previousFocus?.blur()
   }
 
   api.keymap.registerLayer({
@@ -27,7 +29,7 @@ const tui: TuiPlugin = async (api) => {
       },
     ],
     bindings: [
-      { key: "ctrl+shift+l", cmd: "opencode.loopd.dashboard", desc: "Open loop dashboard" },
+      { key: "ctrl+alt+l", cmd: "opencode.loopd.dashboard", desc: "Open loop dashboard" },
     ],
   })
 

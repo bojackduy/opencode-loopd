@@ -70,7 +70,7 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
               goalID: goal.id,
               workerSessionID: worker.workerSessionID,
               name: args.name,
-              message: `Goal "${args.name}" created and started in the background. Monitor with /loop (Ctrl+Shift+L).`,
+              message: `Goal "${args.name}" created and started in the background. Monitor with /loop (Ctrl+Alt+L).`,
             }),
           }
         } catch (error) {
