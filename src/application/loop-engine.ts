@@ -469,7 +469,8 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
 
       // Some OpenCode transports miss the idle event. Poll active workers so a
       // completed turn is continued on the maintenance cadence, not lease expiry.
-      if (runtime.phase === "running" && goal.workerSessionID) {
+      // Also poll idle-phase goals that missed the idle event entirely.
+      if ((runtime.phase === "running" || runtime.phase === "idle") && goal.workerSessionID) {
         const status = await host.sessionStatus(goal.workerSessionID)
         if (status === "idle") {
           await handleSessionIdle(state, goal)

@@ -1,6 +1,6 @@
 {
   "name": "opencode-loopd",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Codex-inspired goal engine for OpenCode with modal TUI dashboard.",
   "type": "module",
   "exports": {
