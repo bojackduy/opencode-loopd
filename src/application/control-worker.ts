@@ -5,6 +5,7 @@
 
 import { promises as fs } from "fs"
 import path from "path"
+import { randomUUID } from "crypto"
 import {
   listPendingRequests,
   claimControlRequest,
@@ -14,6 +15,7 @@ import {
   readState,
   writeState,
   appendEvent,
+  appendGoalInbox,
   type ControlRequest,
   type ControlResponse,
 } from "../infrastructure/state-repository"
@@ -210,6 +212,101 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
           message: `goal cleared`,
           stateRevision: state.revision,
         }
+        break
+      }
+
+      case "send": {
+        const args = request.args as { message: string }
+        const text = String(args.message || "").trim()
+        if (!text) {
+          response = { ...base, ok: false, message: "message is required", errorCode: "bad_request" }
+          break
+        }
+        if (!request.goalID) {
+          response = { ...base, ok: false, message: "goalID is required", errorCode: "bad_request" }
+          break
+        }
+        await appendGoalInbox(directory, request.goalID as string, "user", text)
+        const state = await readState(directory)
+        const goal = state.goals.find((g) => g.id === request.goalID)
+        response = {
+          ...base,
+          message: `sent to "${goal?.name || request.goalID}"`,
+          stateRevision: state.revision,
+        }
+        break
+      }
+
+      case "force_complete": {
+        const args = request.args as { summary?: string; evidence?: string }
+        const state = await readState(directory)
+        const goal = state.goals.find((g) => g.id === request.goalID)
+        if (!goal) {
+          response = { ...base, ok: false, message: "goal not found", errorCode: "not_found" }
+          break
+        }
+        if (goal.status === "complete") {
+          response = { ...base, message: `goal "${goal.name}" already complete`, stateRevision: state.revision }
+          break
+        }
+        goal.status = "complete"
+        goal.updatedAt = new Date().toISOString()
+        goal.completionEvidence = {
+          summary: String(args.summary || "Force-completed from dashboard."),
+          evidence: String(args.evidence || "Manual override — no verification checks run."),
+          at: new Date().toISOString(),
+        }
+        const runtime = state.runtimes.find((r) => r.goalID === goal.id)
+        if (runtime) { runtime.phase = "idle"; runtime.lastError = undefined; runtime.updatedAt = new Date().toISOString() }
+        await writeState(directory, state)
+        await appendEvent(directory, {
+          version: 1,
+          eventID: randomUUID(),
+          goalID: goal.id as any,
+          type: "goal.completed",
+          summary: goal.completionEvidence.summary,
+          evidence: goal.completionEvidence.evidence,
+          timestamp: new Date().toISOString(),
+          revision: state.revision,
+        })
+        response = { ...base, message: `goal "${goal.name}" force-completed`, stateRevision: state.revision }
+        break
+      }
+
+      case "force_block":
+      case "block": {
+        const args = request.args as { reason?: string; needed?: string }
+        const state = await readState(directory)
+        const goal = state.goals.find((g) => g.id === request.goalID)
+        if (!goal) {
+          response = { ...base, ok: false, message: "goal not found", errorCode: "not_found" }
+          break
+        }
+        if (goal.status === "blocked") {
+          response = { ...base, message: `goal "${goal.name}" already blocked`, stateRevision: state.revision }
+          break
+        }
+        goal.status = "blocked"
+        goal.updatedAt = new Date().toISOString()
+        goal.blocker = {
+          reason: String(args.reason || "Blocked from dashboard."),
+          needed: String(args.needed || "User intervention required."),
+          at: new Date().toISOString(),
+        }
+        const runtime = state.runtimes.find((r) => r.goalID === goal.id)
+        if (runtime) { runtime.phase = "idle"; runtime.lastError = undefined; runtime.updatedAt = new Date().toISOString() }
+        await writeState(directory, state)
+        await appendEvent(directory, {
+          version: 1,
+          eventID: randomUUID(),
+          goalID: goal.id as any,
+          type: "goal.blocked",
+          reason: goal.blocker.reason,
+          needed: goal.blocker.needed,
+          timestamp: new Date().toISOString(),
+          revision: state.revision,
+        })
+        response = { ...base, message: `goal "${goal.name}" blocked`, stateRevision: state.revision }
         break
       }
 

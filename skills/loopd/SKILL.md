@@ -51,7 +51,7 @@ loopd_create_goal({
 })
 ```
 
-The goal starts immediately. The user can monitor it via `/loop` (Ctrl+Alt+L).
+The goal starts immediately. The user can monitor it via `/loop` (Ctrl+L).
 
 ## Worker Tools (Running Inside the Goal)
 
@@ -131,7 +131,7 @@ Sends a message to the worker's next turn. See table above.
 
 ## Dashboard Commands
 
-Open the dashboard with `/loop` or Ctrl+Alt+L.
+Open the dashboard with `/loop` or Ctrl+L.
 
 ### Keyboard Shortcuts (Normal Mode)
 
@@ -149,7 +149,10 @@ Open the dashboard with `/loop` or Ctrl+Alt+L.
 
 | Command | Description |
 |---------|-------------|
-| `:goal start <name> --objective "<text>"` | Create a new goal |
+| `:send <message>` | Send instruction to the selected goal's worker |
+| `:open` | Open the selected goal's child session |
+| `:force <summary> --evidence <text>` | Force-complete (bypass verification checks) |
+| `:block <reason> --needed <text>` | Force-block the selected goal |
 | `:pause` | Pause the selected goal |
 | `:resume` | Resume the paused goal |
 | `:retry` | Retry the blocked goal |
@@ -157,6 +160,8 @@ Open the dashboard with `/loop` or Ctrl+Alt+L.
 | `:logs` | Toggle log view |
 | `:help` | Show help |
 | `:q` / `:close` | Close dashboard |
+
+> Goal creation (`:goal start`) was removed from the dashboard — create goals via `/goal` in the parent chat so the agent can clarify the objective first.
 
 ## Safety Patterns
 

@@ -42,14 +42,15 @@ The agent will use `loopd_create_goal` to start the goal.
 
 ### Monitor with dashboard
 
-Press `Ctrl+Alt+L` or open the command palette → "Loop Dashboard".
+Press `Ctrl+L` or open the command palette → "Loop Dashboard".
 
 Dashboard shortcuts:
 - `j/k` — move selection
 - `g/G` — jump to top/bottom
 - `o` — open child session (full transcript)
+- `p/r/R/x` — pause / resume / retry / clear selected goal
 - `?` — toggle help
-- `:` — enter insert mode (create goals, answer questions)
+- `:` — enter insert mode (send message, control commands)
 - `Ctrl+N` — return to normal mode
 - `q` — close
 

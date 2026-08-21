@@ -1,5 +1,5 @@
 {
-  "name": "opencode-loopd",
+  "name": "@bojackduy/opencode-loopd",
   "version": "1.0.0",
   "description": "Codex-inspired goal engine for OpenCode with modal TUI dashboard.",
   "type": "module",

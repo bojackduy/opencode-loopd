@@ -46,12 +46,40 @@ function statusColor(status: GoalStatus, theme: TuiThemeCurrent) {
     default: return theme.text
   }
 }
+function phaseColor(phase: RuntimePhase, theme: TuiThemeCurrent) {
+  switch (phase) {
+    case "running": return theme.success
+    case "compacting": return theme.warning
+    case "waiting_retry": return theme.accent
+    case "stopping": return theme.error
+    default: return theme.textMuted
+  }
+}
+function borderColorForStatus(status: GoalStatus, theme: TuiThemeCurrent): string {
+  switch (status) {
+    case "active": return theme.success as unknown as string
+    case "paused": return theme.warning as unknown as string
+    case "blocked": return theme.error as unknown as string
+    case "budget_limited":
+    case "usage_limited": return theme.accent as unknown as string
+    default: return "gray"
+  }
+}
+function eventColor(type: string, theme: TuiThemeCurrent) {
+  if (type === "goal.completed") return theme.info
+  if (type === "goal.blocked" || type === "run.failed") return theme.error
+  if (type === "goal.created" || type === "goal.progress") return theme.success
+  if (type === "run.started" || type === "compaction.started") return theme.warning
+  return theme.textMuted
+}
 function phaseIcon(phase: RuntimePhase): string {
   switch (phase) {
     case "running": return "▶"
     case "compacting": return "⏳"
     case "waiting_retry": return "🔄"
     case "stopping": return "⏹"
+    case "queued": return "◷"
+    case "idle": return "○"
     default: return "○"
   }
 }
@@ -61,7 +89,7 @@ function statusIcon(status: GoalStatus): string {
     case "paused": return "❚❚"
     case "blocked": return "✖"
     case "complete": return "✓"
-    case "budget_limited": return "$"
+    case "budget_limited": return "⬢"
     case "usage_limited": return "⏰"
     default: return "○"
   }
@@ -81,7 +109,7 @@ export function LoopDashboard(props: Props) {
   const [mode, setMode] = createSignal<Mode>("normal")
   const [selected, setSelected] = createSignal(0)
   const [commandInput, setCommandInput] = createSignal("")
-  const [statusText, setStatusText] = createSignal("Press : to insert, ? help, x:clear, q close")
+  const [statusText, setStatusText] = createSignal("Press : to send/command, ? help, o open, q close")
   const [state, setState] = createSignal<StoreState | null>(null)
   const [events, setEvents] = createSignal<Record<string, unknown>[]>([])
   const [selectedGoal, setSelectedGoal] = createSignal<Goal | null>(null)
@@ -199,31 +227,56 @@ export function LoopDashboard(props: Props) {
     const parsed = parseCommand(cmd)
     debugLog("parsed", parsed)
     if (!parsed) { setStatusText("Empty command"); debugLog("empty command"); return }
-    const route = props.api.route.current
-    const ownerSessionID = route.name === "session" ? route.params?.sessionID as string | undefined : undefined
     try {
       switch (parsed.command) {
-        case "goal": {
-          if (parsed.positional[0] === "start") {
-            if (!ownerSessionID) {
-              setStatusText("Error: open /loop from an active session before starting a goal")
-              break
-            }
-            const name = parsed.positional[1] || parsed.args.name || "unnamed"
-            const objective = parsed.args.objective || parsed.positional[2] || ""
-            const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "start", args: { name, objective, config: {}, ownerSessionID } })
-            setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh()
-          } else setStatusText("Usage: :goal start <name> --objective <text>")
+        case "send": {
+          if (!selectedGoal()) { setStatusText("No goal selected"); break }
+          const message = parsed.positional.join(" ") || parsed.args.message || ""
+          if (!message) { setStatusText("Usage: :send <message>"); break }
+          const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "send", goalID: selectedGoal()!.id, args: { message } })
+          setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh()
+          break
+        }
+        case "open": {
+          const goal = selectedGoal()
+          if (!goal?.workerSessionID) { setStatusText("No worker session"); break }
+          props.api.route.navigate("session", { sessionID: goal.workerSessionID })
+          props.api.ui.dialog.clear()
+          return
+        }
+        case "force": {
+          if (!selectedGoal()) { setStatusText("No goal"); break }
+          const summary = parsed.positional.join(" ") || parsed.args.summary || "Force-completed from dashboard."
+          const evidence = parsed.args.evidence || "Manual override — no verification checks run."
+          const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "force_complete", goalID: selectedGoal()!.id, args: { summary, evidence } })
+          setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh()
+          break
+        }
+        case "block": {
+          if (!selectedGoal()) { setStatusText("No goal"); break }
+          const reason = parsed.positional.join(" ") || parsed.args.reason || "Blocked from dashboard."
+          const needed = parsed.args.needed || "User intervention required."
+          const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "block", goalID: selectedGoal()!.id, args: { reason, needed } })
+          setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh()
           break
         }
         case "pause": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "pause", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
         case "resume": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "resume", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
         case "retry": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "retry", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
         case "clear": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "clear", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
+        // Legacy: keep :goal start but redirect — creation belongs in parent chat
+        case "goal": { setStatusText("Create goals via /goal in the parent chat (agent clarifies first). Dashboard: :send to steer the worker."); break }
         case "logs": setShowLogs(!showLogs()); break
         case "help": setShowHelp(true); break
         case "q": case "close": props.api.ui.dialog.clear(); return
-        default: setStatusText(`Unknown: ${parsed.command}. ? for help`)
+        default: {
+          // Bare text in insert mode → treat as send to selected goal
+          if (parsed.command && selectedGoal()) {
+            const message = parsed.raw
+            const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "send", goalID: selectedGoal()!.id, args: { message } })
+            setStatusText(r.ok ? `sent: ${message.slice(0, 80)}` : `Error: ${r.message}`); if (r.ok) await refresh()
+          } else setStatusText(`Unknown: ${parsed.command}. ? for help`)
+        }
       }
     } catch (e) { setStatusText(`Error: ${e instanceof Error ? e.message : String(e)}`) }
     returnToNormalMode()
@@ -237,53 +290,78 @@ export function LoopDashboard(props: Props) {
 
   return (
     <box flexDirection="column" width="100%" alignItems="center" padding={1}>
-      <box flexDirection="column" width="90%" border={true} borderColor="gray" padding={1}>
-        {/* Header — always visible */}
+      <box flexDirection="column" width="90%" border={true} borderColor={theme().border} padding={1}>
+        {/* Header — always visible, vivid */}
         <box flexDirection="row" padding={0} flexShrink={0}>
           <text>
-            <span style={{ fg: theme().primary, bold: true }}>Loop Dashboard</span>
+            <span style={{ fg: theme().primary, bold: true }}>⬢ Loop Dashboard</span>
             <span style={{ fg: theme().textMuted }}> │ </span>
-            <span style={{ fg: mode() === "normal" ? theme().success : theme().warning }}>{mode().toUpperCase()}</span>
-            <span style={{ fg: theme().textMuted }}> │ goals: </span>
-            <span style={{ fg: theme().text }}>{activeGoals().length}</span>
+            <span style={{ fg: mode() === "normal" ? theme().success : theme().warning, bold: true, bg: mode() === "insert" ? (theme().backgroundElement as unknown as string) : undefined }}> {mode().toUpperCase()} </span>
             <span style={{ fg: theme().textMuted }}> │ </span>
-            <span style={{ fg: runningCount() > 0 ? theme().success : theme().textMuted }}>{runningCount() > 0 ? runningFrame() : "○"} {runningCount()} RUNNING</span>
-            <span style={{ fg: theme().textMuted }}> │ verified: </span>
-            <span style={{ fg: theme().info }}>{state()?.goals.filter((g) => g.status === "complete").length || 0}</span>
+            <span style={{ fg: theme().accent, bold: true }}>{activeGoals().length}</span>
+            <span style={{ fg: theme().textMuted }}> goals</span>
+            <span style={{ fg: theme().textMuted }}> │ </span>
+            <span style={{ fg: runningCount() > 0 ? theme().success : theme().textMuted, bold: runningCount() > 0 }}>{runningCount() > 0 ? runningFrame() : "○"} {runningCount()} RUNNING</span>
+            <span style={{ fg: theme().textMuted }}> │ </span>
+            <span style={{ fg: theme().info, bold: true }}>{state()?.goals.filter((g) => g.status === "complete").length || 0}</span>
+            <span style={{ fg: theme().textMuted }}> done</span>
           </text>
         </box>
 
         {/* Scrollable body — grows, hides overflow */}
         <box flexDirection="column" flexGrow={1} minHeight={0} overflow="hidden">
-          {/* Help panel — bounded, clipped */}
+          {/* Help panel — bounded, clipped, richer */}
           <Show when={showHelp()}>
             <box flexDirection="column" padding={1} border={true} borderColor="yellow" backgroundColor={theme().background} flexShrink={0} maxHeight={14} overflow="hidden">
               <text>
-                <span style={{ fg: "yellow", bold: true }}>━━━ Keyboard Shortcuts — ? toggle, : insert, Ctrl+N normal ━━━</span>
-                {"\n"}{commandHelp()}
+                <span style={{ fg: "yellow", bold: true }}>━━━ Keys: ? toggle  : insert  Ctrl+N normal  o open  q close ━━━</span>
               </text>
+              <For each={commandHelp().split("\n")}>{(line) => {
+                const isHeader = line.startsWith("Modes:") || line.startsWith("Nav:") || line.startsWith("Commands")
+                const isCmd = line.trim().startsWith(":")
+                return (
+                  <text>
+                    <span style={{ fg: isHeader ? theme().primary : isCmd ? theme().warning : theme().text, bold: isHeader }}>{line}</span>
+                  </text>
+                )
+              }}</For>
             </box>
           </Show>
 
           {/* Goal list — takes remaining space, clipped */}
           <box flexDirection="column" flexGrow={1} padding={1} minHeight={0} overflow="hidden">
-            <Show when={activeGoals().length > 0} fallback={<text fg={theme().textMuted}>No active goals. Press : to create.</text>}>
+            <Show when={activeGoals().length > 0} fallback={
+              <box flexDirection="column" gap={1}>
+                <text><span style={{ fg: theme().textMuted }}>No active goals.</span><span style={{ fg: theme().accent }}> /goal</span><span style={{ fg: theme().textMuted }}> in parent chat to create one.</span></text>
+                <text><span style={{ fg: theme().textMuted }}>Tip: </span><span style={{ fg: theme().warning }}>:send</span><span style={{ fg: theme().textMuted }}> to steer the worker · </span><span style={{ fg: theme().warning }}>o</span><span style={{ fg: theme().textMuted }}> to open child · </span><span style={{ fg: theme().warning }}>:force</span><span style={{ fg: theme().textMuted }}> to complete manually.</span></text>
+              </box>
+            }>
               <For each={activeGoals()}>
                 {(goal, i) => {
                   const runtime = () => state()?.runtimes.find((r) => r.goalID === goal.id)
                   const isActive = () => i() === selected()
+                  const maxTurns = (goal.config as any)?.maxTurns as number | undefined
+                  const turnColor = () => {
+                    if (!runtime() || !maxTurns) return phaseColor(runtime()?.phase || "idle", theme())
+                    const ratio = runtime()!.turnCount / maxTurns
+                    if (ratio >= 1) return theme().error
+                    if (ratio >= 0.8) return theme().warning
+                    return phaseColor(runtime()!.phase || "idle", theme())
+                  }
                   return (
                     <box flexDirection="row" paddingLeft={1} paddingRight={1} backgroundColor={isActive() ? theme().backgroundElement : undefined}>
                       <text>
-                        <span style={{ fg: statusColor(goal.status, theme()) }}>{isActive() ? `▶ ${statusIcon(goal.status)} ${goal.name}` : `  ${statusIcon(goal.status)} ${goal.name}`}</span>
+                        <span style={{ fg: statusColor(goal.status, theme()), bold: isActive() }}>{isActive() ? `▶ ${statusIcon(goal.status)} ${goal.name}` : `  ${statusIcon(goal.status)} ${goal.name}`}</span>
                         <span style={{ fg: theme().textMuted }}> │ </span>
-                        <span style={{ fg: statusColor(goal.status, theme()) }}>{goal.status}</span>
+                        <span style={{ fg: statusColor(goal.status, theme()), bold: true }}>{goal.status.toUpperCase()}</span>
                         {runtime() && <>
                           <span style={{ fg: theme().textMuted }}> │ </span>
-                          <span style={{ fg: runtime()!.phase === "running" ? theme().success : theme().text }}>{runtime()!.phase === "running" ? runningFrame() : phaseIcon(runtime()!.phase)} {runtime()!.phase.toUpperCase()} turn {runtime()!.turnCount}</span>
+                          <span style={{ fg: turnColor(), bold: runtime()!.phase === "running" }}>{runtime()!.phase === "running" ? runningFrame() : phaseIcon(runtime()!.phase)} {runtime()!.phase.toUpperCase()}</span>
+                          <span style={{ fg: turnColor() }}> {runtime()!.turnCount}{maxTurns ? `/${maxTurns}` : ""}</span>
                           <span style={{ fg: theme().textMuted }}> {ageLabel(runtime()!.lastProgressAt || runtime()!.lastRunAt, clock())}</span>
                         </>}
-                        {runtime()!.consecutiveFailures > 0 && <span style={{ fg: theme().error }}> │ {runtime()!.consecutiveFailures} failures</span>}
+                        {runtime() && runtime()!.consecutiveFailures > 0 && <span style={{ fg: theme().error, bold: true }}> │ ⚠ {runtime()!.consecutiveFailures} fail</span>}
+                        {runtime() && (runtime()!.noProgressCount || 0) > 0 && <span style={{ fg: theme().warning }}> │ {runtime()!.noProgressCount} no-progress</span>}
                       </text>
                     </box>
                   )
@@ -292,39 +370,52 @@ export function LoopDashboard(props: Props) {
             </Show>
           </box>
 
-          {/* Goal detail — fixed, bounded */}
+          {/* Goal detail — fixed, bounded, border matches status */}
           <Show when={selectedGoal()}>
-            {(goal) => (
-              <box flexDirection="column" border={true} borderColor="gray" padding={1} flexShrink={0} maxHeight={8}>
-                <text>
-                  <span style={{ fg: theme().primary, bold: true }}>{goal().name}</span>
-                  {"\n"}
-                  <span style={{ fg: theme().textMuted }}>{goal().objective.slice(0, 120)}</span>
-                  {goal().lastProgress && <><span style={{ fg: theme().textMuted }}>{"\n"}last: {goal().lastProgress!.summary.slice(0, 80)}</span></>}
-                  {goal().blocker && <><span style={{ fg: theme().error }}>{"\n"}blocked: {goal().blocker!.reason.slice(0, 140)}</span></>}
-                </text>
-              </box>
-            )}
+            {(goal) => {
+              const rt = () => state()?.runtimes.find((r) => r.goalID === goal().id)
+              return (
+                <box flexDirection="column" border={true} borderColor={borderColorForStatus(goal().status, theme())} padding={1} flexShrink={0} maxHeight={10}>
+                  <text>
+                    <span style={{ fg: statusColor(goal().status, theme()), bold: true }}>{statusIcon(goal().status)} {goal().name}</span>
+                    <span style={{ fg: statusColor(goal().status, theme()) }}> {goal().status.toUpperCase()}</span>
+                    {rt() && <><span style={{ fg: theme().textMuted }}> │ </span><span style={{ fg: phaseColor(rt()!.phase, theme()), bold: true }}>{phaseIcon(rt()!.phase)} {rt()!.phase}</span><span style={{ fg: theme().textMuted }}> turn {rt()!.turnCount}</span></>}
+                    {"\n"}
+                    <span style={{ fg: theme().text }}>{goal().objective.slice(0, 160)}</span>
+                    {goal().lastProgress && <><span style={{ fg: theme().success }}>{"\n"}✔ </span><span style={{ fg: theme().text }}>{goal().lastProgress!.summary.slice(0, 100)}</span><span style={{ fg: theme().textMuted }}> → {goal().lastProgress!.next?.slice(0, 60) || ""}</span></>}
+                    {goal().blocker && <><span style={{ fg: theme().error, bold: true }}>{"\n"}✖ blocked: </span><span style={{ fg: theme().error }}>{goal().blocker!.reason.slice(0, 140)}</span><span style={{ fg: theme().textMuted }}> — {goal().blocker!.needed.slice(0, 60)}</span></>}
+                    {goal().config.artifactDir && <><span style={{ fg: theme().accent }}>{"\n"}📁 </span><span style={{ fg: theme().textMuted }}>{String(goal().config.artifactDir).replace(String(props.directory), ".")}</span></>}
+                    {rt()?.lastError && <><span style={{ fg: theme().error }}>{"\n"}⚠ </span><span style={{ fg: theme().error }}>{rt()!.lastError!.slice(0, 120)}</span></>}
+                  </text>
+                </box>
+              )
+            }}
           </Show>
 
-          {/* Logs — bounded, clipped */}
+          {/* Logs — bounded, clipped, per-event coloring */}
           <Show when={showLogs() && events().length > 0}>
-            <box flexDirection="column" border={true} borderColor="gray" padding={1} maxHeight={6} flexShrink={0} overflow="hidden">
-              <text>
-                <span style={{ fg: theme().primary, bold: true }}>Recent Events</span>
-                {events().slice(-10).map((event) => `\n${(event as any).type} ${(event as any).goalID?.slice(0, 8)}`)}
-              </text>
+            <box flexDirection="column" border={true} borderColor={theme().border} padding={1} maxHeight={7} flexShrink={0} overflow="hidden">
+              <text><span style={{ fg: theme().accent, bold: true }}>◈ Recent Events</span><span style={{ fg: theme().textMuted }}> — :logs to hide</span></text>
+              <For each={events().slice(-10)}>{(ev) => (
+                <text>
+                  <span style={{ fg: eventColor(String((ev as any).type), theme()), bold: true }}>{String((ev as any).type)}</span>
+                  <span style={{ fg: theme().textMuted }}> {(ev as any).goalID?.slice(0, 8)}</span>
+                  {(ev as any).summary && <span style={{ fg: theme().text }}> — {String((ev as any).summary).slice(0, 60)}</span>}
+                </text>
+              )}</For>
             </box>
           </Show>
         </box>
 
-        {/* Input — always visible at bottom */}
-        <box flexDirection="row" border={true} borderColor={mode() === "insert" ? theme().warning : "gray"} paddingLeft={1} paddingRight={1} flexShrink={0} height={3} gap={1}>
-          <text fg={mode() === "insert" ? theme().warning : theme().success}>{mode() === "insert" ? "INSERT :" : "NORMAL"}</text>
+        {/* Input — always visible at bottom, vivid mode badge */}
+        <box flexDirection="row" border={true} borderColor={mode() === "insert" ? theme().warning : theme().border} paddingLeft={1} paddingRight={1} flexShrink={0} height={3} gap={1}>
+          <text>
+            <span style={{ fg: mode() === "insert" ? theme().warning : theme().success, bold: true, bg: mode() === "insert" ? (theme().backgroundElement as unknown as string) : undefined }}>{mode() === "insert" ? " INSERT " : " NORMAL "}</span>
+          </text>
           <input
             ref={(el: InputRenderable) => { inputEl = el; focusInput() }}
             flexGrow={1}
-            placeholder={mode() === "insert" ? "goal start my-goal --objective ...  (Ctrl+N: normal)" : statusText() || "Press : to insert, ? help, q close"}
+            placeholder={mode() === "insert" ? ":send hello  or  :force done --evidence proof  or  :open  (Ctrl+N: normal)" : statusText() || "Press : to send/command  ·  ? help  ·  o open child  ·  q close"}
             placeholderColor={theme().textMuted}
             cursorColor={theme().primary}
             focusedTextColor={theme().text}

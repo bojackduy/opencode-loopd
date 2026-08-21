@@ -334,6 +334,7 @@ var init_state_repository = () => {};
 
 // src/application/control-worker.ts
 init_state_repository();
+import { randomUUID as randomUUID2 } from "crypto";
 
 // src/infrastructure/server-log.ts
 import { appendFile } from "fs/promises";
@@ -531,6 +532,106 @@ function createControlWorker(options) {
         };
         break;
       }
+      case "send": {
+        const args = request.args;
+        const text = String(args.message || "").trim();
+        if (!text) {
+          response = { ...base, ok: false, message: "message is required", errorCode: "bad_request" };
+          break;
+        }
+        if (!request.goalID) {
+          response = { ...base, ok: false, message: "goalID is required", errorCode: "bad_request" };
+          break;
+        }
+        await appendGoalInbox(directory, request.goalID, "user", text);
+        const state2 = await readState(directory);
+        const goal = state2.goals.find((g) => g.id === request.goalID);
+        response = {
+          ...base,
+          message: `sent to "${goal?.name || request.goalID}"`,
+          stateRevision: state2.revision
+        };
+        break;
+      }
+      case "force_complete": {
+        const args = request.args;
+        const state2 = await readState(directory);
+        const goal = state2.goals.find((g) => g.id === request.goalID);
+        if (!goal) {
+          response = { ...base, ok: false, message: "goal not found", errorCode: "not_found" };
+          break;
+        }
+        if (goal.status === "complete") {
+          response = { ...base, message: `goal "${goal.name}" already complete`, stateRevision: state2.revision };
+          break;
+        }
+        goal.status = "complete";
+        goal.updatedAt = new Date().toISOString();
+        goal.completionEvidence = {
+          summary: String(args.summary || "Force-completed from dashboard."),
+          evidence: String(args.evidence || "Manual override \u2014 no verification checks run."),
+          at: new Date().toISOString()
+        };
+        const runtime = state2.runtimes.find((r) => r.goalID === goal.id);
+        if (runtime) {
+          runtime.phase = "idle";
+          runtime.lastError = undefined;
+          runtime.updatedAt = new Date().toISOString();
+        }
+        await writeState(directory, state2);
+        await appendEvent(directory, {
+          version: 1,
+          eventID: randomUUID2(),
+          goalID: goal.id,
+          type: "goal.completed",
+          summary: goal.completionEvidence.summary,
+          evidence: goal.completionEvidence.evidence,
+          timestamp: new Date().toISOString(),
+          revision: state2.revision
+        });
+        response = { ...base, message: `goal "${goal.name}" force-completed`, stateRevision: state2.revision };
+        break;
+      }
+      case "force_block":
+      case "block": {
+        const args = request.args;
+        const state2 = await readState(directory);
+        const goal = state2.goals.find((g) => g.id === request.goalID);
+        if (!goal) {
+          response = { ...base, ok: false, message: "goal not found", errorCode: "not_found" };
+          break;
+        }
+        if (goal.status === "blocked") {
+          response = { ...base, message: `goal "${goal.name}" already blocked`, stateRevision: state2.revision };
+          break;
+        }
+        goal.status = "blocked";
+        goal.updatedAt = new Date().toISOString();
+        goal.blocker = {
+          reason: String(args.reason || "Blocked from dashboard."),
+          needed: String(args.needed || "User intervention required."),
+          at: new Date().toISOString()
+        };
+        const runtime = state2.runtimes.find((r) => r.goalID === goal.id);
+        if (runtime) {
+          runtime.phase = "idle";
+          runtime.lastError = undefined;
+          runtime.updatedAt = new Date().toISOString();
+        }
+        await writeState(directory, state2);
+        await appendEvent(directory, {
+          version: 1,
+          eventID: randomUUID2(),
+          goalID: goal.id,
+          type: "goal.blocked",
+          reason: goal.blocker.reason,
+          needed: goal.blocker.needed,
+          timestamp: new Date().toISOString(),
+          revision: state2.revision
+        });
+        response = { ...base, message: `goal "${goal.name}" blocked`, stateRevision: state2.revision };
+        break;
+      }
       default: {
         response = {
           requestID: request.requestID,
@@ -567,7 +668,7 @@ function createControlWorker(options) {
 
 // src/application/loop-engine.ts
 init_state_repository();
-import { randomUUID as randomUUID2 } from "crypto";
+import { randomUUID as randomUUID3 } from "crypto";
 
 // src/domain/goal.ts
 var MODEL_TRANSITIONS = {
@@ -770,7 +871,7 @@ function createLoopEngine(options) {
       if (completedRunID) {
         await appendEvent(directory, {
           version: 1,
-          eventID: randomUUID2(),
+          eventID: randomUUID3(),
           goalID: goal.id,
           type: "run.completed",
           runID: completedRunID,
@@ -800,7 +901,7 @@ function createLoopEngine(options) {
       await writeState(directory, state);
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID2(),
+        eventID: randomUUID3(),
         goalID: goal.id,
         type: "goal.blocked",
         reason: limitResult.reason + " (force-finish ignored)",
@@ -815,7 +916,7 @@ function createLoopEngine(options) {
       await writeState(directory, state);
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID2(),
+        eventID: randomUUID3(),
         goalID: goal.id,
         type: "goal.status_changed",
         from: "active",
@@ -861,7 +962,7 @@ function createLoopEngine(options) {
     }
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID3(),
       goalID: goal.id,
       type: "run.failed",
       runID: runtime.activeRunID || "unknown",
@@ -881,7 +982,7 @@ function createLoopEngine(options) {
       };
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID2(),
+        eventID: randomUUID3(),
         goalID: goal.id,
         type: "goal.blocked",
         reason: `Failed ${runtime.consecutiveFailures} times`,
@@ -907,7 +1008,7 @@ function createLoopEngine(options) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID3(),
       goalID: goal.id,
       type: "compaction.completed",
       timestamp: new Date().toISOString(),
@@ -963,7 +1064,7 @@ function createLoopEngine(options) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID3(),
       goalID: goal.id,
       type: "compaction.started",
       timestamp: new Date().toISOString(),
@@ -1014,7 +1115,7 @@ function createLoopEngine(options) {
 }
 
 // src/application/goal-service.ts
-import { randomUUID as randomUUID3 } from "crypto";
+import { randomUUID as randomUUID4 } from "crypto";
 init_state_repository();
 import * as path2 from "path";
 
@@ -1118,7 +1219,7 @@ function createGoalService(host) {
   const sessions = new Map;
   async function start(directory, input) {
     const state = await readState(directory);
-    const id = randomUUID3();
+    const id = randomUUID4();
     const goal = createGoal({
       id,
       name: input.name,
@@ -1162,7 +1263,7 @@ function createGoalService(host) {
       await writeState(directory, state);
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID3(),
+        eventID: randomUUID4(),
         goalID: id,
         type: "goal.blocked",
         reason: detail,
@@ -1178,7 +1279,7 @@ function createGoalService(host) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID3(),
+      eventID: randomUUID4(),
       goalID: id,
       type: "goal.created",
       name: input.name,
@@ -1188,7 +1289,7 @@ function createGoalService(host) {
       revision: state.revision
     });
     if (runtime) {
-      const runID = randomUUID3();
+      const runID = randomUUID4();
       Object.assign(runtime, acquireLease(runtime, goal.config.timeoutMs || 300000));
       runtime.activeRunID = runID;
       runtime.turnCount = 1;
@@ -1197,7 +1298,7 @@ function createGoalService(host) {
       await writeState(directory, state);
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID3(),
+        eventID: randomUUID4(),
         goalID: id,
         type: "run.started",
         runID,
@@ -1235,7 +1336,7 @@ function createGoalService(host) {
     const timeoutMs = goal.config.timeoutMs || 300000;
     const leased = acquireLease(runtime, timeoutMs);
     Object.assign(runtime, leased);
-    const runID = randomUUID3();
+    const runID = randomUUID4();
     runtime.activeRunID = runID;
     runtime.turnCount += 1;
     runtime.runCount += 1;
@@ -1243,7 +1344,7 @@ function createGoalService(host) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID3(),
+      eventID: randomUUID4(),
       goalID,
       type: "run.started",
       runID,
@@ -1297,7 +1398,7 @@ function createGoalService(host) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID3(),
+      eventID: randomUUID4(),
       goalID,
       type: "goal.status_changed",
       from: "active",
@@ -1324,7 +1425,7 @@ function createGoalService(host) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID3(),
+      eventID: randomUUID4(),
       goalID,
       type: "goal.status_changed",
       from: "paused",
@@ -1352,7 +1453,7 @@ function createGoalService(host) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID3(),
+      eventID: randomUUID4(),
       goalID,
       type: "goal.status_changed",
       from: "blocked",
@@ -1378,7 +1479,7 @@ function createGoalService(host) {
     }
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID3(),
+      eventID: randomUUID4(),
       goalID,
       type: "goal.cleared",
       timestamp: new Date().toISOString(),
@@ -1569,7 +1670,7 @@ async function withTimeout(promise, timeoutMs, operation) {
 
 // src/server/goal-tools.ts
 init_state_repository();
-import { randomUUID as randomUUID4 } from "crypto";
+import { randomUUID as randomUUID5 } from "crypto";
 import { tool } from "@opencode-ai/plugin/tool";
 import { exec as execChild } from "child_process";
 import { promisify } from "util";
@@ -1632,7 +1733,7 @@ function goalTools(dir, goalService, hostSessionID) {
               workerSessionID: worker.workerSessionID,
               artifactDir: goal.config.artifactDir,
               name: args.name,
-              message: `Goal "${args.name}" created and started in the background. Artifacts: ${goal.config.artifactDir}. Monitor with /loop (Ctrl+Alt+L).`
+              message: `Goal "${args.name}" created and started in the background. Artifacts: ${goal.config.artifactDir}. Monitor with /loop (Ctrl+L).`
             })
           };
         } catch (error) {
@@ -1702,7 +1803,7 @@ function goalTools(dir, goalService, hostSessionID) {
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID4(),
+          eventID: randomUUID5(),
           goalID: goal.id,
           type: "goal.progress",
           summary: args.summary,
@@ -1766,7 +1867,7 @@ function goalTools(dir, goalService, hostSessionID) {
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID4(),
+          eventID: randomUUID5(),
           goalID: goal.id,
           type: "goal.completed",
           summary: args.summary,
@@ -1818,7 +1919,7 @@ function goalTools(dir, goalService, hostSessionID) {
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID4(),
+          eventID: randomUUID5(),
           goalID: goal.id,
           type: "goal.blocked",
           reason: args.reason,

@@ -49,6 +49,23 @@ export interface UpdateGoalCommand extends BaseCommand {
   }
 }
 
+// ─── Worker Interaction ──────────────────────────────────────────────────────
+
+export interface SendCommand extends BaseCommand {
+  command: "send"
+  args: { message: string }
+}
+
+export interface ForceCompleteCommand extends BaseCommand {
+  command: "force_complete"
+  args: { summary: string; evidence: string }
+}
+
+export interface ForceBlockCommand extends BaseCommand {
+  command: "block"
+  args: { reason: string; needed: string }
+}
+
 // ─── Engine Control ──────────────────────────────────────────────────────────
 
 export interface CompactCommand extends BaseCommand {
@@ -74,6 +91,9 @@ export type LoopCommand =
   | ResumeGoalCommand
   | RetryGoalCommand
   | ClearGoalCommand
+  | SendCommand
+  | ForceCompleteCommand
+  | ForceBlockCommand
   | UpdateGoalCommand
   | CompactCommand
   | InspectCommand

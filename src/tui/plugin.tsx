@@ -29,7 +29,7 @@ const tui: TuiPlugin = async (api) => {
       },
     ],
     bindings: [
-      { key: "ctrl+alt+l", cmd: "opencode.loopd.dashboard", desc: "Open loop dashboard" },
+      { key: "ctrl+l", cmd: "opencode.loopd.dashboard", desc: "Open loop dashboard" },
     ],
   })
 

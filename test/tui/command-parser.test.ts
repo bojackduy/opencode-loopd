@@ -67,7 +67,7 @@ describe("Command Parser", () => {
   it("commandHelp returns a string", () => {
     const help = commandHelp()
     expect(typeof help).toBe("string")
-    expect(help).toContain(":goal start")
+    expect(help).toContain(":send")
     expect(help).toContain(":pause")
     expect(help).toContain(":help")
   })
