@@ -1,32 +1,31 @@
 {
+  "$schema": "https://json.schemastore.org/package.json",
   "name": "@bojackduy/opencode-loopd",
   "version": "1.0.0",
-  "description": "Codex-inspired goal engine for OpenCode with modal TUI dashboard.",
+  "description": "Codex-inspired background goal engine for OpenCode — autonomous child sessions, engine-driven loop, and modal TUI dashboard",
   "type": "module",
-  "exports": {
-    "./server": "./dist/server.js",
-    "./tui": "./dist/tui.js"
+  "license": "AGPL-3.0-only",
+  "private": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bojackduy/opencode-loopd.git"
   },
-  "scripts": {
-    "typecheck": "tsc --noEmit",
-    "build:server": "bun build src/server/plugin.ts --outfile dist/server.js --target bun --external @opencode-ai/plugin --external @opencode-ai/plugin/tool",
-    "build:tui": "bun scripts/build-tui.ts",
-    "build": "bun run build:server && bun run build:tui",
-    "clean": "rm -rf dist",
-    "prepack": "npm run typecheck && npm test && npm run build",
-    "test": "bun test"
+  "homepage": "https://github.com/bojackduy/opencode-loopd#readme",
+  "bugs": {
+    "url": "https://github.com/bojackduy/opencode-loopd/issues"
   },
-  "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.4.0 <2"
-  },
-  "devDependencies": {
-    "@opencode-ai/plugin": "^1.18.15",
-    "@opentui/core": "latest",
-    "@opentui/solid": "latest",
-    "@types/node": "^26.2.0",
-    "solid-js": "^1.9.13",
-    "typescript": "^5.7.0"
-  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "tui",
+    "loop",
+    "goal",
+    "background",
+    "automation",
+    "worker",
+    "subagent",
+    "opencode-loopd"
+  ],
   "bin": {
     "opencode-loopd": "./scripts/install-node.mjs"
   },
@@ -34,7 +33,50 @@
     "dist",
     "scripts",
     "skills",
-    "commands"
+    "commands",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
   ],
-  "license": "MIT"
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "exports": {
+    "./server": {
+      "import": "./dist/server.js"
+    },
+    "./tui": {
+      "import": "./dist/tui.js"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build:server": "bun build src/server/plugin.ts --outfile dist/server.js --target bun --external @opencode-ai/plugin --external @opencode-ai/plugin/tool",
+    "build:tui": "bun scripts/build-tui.ts",
+    "build": "bun run build:server && bun run build:tui",
+    "clean": "rm -rf dist",
+    "prepack": "bun run typecheck && bun test && bun run build",
+    "test": "bun test",
+    "release:patch": "bun run typecheck && bun test && npm version patch -m \"chore: release %s\" && git push && git push origin $(git describe --tags --abbrev=0)",
+    "release:minor": "bun run typecheck && bun test && npm version minor -m \"chore: release %s\" && git push && git push origin $(git describe --tags --abbrev=0)",
+    "release:major": "bun run typecheck && bun test && npm version major -m \"chore: release %s\" && git push && git push origin $(git describe --tags --abbrev=0)"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.4.0 <2",
+    "@opentui/core": "*",
+    "@opentui/solid": "*",
+    "solid-js": "*"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.18.15",
+    "@opentui/core": "^0.4.1",
+    "@opentui/solid": "^0.4.1",
+    "@types/bun": "^1.3.14",
+    "@types/node": "^26.2.0",
+    "solid-js": "^1.9.13",
+    "typescript": "^5.7.0"
+  }
 }

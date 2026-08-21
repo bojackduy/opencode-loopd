@@ -20,10 +20,19 @@ Add to `~/.config/opencode/opencode.jsonc`:
 }
 ```
 
-### npx (coming soon)
+### npx (recommended)
 
 ```bash
-npx -y opencode-loopd
+npx -y @bojackduy/opencode-loopd@latest
+```
+
+Run the same command again to update. Then restart OpenCode.
+
+### npm global
+
+```bash
+npm install -g @bojackduy/opencode-loopd@latest
+opencode-loopd
 ```
 
 Then restart OpenCode.
@@ -126,4 +135,4 @@ Goals accept these config options:
 
 ## License
 
-MIT
+AGPL-3.0-only — see [LICENSE](./LICENSE).
