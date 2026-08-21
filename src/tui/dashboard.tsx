@@ -13,6 +13,7 @@ import type { StoreState } from "../infrastructure/state-repository"
 import type { Goal, GoalStatus } from "../domain/goal"
 import type { GoalRuntimeState, RuntimePhase } from "../domain/runtime"
 import { parseCommand, commandHelp } from "./command-parser"
+import { bugReportUrl, openBrowserUrl } from "../browser"
 import { randomUUID } from "crypto"
 
 const LOG_FILE = "/tmp/loopd-tui.log"
@@ -217,6 +218,15 @@ export function LoopDashboard(props: Props) {
       }
       return
     }
+    if (key === "B") {
+      prevent(evt)
+      const goal = selectedGoal()
+      const extra = goal ? `Goal: ${goal.name} (${goal.id.slice(0,8)}) status=${goal.status} objective=${goal.objective.slice(0,120)}` : "No goal selected"
+      const url = bugReportUrl({ runtimeLabel: `opencode-loopd dashboard`, extra })
+      const res = openBrowserUrl(url)
+      setStatusText(res.status === "opened" ? "Opening bug report in browser…" : `Could not open browser: ${res.reason} — ${url}`)
+      return
+    }
     if (key === "q") { prevent(evt); props.api.ui.dialog.clear(); return }
   })
 
@@ -266,6 +276,15 @@ export function LoopDashboard(props: Props) {
         case "clear": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "clear", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
         // Legacy: keep :goal start but redirect — creation belongs in parent chat
         case "goal": { setStatusText("Create goals via /goal in the parent chat (agent clarifies first). Dashboard: :send to steer the worker."); break }
+        case "bug":
+        case "report": {
+          const goal = selectedGoal()
+          const extra = goal ? `Goal: ${goal.name} (${goal.id.slice(0,8)}) status=${goal.status} objective=${goal.objective.slice(0,120)}` : "No goal selected"
+          const url = bugReportUrl({ runtimeLabel: `opencode-loopd dashboard`, extra })
+          const res = openBrowserUrl(url)
+          setStatusText(res.status === "opened" ? "Opening bug report in browser…" : `Could not open browser: ${res.reason} — ${url}`)
+          break
+        }
         case "logs": setShowLogs(!showLogs()); break
         case "help": setShowHelp(true); break
         case "q": case "close": props.api.ui.dialog.clear(); return
@@ -314,7 +333,7 @@ export function LoopDashboard(props: Props) {
           <Show when={showHelp()}>
             <box flexDirection="column" padding={1} border={true} borderColor="yellow" backgroundColor={theme().background} flexShrink={0} maxHeight={14} overflow="hidden">
               <text>
-                <span style={{ fg: "yellow", bold: true }}>━━━ Keys: ? toggle  : insert  Ctrl+N normal  o open  q close ━━━</span>
+                <span style={{ fg: "yellow", bold: true }}>━━━ Keys: ? toggle  : insert  Ctrl+N normal  o open  B bug  q close ━━━</span>
                 <For each={commandHelp().split("\n")}>{(line) => {
                   const isHeader = line.startsWith("Modes:") || line.startsWith("Nav:") || line.startsWith("Commands")
                   const isCmd = line.trim().startsWith(":")

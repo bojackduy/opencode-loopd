@@ -15,6 +15,6 @@ When you have enough to write a concrete objective:
    - `checks` — optional shell commands that must pass before the goal can be marked complete (e.g. `["npm test"]`)
    - `progressFile` — optional path to a markdown progress file
    - limits — optional `maxTurns`, `maxNoProgress`, `maxFailures`, `compactEvery`, `timeoutMs`
-2. After it returns, tell the user the goal is running in the background and they can monitor it with `/loop` (or Ctrl+L).
+2. After it returns, tell the user the goal is running in the background and they can monitor it with `/loop` (or <leader>d).
 
 Important: the worker session runs autonomously — do not try to do the goal's work in this chat. This chat only creates the goal.

@@ -82,7 +82,7 @@ function tokenize(input: string): string[] {
 
 export function commandHelp(): string {
   return [
-    "Modes: : insert → send/commands, Ctrl+N → normal, ? toggle help",
+    "Modes: : insert → send/commands, Ctrl+N → normal, ? toggle help, Shift+B bug report",
     "Nav: j/k move │ g/G top/bottom │ o open child │ p/r/R/x pause/resume/retry/clear │ L logs │ q close",
     "Commands (insert mode, : prefix):",
     "  :send <message>                           Send instruction to selected goal",
@@ -90,6 +90,7 @@ export function commandHelp(): string {
     "  :force <summary> --evidence <text>        Force-complete (bypass checks)",
     "  :block <reason> --needed <text>           Force-block the selected goal",
     "  :pause / :resume / :retry / :clear        Quick controls (also p/r/R/x)",
+    "  :bug / :report                            Open prefilled GitHub bug report",
     "  :logs / :help / :q                        Toggle logs / help / close",
     "  Tip: create goals via /goal in the parent chat (agent clarifies first).",
   ].join("\n")

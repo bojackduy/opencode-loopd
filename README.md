@@ -11,7 +11,7 @@
 
 ![Loop Dashboard — modal TUI with goals, running indicator, and insert mode](assets/demo.png)
 
-*Modal dashboard (`/loop` / `Ctrl+L`): zero chat pollution — keys are trapped inside the dialog, NORMAL vs INSERT modes, vivid per-status coloring.*
+*Modal dashboard (`/loop` / `<leader>d`): zero chat pollution — keys are trapped inside the dialog, NORMAL vs INSERT modes, vivid per-status coloring.*
 
 ## Why opencode-loopd
 
@@ -19,7 +19,7 @@
 - **Codex-style engine-driven loop** — idle detection → continuation steering with accumulated context (progress history, transcript tail, inbox). No prompt spam in the parent.
 - **Parent ↔ child visibility** — `list/inspect/read_transcript/send_input` give the parent full observability. Bidirectional inbox lets you steer mid-run.
 - **Safe by default** — per-goal artifact isolation (`.opencode/loopd/goals/<id>/`), `maxTurns`/`maxFailures`/`maxNoProgress`, force-finish → semantic `complete_goal` summary → parent notification via wake-up injection.
-- **Modal TUI dashboard** — `Ctrl+L` or `/loop` opens a focused dialog (no leak to chat prompt). Vim-style navigation, live running indicator, per-status borders.
+- **Modal TUI dashboard** — `<leader>d` or `/loop` opens a focused dialog (no leak to chat prompt). Vim-style navigation, live running indicator, per-status borders.
 
 Keywords: `opencode` `opencode-plugin` `background-agent` `autonomous` `subagent` `loop` `goal` `tui` `codex` `claude-code` `worker`
 
@@ -49,7 +49,7 @@ Add the package to **both** configs.
 }
 ```
 
-Then restart OpenCode. Verify with `/loop` (palette → Loop Dashboard) or `Ctrl+L`.
+Then restart OpenCode. Verify with `/loop` (palette → Loop Dashboard) or `<leader>d`.
 
 For a local checkout:
 
@@ -126,7 +126,7 @@ The agent will clarify (what/where/how to verify) and then call `loopd_create_go
 
 ### 2. Monitor with dashboard — `/loop`
 
-Press **`Ctrl+L`** or open the command palette → **"Loop Dashboard"** (also `/loop`).
+Press **`<leader>d`** or open the command palette → **"Loop Dashboard"** (also `/loop`).
 
 Dashboard (NORMAL / INSERT `:`):
 
@@ -168,14 +168,31 @@ Completion is semantic: the child writes the summary; the plugin forwards it to 
 ## Architecture
 
 ```
-Main session (parent)
-  ↕  owner tools: inspect, steer, pause — via inbox
-Loopd engine (plugin server)
-  ↕  continuation steering + accumulated context
-  ↕  parent notification on complete/block (wake-up inject)
-Child worker session (subagent)
-  ↕  goal tools: progress, complete, block, question
-  •  artifacts isolated: .opencode/loopd/goals/<goal-id>/
+                        ┌─────────────────────────┐
+                        │  Main session (parent)  │
+                        │  owner tools            │
+                        │  inspect / steer / pause│
+                        └────────────┬────────────┘
+                                     │  inbox → child
+                                     │  wake-up ← engine
+             ┌───────────────────────┼───────────────────────┐
+             ▼                       ▼                       ▼
+        ┌─────────┐           ┌──────────┐            ┌─────────┐
+        │  Goal A │           │  Goal B  │            │  Goal C │
+        │ active  │           │ blocked  │            │  paused │
+        └────┬────┘           └────┬─────┘            └────┬────┘
+             │                     │                       │
+             └─────────────────────┼───────────────────────┘
+                                   │
+                     ┌─────────────┴─────────────┐
+                     ▼                           ▼
+              Loopd engine  ──────────►   Child worker (subagent)
+              (plugin server)  steering   get_goal / report / complete
+                 │  lease / retry / polling       │  block / question
+                 │  force-finish / notify         ▼
+                 │                         .opencode/loopd/goals/<id>/
+                 │                           progress.md / artifacts
+                 └─────────────────────────────────┘
 ```
 
 - **Engine-driven loop** (like Codex): `session.idle` → lease + retry + polling → re-prompt child. Not a parent-driven re-prompt machine.

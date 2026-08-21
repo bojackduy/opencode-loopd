@@ -246,7 +246,7 @@ function tokenize(input) {
 }
 function commandHelp() {
   return [
-    "Modes: : insert \u2192 send/commands, Ctrl+N \u2192 normal, ? toggle help",
+    "Modes: : insert \u2192 send/commands, Ctrl+N \u2192 normal, ? toggle help, Shift+B bug report",
     "Nav: j/k move \u2502 g/G top/bottom \u2502 o open child \u2502 p/r/R/x pause/resume/retry/clear \u2502 L logs \u2502 q close",
     "Commands (insert mode, : prefix):",
     "  :send <message>                           Send instruction to selected goal",
@@ -254,10 +254,85 @@ function commandHelp() {
     "  :force <summary> --evidence <text>        Force-complete (bypass checks)",
     "  :block <reason> --needed <text>           Force-block the selected goal",
     "  :pause / :resume / :retry / :clear        Quick controls (also p/r/R/x)",
+    "  :bug / :report                            Open prefilled GitHub bug report",
     "  :logs / :help / :q                        Toggle logs / help / close",
     "  Tip: create goals via /goal in the parent chat (agent clarifies first)."
   ].join(`
 `);
+}
+
+// src/browser.ts
+import { spawn } from "child_process";
+var LOOPD_ISSUES_URL = "https://github.com/bojackduy/opencode-loopd/issues/new";
+function bugReportUrl(context = {}) {
+  const url = new URL(LOOPD_ISSUES_URL);
+  url.searchParams.set("title", "bug: ");
+  url.searchParams.set("body", [
+    "## What happened?",
+    "",
+    "Describe the unexpected behavior.",
+    "",
+    "## What did you expect?",
+    "",
+    "Describe the expected behavior.",
+    "",
+    "## Steps to reproduce",
+    "",
+    "1. ",
+    "2. ",
+    "3. ",
+    "",
+    "## Environment",
+    "",
+    `- opencode-loopd version: ${context.runtimeLabel ?? ""}`,
+    `- OS: ${process.platform}`,
+    "- Terminal:",
+    "- Installation: npm / source",
+    context.extra ? `
+## Goal context
+
+${context.extra}
+` : "",
+    "Do not include secrets, API tokens, or .opencode/loopd contents."
+  ].join(`
+`));
+  return url.toString();
+}
+function openBrowserUrl(value, options = {}) {
+  try {
+    const url = normalizeBrowserUrl(value);
+    const command = browserCommandForUrl(url, options.platform);
+    const launch = options.launch ?? launchBrowserCommand;
+    launch(command.command, command.args);
+    return { status: "opened", url };
+  } catch (error) {
+    return { status: "blocked", reason: error instanceof Error ? error.message : "Could not open the browser." };
+  }
+}
+function browserCommandForUrl(value, platform = process.platform) {
+  const url = normalizeBrowserUrl(value);
+  if (platform === "darwin")
+    return { command: "open", args: [url] };
+  if (platform === "linux")
+    return { command: "xdg-open", args: [url] };
+  if (platform === "win32")
+    return { command: "cmd.exe", args: ["/d", "/s", "/c", `start "" "${url}"`] };
+  throw new Error(`Opening a browser is not supported on ${platform}.`);
+}
+function normalizeBrowserUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("The selected page does not have a valid browser URL.");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:")
+    throw new Error("Only http and https page URLs can be opened in a browser.");
+  return url.toString();
+}
+function launchBrowserCommand(command, args) {
+  const child = spawn(command, args, { detached: true, stdio: "ignore" });
+  child.unref();
 }
 
 // src/tui/dashboard.tsx
@@ -548,6 +623,18 @@ function LoopDashboard(props) {
       }
       return;
     }
+    if (key === "B") {
+      prevent(evt);
+      const goal = selectedGoal();
+      const extra = goal ? `Goal: ${goal.name} (${goal.id.slice(0, 8)}) status=${goal.status} objective=${goal.objective.slice(0, 120)}` : "No goal selected";
+      const url = bugReportUrl({
+        runtimeLabel: `opencode-loopd dashboard`,
+        extra
+      });
+      const res = openBrowserUrl(url);
+      setStatusText(res.status === "opened" ? "Opening bug report in browser\u2026" : `Could not open browser: ${res.reason} \u2014 ${url}`);
+      return;
+    }
     if (key === "q") {
       prevent(evt);
       props.api.ui.dialog.clear();
@@ -721,6 +808,18 @@ function LoopDashboard(props) {
           setStatusText("Create goals via /goal in the parent chat (agent clarifies first). Dashboard: :send to steer the worker.");
           break;
         }
+        case "bug":
+        case "report": {
+          const goal = selectedGoal();
+          const extra = goal ? `Goal: ${goal.name} (${goal.id.slice(0, 8)}) status=${goal.status} objective=${goal.objective.slice(0, 120)}` : "No goal selected";
+          const url = bugReportUrl({
+            runtimeLabel: `opencode-loopd dashboard`,
+            extra
+          });
+          const res = openBrowserUrl(url);
+          setStatusText(res.status === "opened" ? "Opening bug report in browser\u2026" : `Could not open browser: ${res.reason} \u2014 ${url}`);
+          break;
+        }
         case "logs":
           setShowLogs(!showLogs());
           break;
@@ -828,7 +927,7 @@ function LoopDashboard(props) {
         _$setProp(_el$26, "maxHeight", 14);
         _$setProp(_el$26, "overflow", "hidden");
         _$insertNode(_el$27, _el$28);
-        _$insertNode(_el$28, _$createTextNode(`\u2501\u2501\u2501 Keys: ? toggle : insert Ctrl+N normal o open q close \u2501\u2501\u2501`));
+        _$insertNode(_el$28, _$createTextNode(`\u2501\u2501\u2501 Keys: ? toggle : insert Ctrl+N normal o open B bug q close \u2501\u2501\u2501`));
         _$setProp(_el$28, "style", {
           fg: "yellow",
           bold: true
@@ -1464,7 +1563,7 @@ var tui = async (api) => {
       run: open
     }],
     bindings: [{
-      key: "ctrl+l",
+      key: "<leader>d",
       cmd: "opencode.loopd.dashboard",
       desc: "Open loop dashboard"
     }]

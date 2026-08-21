@@ -51,7 +51,7 @@ loopd_create_goal({
 })
 ```
 
-The goal starts immediately. The user can monitor it via `/loop` (Ctrl+L).
+The goal starts immediately. The user can monitor it via `/loop` (<leader>d).
 
 ## Worker Tools (Running Inside the Goal)
 
@@ -131,7 +131,7 @@ Sends a message to the worker's next turn. See table above.
 
 ## Dashboard Commands
 
-Open the dashboard with `/loop` or Ctrl+L.
+Open the dashboard with `/loop` or <leader>d.
 
 ### Keyboard Shortcuts (Normal Mode)
 

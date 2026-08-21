@@ -73,7 +73,7 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
               workerSessionID: worker.workerSessionID,
               artifactDir: goal.config.artifactDir,
               name: args.name,
-              message: `Goal "${args.name}" created and started in the background. Artifacts: ${goal.config.artifactDir}. Monitor with /loop (Ctrl+L).`,
+              message: `Goal "${args.name}" created and started in the background. Artifacts: ${goal.config.artifactDir}. Monitor with /loop (<leader>d).`,
             }),
           }
         } catch (error) {
