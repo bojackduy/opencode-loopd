@@ -1,5 +1,6 @@
 // ─── TUI: Dashboard Component ────────────────────────────────────────────────
 // Modal dashboard — single always-focused input traps keys, no leak to chat.
+// Scrollable sections with input always visible at bottom.
 
 /** @jsxImportSource @opentui/solid */
 import { createSignal, For, Show, onCleanup, onMount, createEffect } from "solid-js"
@@ -39,6 +40,7 @@ function statusColor(status: GoalStatus, theme: TuiThemeCurrent) {
     case "active": return theme.success
     case "paused": return theme.warning
     case "blocked": return theme.error
+    case "awaiting_user": return theme.warning
     case "complete": return theme.info
     case "budget_limited": return theme.accent
     case "usage_limited": return theme.accent
@@ -59,6 +61,7 @@ function statusIcon(status: GoalStatus): string {
     case "active": return "●"
     case "paused": return "❚❚"
     case "blocked": return "✖"
+    case "awaiting_user": return "?"
     case "complete": return "✓"
     case "budget_limited": return "$"
     case "usage_limited": return "⏰"
@@ -80,7 +83,7 @@ export function LoopDashboard(props: Props) {
   const [mode, setMode] = createSignal<Mode>("normal")
   const [selected, setSelected] = createSignal(0)
   const [commandInput, setCommandInput] = createSignal("")
-  const [statusText, setStatusText] = createSignal("Press : to create, ? help, q close")
+  const [statusText, setStatusText] = createSignal("Press : to insert, ? help, x:clear, q close")
   const [state, setState] = createSignal<StoreState | null>(null)
   const [events, setEvents] = createSignal<Record<string, unknown>[]>([])
   const [selectedGoal, setSelectedGoal] = createSignal<Goal | null>(null)
@@ -149,7 +152,6 @@ export function LoopDashboard(props: Props) {
     focusInput()
   }
 
-  // Help visibility is independent of editing mode, so it can stay open while typing.
   useKeyboard((evt: ParsedKey) => {
     const name = evt.name || ""
     const seq = (evt as unknown as { sequence?: string }).sequence || ""
@@ -246,72 +248,81 @@ export function LoopDashboard(props: Props) {
   return (
     <box flexDirection="column" width="100%" alignItems="center" padding={1}>
       <box flexDirection="column" width="90%" border={true} borderColor="gray" padding={1}>
+        {/* Header — always visible */}
         <box flexDirection="row" padding={0} flexShrink={0}>
-          <text>
-            <span style={{ fg: theme().primary, bold: true }}>Loop Dashboard</span>
-            <span style={{ fg: theme().textMuted }}>{" │ "}</span>
-            <span style={{ fg: mode() === "normal" ? theme().success : theme().warning }}>{mode().toUpperCase()}</span>
-            <span style={{ fg: theme().textMuted }}>{" │ goals: "}</span><span style={{ fg: theme().text }}>{activeGoals().length}</span>
-            <span style={{ fg: theme().textMuted }}>{" │ "}</span><span style={{ fg: runningCount() > 0 ? theme().success : theme().textMuted, bold: runningCount() > 0 }}>{runningCount() > 0 ? runningFrame() : "○"} {runningCount()} RUNNING</span>
-            <span style={{ fg: theme().textMuted }}>{" │ verified: "}</span><span style={{ fg: theme().info }}>{state()?.goals.filter((g) => g.status === "complete").length || 0}</span>
-          </text>
+          <text fg={theme().primary} bold={true}>Loop Dashboard</text>
+          <text fg={theme().textMuted}>{" │ "}</text>
+          <text fg={mode() === "normal" ? theme().success : theme().warning}>{mode().toUpperCase()}</text>
+          <text fg={theme().textMuted}>{" │ goals: "}</text>
+          <text fg={theme().text}>{activeGoals().length}</text>
+          <text fg={theme().textMuted}>{" │ "}</text>
+          <text fg={runningCount() > 0 ? theme().success : theme().textMuted} bold={runningCount() > 0}>{runningCount() > 0 ? runningFrame() : "○"} {runningCount()} RUNNING</text>
+          <text fg={theme().textMuted}>{" │ verified: "}</text>
+          <text fg={theme().info}>{state()?.goals.filter((g) => g.status === "complete").length || 0}</text>
         </box>
 
-        <Show when={showHelp()}>
-          <box flexDirection="column" padding={1} minHeight={12} border={true} borderColor="yellow" backgroundColor={theme().background} flexShrink={0}>
-            <text><span style={{ fg: "yellow", bold: true }}>━━━ Keyboard Shortcuts — ? toggle, : insert, Ctrl+N normal ━━━</span></text>
-            <For each={commandHelp().split("\n")}>{(line) => <text><span style={{ fg: theme().text }}>{line}</span></text>}</For>
-          </box>
-        </Show>
+        {/* Scrollable body — grows, hides overflow */}
+        <box flexDirection="column" flexGrow={1} minHeight={0} overflow="hidden">
+          {/* Help panel — bounded, clipped */}
+          <Show when={showHelp()}>
+            <box flexDirection="column" padding={1} border={true} borderColor="yellow" backgroundColor={theme().background} flexShrink={0} maxHeight={12} overflow="hidden">
+              <text fg="yellow" bold={true}>━━━ Keyboard Shortcuts — ? toggle, : insert, Ctrl+N normal ━━━</text>
+              <text fg={theme().text}>{commandHelp()}</text>
+            </box>
+          </Show>
 
-        <box flexDirection="column" flexGrow={1} padding={1} minHeight={5}>
-          <Show when={activeGoals().length > 0} fallback={<text><span style={{ fg: theme().textMuted }}>No active goals. Press : to create one.</span></text>}>
-            <For each={activeGoals()}>
-              {(goal, i) => {
-                const runtime = () => state()?.runtimes.find((r) => r.goalID === goal.id)
-                const isActive = () => i() === selected()
-                return (
-                  <box flexDirection="row" paddingLeft={1} paddingRight={1} backgroundColor={isActive() ? theme().backgroundElement : undefined}>
-                    <text>
-                      <span style={{ fg: statusColor(goal.status, theme()), bold: isActive() }}>{statusIcon(goal.status)} {goal.name}</span><span style={{ fg: theme().textMuted }}>{" │ "}</span><span style={{ fg: statusColor(goal.status, theme()) }}>{goal.status}</span>
-                      {runtime() && <><span style={{ fg: theme().textMuted }}>{" │ "}</span><span style={{ fg: runtime()!.phase === "running" ? theme().success : theme().text, bold: runtime()!.phase === "running" }}>{runtime()!.phase === "running" ? runningFrame() : phaseIcon(runtime()!.phase)} {runtime()!.phase.toUpperCase()} turn {runtime()!.turnCount}</span><span style={{ fg: theme().textMuted }}> {ageLabel(runtime()!.lastProgressAt || runtime()!.lastRunAt, clock())}</span>{runtime()!.consecutiveFailures > 0 && <span style={{ fg: theme().error }}>{" │ "}{runtime()!.consecutiveFailures} failures</span>}</>}
-                    </text>
-                  </box>
-                )
-              }}
-            </For>
+          {/* Goal list — takes remaining space, clipped */}
+          <box flexDirection="column" flexGrow={1} padding={1} minHeight={0} overflow="hidden">
+            <Show when={activeGoals().length > 0} fallback={<text fg={theme().textMuted}>No active goals. Press : to create.</text>}>
+              <For each={activeGoals()}>
+                {(goal, i) => {
+                  const runtime = () => state()?.runtimes.find((r) => r.goalID === goal.id)
+                  const isActive = () => i() === selected()
+                  const line = () => {
+                    const parts = [`${statusIcon(goal.status)} ${goal.name}`, goal.status]
+                    if (runtime()) parts.push(`${runtime()!.phase === "running" ? runningFrame() : phaseIcon(runtime()!.phase)} ${runtime()!.phase.toUpperCase()} turn ${runtime()!.turnCount}`, ageLabel(runtime()!.lastProgressAt || runtime()!.lastRunAt, clock()))
+                    if (runtime()!.consecutiveFailures > 0) parts.push(`${runtime()!.consecutiveFailures} failures`)
+                    return parts.join(" │ ")
+                  }
+                  return (
+                    <box flexDirection="row" paddingLeft={1} paddingRight={1} backgroundColor={isActive() ? theme().backgroundElement : undefined}>
+                      <text fg={statusColor(goal.status, theme())} bold={isActive()}>{line()}</text>
+                    </box>
+                  )
+                }}
+              </For>
+            </Show>
+          </box>
+
+          {/* Goal detail — fixed, bounded */}
+          <Show when={selectedGoal()}>
+            {(goal) => (
+              <box flexDirection="column" border={true} borderColor={goal().status === "awaiting_user" ? theme().warning : "gray"} padding={1} flexShrink={0} maxHeight={6}>
+                <text fg={theme().primary} bold={true}>{goal().name}{goal().status === "awaiting_user" ? " WAITING FOR YOU" : ""}</text>
+                <text fg={theme().textMuted}>{goal().objective.slice(0, 120)}</text>
+                {goal().question && <text fg={theme().warning}>Q: {goal().question!.text}</text>}
+                {goal().lastProgress && <text fg={theme().textMuted}>last: {goal().lastProgress!.summary.slice(0, 80)}</text>}
+                {goal().blocker && <text fg={theme().error}>blocked: {goal().blocker!.reason.slice(0, 140)}</text>}
+              </box>
+            )}
+          </Show>
+
+          {/* Logs — bounded, clipped */}
+          <Show when={showLogs() && events().length > 0}>
+            <box flexDirection="column" border={true} borderColor="gray" padding={1} maxHeight={6} flexShrink={0} overflow="hidden">
+              <text fg={theme().primary} bold={true}>Recent Events</text>
+              <For each={events().slice(-10)}>{(event) => <text fg={theme().textMuted}>{(event as any).type} {(event as any).goalID?.slice(0, 8)}</text>}</For>
+            </box>
           </Show>
         </box>
 
-        <Show when={selectedGoal()}>
-          {(goal) => (
-            <box flexDirection="column" border={true} borderColor={goal().status === "awaiting_user" ? theme().warning : "gray"} padding={1} flexShrink={0}>
-              <text><span style={{ fg: theme().primary, bold: true }}>{goal().name}</span>{goal().status === "awaiting_user" && <span style={{ fg: theme().warning, bold: true }}> {" "}WAITING FOR YOU</span>}</text>
-              <text><span style={{ fg: theme().textMuted }}>{goal().objective.slice(0, 120)}</span></text>
-              {goal().workerSessionID && <text><span style={{ fg: theme().textMuted }}>worker: {goal().workerSessionID} · last activity {ageLabel(state()?.runtimes.find((runtime) => runtime.goalID === goal().id)?.lastProgressAt || state()?.runtimes.find((runtime) => runtime.goalID === goal().id)?.lastRunAt, clock())}</span></text>}
-              {goal().config.progressFile && <text><span style={{ fg: theme().textMuted }}>progress: {goal().config.progressFile}</span></text>}
-              {goal().question && <text><span style={{ fg: theme().warning }}>QUESTION: {goal().question!.text}</span></text>}
-              {goal().question && <text><span style={{ fg: theme().textMuted }}>needs: {goal().question!.needed} — type :answer in insert mode</span></text>}
-              {goal().lastProgress && <text><span style={{ fg: theme().textMuted }}>last progress: {goal().lastProgress!.summary.slice(0, 80)}</span></text>}
-              {goal().blocker && <text><span style={{ fg: theme().error }}>blocked: {goal().blocker!.reason.slice(0, 140)}</span></text>}
-              {state()?.runtimes.find((runtime) => runtime.goalID === goal().id)?.lastError && <text><span style={{ fg: theme().error }}>error: {state()!.runtimes.find((runtime) => runtime.goalID === goal().id)!.lastError!.slice(0, 140)}</span></text>}
-            </box>
-          )}
-        </Show>
-
-        <Show when={showLogs() && events().length > 0}>
-          <box flexDirection="column" border={true} borderColor="gray" padding={1} maxHeight={8} flexShrink={0}>
-            <text><span style={{ fg: theme().primary, bold: true }}>Recent Events</span></text>
-            <For each={events().slice(-10)}>{(event) => <text><span style={{ fg: theme().textMuted }}>{(event as any).type} {(event as any).goalID?.slice(0, 8)}</span></text>}</For>
-          </box>
-        </Show>
-
+        {/* Input — always visible at bottom */}
         <box flexDirection="row" border={true} borderColor={mode() === "insert" ? theme().warning : "gray"} paddingLeft={1} paddingRight={1} flexShrink={0} height={3} gap={1}>
-          <text><span style={{ fg: mode() === "insert" ? theme().warning : theme().success, bold: true }}>{mode() === "insert" ? "INSERT :" : "NORMAL"}</span></text>
+          <text fg={mode() === "insert" ? theme().warning : theme().success} bold={true}>{mode() === "insert" ? "INSERT :" : "NORMAL"}</text>
           <input
             ref={(el: InputRenderable) => { inputEl = el; focusInput() }}
             flexGrow={1}
-            placeholder={mode() === "insert" ? "goal start my-goal --objective ...  (Ctrl+N: normal)" : statusText() || "Press : to insert, ? help, q close — j/k move p pause r resume"}
+            placeholder={mode() === "insert" ? "goal start my-goal --objective ...  (Ctrl+N: normal)" : statusText() || "Press : to insert, ? help, q close"}
             placeholderColor={theme().textMuted}
             cursorColor={theme().primary}
             focusedTextColor={theme().text}
