@@ -310,21 +310,22 @@ export function LoopDashboard(props: Props) {
 
         {/* Scrollable body — grows, hides overflow */}
         <box flexDirection="column" flexGrow={1} minHeight={0} overflow="hidden">
-          {/* Help panel — bounded, clipped, richer */}
+          {/* Help panel — single text to avoid flex overlap */}
           <Show when={showHelp()}>
             <box flexDirection="column" padding={1} border={true} borderColor="yellow" backgroundColor={theme().background} flexShrink={0} maxHeight={14} overflow="hidden">
               <text>
                 <span style={{ fg: "yellow", bold: true }}>━━━ Keys: ? toggle  : insert  Ctrl+N normal  o open  q close ━━━</span>
+                <For each={commandHelp().split("\n")}>{(line) => {
+                  const isHeader = line.startsWith("Modes:") || line.startsWith("Nav:") || line.startsWith("Commands")
+                  const isCmd = line.trim().startsWith(":")
+                  return (
+                    <>
+                      {"\n"}
+                      <span style={{ fg: isHeader ? theme().primary : isCmd ? theme().warning : theme().text, bold: isHeader }}>{line}</span>
+                    </>
+                  )
+                }}</For>
               </text>
-              <For each={commandHelp().split("\n")}>{(line) => {
-                const isHeader = line.startsWith("Modes:") || line.startsWith("Nav:") || line.startsWith("Commands")
-                const isCmd = line.trim().startsWith(":")
-                return (
-                  <text>
-                    <span style={{ fg: isHeader ? theme().primary : isCmd ? theme().warning : theme().text, bold: isHeader }}>{line}</span>
-                  </text>
-                )
-              }}</For>
             </box>
           </Show>
 
