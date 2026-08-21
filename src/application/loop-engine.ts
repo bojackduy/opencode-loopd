@@ -139,8 +139,8 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     // Update worker session cache
     if (goal.workerSessionID) knownWorkerSessions.add(goal.workerSessionID)
 
-    // Skip terminal or paused goals
-    if (isTerminal(goal.status) || goal.status === "paused") return false
+    // Skip terminal, paused, or awaiting_user goals
+    if (isTerminal(goal.status) || goal.status === "paused" || goal.status === "awaiting_user") return false
 
     switch (type) {
       case "session.idle":
@@ -446,12 +446,12 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     const state = await readState(directory)
     // FAST PATH: skip if no active goals
     const hasActiveGoals = state.goals.some(
-      (g) => !isTerminal(g.status) && g.status !== "paused",
+      (g) => !isTerminal(g.status) && g.status !== "paused" && g.status !== "awaiting_user",
     )
     if (!hasActiveGoals) return
 
     for (const goal of state.goals) {
-      if (isTerminal(goal.status) || goal.status === "paused") continue
+      if (isTerminal(goal.status) || goal.status === "paused" || goal.status === "awaiting_user") continue
 
       const runtime = state.runtimes.find((r) => r.goalID === goal.id)
       if (!runtime) continue

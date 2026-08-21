@@ -13,8 +13,9 @@ Call get_goal to retrieve the authoritative objective, current state, acceptance
 - Call report_goal_progress if work remains.
 - Call complete_goal only if all acceptance criteria pass with concrete evidence.
 - Call block_goal only for a real external blocker requiring user intervention.
+- Call ask_user when you need clarification that only the user can provide. The goal pauses until they answer.
 
-Do not ask questions. Make reasonable assumptions. Work directly.`
+Do not ask questions unnecessarily. Make reasonable assumptions and work directly. Only ask when the ambiguity is risky.`
 
 export interface WorkerSession {
   goalID: GoalID
@@ -27,7 +28,7 @@ export interface WorkerManager {
   createWorker(goal: Goal): Promise<WorkerSession>
 
   /** Send a continuation prompt to the worker. */
-  continueWorker(worker: WorkerSession, goal: Goal, runtime: GoalRuntimeState): Promise<void>
+  continueWorker(worker: WorkerSession, goal: Goal, runtime: GoalRuntimeState, inboxMessages?: string[]): Promise<void>
 
   /** Check if the worker session is idle. */
   isIdle(workerSessionID: string): Promise<boolean>
@@ -54,8 +55,8 @@ export function createWorkerManager(host: LoopHost): WorkerManager {
       }
     },
 
-    async continueWorker(worker, goal, runtime) {
-      const prompt = buildContinuationPrompt(goal, runtime)
+    async continueWorker(worker, goal, runtime, inboxMessages) {
+      const prompt = buildContinuationPrompt(goal, runtime, inboxMessages)
       await host.promptWorker({
         sessionID: worker.workerSessionID,
         prompt,
@@ -77,7 +78,7 @@ export function createWorkerManager(host: LoopHost): WorkerManager {
   }
 }
 
-function buildContinuationPrompt(goal: Goal, runtime: GoalRuntimeState): string {
+function buildContinuationPrompt(goal: Goal, runtime: GoalRuntimeState, inboxMessages?: string[]): string {
   const parts = [CONTINUATION_PROMPT]
 
   if (runtime.turnCount > 1) {
@@ -86,6 +87,13 @@ function buildContinuationPrompt(goal: Goal, runtime: GoalRuntimeState): string 
 
   if (runtime.consecutiveFailures > 0) {
     parts.push(`\nWarning: ${runtime.consecutiveFailures} consecutive failure(s). Last error: ${runtime.lastError || "unknown"}.`)
+  }
+
+  if (inboxMessages && inboxMessages.length > 0) {
+    parts.push(`\nUser instructions since last turn:`)
+    for (const msg of inboxMessages) {
+      parts.push(`- ${msg}`)
+    }
   }
 
   return parts.join("\n")

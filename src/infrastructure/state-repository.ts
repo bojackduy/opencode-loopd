@@ -390,6 +390,48 @@ export async function recoverStaleProcessing(directory: string): Promise<Control
   }
 }
 
+// ─── Goal Inbox ─────────────────────────────────────────────────────────────
+
+interface GoalInboxMessage {
+  from: "user" | "worker"
+  text: string
+  at: string
+}
+
+function inboxFile(directory: string, goalID: string): string {
+  return path.join(loopDir(directory), "inboxes", `${goalID}.jsonl`)
+}
+
+export async function appendGoalInbox(
+  directory: string,
+  goalID: string,
+  from: "user" | "worker",
+  text: string,
+): Promise<void> {
+  const dir = path.join(loopDir(directory), "inboxes")
+  await fs.mkdir(dir, { recursive: true })
+  const msg: GoalInboxMessage = { from, text, at: new Date().toISOString() }
+  await fs.appendFile(inboxFile(directory, goalID), JSON.stringify(msg) + "\n", "utf8")
+}
+
+export async function drainGoalInbox(
+  directory: string,
+  goalID: string,
+): Promise<string[]> {
+  const file = inboxFile(directory, goalID)
+  try {
+    const raw = await fs.readFile(file, "utf8")
+    const lines = raw.trim().split("\n").filter(Boolean)
+    if (lines.length === 0) return []
+    const messages = lines.map((l) => JSON.parse(l) as GoalInboxMessage)
+    // Delete the file after draining
+    await fs.rm(file, { force: true })
+    return messages.map((m) => `[${m.from}] ${m.text}`)
+  } catch {
+    return []
+  }
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function delay(ms: number): Promise<void> {

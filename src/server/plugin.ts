@@ -8,6 +8,7 @@ import { createLoopEngine } from "../application/loop-engine"
 import { createGoalService } from "../application/goal-service"
 import { createRealHost } from "./host-adapter"
 import { goalTools } from "./goal-tools"
+import { ownerTools } from "./owner-tools"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
 
 const PLUGIN_ID = "opencode-loopd.server"
@@ -61,7 +62,7 @@ const server: Plugin = async ({ client, directory }) => {
       await engine.handleEvent(event)
       if (type?.startsWith("session.")) reconcileInBackground()
     },
-    tool: goalTools(directory, goalService),
+    tool: { ...goalTools(directory, goalService), ...ownerTools({ directory, host }) },
     "tool.execute.after": async (input, output) => {
       // Lazy start when goal tools are used
       if (input.tool === "loopd_create_goal" || input.tool === "get_goal" || input.tool === "report_goal_progress") {

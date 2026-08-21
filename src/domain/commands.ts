@@ -41,6 +41,13 @@ export interface ClearGoalCommand extends BaseCommand {
   command: "clear"
 }
 
+export interface AnswerCommand extends BaseCommand {
+  command: "answer"
+  args: {
+    answer: string
+  }
+}
+
 export interface UpdateGoalCommand extends BaseCommand {
   command: "update"
   args: {
@@ -74,6 +81,7 @@ export type LoopCommand =
   | ResumeGoalCommand
   | RetryGoalCommand
   | ClearGoalCommand
+  | AnswerCommand
   | UpdateGoalCommand
   | CompactCommand
   | InspectCommand

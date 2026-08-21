@@ -84,8 +84,8 @@ describe("Goal domain", () => {
   })
 
   describe("transition tables", () => {
-    it("model can only complete or block", () => {
-      expect(MODEL_TRANSITIONS.active).toEqual(["complete", "blocked"])
+    it("model can only complete, block, or ask user", () => {
+      expect(MODEL_TRANSITIONS.active).toEqual(["complete", "blocked", "awaiting_user"])
     })
 
     it("user can only pause/resume", () => {

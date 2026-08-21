@@ -247,12 +247,14 @@ function tokenize(input) {
 function commandHelp() {
   return [
     "Modes: : insert, Ctrl+N normal, ? toggle help",
+    "Navigation: j/k move, g/G top/bottom, o open child, L toggle logs",
     "Commands:",
     '  :goal start <name> --objective "<text>"  Create a new goal',
     "  :pause                                    Pause the selected goal",
     "  :resume                                   Resume the selected goal",
     "  :retry                                    Retry the blocked goal",
     "  :clear                                    Clear the selected goal",
+    "  :answer <text>                            Answer worker's question",
     "  :logs                                     Toggle log view",
     "  :help                                     Show this help",
     "  :q / :close                               Close dashboard"
@@ -493,6 +495,17 @@ function LoopDashboard(props) {
       setShowLogs((value) => !value);
       return;
     }
+    if (key === "o") {
+      prevent(evt);
+      const goal = selectedGoal();
+      if (goal?.workerSessionID) {
+        props.api.route.navigate("session", {
+          sessionID: goal.workerSessionID
+        });
+        props.api.ui.dialog.clear();
+      }
+      return;
+    }
     if (key === "q") {
       prevent(evt);
       props.api.ui.dialog.clear();
@@ -602,6 +615,31 @@ function LoopDashboard(props) {
             requestedAt: new Date().toISOString(),
             command: "clear",
             goalID: selectedGoal().id
+          });
+          setStatusText(r.ok ? r.message : `Error: ${r.message}`);
+          if (r.ok)
+            await refresh();
+          break;
+        }
+        case "answer": {
+          if (!selectedGoal()) {
+            setStatusText("No goal");
+            break;
+          }
+          const answerText = parsed.positional.join(" ") || parsed.args.text || "";
+          if (!answerText) {
+            setStatusText("Usage: :answer <your response>");
+            break;
+          }
+          const r = await client.execute({
+            version: 1,
+            requestID: randomUUID(),
+            requestedAt: new Date().toISOString(),
+            command: "answer",
+            goalID: selectedGoal().id,
+            args: {
+              answer: answerText
+            }
           });
           setStatusText(r.ok ? r.message : `Error: ${r.message}`);
           if (r.ok)
@@ -831,35 +869,33 @@ function LoopDashboard(props) {
         _$insertNode(_el$54, _el$57);
         _$setProp(_el$54, "flexDirection", "column");
         _$setProp(_el$54, "border", true);
-        _$setProp(_el$54, "borderColor", "gray");
         _$setProp(_el$54, "padding", 1);
         _$setProp(_el$54, "flexShrink", 0);
         _$insertNode(_el$55, _el$56);
         _$insert(_el$56, () => goal().name);
-        _$insertNode(_el$57, _el$58);
-        _$insert(_el$58, () => goal().objective.slice(0, 120));
-        _$insert(_el$54, (() => {
-          var _c$4 = _$memo(() => !!goal().workerSessionID);
+        _$insert(_el$55, (() => {
+          var _c$4 = _$memo(() => goal().status === "awaiting_user");
           return () => _c$4() && (() => {
-            var _el$59 = _$createElement("text"), _el$60 = _$createElement("span"), _el$61 = _$createTextNode(`worker: `), _el$62 = _$createTextNode(` \xB7 last activity `);
+            var _el$59 = _$createElement("span"), _el$60 = _$createTextNode(`  WAITING FOR YOU`);
             _$insertNode(_el$59, _el$60);
-            _$insertNode(_el$60, _el$61);
-            _$insertNode(_el$60, _el$62);
-            _$insert(_el$60, () => goal().workerSessionID, _el$62);
-            _$insert(_el$60, () => ageLabel(state()?.runtimes.find((runtime) => runtime.goalID === goal().id)?.lastProgressAt || state()?.runtimes.find((runtime) => runtime.goalID === goal().id)?.lastRunAt, clock()), null);
-            _$effect((_$p) => _$setProp(_el$60, "style", {
-              fg: theme().textMuted
+            _$effect((_$p) => _$setProp(_el$59, "style", {
+              fg: theme().warning,
+              bold: true
             }, _$p));
             return _el$59;
           })();
         })(), null);
+        _$insertNode(_el$57, _el$58);
+        _$insert(_el$58, () => goal().objective.slice(0, 120));
         _$insert(_el$54, (() => {
-          var _c$5 = _$memo(() => !!goal().config.progressFile);
+          var _c$5 = _$memo(() => !!goal().workerSessionID);
           return () => _c$5() && (() => {
-            var _el$63 = _$createElement("text"), _el$64 = _$createElement("span"), _el$65 = _$createTextNode(`progress: `);
+            var _el$63 = _$createElement("text"), _el$64 = _$createElement("span"), _el$65 = _$createTextNode(`worker: `), _el$66 = _$createTextNode(` \xB7 last activity `);
             _$insertNode(_el$63, _el$64);
             _$insertNode(_el$64, _el$65);
-            _$insert(_el$64, () => goal().config.progressFile, null);
+            _$insertNode(_el$64, _el$66);
+            _$insert(_el$64, () => goal().workerSessionID, _el$66);
+            _$insert(_el$64, () => ageLabel(state()?.runtimes.find((runtime) => runtime.goalID === goal().id)?.lastProgressAt || state()?.runtimes.find((runtime) => runtime.goalID === goal().id)?.lastRunAt, clock()), null);
             _$effect((_$p) => _$setProp(_el$64, "style", {
               fg: theme().textMuted
             }, _$p));
@@ -867,57 +903,99 @@ function LoopDashboard(props) {
           })();
         })(), null);
         _$insert(_el$54, (() => {
-          var _c$6 = _$memo(() => !!goal().lastProgress);
+          var _c$6 = _$memo(() => !!goal().config.progressFile);
           return () => _c$6() && (() => {
-            var _el$66 = _$createElement("text"), _el$67 = _$createElement("span"), _el$68 = _$createTextNode(`last progress: `);
-            _$insertNode(_el$66, _el$67);
+            var _el$67 = _$createElement("text"), _el$68 = _$createElement("span"), _el$69 = _$createTextNode(`progress: `);
             _$insertNode(_el$67, _el$68);
-            _$insert(_el$67, () => goal().lastProgress.summary.slice(0, 80), null);
-            _$effect((_$p) => _$setProp(_el$67, "style", {
+            _$insertNode(_el$68, _el$69);
+            _$insert(_el$68, () => goal().config.progressFile, null);
+            _$effect((_$p) => _$setProp(_el$68, "style", {
               fg: theme().textMuted
             }, _$p));
-            return _el$66;
+            return _el$67;
           })();
         })(), null);
         _$insert(_el$54, (() => {
-          var _c$7 = _$memo(() => !!goal().blocker);
+          var _c$7 = _$memo(() => !!goal().question);
           return () => _c$7() && (() => {
-            var _el$69 = _$createElement("text"), _el$70 = _$createElement("span"), _el$71 = _$createTextNode(`blocked: `);
-            _$insertNode(_el$69, _el$70);
+            var _el$70 = _$createElement("text"), _el$71 = _$createElement("span"), _el$72 = _$createTextNode(`QUESTION: `);
             _$insertNode(_el$70, _el$71);
-            _$insert(_el$70, () => goal().blocker.reason.slice(0, 140), null);
-            _$effect((_$p) => _$setProp(_el$70, "style", {
-              fg: theme().error
+            _$insertNode(_el$71, _el$72);
+            _$insert(_el$71, () => goal().question.text, null);
+            _$effect((_$p) => _$setProp(_el$71, "style", {
+              fg: theme().warning
             }, _$p));
-            return _el$69;
+            return _el$70;
           })();
         })(), null);
         _$insert(_el$54, (() => {
-          var _c$8 = _$memo(() => !!state()?.runtimes.find((runtime) => runtime.goalID === goal().id)?.lastError);
+          var _c$8 = _$memo(() => !!goal().question);
           return () => _c$8() && (() => {
-            var _el$72 = _$createElement("text"), _el$73 = _$createElement("span"), _el$74 = _$createTextNode(`error: `);
-            _$insertNode(_el$72, _el$73);
+            var _el$73 = _$createElement("text"), _el$74 = _$createElement("span"), _el$75 = _$createTextNode(`needs: `), _el$76 = _$createTextNode(` \u2014 type :answer in insert mode`);
             _$insertNode(_el$73, _el$74);
-            _$insert(_el$73, () => state().runtimes.find((runtime) => runtime.goalID === goal().id).lastError.slice(0, 140), null);
-            _$effect((_$p) => _$setProp(_el$73, "style", {
+            _$insertNode(_el$74, _el$75);
+            _$insertNode(_el$74, _el$76);
+            _$insert(_el$74, () => goal().question.needed, _el$76);
+            _$effect((_$p) => _$setProp(_el$74, "style", {
+              fg: theme().textMuted
+            }, _$p));
+            return _el$73;
+          })();
+        })(), null);
+        _$insert(_el$54, (() => {
+          var _c$9 = _$memo(() => !!goal().lastProgress);
+          return () => _c$9() && (() => {
+            var _el$77 = _$createElement("text"), _el$78 = _$createElement("span"), _el$79 = _$createTextNode(`last progress: `);
+            _$insertNode(_el$77, _el$78);
+            _$insertNode(_el$78, _el$79);
+            _$insert(_el$78, () => goal().lastProgress.summary.slice(0, 80), null);
+            _$effect((_$p) => _$setProp(_el$78, "style", {
+              fg: theme().textMuted
+            }, _$p));
+            return _el$77;
+          })();
+        })(), null);
+        _$insert(_el$54, (() => {
+          var _c$0 = _$memo(() => !!goal().blocker);
+          return () => _c$0() && (() => {
+            var _el$80 = _$createElement("text"), _el$81 = _$createElement("span"), _el$82 = _$createTextNode(`blocked: `);
+            _$insertNode(_el$80, _el$81);
+            _$insertNode(_el$81, _el$82);
+            _$insert(_el$81, () => goal().blocker.reason.slice(0, 140), null);
+            _$effect((_$p) => _$setProp(_el$81, "style", {
               fg: theme().error
             }, _$p));
-            return _el$72;
+            return _el$80;
+          })();
+        })(), null);
+        _$insert(_el$54, (() => {
+          var _c$1 = _$memo(() => !!state()?.runtimes.find((runtime) => runtime.goalID === goal().id)?.lastError);
+          return () => _c$1() && (() => {
+            var _el$83 = _$createElement("text"), _el$84 = _$createElement("span"), _el$85 = _$createTextNode(`error: `);
+            _$insertNode(_el$83, _el$84);
+            _$insertNode(_el$84, _el$85);
+            _$insert(_el$84, () => state().runtimes.find((runtime) => runtime.goalID === goal().id).lastError.slice(0, 140), null);
+            _$effect((_$p) => _$setProp(_el$84, "style", {
+              fg: theme().error
+            }, _$p));
+            return _el$83;
           })();
         })(), null);
         _$effect((_p$) => {
-          var _v$19 = {
+          var _v$19 = goal().status === "awaiting_user" ? theme().warning : "gray", _v$20 = {
             fg: theme().primary,
             bold: true
-          }, _v$20 = {
+          }, _v$21 = {
             fg: theme().textMuted
           };
-          _v$19 !== _p$.e && (_p$.e = _$setProp(_el$56, "style", _v$19, _p$.e));
-          _v$20 !== _p$.t && (_p$.t = _$setProp(_el$58, "style", _v$20, _p$.t));
+          _v$19 !== _p$.e && (_p$.e = _$setProp(_el$54, "borderColor", _v$19, _p$.e));
+          _v$20 !== _p$.t && (_p$.t = _$setProp(_el$56, "style", _v$20, _p$.t));
+          _v$21 !== _p$.a && (_p$.a = _$setProp(_el$58, "style", _v$21, _p$.a));
           return _p$;
         }, {
           e: undefined,
-          t: undefined
+          t: undefined,
+          a: undefined
         });
         return _el$54;
       })()
@@ -942,15 +1020,15 @@ function LoopDashboard(props) {
             return events().slice(-10);
           },
           children: (event) => (() => {
-            var _el$75 = _$createElement("text"), _el$76 = _$createElement("span"), _el$77 = _$createTextNode(` `);
-            _$insertNode(_el$75, _el$76);
-            _$insertNode(_el$76, _el$77);
-            _$insert(_el$76, () => event.type, _el$77);
-            _$insert(_el$76, () => event.goalID?.slice(0, 8), null);
-            _$effect((_$p) => _$setProp(_el$76, "style", {
+            var _el$86 = _$createElement("text"), _el$87 = _$createElement("span"), _el$88 = _$createTextNode(` `);
+            _$insertNode(_el$86, _el$87);
+            _$insertNode(_el$87, _el$88);
+            _$insert(_el$87, () => event.type, _el$88);
+            _$insert(_el$87, () => event.goalID?.slice(0, 8), null);
+            _$effect((_$p) => _$setProp(_el$87, "style", {
               fg: theme().textMuted
             }, _$p));
-            return _el$75;
+            return _el$86;
           })()
         }), null);
         _$effect((_$p) => _$setProp(_el$26, "style", {

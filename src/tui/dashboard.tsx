@@ -180,6 +180,15 @@ export function LoopDashboard(props: Props) {
     if (key === "R") { prevent(evt); void executeCommand("retry"); return }
     if (key === "x") { prevent(evt); void executeCommand("clear"); return }
     if (key === "L") { prevent(evt); setShowLogs((value) => !value); return }
+    if (key === "o") {
+      prevent(evt)
+      const goal = selectedGoal()
+      if (goal?.workerSessionID) {
+        props.api.route.navigate("session", { sessionID: goal.workerSessionID })
+        props.api.ui.dialog.clear()
+      }
+      return
+    }
     if (key === "q") { prevent(evt); props.api.ui.dialog.clear(); return }
   })
 
@@ -211,6 +220,14 @@ export function LoopDashboard(props: Props) {
         case "resume": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "resume", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
         case "retry": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "retry", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
         case "clear": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "clear", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
+        case "answer": {
+          if (!selectedGoal()) { setStatusText("No goal"); break }
+          const answerText = parsed.positional.join(" ") || parsed.args.text || ""
+          if (!answerText) { setStatusText("Usage: :answer <your response>"); break }
+          const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "answer", goalID: selectedGoal()!.id, args: { answer: answerText } })
+          setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh()
+          break
+        }
         case "logs": setShowLogs(!showLogs()); break
         case "help": setShowHelp(true); break
         case "q": case "close": props.api.ui.dialog.clear(); return
@@ -268,11 +285,13 @@ export function LoopDashboard(props: Props) {
 
         <Show when={selectedGoal()}>
           {(goal) => (
-            <box flexDirection="column" border={true} borderColor="gray" padding={1} flexShrink={0}>
-              <text><span style={{ fg: theme().primary, bold: true }}>{goal().name}</span></text>
+            <box flexDirection="column" border={true} borderColor={goal().status === "awaiting_user" ? theme().warning : "gray"} padding={1} flexShrink={0}>
+              <text><span style={{ fg: theme().primary, bold: true }}>{goal().name}</span>{goal().status === "awaiting_user" && <span style={{ fg: theme().warning, bold: true }}> {" "}WAITING FOR YOU</span>}</text>
               <text><span style={{ fg: theme().textMuted }}>{goal().objective.slice(0, 120)}</span></text>
               {goal().workerSessionID && <text><span style={{ fg: theme().textMuted }}>worker: {goal().workerSessionID} · last activity {ageLabel(state()?.runtimes.find((runtime) => runtime.goalID === goal().id)?.lastProgressAt || state()?.runtimes.find((runtime) => runtime.goalID === goal().id)?.lastRunAt, clock())}</span></text>}
               {goal().config.progressFile && <text><span style={{ fg: theme().textMuted }}>progress: {goal().config.progressFile}</span></text>}
+              {goal().question && <text><span style={{ fg: theme().warning }}>QUESTION: {goal().question!.text}</span></text>}
+              {goal().question && <text><span style={{ fg: theme().textMuted }}>needs: {goal().question!.needed} — type :answer in insert mode</span></text>}
               {goal().lastProgress && <text><span style={{ fg: theme().textMuted }}>last progress: {goal().lastProgress!.summary.slice(0, 80)}</span></text>}
               {goal().blocker && <text><span style={{ fg: theme().error }}>blocked: {goal().blocker!.reason.slice(0, 140)}</span></text>}
               {state()?.runtimes.find((runtime) => runtime.goalID === goal().id)?.lastError && <text><span style={{ fg: theme().error }}>error: {state()!.runtimes.find((runtime) => runtime.goalID === goal().id)!.lastError!.slice(0, 140)}</span></text>}

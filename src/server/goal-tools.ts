@@ -4,7 +4,7 @@
 
 import { randomUUID } from "crypto"
 import { tool } from "@opencode-ai/plugin/tool"
-import { readState, writeState, appendEvent } from "../infrastructure/state-repository"
+import { readState, writeState, appendEvent, appendGoalInbox } from "../infrastructure/state-repository"
 import type { Goal, GoalID, GoalConfig } from "../domain/goal"
 import { canTransition } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
@@ -308,6 +308,76 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
             status: "blocked",
             reason: args.reason,
             needed: args.needed,
+          }),
+        }
+      },
+    }),
+
+    ask_user: tool({
+      description:
+        "Ask the user a clarifying question. The goal pauses until the user answers. " +
+        "Use when you need information that only the user can provide, or when " +
+        "the goal is ambiguous and proceeding without clarification would be risky.",
+      args: {
+        question: tool.schema.string().describe("The question to ask the user."),
+        needed: tool.schema.string().describe("What kind of answer is needed (e.g. 'yes/no', 'file path', 'preference')."),
+      },
+      execute: async (args, context) => {
+        const state = await readState(dir)
+        const workerID = context?.sessionID || hostSessionID
+        const goal = findGoalByWorkerSession(state, workerID)
+        if (!goal) {
+          return { title: "No goal", output: "No active goal to ask about." }
+        }
+
+        if (!canTransition(goal.status, "awaiting_user", "model")) {
+          return { title: "Invalid transition", output: `Cannot ask question in ${goal.status} state.` }
+        }
+
+        goal.status = "awaiting_user"
+        goal.updatedAt = new Date().toISOString()
+        goal.question = {
+          text: args.question,
+          needed: args.needed,
+          at: new Date().toISOString(),
+        }
+
+        const runtime = state.runtimes.find((r) => r.goalID === goal.id)
+        if (runtime) {
+          runtime.phase = "idle"
+        }
+
+        await writeState(dir, state)
+
+        const event: LoopEvent = {
+          version: 1,
+          eventID: randomUUID(),
+          goalID: goal.id,
+          type: "goal.progress",
+          summary: `QUESTION: ${args.question}`,
+          next: args.needed,
+          timestamp: new Date().toISOString(),
+          revision: state.revision,
+        }
+        await appendEvent(dir, event)
+
+        // Also persist question in goal for dashboard
+        const goalState = await readState(dir)
+        const g = goalState.goals.find((item) => item.id === goal.id)
+        if (g) {
+          g.question = goal.question
+          g.status = goal.status
+          await writeState(dir, goalState)
+        }
+
+        return {
+          title: "Question sent to user",
+          output: JSON.stringify({
+            ok: true,
+            goalName: goal.name,
+            question: args.question,
+            needed: args.needed,
+            message: "Goal paused. The user will see your question in the dashboard and can answer from there.",
           }),
         }
       },

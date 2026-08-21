@@ -83,12 +83,14 @@ function tokenize(input: string): string[] {
 export function commandHelp(): string {
   return [
     "Modes: : insert, Ctrl+N normal, ? toggle help",
+    "Navigation: j/k move, g/G top/bottom, o open child, L toggle logs",
     "Commands:",
     '  :goal start <name> --objective "<text>"  Create a new goal',
     "  :pause                                    Pause the selected goal",
     "  :resume                                   Resume the selected goal",
     "  :retry                                    Retry the blocked goal",
     "  :clear                                    Clear the selected goal",
+    "  :answer <text>                            Answer worker's question",
     "  :logs                                     Toggle log view",
     "  :help                                     Show this help",
     "  :q / :close                               Close dashboard",

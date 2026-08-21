@@ -152,6 +152,31 @@ async function listPendingRequests(directory) {
     return [];
   }
 }
+function inboxFile(directory, goalID) {
+  return path.join(loopDir(directory), "inboxes", `${goalID}.jsonl`);
+}
+async function appendGoalInbox(directory, goalID, from, text) {
+  const dir = path.join(loopDir(directory), "inboxes");
+  await fs.mkdir(dir, { recursive: true });
+  const msg = { from, text, at: new Date().toISOString() };
+  await fs.appendFile(inboxFile(directory, goalID), JSON.stringify(msg) + `
+`, "utf8");
+}
+async function drainGoalInbox(directory, goalID) {
+  const file = inboxFile(directory, goalID);
+  try {
+    const raw = await fs.readFile(file, "utf8");
+    const lines = raw.trim().split(`
+`).filter(Boolean);
+    if (lines.length === 0)
+      return [];
+    const messages = lines.map((l) => JSON.parse(l));
+    await fs.rm(file, { force: true });
+    return messages.map((m) => `[${m.from}] ${m.text}`);
+  } catch {
+    return [];
+  }
+}
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -352,6 +377,18 @@ function createControlWorker(options) {
         };
         break;
       }
+      case "answer": {
+        const args = request.args;
+        await goalSvc.answerQuestion(directory, request.goalID, args.answer);
+        const state2 = await readState(directory);
+        const goal = state2.goals.find((g) => g.id === request.goalID);
+        response = {
+          ...base,
+          message: `answer sent to "${goal?.name || request.goalID}", goal resumed`,
+          stateRevision: state2.revision
+        };
+        break;
+      }
       default: {
         response = {
           requestID: request.requestID,
@@ -391,9 +428,10 @@ import { randomUUID } from "crypto";
 
 // src/domain/goal.ts
 var MODEL_TRANSITIONS = {
-  active: ["complete", "blocked"],
+  active: ["complete", "blocked", "awaiting_user"],
   paused: [],
   blocked: [],
+  awaiting_user: ["active"],
   budget_limited: ["complete", "blocked"],
   usage_limited: [],
   complete: []
@@ -402,6 +440,7 @@ var USER_TRANSITIONS = {
   active: ["paused"],
   paused: ["active"],
   blocked: ["active"],
+  awaiting_user: ["active"],
   budget_limited: ["active"],
   usage_limited: ["active"],
   complete: ["active"]
@@ -410,6 +449,7 @@ var SYSTEM_TRANSITIONS = {
   active: ["budget_limited", "usage_limited"],
   paused: [],
   blocked: [],
+  awaiting_user: [],
   budget_limited: [],
   usage_limited: [],
   complete: []
@@ -560,7 +600,7 @@ function createLoopEngine(options) {
       return false;
     if (goal.workerSessionID)
       knownWorkerSessions.add(goal.workerSessionID);
-    if (isTerminal(goal.status) || goal.status === "paused")
+    if (isTerminal(goal.status) || goal.status === "paused" || goal.status === "awaiting_user")
       return false;
     switch (type) {
       case "session.idle":
@@ -798,11 +838,11 @@ function createLoopEngine(options) {
     if (knownWorkerSessions.size === 0)
       return;
     const state = await readState(directory);
-    const hasActiveGoals = state.goals.some((g) => !isTerminal(g.status) && g.status !== "paused");
+    const hasActiveGoals = state.goals.some((g) => !isTerminal(g.status) && g.status !== "paused" && g.status !== "awaiting_user");
     if (!hasActiveGoals)
       return;
     for (const goal of state.goals) {
-      if (isTerminal(goal.status) || goal.status === "paused")
+      if (isTerminal(goal.status) || goal.status === "paused" || goal.status === "awaiting_user")
         continue;
       const runtime = state.runtimes.find((r) => r.goalID === goal.id);
       if (!runtime)
@@ -838,8 +878,9 @@ Call get_goal to retrieve the authoritative objective, current state, acceptance
 - Call report_goal_progress if work remains.
 - Call complete_goal only if all acceptance criteria pass with concrete evidence.
 - Call block_goal only for a real external blocker requiring user intervention.
+- Call ask_user when you need clarification that only the user can provide. The goal pauses until they answer.
 
-Do not ask questions. Make reasonable assumptions. Work directly.`;
+Do not ask questions unnecessarily. Make reasonable assumptions and work directly. Only ask when the ambiguity is risky.`;
 function createWorkerManager(host) {
   return {
     async createWorker(goal) {
@@ -853,8 +894,8 @@ function createWorkerManager(host) {
         startedAt: new Date().toISOString()
       };
     },
-    async continueWorker(worker, goal, runtime) {
-      const prompt = buildContinuationPrompt(goal, runtime);
+    async continueWorker(worker, goal, runtime, inboxMessages) {
+      const prompt = buildContinuationPrompt(goal, runtime, inboxMessages);
       await host.promptWorker({
         sessionID: worker.workerSessionID,
         prompt
@@ -872,7 +913,7 @@ function createWorkerManager(host) {
     }
   };
 }
-function buildContinuationPrompt(goal, runtime) {
+function buildContinuationPrompt(goal, runtime, inboxMessages) {
   const parts = [CONTINUATION_PROMPT];
   if (runtime.turnCount > 1) {
     parts.push(`
@@ -881,6 +922,13 @@ This is turn ${runtime.turnCount}.`);
   if (runtime.consecutiveFailures > 0) {
     parts.push(`
 Warning: ${runtime.consecutiveFailures} consecutive failure(s). Last error: ${runtime.lastError || "unknown"}.`);
+  }
+  if (inboxMessages && inboxMessages.length > 0) {
+    parts.push(`
+User instructions since last turn:`);
+    for (const msg of inboxMessages) {
+      parts.push(`- ${msg}`);
+    }
   }
   return parts.join(`
 `);
@@ -1017,7 +1065,8 @@ function createGoalService(host) {
       timestamp: new Date().toISOString(),
       revision: state.revision
     });
-    await workers.continueWorker(session, goal, runtime);
+    const inboxMessages = await drainGoalInbox(directory, goalID);
+    await workers.continueWorker(session, goal, runtime, inboxMessages);
   }
   async function pause(directory, goalID) {
     const state = await readState(directory);
@@ -1134,6 +1183,30 @@ function createGoalService(host) {
     state.runtimes = state.runtimes.filter((r) => r.goalID !== goalID);
     await writeState(directory, state);
   }
+  async function answerQuestion(directory, goalID, answer) {
+    const state = await readState(directory);
+    const goal = state.goals.find((g) => g.id === goalID);
+    if (!goal)
+      return;
+    if (goal.status !== "awaiting_user")
+      return;
+    goal.status = "active";
+    goal.question = undefined;
+    goal.updatedAt = new Date().toISOString();
+    await appendGoalInbox(directory, goalID, "user", `User's answer: ${answer}`);
+    await writeState(directory, state);
+    await appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID2(),
+      goalID,
+      type: "goal.status_changed",
+      from: "awaiting_user",
+      to: "active",
+      timestamp: new Date().toISOString(),
+      revision: state.revision
+    });
+    await continueTurn(directory, goalID);
+  }
   function getWorker(goalID) {
     return sessions.get(goalID);
   }
@@ -1190,7 +1263,7 @@ function createGoalService(host) {
     }
     await writeState(directory, state);
   }
-  return { start, continueTurn, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile };
+  return { start, continueTurn, pause, resume, retry, clear, answerQuestion, getWorker, getActiveWorkers, reconcile };
 }
 
 // src/server/host-adapter.ts
@@ -1563,6 +1636,64 @@ function goalTools(dir, goalService, hostSessionID) {
           })
         };
       }
+    }),
+    ask_user: tool({
+      description: "Ask the user a clarifying question. The goal pauses until the user answers. " + "Use when you need information that only the user can provide, or when " + "the goal is ambiguous and proceeding without clarification would be risky.",
+      args: {
+        question: tool.schema.string().describe("The question to ask the user."),
+        needed: tool.schema.string().describe("What kind of answer is needed (e.g. 'yes/no', 'file path', 'preference').")
+      },
+      execute: async (args, context) => {
+        const state = await readState(dir);
+        const workerID = context?.sessionID || hostSessionID;
+        const goal = findGoalByWorkerSession(state, workerID);
+        if (!goal) {
+          return { title: "No goal", output: "No active goal to ask about." };
+        }
+        if (!canTransition(goal.status, "awaiting_user", "model")) {
+          return { title: "Invalid transition", output: `Cannot ask question in ${goal.status} state.` };
+        }
+        goal.status = "awaiting_user";
+        goal.updatedAt = new Date().toISOString();
+        goal.question = {
+          text: args.question,
+          needed: args.needed,
+          at: new Date().toISOString()
+        };
+        const runtime = state.runtimes.find((r) => r.goalID === goal.id);
+        if (runtime) {
+          runtime.phase = "idle";
+        }
+        await writeState(dir, state);
+        const event = {
+          version: 1,
+          eventID: randomUUID3(),
+          goalID: goal.id,
+          type: "goal.progress",
+          summary: `QUESTION: ${args.question}`,
+          next: args.needed,
+          timestamp: new Date().toISOString(),
+          revision: state.revision
+        };
+        await appendEvent(dir, event);
+        const goalState = await readState(dir);
+        const g = goalState.goals.find((item) => item.id === goal.id);
+        if (g) {
+          g.question = goal.question;
+          g.status = goal.status;
+          await writeState(dir, goalState);
+        }
+        return {
+          title: "Question sent to user",
+          output: JSON.stringify({
+            ok: true,
+            goalName: goal.name,
+            question: args.question,
+            needed: args.needed,
+            message: "Goal paused. The user will see your question in the dashboard and can answer from there."
+          })
+        };
+      }
     })
   };
 }
@@ -1630,6 +1761,192 @@ async function runCompletionChecks(checks) {
   };
 }
 
+// src/server/owner-tools.ts
+import { tool as tool2 } from "@opencode-ai/plugin/tool";
+function ownerTools(options) {
+  const { directory, host } = options;
+  return {
+    list_background_goals: tool2({
+      description: "List all background loop goals visible to this session. " + "Shows name, status, progress, and whether any goal is waiting for user input.",
+      args: {},
+      execute: async (_args, context) => {
+        const state = await readState(directory);
+        const ownerID = context?.sessionID;
+        if (!ownerID) {
+          return {
+            title: "No session",
+            output: JSON.stringify({ ok: false, message: "No session context available." })
+          };
+        }
+        const goals = state.goals.filter((g) => g.ownerSessionID === ownerID && g.status !== "complete");
+        if (goals.length === 0) {
+          return {
+            title: "No active goals",
+            output: JSON.stringify({
+              ok: true,
+              goals: [],
+              message: "No active background goals for this session."
+            })
+          };
+        }
+        const summaries = goals.map((g) => {
+          const runtime = state.runtimes.find((r) => r.goalID === g.id);
+          return {
+            id: g.id,
+            name: g.name,
+            status: g.status,
+            phase: runtime?.phase ?? "unknown",
+            turn: runtime?.turnCount ?? 0,
+            lastProgress: g.lastProgress?.summary?.slice(0, 120),
+            lastProgressAt: g.lastProgress?.at,
+            blocker: g.blocker?.reason?.slice(0, 120),
+            question: g.question?.text?.slice(0, 120)
+          };
+        });
+        return {
+          title: `${goals.length} active goal(s)`,
+          output: JSON.stringify({ ok: true, goals: summaries }, null, 2)
+        };
+      }
+    }),
+    inspect_background_goal: tool2({
+      description: "Inspect a background goal in detail: objective, contract, progress, " + "blockers, questions, runtime state, and recent events.",
+      args: {
+        goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to inspect the first active goal.")
+      },
+      execute: async (args, context) => {
+        const state = await readState(directory);
+        const ownerID = context?.sessionID;
+        const goal = args.goal_id ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID) : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete");
+        if (!goal) {
+          return {
+            title: "No goal found",
+            output: JSON.stringify({ ok: false, message: "No matching active goal for this session." })
+          };
+        }
+        const runtime = state.runtimes.find((r) => r.goalID === goal.id);
+        return {
+          title: `Goal: ${goal.name}`,
+          output: JSON.stringify({
+            ok: true,
+            id: goal.id,
+            name: goal.name,
+            objective: goal.objective,
+            status: goal.status,
+            ownerSessionID: goal.ownerSessionID,
+            workerSessionID: goal.workerSessionID,
+            config: {
+              maxTurns: goal.config.maxTurns,
+              maxFailures: goal.config.maxFailures,
+              timeoutMs: goal.config.timeoutMs,
+              progressFile: goal.config.progressFile,
+              checks: goal.config.checks
+            },
+            lastProgress: goal.lastProgress,
+            completionEvidence: goal.completionEvidence,
+            blocker: goal.blocker,
+            question: goal.question,
+            tokensUsed: goal.tokensUsed,
+            timeUsedSeconds: goal.timeUsedSeconds,
+            runtime: runtime ? {
+              phase: runtime.phase,
+              turnCount: runtime.turnCount,
+              runCount: runtime.runCount,
+              consecutiveFailures: runtime.consecutiveFailures,
+              lastError: runtime.lastError,
+              lastProgressAt: runtime.lastProgressAt,
+              lastRunAt: runtime.lastRunAt
+            } : undefined
+          }, null, 2)
+        };
+      }
+    }),
+    read_goal_transcript: tool2({
+      description: "Read the last N messages from a goal's worker session transcript. " + "Shows what the worker has been doing: tool calls, file changes, responses.",
+      args: {
+        goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to read the first active goal."),
+        limit: tool2.schema.number().optional().describe("Max messages to return (default: 20).")
+      },
+      execute: async (args, context) => {
+        const state = await readState(directory);
+        const ownerID = context?.sessionID;
+        const goal = args.goal_id ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID) : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete");
+        if (!goal) {
+          return {
+            title: "No goal found",
+            output: JSON.stringify({ ok: false, message: "No matching active goal for this session." })
+          };
+        }
+        if (!goal.workerSessionID) {
+          return {
+            title: "No worker",
+            output: JSON.stringify({ ok: false, message: "Goal has no worker session yet." })
+          };
+        }
+        try {
+          const messages = await host.readMessages(goal.workerSessionID, args.limit || 20);
+          return {
+            title: `Transcript: ${goal.name}`,
+            output: JSON.stringify({
+              ok: true,
+              goalID: goal.id,
+              workerSessionID: goal.workerSessionID,
+              messages: messages.map((m) => ({
+                role: m.role,
+                content: m.content.slice(0, 2000),
+                timestamp: m.timestamp,
+                messageID: m.messageID
+              }))
+            }, null, 2)
+          };
+        } catch (error) {
+          return {
+            title: "Transcript error",
+            output: JSON.stringify({
+              ok: false,
+              message: error instanceof Error ? error.message : String(error)
+            })
+          };
+        }
+      }
+    }),
+    send_goal_input: tool2({
+      description: "Send a message, instruction, or answer to a background goal's worker session. " + "The message will be injected into the worker's next continuation prompt. " + "Use this to answer worker questions, redirect work, or refine scope.",
+      args: {
+        goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to target the first active goal."),
+        message: tool2.schema.string().describe("Message to send to the worker.")
+      },
+      execute: async (args, context) => {
+        const state = await readState(directory);
+        const ownerID = context?.sessionID;
+        const goal = args.goal_id ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID) : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete");
+        if (!goal) {
+          return {
+            title: "No goal found",
+            output: JSON.stringify({ ok: false, message: "No matching active goal for this session." })
+          };
+        }
+        await appendGoalInbox(directory, goal.id, "user", args.message);
+        if (goal.status === "awaiting_user") {
+          goal.status = "active";
+          goal.question = undefined;
+          goal.updatedAt = new Date().toISOString();
+          await writeState(directory, state);
+        }
+        return {
+          title: "Message sent",
+          output: JSON.stringify({
+            ok: true,
+            goalID: goal.id,
+            goalName: goal.name,
+            message: `Message delivered to "${goal.name}". It will appear in the worker's next turn.`
+          })
+        };
+      }
+    })
+  };
+}
+
 // src/server/plugin.ts
 var PLUGIN_ID = "opencode-loopd.server";
 var server = async ({ client, directory }) => {
@@ -1672,7 +1989,7 @@ var server = async ({ client, directory }) => {
       if (type?.startsWith("session."))
         reconcileInBackground();
     },
-    tool: goalTools(directory, goalService),
+    tool: { ...goalTools(directory, goalService), ...ownerTools({ directory, host }) },
     "tool.execute.after": async (input, output) => {
       if (input.tool === "loopd_create_goal" || input.tool === "get_goal" || input.tool === "report_goal_progress") {
         ensureStarted();

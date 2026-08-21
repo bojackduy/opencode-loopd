@@ -5,6 +5,7 @@ export type GoalStatus =
   | "active"
   | "paused"
   | "blocked"
+  | "awaiting_user"
   | "budget_limited"
   | "usage_limited"
   | "complete"
@@ -56,6 +57,13 @@ export interface Goal {
     at: string
   }
 
+  /** Active question waiting for user answer. */
+  question?: {
+    text: string
+    needed: string
+    at: string
+  }
+
   createdAt: string
   updatedAt: string
 }
@@ -93,9 +101,10 @@ export interface GoalConfig {
 
 /** Model-controlled transitions (via tools). */
 export const MODEL_TRANSITIONS: Record<GoalStatus, GoalStatus[]> = {
-  active: ["complete", "blocked"],
+  active: ["complete", "blocked", "awaiting_user"],
   paused: [],
   blocked: [],
+  awaiting_user: ["active"],
   budget_limited: ["complete", "blocked"],
   usage_limited: [],
   complete: [],
@@ -106,6 +115,7 @@ export const USER_TRANSITIONS: Record<GoalStatus, GoalStatus[]> = {
   active: ["paused"],
   paused: ["active"],
   blocked: ["active"],
+  awaiting_user: ["active"],
   budget_limited: ["active"],
   usage_limited: ["active"],
   complete: ["active"],
@@ -116,6 +126,7 @@ export const SYSTEM_TRANSITIONS: Record<GoalStatus, GoalStatus[]> = {
   active: ["budget_limited", "usage_limited"],
   paused: [],
   blocked: [],
+  awaiting_user: [],
   budget_limited: [],
   usage_limited: [],
   complete: [],
@@ -140,7 +151,7 @@ export function isTerminal(status: GoalStatus): boolean {
 }
 
 export function isRunning(status: GoalStatus): boolean {
-  return status === "active" || status === "blocked" || status === "budget_limited" || status === "usage_limited"
+  return status === "active" || status === "blocked" || status === "awaiting_user" || status === "budget_limited" || status === "usage_limited"
 }
 
 export function createGoal(
