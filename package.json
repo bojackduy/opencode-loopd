@@ -27,8 +27,14 @@
     "solid-js": "^1.9.13",
     "typescript": "^5.7.0"
   },
+  "bin": {
+    "opencode-loopd": "./scripts/install-node.mjs"
+  },
   "files": [
-    "dist"
+    "dist",
+    "scripts",
+    "skills",
+    "commands"
   ],
   "license": "MIT"
 }
