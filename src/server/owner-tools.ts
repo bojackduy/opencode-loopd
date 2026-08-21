@@ -6,14 +6,16 @@ import { tool } from "@opencode-ai/plugin/tool"
 import { readState, writeState, appendGoalInbox } from "../infrastructure/state-repository"
 import type { GoalID } from "../domain/goal"
 import type { LoopHost } from "./host-adapter"
+import type { GoalService } from "../application/goal-service"
 
 export interface OwnerToolsOptions {
   directory: string
   host: LoopHost
+  goalService: GoalService
 }
 
 export function ownerTools(options: OwnerToolsOptions) {
-  const { directory, host } = options
+  const { directory, host, goalService } = options
 
   return {
     list_background_goals: tool({
@@ -224,6 +226,167 @@ export function ownerTools(options: OwnerToolsOptions) {
             goalName: goal.name,
             message: `Message delivered to "${goal.name}". It will appear in the worker's next turn.`,
           }),
+        }
+      },
+    }),
+
+    pause_goal: tool({
+      description:
+        "Pause a background goal. The worker session is aborted and the goal stops running. " +
+        "Use when you need to temporarily stop work (e.g., to investigate an issue or change priorities).",
+      args: {
+        goal_id: tool.schema.string().optional().describe("Goal ID. Omit to pause the first active goal."),
+      },
+      execute: async (args, context) => {
+        const state = await readState(directory)
+        const ownerID = context?.sessionID
+        const goal = args.goal_id
+          ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID)
+          : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete")
+
+        if (!goal) {
+          return {
+            title: "No goal found",
+            output: JSON.stringify({ ok: false, message: "No matching active goal for this session." }),
+          }
+        }
+
+        if (goal.status === "paused") {
+          return {
+            title: "Already paused",
+            output: JSON.stringify({ ok: true, message: `Goal "${goal.name}" is already paused.` }),
+          }
+        }
+
+        try {
+          await goalService.pause(directory, goal.id)
+          return {
+            title: "Goal paused",
+            output: JSON.stringify({
+              ok: true,
+              goalID: goal.id,
+              goalName: goal.name,
+              message: `Goal "${goal.name}" paused. Resume with resume_goal.`,
+            }),
+          }
+        } catch (error) {
+          return {
+            title: "Pause failed",
+            output: JSON.stringify({
+              ok: false,
+              goalName: goal.name,
+              message: error instanceof Error ? error.message : String(error),
+            }),
+          }
+        }
+      },
+    }),
+
+    resume_goal: tool({
+      description:
+        "Resume a paused or blocked background goal. " +
+        "For paused goals, creates a new worker session if needed. " +
+        "For blocked goals, resets failure count and retries.",
+      args: {
+        goal_id: tool.schema.string().optional().describe("Goal ID. Omit to resume the first paused/blocked goal."),
+      },
+      execute: async (args, context) => {
+        const state = await readState(directory)
+        const ownerID = context?.sessionID
+        const goal = args.goal_id
+          ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID)
+          : state.goals.find(
+              (g) =>
+                g.ownerSessionID === ownerID &&
+                (g.status === "paused" || g.status === "blocked"),
+            )
+
+        if (!goal) {
+          return {
+            title: "No goal found",
+            output: JSON.stringify({
+              ok: false,
+              message: "No matching paused/blocked goal for this session.",
+            }),
+          }
+        }
+
+        if (goal.status === "active") {
+          return {
+            title: "Already active",
+            output: JSON.stringify({ ok: true, message: `Goal "${goal.name}" is already active.` }),
+          }
+        }
+
+        try {
+          if (goal.status === "paused") {
+            await goalService.resume(directory, goal.id)
+          } else if (goal.status === "blocked") {
+            await goalService.retry(directory, goal.id)
+          }
+          return {
+            title: "Goal resumed",
+            output: JSON.stringify({
+              ok: true,
+              goalID: goal.id,
+              goalName: goal.name,
+              message: `Goal "${goal.name}" resumed.`,
+            }),
+          }
+        } catch (error) {
+          return {
+            title: "Resume failed",
+            output: JSON.stringify({
+              ok: false,
+              goalName: goal.name,
+              message: error instanceof Error ? error.message : String(error),
+            }),
+          }
+        }
+      },
+    }),
+
+    clear_goal: tool({
+      description:
+        "Clear a background goal. Aborts the worker and removes the goal from the dashboard. " +
+        "This action cannot be undone. Use when the goal is no longer needed.",
+      args: {
+        goal_id: tool.schema.string().optional().describe("Goal ID. Omit to clear the first active goal."),
+      },
+      execute: async (args, context) => {
+        const state = await readState(directory)
+        const ownerID = context?.sessionID
+        const goal = args.goal_id
+          ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID)
+          : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete")
+
+        if (!goal) {
+          return {
+            title: "No goal found",
+            output: JSON.stringify({ ok: false, message: "No matching active goal for this session." }),
+          }
+        }
+
+        try {
+          await goalService.clear(directory, goal.id)
+          return {
+            title: "Goal cleared",
+            output: JSON.stringify({
+              ok: true,
+              goalID: goal.id,
+              goalName: goal.name,
+              message: `Goal "${goal.name}" cleared and removed.`,
+            }),
+          }
+        } catch (error) {
+          return {
+            title: "Clear failed",
+            output: JSON.stringify({
+              ok: false,
+              goalName: goal.name,
+              message: error instanceof Error ? error.message : String(error),
+            }),
+          }
         }
       },
     }),

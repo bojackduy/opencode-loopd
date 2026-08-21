@@ -73,7 +73,10 @@ export function createGoalService(host: LoopHost): GoalService {
       objective: input.objective,
       status: "active",
       ownerSessionID: input.ownerSessionID,
-      config: input.config || {},
+      config: {
+        maxTurns: 50,
+        ...input.config,
+      },
     })
 
     state.goals.push(goal)

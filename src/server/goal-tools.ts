@@ -47,7 +47,9 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
             }),
           }
         }
-        const config: GoalConfig = {}
+        const config: GoalConfig = {
+          maxTurns: 50,
+        }
         if (args.checks) config.checks = args.checks
         if (args.progressFile) config.progressFile = args.progressFile
         if (args.maxTurns !== undefined) config.maxTurns = args.maxTurns

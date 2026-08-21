@@ -62,7 +62,7 @@ const server: Plugin = async ({ client, directory }) => {
       await engine.handleEvent(event)
       if (type?.startsWith("session.")) reconcileInBackground()
     },
-    tool: { ...goalTools(directory, goalService), ...ownerTools({ directory, host }) },
+    tool: { ...goalTools(directory, goalService), ...ownerTools({ directory, host, goalService }) },
     "tool.execute.after": async (input, output) => {
       // Lazy start when goal tools are used
       if (input.tool === "loopd_create_goal" || input.tool === "get_goal" || input.tool === "report_goal_progress") {
