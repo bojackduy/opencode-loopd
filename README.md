@@ -75,7 +75,7 @@ The child worker has these tools:
 - `report_goal_progress` — report what was done
 - `complete_goal` — mark done (must pass checks)
 - `block_goal` — mark blocked (needs user)
-- `ask_user` — ask clarifying question (pauses goal)
+- `question` (OpenCode builtin) — ask the user; appears in the TUI footer
 
 ## Architecture
 

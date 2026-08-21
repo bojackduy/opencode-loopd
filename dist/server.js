@@ -387,18 +387,6 @@ function createControlWorker(options) {
         };
         break;
       }
-      case "answer": {
-        const args = request.args;
-        await goalSvc.answerQuestion(directory, request.goalID, args.answer);
-        const state2 = await readState(directory);
-        const goal = state2.goals.find((g) => g.id === request.goalID);
-        response = {
-          ...base,
-          message: `answer sent to "${goal?.name || request.goalID}", goal resumed`,
-          stateRevision: state2.revision
-        };
-        break;
-      }
       default: {
         response = {
           requestID: request.requestID,
@@ -438,10 +426,9 @@ import { randomUUID } from "crypto";
 
 // src/domain/goal.ts
 var MODEL_TRANSITIONS = {
-  active: ["complete", "blocked", "awaiting_user"],
+  active: ["complete", "blocked"],
   paused: [],
   blocked: [],
-  awaiting_user: ["active"],
   budget_limited: ["complete", "blocked"],
   usage_limited: [],
   complete: []
@@ -450,7 +437,6 @@ var USER_TRANSITIONS = {
   active: ["paused"],
   paused: ["active"],
   blocked: ["active"],
-  awaiting_user: ["active"],
   budget_limited: ["active"],
   usage_limited: ["active"],
   complete: ["active"]
@@ -459,7 +445,6 @@ var SYSTEM_TRANSITIONS = {
   active: ["budget_limited", "usage_limited"],
   paused: [],
   blocked: [],
-  awaiting_user: [],
   budget_limited: [],
   usage_limited: [],
   complete: []
@@ -610,7 +595,7 @@ function createLoopEngine(options) {
       return false;
     if (goal.workerSessionID)
       knownWorkerSessions.add(goal.workerSessionID);
-    if (isTerminal(goal.status) || goal.status === "paused" || goal.status === "awaiting_user")
+    if (isTerminal(goal.status) || goal.status === "paused")
       return false;
     switch (type) {
       case "session.idle":
@@ -848,11 +833,11 @@ function createLoopEngine(options) {
     if (knownWorkerSessions.size === 0)
       return;
     const state = await readState(directory);
-    const hasActiveGoals = state.goals.some((g) => !isTerminal(g.status) && g.status !== "paused" && g.status !== "awaiting_user");
+    const hasActiveGoals = state.goals.some((g) => !isTerminal(g.status) && g.status !== "paused");
     if (!hasActiveGoals)
       return;
     for (const goal of state.goals) {
-      if (isTerminal(goal.status) || goal.status === "paused" || goal.status === "awaiting_user")
+      if (isTerminal(goal.status) || goal.status === "paused")
         continue;
       const runtime = state.runtimes.find((r) => r.goalID === goal.id);
       if (!runtime)
@@ -916,7 +901,7 @@ function createWorkerManager(host) {
 function buildContinuationSteering(goal, runtime, context) {
   const parts = [];
   if (runtime.turnCount <= 1) {
-    parts.push(`You are a worker for an active goal.`, ``, `Call get_goal to read the authoritative objective, acceptance criteria, and current state.`, `Perform one concrete batch of work. After durable verification:`, ``, `- Call report_goal_progress if work remains.`, `- Call complete_goal only if ALL acceptance criteria pass with concrete evidence.`, `- Call block_goal only for a real external blocker requiring user intervention.`, `- Call ask_user when you need clarification only the user can provide.`, ``, `Do not ask questions unnecessarily. Make reasonable assumptions and work directly.`);
+    parts.push(`You are a worker for an active goal.`, ``, `Call get_goal to read the authoritative objective, acceptance criteria, and current state.`, `Perform one concrete batch of work. After durable verification:`, ``, `- Call report_goal_progress if work remains.`, `- Call complete_goal only if ALL acceptance criteria pass with concrete evidence.`, `- Call block_goal only for a real external blocker requiring user intervention.`, `- Use the built-in question tool when you need clarification only the user can provide.`, ``, `Do not ask questions unnecessarily. Make reasonable assumptions and work directly.`);
   } else {
     parts.push(`This is continuation turn ${runtime.turnCount} for the goal below.`, ``, `## GOAL (user-provided data)`, goal.objective);
     const progress = context?.progressHistory;
@@ -943,7 +928,7 @@ function buildContinuationSteering(goal, runtime, context) {
         parts.push(`- ${runtime.noProgressCount} turn(s) without progress. Work concretely this turn.`);
       }
     }
-    parts.push(``, `## INSTRUCTIONS`, `1. Inspect current workspace state \u2014 read files, check what exists. Do NOT redo completed work.`, `2. Continue concrete progress toward the objective.`, `3. After completing a batch, call report_goal_progress with what you did and what's next.`, `4. Verify completion requirement-by-requirement before calling complete_goal.`, `5. Call block_goal only if the same blocker persists across 3+ consecutive turns.`, `6. Call ask_user only for genuinely risky ambiguity.`);
+    parts.push(``, `## INSTRUCTIONS`, `1. Inspect current workspace state \u2014 read files, check what exists. Do NOT redo completed work.`, `2. Continue concrete progress toward the objective.`, `3. After completing a batch, call report_goal_progress with what you did and what's next.`, `4. Verify completion requirement-by-requirement before calling complete_goal.`, `5. Call block_goal only if the same blocker persists across 3+ consecutive turns.`, `6. Use the built-in question tool only for genuinely risky ambiguity.`);
   }
   if (context?.inboxMessages && context.inboxMessages.length > 0) {
     parts.push(``, `## USER INSTRUCTIONS`);
@@ -1224,30 +1209,6 @@ function createGoalService(host) {
     state.runtimes = state.runtimes.filter((r) => r.goalID !== goalID);
     await writeState(directory, state);
   }
-  async function answerQuestion(directory, goalID, answer) {
-    const state = await readState(directory);
-    const goal = state.goals.find((g) => g.id === goalID);
-    if (!goal)
-      return;
-    if (goal.status !== "awaiting_user")
-      return;
-    goal.status = "active";
-    goal.question = undefined;
-    goal.updatedAt = new Date().toISOString();
-    await appendGoalInbox(directory, goalID, "user", `User's answer: ${answer}`);
-    await writeState(directory, state);
-    await appendEvent(directory, {
-      version: 1,
-      eventID: randomUUID2(),
-      goalID,
-      type: "goal.status_changed",
-      from: "awaiting_user",
-      to: "active",
-      timestamp: new Date().toISOString(),
-      revision: state.revision
-    });
-    await continueTurn(directory, goalID);
-  }
   function getWorker(goalID) {
     return sessions.get(goalID);
   }
@@ -1304,7 +1265,7 @@ function createGoalService(host) {
     }
     await writeState(directory, state);
   }
-  return { start, continueTurn, pause, resume, retry, clear, answerQuestion, getWorker, getActiveWorkers, reconcile };
+  return { start, continueTurn, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile };
 }
 
 // src/server/host-adapter.ts
@@ -1679,64 +1640,6 @@ function goalTools(dir, goalService, hostSessionID) {
           })
         };
       }
-    }),
-    ask_user: tool({
-      description: "Ask the user a clarifying question. The goal pauses until the user answers. " + "Use when you need information that only the user can provide, or when " + "the goal is ambiguous and proceeding without clarification would be risky.",
-      args: {
-        question: tool.schema.string().describe("The question to ask the user."),
-        needed: tool.schema.string().describe("What kind of answer is needed (e.g. 'yes/no', 'file path', 'preference').")
-      },
-      execute: async (args, context) => {
-        const state = await readState(dir);
-        const workerID = context?.sessionID || hostSessionID;
-        const goal = findGoalByWorkerSession(state, workerID);
-        if (!goal) {
-          return { title: "No goal", output: "No active goal to ask about." };
-        }
-        if (!canTransition(goal.status, "awaiting_user", "model")) {
-          return { title: "Invalid transition", output: `Cannot ask question in ${goal.status} state.` };
-        }
-        goal.status = "awaiting_user";
-        goal.updatedAt = new Date().toISOString();
-        goal.question = {
-          text: args.question,
-          needed: args.needed,
-          at: new Date().toISOString()
-        };
-        const runtime = state.runtimes.find((r) => r.goalID === goal.id);
-        if (runtime) {
-          runtime.phase = "idle";
-        }
-        await writeState(dir, state);
-        const event = {
-          version: 1,
-          eventID: randomUUID3(),
-          goalID: goal.id,
-          type: "goal.progress",
-          summary: `QUESTION: ${args.question}`,
-          next: args.needed,
-          timestamp: new Date().toISOString(),
-          revision: state.revision
-        };
-        await appendEvent(dir, event);
-        const goalState = await readState(dir);
-        const g = goalState.goals.find((item) => item.id === goal.id);
-        if (g) {
-          g.question = goal.question;
-          g.status = goal.status;
-          await writeState(dir, goalState);
-        }
-        return {
-          title: "Question sent to user",
-          output: JSON.stringify({
-            ok: true,
-            goalName: goal.name,
-            question: args.question,
-            needed: args.needed,
-            message: "Goal paused. The user will see your question in the dashboard and can answer from there."
-          })
-        };
-      }
     })
   };
 }
@@ -1842,8 +1745,7 @@ function ownerTools(options) {
             turn: runtime?.turnCount ?? 0,
             lastProgress: g.lastProgress?.summary?.slice(0, 120),
             lastProgressAt: g.lastProgress?.at,
-            blocker: g.blocker?.reason?.slice(0, 120),
-            question: g.question?.text?.slice(0, 120)
+            blocker: g.blocker?.reason?.slice(0, 120)
           };
         });
         return {
@@ -1888,7 +1790,6 @@ function ownerTools(options) {
             lastProgress: goal.lastProgress,
             completionEvidence: goal.completionEvidence,
             blocker: goal.blocker,
-            question: goal.question,
             tokensUsed: goal.tokensUsed,
             timeUsedSeconds: goal.timeUsedSeconds,
             runtime: runtime ? {
@@ -1970,12 +1871,6 @@ function ownerTools(options) {
           };
         }
         await appendGoalInbox(directory, goal.id, "user", args.message);
-        if (goal.status === "awaiting_user") {
-          goal.status = "active";
-          goal.question = undefined;
-          goal.updatedAt = new Date().toISOString();
-          await writeState(directory, state);
-        }
         return {
           title: "Message sent",
           output: JSON.stringify({

@@ -93,7 +93,7 @@ function buildContinuationSteering(goal: Goal, runtime: GoalRuntimeState, contex
       `- Call report_goal_progress if work remains.`,
       `- Call complete_goal only if ALL acceptance criteria pass with concrete evidence.`,
       `- Call block_goal only for a real external blocker requiring user intervention.`,
-      `- Call ask_user when you need clarification only the user can provide.`,
+      `- Use the built-in question tool when you need clarification only the user can provide.`,
       ``,
       `Do not ask questions unnecessarily. Make reasonable assumptions and work directly.`,
     )
@@ -144,7 +144,7 @@ function buildContinuationSteering(goal: Goal, runtime: GoalRuntimeState, contex
       `3. After completing a batch, call report_goal_progress with what you did and what's next.`,
       `4. Verify completion requirement-by-requirement before calling complete_goal.`,
       `5. Call block_goal only if the same blocker persists across 3+ consecutive turns.`,
-      `6. Call ask_user only for genuinely risky ambiguity.`,
+      `6. Use the built-in question tool only for genuinely risky ambiguity.`,
     )
   }
 

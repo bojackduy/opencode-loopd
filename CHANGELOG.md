@@ -4,10 +4,10 @@
 
 ### Features
 
-- **Goal lifecycle**: create, active, pause, resume, retry, clear, complete, blocked, awaiting_user
+- **Goal lifecycle**: create, active, pause, resume, retry, clear, complete, blocked
 - **Engine-driven loop**: idle detection → continuation steering → automatic re-prompt
 - **Continuation steering**: accumulated context (progress history, transcript tail, inbox messages)
-- **Worker tools**: get_goal, report_goal_progress, complete_goal, block_goal, ask_user
+- **Worker tools**: get_goal, report_goal_progress, complete_goal, block_goal (clarification via OpenCode's native `question` tool)
 - **Owner tools**: list_background_goals, inspect_background_goal, read_goal_transcript, send_goal_input, pause_goal, resume_goal, clear_goal
 - **Inbox system**: bidirectional user↔child messaging
 - **Dashboard**: goal list, detail view, question banner, mode switch (NORMAL/INSERT), keyboard shortcuts
@@ -21,3 +21,11 @@
 - Parent visibility layer: owner tools read child transcript, progress, and state
 - Bidirectional messaging: inbox system for user→child instructions
 - Awaiting_user status: child can pause and ask questions
+
+
+## 1.0.1 (2026-08-21)
+
+### Changed
+
+- Removed redundant `ask_user` tool and `awaiting_user` status. Workers now use OpenCode's native `question` tool for clarification — questions appear in the TUI footer as blocker tabs, no goal status change needed.
+- Removed `:answer` dashboard command (native question answers flow through OpenCode).

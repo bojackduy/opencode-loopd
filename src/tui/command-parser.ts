@@ -90,7 +90,6 @@ export function commandHelp(): string {
     "  :resume                                   Resume the selected goal",
     "  :retry                                    Retry the blocked goal",
     "  :clear                                    Clear the selected goal",
-    "  :answer <text>                            Answer worker's question",
     "  :logs                                     Toggle log view",
     "  :help                                     Show this help",
     "  :q / :close                               Close dashboard",

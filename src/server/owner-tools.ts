@@ -3,7 +3,7 @@
 // Matched by ownerSessionID (the session that created the goal).
 
 import { tool } from "@opencode-ai/plugin/tool"
-import { readState, writeState, appendGoalInbox } from "../infrastructure/state-repository"
+import { readState, appendGoalInbox } from "../infrastructure/state-repository"
 import type { GoalID } from "../domain/goal"
 import type { LoopHost } from "./host-adapter"
 import type { GoalService } from "../application/goal-service"
@@ -58,7 +58,6 @@ export function ownerTools(options: OwnerToolsOptions) {
             lastProgress: g.lastProgress?.summary?.slice(0, 120),
             lastProgressAt: g.lastProgress?.at,
             blocker: g.blocker?.reason?.slice(0, 120),
-            question: g.question?.text?.slice(0, 120),
           }
         })
 
@@ -112,7 +111,6 @@ export function ownerTools(options: OwnerToolsOptions) {
             lastProgress: goal.lastProgress,
             completionEvidence: goal.completionEvidence,
             blocker: goal.blocker,
-            question: goal.question,
             tokensUsed: goal.tokensUsed,
             timeUsedSeconds: goal.timeUsedSeconds,
             runtime: runtime ? {
@@ -209,14 +207,6 @@ export function ownerTools(options: OwnerToolsOptions) {
         }
 
         await appendGoalInbox(directory, goal.id, "user", args.message)
-
-        // If goal was awaiting_user, resume it
-        if (goal.status === "awaiting_user") {
-          goal.status = "active"
-          goal.question = undefined
-          goal.updatedAt = new Date().toISOString()
-          await writeState(directory, state)
-        }
 
         return {
           title: "Message sent",

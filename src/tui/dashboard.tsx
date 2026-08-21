@@ -40,7 +40,6 @@ function statusColor(status: GoalStatus, theme: TuiThemeCurrent) {
     case "active": return theme.success
     case "paused": return theme.warning
     case "blocked": return theme.error
-    case "awaiting_user": return theme.warning
     case "complete": return theme.info
     case "budget_limited": return theme.accent
     case "usage_limited": return theme.accent
@@ -61,7 +60,6 @@ function statusIcon(status: GoalStatus): string {
     case "active": return "●"
     case "paused": return "❚❚"
     case "blocked": return "✖"
-    case "awaiting_user": return "?"
     case "complete": return "✓"
     case "budget_limited": return "$"
     case "usage_limited": return "⏰"
@@ -222,14 +220,6 @@ export function LoopDashboard(props: Props) {
         case "resume": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "resume", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
         case "retry": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "retry", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
         case "clear": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "clear", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
-        case "answer": {
-          if (!selectedGoal()) { setStatusText("No goal"); break }
-          const answerText = parsed.positional.join(" ") || parsed.args.text || ""
-          if (!answerText) { setStatusText("Usage: :answer <your response>"); break }
-          const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "answer", goalID: selectedGoal()!.id, args: { answer: answerText } })
-          setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh()
-          break
-        }
         case "logs": setShowLogs(!showLogs()); break
         case "help": setShowHelp(true); break
         case "q": case "close": props.api.ui.dialog.clear(); return
@@ -305,13 +295,11 @@ export function LoopDashboard(props: Props) {
           {/* Goal detail — fixed, bounded */}
           <Show when={selectedGoal()}>
             {(goal) => (
-              <box flexDirection="column" border={true} borderColor={goal().status === "awaiting_user" ? theme().warning : "gray"} padding={1} flexShrink={0} maxHeight={8}>
+              <box flexDirection="column" border={true} borderColor="gray" padding={1} flexShrink={0} maxHeight={8}>
                 <text>
                   <span style={{ fg: theme().primary, bold: true }}>{goal().name}</span>
-                  {goal().status === "awaiting_user" && <span style={{ fg: theme().warning, bold: true }}> WAITING FOR YOU</span>}
                   {"\n"}
                   <span style={{ fg: theme().textMuted }}>{goal().objective.slice(0, 120)}</span>
-                  {goal().question && <><span style={{ fg: theme().warning }}>{"\n"}Q: {goal().question!.text}</span></>}
                   {goal().lastProgress && <><span style={{ fg: theme().textMuted }}>{"\n"}last: {goal().lastProgress!.summary.slice(0, 80)}</span></>}
                   {goal().blocker && <><span style={{ fg: theme().error }}>{"\n"}blocked: {goal().blocker!.reason.slice(0, 140)}</span></>}
                 </text>

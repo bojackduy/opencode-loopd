@@ -213,19 +213,6 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
         break
       }
 
-      case "answer": {
-        const args = request.args as { answer: string }
-        await goalSvc.answerQuestion(directory, request.goalID as any, args.answer)
-        const state = await readState(directory)
-        const goal = state.goals.find((g) => g.id === request.goalID)
-        response = {
-          ...base,
-          message: `answer sent to "${goal?.name || request.goalID}", goal resumed`,
-          stateRevision: state.revision,
-        }
-        break
-      }
-
       default: {
         response = {
           requestID: request.requestID,

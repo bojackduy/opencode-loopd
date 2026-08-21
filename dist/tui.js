@@ -254,7 +254,6 @@ function commandHelp() {
     "  :resume                                   Resume the selected goal",
     "  :retry                                    Retry the blocked goal",
     "  :clear                                    Clear the selected goal",
-    "  :answer <text>                            Answer worker's question",
     "  :logs                                     Toggle log view",
     "  :help                                     Show this help",
     "  :q / :close                               Close dashboard"
@@ -287,8 +286,6 @@ function statusColor(status, theme) {
       return theme.warning;
     case "blocked":
       return theme.error;
-    case "awaiting_user":
-      return theme.warning;
     case "complete":
       return theme.info;
     case "budget_limited":
@@ -321,8 +318,6 @@ function statusIcon(status) {
       return "\u275A\u275A";
     case "blocked":
       return "\u2716";
-    case "awaiting_user":
-      return "?";
     case "complete":
       return "\u2713";
     case "budget_limited":
@@ -625,31 +620,6 @@ function LoopDashboard(props) {
             await refresh();
           break;
         }
-        case "answer": {
-          if (!selectedGoal()) {
-            setStatusText("No goal");
-            break;
-          }
-          const answerText = parsed.positional.join(" ") || parsed.args.text || "";
-          if (!answerText) {
-            setStatusText("Usage: :answer <your response>");
-            break;
-          }
-          const r = await client.execute({
-            version: 1,
-            requestID: randomUUID(),
-            requestedAt: new Date().toISOString(),
-            command: "answer",
-            goalID: selectedGoal().id,
-            args: {
-              answer: answerText
-            }
-          });
-          setStatusText(r.ok ? r.message : `Error: ${r.message}`);
-          if (r.ok)
-            await refresh();
-          break;
-        }
         case "logs":
           setShowLogs(!showLogs());
           break;
@@ -868,6 +838,7 @@ function LoopDashboard(props) {
         _$insertNode(_el$51, _el$52);
         _$setProp(_el$51, "flexDirection", "column");
         _$setProp(_el$51, "border", true);
+        _$setProp(_el$51, "borderColor", "gray");
         _$setProp(_el$51, "padding", 1);
         _$setProp(_el$51, "flexShrink", 0);
         _$setProp(_el$51, "maxHeight", 8);
@@ -875,73 +846,46 @@ function LoopDashboard(props) {
         _$insertNode(_el$52, _el$54);
         _$insertNode(_el$52, _el$55);
         _$insert(_el$53, () => goal().name);
+        _$insert(_el$55, () => goal().objective.slice(0, 120));
         _$insert(_el$52, (() => {
-          var _c$6 = _$memo(() => goal().status === "awaiting_user");
+          var _c$6 = _$memo(() => !!goal().lastProgress);
           return () => _c$6() && (() => {
-            var _el$56 = _$createElement("span");
-            _$insertNode(_el$56, _$createTextNode(` WAITING FOR YOU`));
+            var _el$56 = _$createElement("span"), _el$57 = _$createTextNode(`
+last: `);
+            _$insertNode(_el$56, _el$57);
+            _$insert(_el$56, () => goal().lastProgress.summary.slice(0, 80), null);
             _$effect((_$p) => _$setProp(_el$56, "style", {
-              fg: theme().warning,
-              bold: true
+              fg: theme().textMuted
             }, _$p));
             return _el$56;
           })();
-        })(), _el$54);
-        _$insert(_el$55, () => goal().objective.slice(0, 120));
+        })(), null);
         _$insert(_el$52, (() => {
-          var _c$7 = _$memo(() => !!goal().question);
+          var _c$7 = _$memo(() => !!goal().blocker);
           return () => _c$7() && (() => {
-            var _el$58 = _$createElement("span"), _el$59 = _$createTextNode(`
-Q: `);
-            _$insertNode(_el$58, _el$59);
-            _$insert(_el$58, () => goal().question.text, null);
-            _$effect((_$p) => _$setProp(_el$58, "style", {
-              fg: theme().warning
-            }, _$p));
-            return _el$58;
-          })();
-        })(), null);
-        _$insert(_el$52, (() => {
-          var _c$8 = _$memo(() => !!goal().lastProgress);
-          return () => _c$8() && (() => {
-            var _el$61 = _$createElement("span"), _el$62 = _$createTextNode(`
-last: `);
-            _$insertNode(_el$61, _el$62);
-            _$insert(_el$61, () => goal().lastProgress.summary.slice(0, 80), null);
-            _$effect((_$p) => _$setProp(_el$61, "style", {
-              fg: theme().textMuted
-            }, _$p));
-            return _el$61;
-          })();
-        })(), null);
-        _$insert(_el$52, (() => {
-          var _c$9 = _$memo(() => !!goal().blocker);
-          return () => _c$9() && (() => {
-            var _el$64 = _$createElement("span"), _el$65 = _$createTextNode(`
+            var _el$59 = _$createElement("span"), _el$60 = _$createTextNode(`
 blocked: `);
-            _$insertNode(_el$64, _el$65);
-            _$insert(_el$64, () => goal().blocker.reason.slice(0, 140), null);
-            _$effect((_$p) => _$setProp(_el$64, "style", {
+            _$insertNode(_el$59, _el$60);
+            _$insert(_el$59, () => goal().blocker.reason.slice(0, 140), null);
+            _$effect((_$p) => _$setProp(_el$59, "style", {
               fg: theme().error
             }, _$p));
-            return _el$64;
+            return _el$59;
           })();
         })(), null);
         _$effect((_p$) => {
-          var _v$19 = goal().status === "awaiting_user" ? theme().warning : "gray", _v$20 = {
+          var _v$19 = {
             fg: theme().primary,
             bold: true
-          }, _v$21 = {
+          }, _v$20 = {
             fg: theme().textMuted
           };
-          _v$19 !== _p$.e && (_p$.e = _$setProp(_el$51, "borderColor", _v$19, _p$.e));
-          _v$20 !== _p$.t && (_p$.t = _$setProp(_el$53, "style", _v$20, _p$.t));
-          _v$21 !== _p$.a && (_p$.a = _$setProp(_el$55, "style", _v$21, _p$.a));
+          _v$19 !== _p$.e && (_p$.e = _$setProp(_el$53, "style", _v$19, _p$.e));
+          _v$20 !== _p$.t && (_p$.t = _$setProp(_el$55, "style", _v$20, _p$.t));
           return _p$;
         }, {
           e: undefined,
-          t: undefined,
-          a: undefined
+          t: undefined
         });
         return _el$51;
       })()

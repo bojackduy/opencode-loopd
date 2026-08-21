@@ -8,7 +8,7 @@ import type { Goal, GoalID } from "../domain/goal"
 import { createGoal, canTransition, isTerminal } from "../domain/goal"
 import type { GoalRuntimeState, RunID } from "../domain/runtime"
 import { createRuntimeState, acquireLease, releaseLease, leaseIsValid, markProgress } from "../domain/runtime"
-import { readState, writeState, appendEvent, drainGoalInbox, appendGoalInbox, readEvents } from "../infrastructure/state-repository"
+import { readState, writeState, appendEvent, drainGoalInbox, readEvents } from "../infrastructure/state-repository"
 import type { StoreState } from "../infrastructure/state-repository"
 import type { LoopHost } from "../server/host-adapter"
 import { createWorkerManager, type WorkerManager, type WorkerSession, type ContinuationContext } from "../server/worker-session"
@@ -38,9 +38,6 @@ export interface GoalService {
 
   /** Clear a goal and abort its worker. */
   clear(directory: string, goalID: GoalID): Promise<void>
-
-  /** Answer a question from the worker and resume the goal. */
-  answerQuestion(directory: string, goalID: GoalID, answer: string): Promise<void>
 
   /** Get the worker session for a goal (for engine to check status). */
   getWorker(goalID: GoalID): WorkerSession | undefined
@@ -377,36 +374,6 @@ export function createGoalService(host: LoopHost): GoalService {
     await writeState(directory, state)
   }
 
-  async function answerQuestion(directory: string, goalID: GoalID, answer: string) {
-    const state = await readState(directory)
-    const goal = state.goals.find((g) => g.id === goalID)
-    if (!goal) return
-
-    if (goal.status !== "awaiting_user") return
-
-    goal.status = "active"
-    goal.question = undefined
-    goal.updatedAt = new Date().toISOString()
-
-    // Enqueue the answer so it appears in the next continuation
-    await appendGoalInbox(directory, goalID, "user", `User's answer: ${answer}`)
-
-    await writeState(directory, state)
-    await appendEvent(directory, {
-      version: 1,
-      eventID: randomUUID(),
-      goalID,
-      type: "goal.status_changed",
-      from: "awaiting_user",
-      to: "active",
-      timestamp: new Date().toISOString(),
-      revision: state.revision,
-    } satisfies LoopEvent)
-
-    // Drive next continuation
-    await continueTurn(directory, goalID)
-  }
-
   function getWorker(goalID: GoalID): WorkerSession | undefined {
     return sessions.get(goalID)
   }
@@ -472,5 +439,5 @@ export function createGoalService(host: LoopHost): GoalService {
     await writeState(directory, state)
   }
 
-  return { start, continueTurn, pause, resume, retry, clear, answerQuestion, getWorker, getActiveWorkers, reconcile }
+  return { start, continueTurn, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile }
 }
