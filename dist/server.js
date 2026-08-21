@@ -1,8 +1,44 @@
 // @bun
+var __defProp = Object.defineProperty;
+var __returnValue = (v) => v;
+function __exportSetter(name, newValue) {
+  this[name] = __returnValue.bind(null, newValue);
+}
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, {
+      get: all[name],
+      enumerable: true,
+      configurable: true,
+      set: __exportSetter.bind(all, name)
+    });
+};
+var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
+
 // src/infrastructure/state-repository.ts
+var exports_state_repository = {};
+__export(exports_state_repository, {
+  writeState: () => writeState,
+  writeControlResponse: () => writeControlResponse,
+  writeControlRequest: () => writeControlRequest,
+  recoverStaleProcessing: () => recoverStaleProcessing,
+  readState: () => readState,
+  readEvents: () => readEvents,
+  readControlResponse: () => readControlResponse,
+  readControlRequest: () => readControlRequest,
+  mutateState: () => mutateState,
+  listPendingRequests: () => listPendingRequests,
+  goalArtifactDir: () => goalArtifactDir,
+  ensureGoalArtifactDir: () => ensureGoalArtifactDir,
+  drainGoalInbox: () => drainGoalInbox,
+  claimControlRequest: () => claimControlRequest,
+  appendGoalInbox: () => appendGoalInbox,
+  appendEvent: () => appendEvent
+});
 import { promises as fs } from "fs";
 import path from "path";
-var CURRENT_VERSION = 2;
+import os from "os";
+import { randomUUID } from "crypto";
 function emptyState() {
   return { version: CURRENT_VERSION, revision: 0, goals: [], runtimes: [], commandLedger: [] };
 }
@@ -14,6 +50,55 @@ function stateFile(directory) {
 }
 function eventsFile(directory) {
   return path.join(loopDir(directory), "events.ndjson");
+}
+function lockDir(directory) {
+  const projectHash = Buffer.from(directory).toString("base64url").slice(0, 32);
+  return path.join(os.tmpdir(), "loopd-locks", projectHash);
+}
+function lockFile(directory, key) {
+  return path.join(lockDir(directory), `${key}.lock`);
+}
+async function acquireLock(directory, key, operation) {
+  const dir = lockDir(directory);
+  await fs.mkdir(dir, { recursive: true });
+  const lockPath = lockFile(directory, key);
+  const lockID = randomUUID();
+  for (let attempt = 0;attempt < 10; attempt++) {
+    try {
+      try {
+        const raw = await fs.readFile(lockPath, "utf8");
+        const meta2 = JSON.parse(raw);
+        const age = Date.now() - Date.parse(meta2.acquiredAt);
+        if (age > LOCK_STALE_MS) {
+          await fs.rm(lockPath, { force: true });
+        }
+      } catch {}
+      const temp = lockPath + `.${lockID}.tmp`;
+      const meta = { pid: process.pid, operation, acquiredAt: new Date().toISOString() };
+      await fs.writeFile(temp, JSON.stringify(meta), "utf8");
+      try {
+        await fs.rename(temp, lockPath);
+        return;
+      } catch (error) {
+        await fs.rm(temp, { force: true });
+        if (error?.code !== "EEXIST")
+          throw error;
+      }
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        await fs.mkdir(dir, { recursive: true });
+        continue;
+      }
+      throw error;
+    }
+    await delay(25 * (attempt + 1));
+  }
+  throw new Error(`failed to acquire lock "${key}" for "${operation}" after retries`);
+}
+async function releaseLock(directory, key) {
+  try {
+    await fs.rm(lockFile(directory, key), { force: true });
+  } catch {}
 }
 async function readState(directory) {
   const target = stateFile(directory);
@@ -89,6 +174,17 @@ async function writeState(directory, state) {
   const payload = JSON.stringify(state, null, 2);
   await writeAtomic(stateFile(directory), payload);
 }
+async function mutateState(directory, description, fn) {
+  await acquireLock(directory, "state", description);
+  try {
+    const state = await readState(directory);
+    const next = await fn(state);
+    await writeState(directory, next);
+    return next;
+  } finally {
+    await releaseLock(directory, "state");
+  }
+}
 async function appendEvent(directory, event) {
   await fs.mkdir(loopDir(directory), { recursive: true });
   const line = JSON.stringify(event) + `
@@ -116,6 +212,19 @@ function processingFile(directory, requestID) {
 }
 function responseFile(directory, requestID) {
   return path.join(controlDir(directory), "responses", `${requestID}.json`);
+}
+async function writeControlRequest(directory, request) {
+  const dir = path.join(controlDir(directory), "requests");
+  await fs.mkdir(dir, { recursive: true });
+  await writeAtomic(requestFile(directory, request.requestID), JSON.stringify(request, null, 2));
+}
+async function readControlRequest(directory, requestID) {
+  try {
+    const raw = await fs.readFile(requestFile(directory, requestID), "utf8");
+    return JSON.parse(raw);
+  } catch {
+    return;
+  }
 }
 async function claimControlRequest(directory, requestID) {
   const src = requestFile(directory, requestID);
@@ -162,6 +271,36 @@ async function listPendingRequests(directory) {
     return [];
   }
 }
+async function recoverStaleProcessing(directory) {
+  const dir = path.join(controlDir(directory), "processing");
+  try {
+    const files = await fs.readdir(dir);
+    const recovered = [];
+    for (const file of files) {
+      if (!file.endsWith(".json"))
+        continue;
+      const processingPath = path.join(dir, file);
+      const requestPath = path.join(controlDir(directory), "requests", file);
+      try {
+        const raw = await fs.readFile(processingPath, "utf8");
+        const request = JSON.parse(raw);
+        await fs.rename(processingPath, requestPath);
+        recovered.push(request);
+      } catch {}
+    }
+    return recovered;
+  } catch {
+    return [];
+  }
+}
+function goalArtifactDir(directory, goalID) {
+  return path.join(loopDir(directory), "goals", goalID);
+}
+async function ensureGoalArtifactDir(directory, goalID) {
+  const dir = goalArtifactDir(directory, goalID);
+  await fs.mkdir(dir, { recursive: true });
+  return dir;
+}
 function inboxFile(directory, goalID) {
   return path.join(loopDir(directory), "inboxes", `${goalID}.jsonl`);
 }
@@ -190,6 +329,11 @@ async function drainGoalInbox(directory, goalID) {
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+var CURRENT_VERSION = 2, LOCK_STALE_MS = 1e4;
+var init_state_repository = () => {};
+
+// src/application/control-worker.ts
+init_state_repository();
 
 // src/infrastructure/server-log.ts
 import { appendFile } from "fs/promises";
@@ -422,7 +566,8 @@ function createControlWorker(options) {
 }
 
 // src/application/loop-engine.ts
-import { randomUUID } from "crypto";
+init_state_repository();
+import { randomUUID as randomUUID2 } from "crypto";
 
 // src/domain/goal.ts
 var MODEL_TRANSITIONS = {
@@ -625,7 +770,7 @@ function createLoopEngine(options) {
       if (completedRunID) {
         await appendEvent(directory, {
           version: 1,
-          eventID: randomUUID(),
+          eventID: randomUUID2(),
           goalID: goal.id,
           type: "run.completed",
           runID: completedRunID,
@@ -637,31 +782,47 @@ function createLoopEngine(options) {
     if (goal.status !== "active")
       return false;
     const limitResult = enforceLimits(goal, runtime);
-    if (limitResult.blocked) {
-      await writeState(directory, state);
-      if (limitResult.event === "goal.blocked") {
-        await appendEvent(directory, {
-          version: 1,
-          eventID: randomUUID(),
-          goalID: goal.id,
-          type: "goal.blocked",
-          reason: limitResult.reason,
-          needed: limitResult.reason,
-          timestamp: new Date().toISOString(),
-          revision: state.revision
-        });
-      } else {
-        await appendEvent(directory, {
-          version: 1,
-          eventID: randomUUID(),
-          goalID: goal.id,
-          type: "goal.status_changed",
-          from: "active",
-          to: goal.status,
-          timestamp: new Date().toISOString(),
-          revision: state.revision
-        });
+    if (limitResult.stop === "force_finish") {
+      if (!runtime.forceFinishRequested) {
+        runtime.forceFinishRequested = true;
+        await writeState(directory, state);
+        await goalService.continueTurn(directory, goal.id, { forceFinish: true });
+        return true;
       }
+      goal.status = "blocked";
+      goal.updatedAt = new Date().toISOString();
+      goal.blocker = {
+        reason: limitResult.reason + " (force-finish ignored)",
+        needed: "User intervention required. Use retry to attempt again.",
+        at: new Date().toISOString()
+      };
+      runtime.forceFinishRequested = undefined;
+      await writeState(directory, state);
+      await appendEvent(directory, {
+        version: 1,
+        eventID: randomUUID2(),
+        goalID: goal.id,
+        type: "goal.blocked",
+        reason: limitResult.reason + " (force-finish ignored)",
+        needed: goal.blocker.needed,
+        timestamp: new Date().toISOString(),
+        revision: state.revision
+      });
+      await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" stopped: ${limitResult.reason} (child did not wrap up). Status: blocked. Last progress: ${goal.lastProgress?.summary || "none"}.`);
+      return true;
+    }
+    if (limitResult.stop === "budget") {
+      await writeState(directory, state);
+      await appendEvent(directory, {
+        version: 1,
+        eventID: randomUUID2(),
+        goalID: goal.id,
+        type: "goal.status_changed",
+        from: "active",
+        to: goal.status,
+        timestamp: new Date().toISOString(),
+        revision: state.revision
+      });
       return true;
     }
     if (shouldCompact(goal, runtime)) {
@@ -700,7 +861,7 @@ function createLoopEngine(options) {
     }
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID(),
+      eventID: randomUUID2(),
       goalID: goal.id,
       type: "run.failed",
       runID: runtime.activeRunID || "unknown",
@@ -720,7 +881,7 @@ function createLoopEngine(options) {
       };
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID(),
+        eventID: randomUUID2(),
         goalID: goal.id,
         type: "goal.blocked",
         reason: `Failed ${runtime.consecutiveFailures} times`,
@@ -728,6 +889,7 @@ function createLoopEngine(options) {
         timestamp: new Date().toISOString(),
         revision: state.revision
       });
+      await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" blocked after ${runtime.consecutiveFailures} failures. Last error: ${message}.`);
     } else {
       const backoffMs = Math.min(30000, 1000 * Math.pow(2, runtime.consecutiveFailures));
       runtime.retryAfter = new Date(Date.now() + backoffMs).toISOString();
@@ -745,7 +907,7 @@ function createLoopEngine(options) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID(),
+      eventID: randomUUID2(),
       goalID: goal.id,
       type: "compaction.completed",
       timestamp: new Date().toISOString(),
@@ -754,17 +916,11 @@ function createLoopEngine(options) {
     return true;
   }
   function enforceLimits(goal, runtime) {
-    const noResult = { blocked: false, event: "goal.status_changed", reason: "" };
+    const noResult = { stop: "none", blocked: false, event: "goal.status_changed", reason: "" };
     const maxTurns = goal.config?.maxTurns;
     if (maxTurns && runtime.turnCount >= maxTurns) {
-      goal.status = "blocked";
-      goal.updatedAt = new Date().toISOString();
-      goal.blocker = {
-        reason: `Reached max turns (${maxTurns})`,
-        needed: "Use retry to reset turns and continue.",
-        at: new Date().toISOString()
-      };
       return {
+        stop: "force_finish",
         blocked: true,
         event: "goal.blocked",
         reason: `Reached max turns (${maxTurns})`
@@ -772,14 +928,8 @@ function createLoopEngine(options) {
     }
     const maxNoProgress = goal.config?.maxNoProgress;
     if (maxNoProgress && runtime.noProgressCount >= maxNoProgress) {
-      goal.status = "blocked";
-      goal.updatedAt = new Date().toISOString();
-      goal.blocker = {
-        reason: `No progress for ${runtime.noProgressCount} consecutive turns`,
-        needed: "Use retry to reset and continue.",
-        at: new Date().toISOString()
-      };
       return {
+        stop: "force_finish",
         blocked: true,
         event: "goal.blocked",
         reason: `No progress for ${runtime.noProgressCount} consecutive turns`
@@ -789,6 +939,7 @@ function createLoopEngine(options) {
       goal.status = "budget_limited";
       goal.updatedAt = new Date().toISOString();
       return {
+        stop: "budget",
         blocked: true,
         event: "goal.status_changed",
         reason: `Token budget exhausted (${goal.tokensUsed}/${goal.tokenBudget})`
@@ -812,7 +963,7 @@ function createLoopEngine(options) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID(),
+      eventID: randomUUID2(),
       goalID: goal.id,
       type: "compaction.started",
       timestamp: new Date().toISOString(),
@@ -863,7 +1014,9 @@ function createLoopEngine(options) {
 }
 
 // src/application/goal-service.ts
-import { randomUUID as randomUUID2 } from "crypto";
+import { randomUUID as randomUUID3 } from "crypto";
+init_state_repository();
+import * as path2 from "path";
 
 // src/server/worker-session.ts
 function createWorkerManager(host) {
@@ -900,8 +1053,22 @@ function createWorkerManager(host) {
 }
 function buildContinuationSteering(goal, runtime, context) {
   const parts = [];
+  const artifactDir = goal.config.artifactDir;
+  function outputLocationBlock() {
+    if (!artifactDir)
+      return [];
+    return [
+      ``,
+      `## OUTPUT LOCATION`,
+      `Write all files, logs, and artifacts under:`,
+      artifactDir,
+      ``,
+      `Exception: if the objective explicitly specifies a different output directory, follow the objective instead.`
+    ];
+  }
   if (runtime.turnCount <= 1) {
     parts.push(`You are a worker for an active goal.`, ``, `Call get_goal to read the authoritative objective, acceptance criteria, and current state.`, `Perform one concrete batch of work. After durable verification:`, ``, `- Call report_goal_progress if work remains.`, `- Call complete_goal only if ALL acceptance criteria pass with concrete evidence.`, `- Call block_goal only for a real external blocker requiring user intervention.`, `- Use the built-in question tool when you need clarification only the user can provide.`, ``, `Do not ask questions unnecessarily. Make reasonable assumptions and work directly.`);
+    parts.push(...outputLocationBlock());
   } else {
     parts.push(`This is continuation turn ${runtime.turnCount} for the goal below.`, ``, `## GOAL (user-provided data)`, goal.objective);
     const progress = context?.progressHistory;
@@ -928,7 +1095,12 @@ function buildContinuationSteering(goal, runtime, context) {
         parts.push(`- ${runtime.noProgressCount} turn(s) without progress. Work concretely this turn.`);
       }
     }
-    parts.push(``, `## INSTRUCTIONS`, `1. Inspect current workspace state \u2014 read files, check what exists. Do NOT redo completed work.`, `2. Continue concrete progress toward the objective.`, `3. After completing a batch, call report_goal_progress with what you did and what's next.`, `4. Verify completion requirement-by-requirement before calling complete_goal.`, `5. Call block_goal only if the same blocker persists across 3+ consecutive turns.`, `6. Use the built-in question tool only for genuinely risky ambiguity.`);
+    parts.push(...outputLocationBlock());
+    if (context?.forceFinish) {
+      parts.push(``, `## FINAL REPORT REQUIRED \u2014 STOPPING SOON`, `The system requires you to wrap up now. Do NOT start new work.`, `Call complete_goal NOW with:`, `- summary: a specific semantic summary of what was accomplished (files changed, results, key findings)`, `- evidence: concrete proof (commands run, files created, checks passed)`, `If you cannot complete, call block_goal with the reason.`);
+    } else {
+      parts.push(``, `## INSTRUCTIONS`, `1. Inspect current workspace state \u2014 read files, check what exists. Do NOT redo completed work.`, `2. Continue concrete progress toward the objective.`, `3. After completing a batch, call report_goal_progress with what you did and what's next.`, `4. Verify completion requirement-by-requirement before calling complete_goal.`, `5. Call block_goal only if the same blocker persists across 3+ consecutive turns.`, `6. Use the built-in question tool only for genuinely risky ambiguity.`);
+    }
   }
   if (context?.inboxMessages && context.inboxMessages.length > 0) {
     parts.push(``, `## USER INSTRUCTIONS`);
@@ -946,7 +1118,7 @@ function createGoalService(host) {
   const sessions = new Map;
   async function start(directory, input) {
     const state = await readState(directory);
-    const id = randomUUID2();
+    const id = randomUUID3();
     const goal = createGoal({
       id,
       name: input.name,
@@ -958,6 +1130,11 @@ function createGoalService(host) {
         ...input.config
       }
     });
+    const artifactDir = goalArtifactDir(directory, id);
+    goal.config.artifactDir = artifactDir;
+    if (!goal.config.progressFile)
+      goal.config.progressFile = path2.join(artifactDir, "progress.md");
+    await ensureGoalArtifactDir(directory, id);
     state.goals.push(goal);
     state.runtimes.push(createRuntimeState(id));
     const runtime = state.runtimes.find((r) => r.goalID === id);
@@ -985,7 +1162,7 @@ function createGoalService(host) {
       await writeState(directory, state);
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID2(),
+        eventID: randomUUID3(),
         goalID: id,
         type: "goal.blocked",
         reason: detail,
@@ -1001,7 +1178,7 @@ function createGoalService(host) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID3(),
       goalID: id,
       type: "goal.created",
       name: input.name,
@@ -1011,7 +1188,7 @@ function createGoalService(host) {
       revision: state.revision
     });
     if (runtime) {
-      const runID = randomUUID2();
+      const runID = randomUUID3();
       Object.assign(runtime, acquireLease(runtime, goal.config.timeoutMs || 300000));
       runtime.activeRunID = runID;
       runtime.turnCount = 1;
@@ -1020,7 +1197,7 @@ function createGoalService(host) {
       await writeState(directory, state);
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID2(),
+        eventID: randomUUID3(),
         goalID: id,
         type: "run.started",
         runID,
@@ -1032,7 +1209,7 @@ function createGoalService(host) {
     }
     return { goal, worker };
   }
-  async function continueTurn(directory, goalID) {
+  async function continueTurn(directory, goalID, opts) {
     const state = await readState(directory);
     const goal = state.goals.find((g) => g.id === goalID);
     if (!goal || isTerminal(goal.status))
@@ -1058,7 +1235,7 @@ function createGoalService(host) {
     const timeoutMs = goal.config.timeoutMs || 300000;
     const leased = acquireLease(runtime, timeoutMs);
     Object.assign(runtime, leased);
-    const runID = randomUUID2();
+    const runID = randomUUID3();
     runtime.activeRunID = runID;
     runtime.turnCount += 1;
     runtime.runCount += 1;
@@ -1066,7 +1243,7 @@ function createGoalService(host) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID3(),
       goalID,
       type: "run.started",
       runID,
@@ -1090,7 +1267,8 @@ function createGoalService(host) {
     const context = {
       inboxMessages: inboxMessages.length > 0 ? inboxMessages : undefined,
       progressHistory: progressHistory.length > 0 ? progressHistory : undefined,
-      transcriptTail: transcriptTail && transcriptTail.length > 0 ? transcriptTail : undefined
+      transcriptTail: transcriptTail && transcriptTail.length > 0 ? transcriptTail : undefined,
+      forceFinish: opts?.forceFinish || undefined
     };
     await workers.continueWorker(session, goal, runtime, context);
   }
@@ -1119,7 +1297,7 @@ function createGoalService(host) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID3(),
       goalID,
       type: "goal.status_changed",
       from: "active",
@@ -1146,7 +1324,7 @@ function createGoalService(host) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID3(),
       goalID,
       type: "goal.status_changed",
       from: "paused",
@@ -1167,13 +1345,14 @@ function createGoalService(host) {
     if (runtime) {
       runtime.consecutiveFailures = 0;
       runtime.lastError = undefined;
+      runtime.forceFinishRequested = undefined;
       runtime.phase = "idle";
       runtime.updatedAt = new Date().toISOString();
     }
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID3(),
       goalID,
       type: "goal.status_changed",
       from: "blocked",
@@ -1199,7 +1378,7 @@ function createGoalService(host) {
     }
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID3(),
       goalID,
       type: "goal.cleared",
       timestamp: new Date().toISOString(),
@@ -1355,6 +1534,21 @@ function createRealHost(client, directory) {
       try {
         await client.session.compact({ sessionID });
       } catch {}
+    },
+    async notifyOwner(ownerSessionID, message) {
+      try {
+        const result = await withTimeout(client.session.promptAsync({
+          path: { id: ownerSessionID },
+          body: { parts: [{ type: "text", text: message }] }
+        }), 1e4, "OpenCode parent notify");
+        if (result?.error) {
+          await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(result.error) });
+        } else {
+          await logServerEvent(directory, "parent.notified", { ownerSessionID, preview: message.slice(0, 160) });
+        }
+      } catch (error) {
+        await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(error) });
+      }
     }
   };
 }
@@ -1374,7 +1568,8 @@ async function withTimeout(promise, timeoutMs, operation) {
 }
 
 // src/server/goal-tools.ts
-import { randomUUID as randomUUID3 } from "crypto";
+init_state_repository();
+import { randomUUID as randomUUID4 } from "crypto";
 import { tool } from "@opencode-ai/plugin/tool";
 import { exec as execChild } from "child_process";
 import { promisify } from "util";
@@ -1435,8 +1630,9 @@ function goalTools(dir, goalService, hostSessionID) {
               ok: true,
               goalID: goal.id,
               workerSessionID: worker.workerSessionID,
+              artifactDir: goal.config.artifactDir,
               name: args.name,
-              message: `Goal "${args.name}" created and started in the background. Monitor with /loop (Ctrl+Alt+L).`
+              message: `Goal "${args.name}" created and started in the background. Artifacts: ${goal.config.artifactDir}. Monitor with /loop (Ctrl+Alt+L).`
             })
           };
         } catch (error) {
@@ -1506,7 +1702,7 @@ function goalTools(dir, goalService, hostSessionID) {
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID3(),
+          eventID: randomUUID4(),
           goalID: goal.id,
           type: "goal.progress",
           summary: args.summary,
@@ -1570,7 +1766,7 @@ function goalTools(dir, goalService, hostSessionID) {
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID3(),
+          eventID: randomUUID4(),
           goalID: goal.id,
           type: "goal.completed",
           summary: args.summary,
@@ -1582,6 +1778,7 @@ function goalTools(dir, goalService, hostSessionID) {
         return {
           title: "Goal completed",
           output: JSON.stringify({
+            goalID: goal.id,
             goalName: goal.name,
             status: "complete",
             summary: args.summary,
@@ -1621,7 +1818,7 @@ function goalTools(dir, goalService, hostSessionID) {
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID3(),
+          eventID: randomUUID4(),
           goalID: goal.id,
           type: "goal.blocked",
           reason: args.reason,
@@ -1633,6 +1830,7 @@ function goalTools(dir, goalService, hostSessionID) {
         return {
           title: "Goal blocked",
           output: JSON.stringify({
+            goalID: goal.id,
             goalName: goal.name,
             status: "blocked",
             reason: args.reason,
@@ -1708,6 +1906,7 @@ async function runCompletionChecks(checks) {
 }
 
 // src/server/owner-tools.ts
+init_state_repository();
 import { tool as tool2 } from "@opencode-ai/plugin/tool";
 function ownerTools(options) {
   const { directory, host, goalService } = options;
@@ -2065,6 +2264,26 @@ var server = async ({ client, directory }) => {
       if (input.tool === "loopd_create_goal" || input.tool === "get_goal" || input.tool === "report_goal_progress") {
         ensureStarted();
         reconcileInBackground();
+      }
+      if (input.tool === "complete_goal" || input.tool === "block_goal") {
+        try {
+          const raw = output?.output;
+          if (!raw)
+            return;
+          const parsed = JSON.parse(raw);
+          if (parsed.status !== "complete" && parsed.status !== "blocked")
+            return;
+          const goalID = parsed.goalID;
+          if (!goalID)
+            return;
+          const { readState: readState2 } = await Promise.resolve().then(() => (init_state_repository(), exports_state_repository));
+          const state = await readState2(directory);
+          const goal = state.goals.find((g) => g.id === goalID);
+          if (!goal)
+            return;
+          const message = parsed.status === "complete" ? `Loop goal "${goal.name}" completed: ${parsed.summary || ""}. Evidence: ${parsed.evidence || ""}. Artifacts: ${goal.config.artifactDir || "n/a"}.` : `Loop goal "${goal.name}" blocked: ${parsed.reason || ""}. Needed: ${parsed.needed || ""}.`;
+          await host.notifyOwner(goal.ownerSessionID, message);
+        } catch {}
       }
     },
     dispose: async () => {

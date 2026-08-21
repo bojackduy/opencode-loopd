@@ -87,6 +87,9 @@ export interface GoalConfig {
 
   /** Timeout per turn (ms). */
   timeoutMs?: number
+
+  /** Per-goal artifact directory. Computed at creation; not user-supplied. */
+  artifactDir?: string
 }
 
 // ─── Transition Rules ────────────────────────────────────────────────────────

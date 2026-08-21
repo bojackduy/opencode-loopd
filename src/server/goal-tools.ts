@@ -71,8 +71,9 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
               ok: true,
               goalID: goal.id,
               workerSessionID: worker.workerSessionID,
+              artifactDir: goal.config.artifactDir,
               name: args.name,
-              message: `Goal "${args.name}" created and started in the background. Monitor with /loop (Ctrl+Alt+L).`,
+              message: `Goal "${args.name}" created and started in the background. Artifacts: ${goal.config.artifactDir}. Monitor with /loop (Ctrl+Alt+L).`,
             }),
           }
         } catch (error) {
@@ -246,6 +247,7 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
         return {
           title: "Goal completed",
           output: JSON.stringify({
+            goalID: goal.id,
             goalName: goal.name,
             status: "complete",
             summary: args.summary,
@@ -306,6 +308,7 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
         return {
           title: "Goal blocked",
           output: JSON.stringify({
+            goalID: goal.id,
             goalName: goal.name,
             status: "blocked",
             reason: args.reason,

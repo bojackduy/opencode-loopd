@@ -22,6 +22,8 @@ export interface ContinuationContext {
   progressHistory?: { summary: string; next?: string; at: string }[]
   /** Last N messages from the worker's own transcript. */
   transcriptTail?: SessionMessage[]
+  /** When set, the engine requires the child to wrap up . */
+  forceFinish?: boolean
 }
 
 export interface WorkerManager {
@@ -82,6 +84,19 @@ export function createWorkerManager(host: LoopHost): WorkerManager {
 function buildContinuationSteering(goal: Goal, runtime: GoalRuntimeState, context?: ContinuationContext): string {
   const parts: string[] = []
 
+  const artifactDir = (goal.config as any).artifactDir as string | undefined
+  function outputLocationBlock(): string[] {
+    if (!artifactDir) return []
+    return [
+      ``,
+      `## OUTPUT LOCATION`,
+      `Write all files, logs, and artifacts under:`,
+      artifactDir,
+      ``,
+      `Exception: if the objective explicitly specifies a different output directory, follow the objective instead.`,
+    ]
+  }
+
   // ── Header ─────────────────────────────────────────────────────────────
   if (runtime.turnCount <= 1) {
     parts.push(
@@ -97,6 +112,7 @@ function buildContinuationSteering(goal: Goal, runtime: GoalRuntimeState, contex
       ``,
       `Do not ask questions unnecessarily. Make reasonable assumptions and work directly.`,
     )
+    parts.push(...outputLocationBlock())
   } else {
     // ── Continuation steering (turn 2+) ──────────────────────────────────
     parts.push(
@@ -135,17 +151,32 @@ function buildContinuationSteering(goal: Goal, runtime: GoalRuntimeState, contex
       }
     }
 
-    // ── Instructions ──────────────────────────────────────────────────────
-    parts.push(
-      ``,
-      `## INSTRUCTIONS`,
-      `1. Inspect current workspace state — read files, check what exists. Do NOT redo completed work.`,
-      `2. Continue concrete progress toward the objective.`,
-      `3. After completing a batch, call report_goal_progress with what you did and what's next.`,
-      `4. Verify completion requirement-by-requirement before calling complete_goal.`,
-      `5. Call block_goal only if the same blocker persists across 3+ consecutive turns.`,
-      `6. Use the built-in question tool only for genuinely risky ambiguity.`,
-    )
+    // ── Output location (turn 2+) ─────────────────────────────────────────
+    parts.push(...outputLocationBlock())
+
+    // ── Force-finish vs normal instructions ────────────────────────────────
+    if (context?.forceFinish) {
+      parts.push(
+        ``,
+        `## FINAL REPORT REQUIRED — STOPPING SOON`,
+        `The system requires you to wrap up now. Do NOT start new work.`,
+        `Call complete_goal NOW with:`,
+        `- summary: a specific semantic summary of what was accomplished (files changed, results, key findings)`,
+        `- evidence: concrete proof (commands run, files created, checks passed)`,
+        `If you cannot complete, call block_goal with the reason.`,
+      )
+    } else {
+      parts.push(
+        ``,
+        `## INSTRUCTIONS`,
+        `1. Inspect current workspace state — read files, check what exists. Do NOT redo completed work.`,
+        `2. Continue concrete progress toward the objective.`,
+        `3. After completing a batch, call report_goal_progress with what you did and what's next.`,
+        `4. Verify completion requirement-by-requirement before calling complete_goal.`,
+        `5. Call block_goal only if the same blocker persists across 3+ consecutive turns.`,
+        `6. Use the built-in question tool only for genuinely risky ambiguity.`,
+      )
+    }
   }
 
   // ── User instructions from owner ─────────────────────────────────────

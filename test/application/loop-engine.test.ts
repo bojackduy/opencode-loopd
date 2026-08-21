@@ -224,7 +224,7 @@ describe("Loop Engine", () => {
   })
 
   describe("limits", () => {
-    it("blocks on max turns", async () => {
+    it("force-finish then blocks on max turns", async () => {
       const { goal } = await goalService.start(dir, {
         name: "test",
         objective: "do something",
@@ -232,25 +232,33 @@ describe("Loop Engine", () => {
         config: { maxTurns: 1 },
       })
 
-      // Simulate that the worker has already completed 1 turn
-      // by sending an idle event which will trigger the limit check
+      // Exceed maxTurns
       const state = await readState(dir)
       const runtime = state.runtimes.find((r) => r.goalID === goal.id)
       if (runtime) {
-        runtime.turnCount = 2 // Exceed maxTurns
+        runtime.turnCount = 2
         await fs.writeFile(
           path.join(dir, ".opencode", "loopd", "state.json"),
           JSON.stringify(state, null, 2),
         )
       }
 
-      // Simulate idle to trigger limit check
+      // 1st idle → force-finish requested, still active, prompt contains FINAL REPORT
       await engine.handleEvent({
         type: "session.idle",
         properties: { sessionID: goal.workerSessionID },
       })
+      let updatedState = await readState(dir)
+      expect(updatedState.goals[0].status).toBe("active")
+      expect(updatedState.runtimes[0].forceFinishRequested).toBe(true)
+      expect(host.prompts[host.prompts.length - 1]).toContain("FINAL REPORT REQUIRED")
 
-      const updatedState = await readState(dir)
+      // 2nd idle → child ignored → blocked + parent notified
+      await engine.handleEvent({
+        type: "session.idle",
+        properties: { sessionID: goal.workerSessionID },
+      })
+      updatedState = await readState(dir)
       expect(updatedState.goals[0].status).toBe("blocked")
     })
   })

@@ -390,6 +390,18 @@ export async function recoverStaleProcessing(directory: string): Promise<Control
   }
 }
 
+// ─── Goal Artifact Directory ─────────────────────────────────────────────────
+
+export function goalArtifactDir(directory: string, goalID: string): string {
+  return path.join(loopDir(directory), "goals", goalID)
+}
+
+export async function ensureGoalArtifactDir(directory: string, goalID: string): Promise<string> {
+  const dir = goalArtifactDir(directory, goalID)
+  await fs.mkdir(dir, { recursive: true })
+  return dir
+}
+
 // ─── Goal Inbox ─────────────────────────────────────────────────────────────
 
 interface GoalInboxMessage {

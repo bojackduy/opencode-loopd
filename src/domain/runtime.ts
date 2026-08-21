@@ -53,6 +53,9 @@ export interface GoalRuntimeState {
   /** Number of tokens consumed during current turn. */
   turnTokensUsed?: number
 
+  /** Whether the engine has already asked the child to wrap up . */
+  forceFinishRequested?: boolean
+
   /** Timestamps. */
   lastRunAt?: string
   lastProgressAt?: string

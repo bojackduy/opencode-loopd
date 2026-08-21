@@ -8,7 +8,8 @@ import type { Goal, GoalID } from "../domain/goal"
 import { createGoal, canTransition, isTerminal } from "../domain/goal"
 import type { GoalRuntimeState, RunID } from "../domain/runtime"
 import { createRuntimeState, acquireLease, releaseLease, leaseIsValid, markProgress } from "../domain/runtime"
-import { readState, writeState, appendEvent, drainGoalInbox, readEvents } from "../infrastructure/state-repository"
+import { readState, writeState, appendEvent, drainGoalInbox, readEvents, goalArtifactDir, ensureGoalArtifactDir } from "../infrastructure/state-repository"
+import * as path from "path"
 import type { StoreState } from "../infrastructure/state-repository"
 import type { LoopHost } from "../server/host-adapter"
 import { createWorkerManager, type WorkerManager, type WorkerSession, type ContinuationContext } from "../server/worker-session"
@@ -25,7 +26,7 @@ export interface GoalService {
   }): Promise<{ goal: Goal; worker: WorkerSession }>
 
   /** Drive one continuation turn for a goal. */
-  continueTurn(directory: string, goalID: GoalID): Promise<void>
+  continueTurn(directory: string, goalID: GoalID, opts?: { forceFinish?: boolean }): Promise<void>
 
   /** Pause a goal and abort its worker. */
   pause(directory: string, goalID: GoalID): Promise<void>
@@ -75,6 +76,12 @@ export function createGoalService(host: LoopHost): GoalService {
         ...input.config,
       },
     })
+
+    // Compute per-goal artifact directory and wire defaults
+    const artifactDir = goalArtifactDir(directory, id)
+    goal.config.artifactDir = artifactDir
+    if (!goal.config.progressFile) goal.config.progressFile = path.join(artifactDir, "progress.md")
+    await ensureGoalArtifactDir(directory, id)
 
     state.goals.push(goal)
     state.runtimes.push(createRuntimeState(id))
@@ -161,7 +168,7 @@ export function createGoalService(host: LoopHost): GoalService {
     return { goal, worker }
   }
 
-  async function continueTurn(directory: string, goalID: GoalID) {
+  async function continueTurn(directory: string, goalID: GoalID, opts?: { forceFinish?: boolean }) {
     const state = await readState(directory)
     const goal = state.goals.find((g) => g.id === goalID)
     if (!goal || isTerminal(goal.status)) return
@@ -233,6 +240,7 @@ export function createGoalService(host: LoopHost): GoalService {
       inboxMessages: inboxMessages.length > 0 ? inboxMessages : undefined,
       progressHistory: progressHistory.length > 0 ? progressHistory : undefined,
       transcriptTail: transcriptTail && transcriptTail.length > 0 ? transcriptTail : undefined,
+      forceFinish: opts?.forceFinish || undefined,
     }
 
     await workers.continueWorker(session, goal, runtime, context)
@@ -324,6 +332,7 @@ export function createGoalService(host: LoopHost): GoalService {
     if (runtime) {
       runtime.consecutiveFailures = 0
       runtime.lastError = undefined
+      runtime.forceFinishRequested = undefined
       runtime.phase = "idle"
       runtime.updatedAt = new Date().toISOString()
     }

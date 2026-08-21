@@ -190,31 +190,52 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
 
     // Enforce limits
     const limitResult = enforceLimits(goal, runtime)
-    if (limitResult.blocked) {
-      await writeState(directory, state)
-      if (limitResult.event === "goal.blocked") {
-        await appendEvent(directory, {
-          version: 1,
-          eventID: randomUUID(),
-          goalID: goal.id,
-          type: "goal.blocked",
-          reason: limitResult.reason,
-          needed: limitResult.reason,
-          timestamp: new Date().toISOString(),
-          revision: state.revision,
-        } satisfies LoopEvent)
-      } else {
-        await appendEvent(directory, {
-          version: 1,
-          eventID: randomUUID(),
-          goalID: goal.id,
-          type: "goal.status_changed",
-          from: "active",
-          to: goal.status,
-          timestamp: new Date().toISOString(),
-          revision: state.revision,
-        } satisfies LoopEvent)
+    if (limitResult.stop === "force_finish") {
+      if (!runtime.forceFinishRequested) {
+        // First detection: ask child to wrap up with a semantic summary
+        runtime.forceFinishRequested = true
+        await writeState(directory, state)
+        await goalService.continueTurn(directory, goal.id, { forceFinish: true })
+        return true
       }
+      // Second detection: child ignored the request — treat as dead/stuck
+      goal.status = "blocked"
+      goal.updatedAt = new Date().toISOString()
+      goal.blocker = {
+        reason: limitResult.reason + " (force-finish ignored)",
+        needed: "User intervention required. Use retry to attempt again.",
+        at: new Date().toISOString(),
+      }
+      runtime.forceFinishRequested = undefined
+      await writeState(directory, state)
+      await appendEvent(directory, {
+        version: 1,
+        eventID: randomUUID(),
+        goalID: goal.id,
+        type: "goal.blocked",
+        reason: limitResult.reason + " (force-finish ignored)",
+        needed: goal.blocker.needed,
+        timestamp: new Date().toISOString(),
+        revision: state.revision,
+      } satisfies LoopEvent)
+      await host.notifyOwner(
+        goal.ownerSessionID,
+        `Loop goal "${goal.name}" stopped: ${limitResult.reason} (child did not wrap up). Status: blocked. Last progress: ${goal.lastProgress?.summary || "none"}.`,
+      )
+      return true
+    }
+    if (limitResult.stop === "budget") {
+      await writeState(directory, state)
+      await appendEvent(directory, {
+        version: 1,
+        eventID: randomUUID(),
+        goalID: goal.id,
+        type: "goal.status_changed",
+        from: "active",
+        to: goal.status,
+        timestamp: new Date().toISOString(),
+        revision: state.revision,
+      } satisfies LoopEvent)
       return true
     }
 
@@ -301,6 +322,10 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
         timestamp: new Date().toISOString(),
         revision: state.revision,
       } satisfies LoopEvent)
+      await host.notifyOwner(
+        goal.ownerSessionID,
+        `Loop goal "${goal.name}" blocked after ${runtime.consecutiveFailures} failures. Last error: ${message}.`,
+      )
     } else {
       // Set retry backoff
       const backoffMs = Math.min(30_000, 1_000 * Math.pow(2, runtime.consecutiveFailures))
@@ -337,54 +362,45 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
 
   // ─── Limit Enforcement ────────────────────────────────────────────────────
 
+  type LimitStop = "none" | "force_finish" | "budget"
   interface LimitResult {
+    stop: LimitStop
     blocked: boolean
     event: "goal.blocked" | "goal.status_changed"
     reason: string
   }
 
   function enforceLimits(goal: any, runtime: GoalRuntimeState): LimitResult {
-    const noResult: LimitResult = { blocked: false, event: "goal.status_changed", reason: "" }
+    const noResult: LimitResult = { stop: "none", blocked: false, event: "goal.status_changed", reason: "" }
 
-    // Max turns
+    // Max turns — force child to wrap up with a semantic summary
     const maxTurns = goal.config?.maxTurns
     if (maxTurns && runtime.turnCount >= maxTurns) {
-      goal.status = "blocked"
-      goal.updatedAt = new Date().toISOString()
-      goal.blocker = {
-        reason: `Reached max turns (${maxTurns})`,
-        needed: "Use retry to reset turns and continue.",
-        at: new Date().toISOString(),
-      }
       return {
+        stop: "force_finish",
         blocked: true,
         event: "goal.blocked",
         reason: `Reached max turns (${maxTurns})`,
       }
     }
 
-    // Max no-progress
+    // Max no-progress — force child to wrap up
     const maxNoProgress = goal.config?.maxNoProgress
     if (maxNoProgress && runtime.noProgressCount >= maxNoProgress) {
-      goal.status = "blocked"
-      goal.updatedAt = new Date().toISOString()
-      goal.blocker = {
-        reason: `No progress for ${runtime.noProgressCount} consecutive turns`,
-        needed: "Use retry to reset and continue.",
-        at: new Date().toISOString(),
-      }
       return {
+        stop: "force_finish",
         blocked: true,
         event: "goal.blocked",
         reason: `No progress for ${runtime.noProgressCount} consecutive turns`,
       }
     }
 
-    // Token budget
+    // Token budget — direct status change (no semantic summary needed)
     if (goal.tokenBudget && goal.tokensUsed >= goal.tokenBudget) {
       goal.status = "budget_limited"
       goal.updatedAt = new Date().toISOString()
       return {
+        stop: "budget",
         blocked: true,
         event: "goal.status_changed",
         reason: `Token budget exhausted (${goal.tokensUsed}/${goal.tokenBudget})`,

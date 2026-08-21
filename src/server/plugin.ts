@@ -69,6 +69,27 @@ const server: Plugin = async ({ client, directory }) => {
         ensureStarted()
         reconcileInBackground()
       }
+
+      // Forward terminal worker events to the parent session
+      if (input.tool === "complete_goal" || input.tool === "block_goal") {
+        try {
+          const raw = (output as any)?.output as string | undefined
+          if (!raw) return
+          const parsed = JSON.parse(raw) as any
+          if (parsed.status !== "complete" && parsed.status !== "blocked") return
+          const goalID = parsed.goalID as string | undefined
+          if (!goalID) return
+          const { readState } = await import("../infrastructure/state-repository")
+          const state = await readState(directory)
+          const goal = state.goals.find((g) => g.id === goalID)
+          if (!goal) return
+          const message =
+            parsed.status === "complete"
+              ? `Loop goal "${goal.name}" completed: ${parsed.summary || ""}. Evidence: ${parsed.evidence || ""}. Artifacts: ${goal.config.artifactDir || "n/a"}.`
+              : `Loop goal "${goal.name}" blocked: ${parsed.reason || ""}. Needed: ${parsed.needed || ""}.`
+          await host.notifyOwner(goal.ownerSessionID, message)
+        } catch {}
+      }
     },
     dispose: async () => {
       engine.stop()

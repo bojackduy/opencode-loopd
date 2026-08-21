@@ -36,6 +36,7 @@ export interface LoopHost {
   abortSession(sessionID: string): Promise<void>
   readMessages(sessionID: string, limit?: number): Promise<SessionMessage[]>
   compactSession(sessionID: string): Promise<void>
+  notifyOwner(ownerSessionID: string, message: string): Promise<void>
 }
 
 // ─── Real Host (SDK-backed) ─────────────────────────────────────────────────
@@ -141,6 +142,26 @@ export function createRealHost(client: any, directory: string): LoopHost {
         // Best-effort compaction
       }
     },
+
+    async notifyOwner(ownerSessionID, message) {
+      try {
+        const result = await withTimeout<any>(
+          client.session.promptAsync({
+            path: { id: ownerSessionID },
+            body: { parts: [{ type: "text", text: message }] },
+          }),
+          10_000,
+          "OpenCode parent notify",
+        )
+        if (result?.error) {
+          await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(result.error) })
+        } else {
+          await logServerEvent(directory, "parent.notified", { ownerSessionID, preview: message.slice(0, 160) })
+        }
+      } catch (error) {
+        await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(error) })
+      }
+    },
   }
 }
 
@@ -200,6 +221,12 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
     },
     async compactSession(sessionID) {
       // No-op for fake host
+    },
+
+    async notifyOwner(ownerSessionID, message) {
+      // Fake host records for tests
+      ;(sessions as any).notifications = (sessions as any).notifications || []
+      ;(sessions as any).notifications.push({ ownerSessionID, message })
     },
   }
 }
