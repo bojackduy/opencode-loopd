@@ -250,24 +250,15 @@ export function LoopDashboard(props: Props) {
       <box flexDirection="column" width="90%" border={true} borderColor="gray" padding={1}>
         {/* Header — always visible */}
         <box flexDirection="row" padding={0} flexShrink={0}>
-          <text fg={theme().primary} bold={true}>Loop Dashboard</text>
-          <text fg={theme().textMuted}>{" │ "}</text>
-          <text fg={mode() === "normal" ? theme().success : theme().warning}>{mode().toUpperCase()}</text>
-          <text fg={theme().textMuted}>{" │ goals: "}</text>
-          <text fg={theme().text}>{activeGoals().length}</text>
-          <text fg={theme().textMuted}>{" │ "}</text>
-          <text fg={runningCount() > 0 ? theme().success : theme().textMuted} bold={runningCount() > 0}>{runningCount() > 0 ? runningFrame() : "○"} {runningCount()} RUNNING</text>
-          <text fg={theme().textMuted}>{" │ verified: "}</text>
-          <text fg={theme().info}>{state()?.goals.filter((g) => g.status === "complete").length || 0}</text>
+          <text fg={theme().text}>Loop Dashboard │ {mode().toUpperCase()} │ goals: {activeGoals().length} │ {runningCount() > 0 ? runningFrame() : "○"} {runningCount()} RUNNING │ verified: {state()?.goals.filter((g) => g.status === "complete").length || 0}</text>
         </box>
 
         {/* Scrollable body — grows, hides overflow */}
         <box flexDirection="column" flexGrow={1} minHeight={0} overflow="hidden">
           {/* Help panel — bounded, clipped */}
           <Show when={showHelp()}>
-            <box flexDirection="column" padding={1} border={true} borderColor="yellow" backgroundColor={theme().background} flexShrink={0} maxHeight={12} overflow="hidden">
-              <text fg="yellow" bold={true}>━━━ Keyboard Shortcuts — ? toggle, : insert, Ctrl+N normal ━━━</text>
-              <text fg={theme().text}>{commandHelp()}</text>
+            <box flexDirection="column" padding={1} border={true} borderColor="yellow" backgroundColor={theme().background} flexShrink={0} maxHeight={14} overflow="hidden">
+              <text fg={theme().text}>━━━ Keyboard Shortcuts — ? toggle, : insert, Ctrl+N normal ━━━{"\n"}{commandHelp()}</text>
             </box>
           </Show>
 
@@ -286,7 +277,7 @@ export function LoopDashboard(props: Props) {
                   }
                   return (
                     <box flexDirection="row" paddingLeft={1} paddingRight={1} backgroundColor={isActive() ? theme().backgroundElement : undefined}>
-                      <text fg={statusColor(goal.status, theme())} bold={isActive()}>{line()}</text>
+                      <text fg={statusColor(goal.status, theme())}>{isActive() ? `▶ ${line()}` : `  ${line()}`}</text>
                     </box>
                   )
                 }}
@@ -296,29 +287,33 @@ export function LoopDashboard(props: Props) {
 
           {/* Goal detail — fixed, bounded */}
           <Show when={selectedGoal()}>
-            {(goal) => (
-              <box flexDirection="column" border={true} borderColor={goal().status === "awaiting_user" ? theme().warning : "gray"} padding={1} flexShrink={0} maxHeight={6}>
-                <text fg={theme().primary} bold={true}>{goal().name}{goal().status === "awaiting_user" ? " WAITING FOR YOU" : ""}</text>
-                <text fg={theme().textMuted}>{goal().objective.slice(0, 120)}</text>
-                {goal().question && <text fg={theme().warning}>Q: {goal().question!.text}</text>}
-                {goal().lastProgress && <text fg={theme().textMuted}>last: {goal().lastProgress!.summary.slice(0, 80)}</text>}
-                {goal().blocker && <text fg={theme().error}>blocked: {goal().blocker!.reason.slice(0, 140)}</text>}
-              </box>
-            )}
+            {(goal) => {
+              const detailLines = [
+                `${goal().name}${goal().status === "awaiting_user" ? " WAITING FOR YOU" : ""}`,
+                goal().objective.slice(0, 120),
+              ]
+              if (goal().question) detailLines.push(`Q: ${goal().question!.text}`)
+              if (goal().lastProgress) detailLines.push(`last: ${goal().lastProgress!.summary.slice(0, 80)}`)
+              if (goal().blocker) detailLines.push(`blocked: ${goal().blocker!.reason.slice(0, 140)}`)
+              return (
+                <box flexDirection="column" border={true} borderColor={goal().status === "awaiting_user" ? theme().warning : "gray"} padding={1} flexShrink={0} maxHeight={8}>
+                  <text fg={goal().status === "awaiting_user" ? theme().warning : theme().text}>{detailLines.join("\n")}</text>
+                </box>
+              )
+            }}
           </Show>
 
           {/* Logs — bounded, clipped */}
           <Show when={showLogs() && events().length > 0}>
             <box flexDirection="column" border={true} borderColor="gray" padding={1} maxHeight={6} flexShrink={0} overflow="hidden">
-              <text fg={theme().primary} bold={true}>Recent Events</text>
-              <For each={events().slice(-10)}>{(event) => <text fg={theme().textMuted}>{(event as any).type} {(event as any).goalID?.slice(0, 8)}</text>}</For>
+              <text fg={theme().textMuted}>Recent Events{"\n"}{events().slice(-10).map((event) => `${(event as any).type} ${(event as any).goalID?.slice(0, 8)}`).join("\n")}</text>
             </box>
           </Show>
         </box>
 
         {/* Input — always visible at bottom */}
         <box flexDirection="row" border={true} borderColor={mode() === "insert" ? theme().warning : "gray"} paddingLeft={1} paddingRight={1} flexShrink={0} height={3} gap={1}>
-          <text fg={mode() === "insert" ? theme().warning : theme().success} bold={true}>{mode() === "insert" ? "INSERT :" : "NORMAL"}</text>
+          <text fg={mode() === "insert" ? theme().warning : theme().success}>{mode() === "insert" ? "INSERT :" : "NORMAL"}</text>
           <input
             ref={(el: InputRenderable) => { inputEl = el; focusInput() }}
             flexGrow={1}
