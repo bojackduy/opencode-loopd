@@ -8,10 +8,10 @@ import type { Goal, GoalID } from "../domain/goal"
 import { createGoal, canTransition, isTerminal } from "../domain/goal"
 import type { GoalRuntimeState, RunID } from "../domain/runtime"
 import { createRuntimeState, acquireLease, releaseLease, leaseIsValid, markProgress } from "../domain/runtime"
-import { readState, writeState, appendEvent, drainGoalInbox, appendGoalInbox } from "../infrastructure/state-repository"
+import { readState, writeState, appendEvent, drainGoalInbox, appendGoalInbox, readEvents } from "../infrastructure/state-repository"
 import type { StoreState } from "../infrastructure/state-repository"
 import type { LoopHost } from "../server/host-adapter"
-import { createWorkerManager, type WorkerManager, type WorkerSession } from "../server/worker-session"
+import { createWorkerManager, type WorkerManager, type WorkerSession, type ContinuationContext } from "../server/worker-session"
 import type { LoopEvent } from "../domain/events"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
 
@@ -208,9 +208,34 @@ export function createGoalService(host: LoopHost): GoalService {
       revision: state.revision,
     } satisfies LoopEvent)
 
-    // Send continuation
+    // Send continuation with accumulated context
     const inboxMessages = await drainGoalInbox(directory, goalID)
-    await workers.continueWorker(session, goal, runtime, inboxMessages)
+
+    // Gather progress history from events
+    const allEvents = await readEvents(directory, 200)
+    const progressHistory = allEvents
+      .filter((e) => e.goalID === goalID && e.type === "goal.progress")
+      .map((e) => ({
+        summary: String(e.summary || ""),
+        next: e.next ? String(e.next) : undefined,
+        at: String(e.timestamp || ""),
+      }))
+
+    // Gather last 5 transcript messages from the worker session
+    let transcriptTail: ContinuationContext["transcriptTail"]
+    try {
+      transcriptTail = await host.readMessages(goal.workerSessionID!, 5)
+    } catch {
+      transcriptTail = []
+    }
+
+    const context: ContinuationContext = {
+      inboxMessages: inboxMessages.length > 0 ? inboxMessages : undefined,
+      progressHistory: progressHistory.length > 0 ? progressHistory : undefined,
+      transcriptTail: transcriptTail && transcriptTail.length > 0 ? transcriptTail : undefined,
+    }
+
+    await workers.continueWorker(session, goal, runtime, context)
   }
 
   async function pause(directory: string, goalID: GoalID) {
