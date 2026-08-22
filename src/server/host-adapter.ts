@@ -39,6 +39,20 @@ export interface LoopHost {
   notifyOwner(ownerSessionID: string, message: string): Promise<void>
 }
 
+const recentParentNotifies = new Map<string, number>()
+function shouldDedupParentNotify(ownerSessionID: string, message: string): boolean {
+  const key = `${ownerSessionID}:${message.slice(0, 200)}`
+  const now = Date.now()
+  const last = recentParentNotifies.get(key)
+  if (last !== undefined && now - last < 60_000) return true
+  recentParentNotifies.set(key, now)
+  // prune old entries occasionally
+  if (recentParentNotifies.size > 200) {
+    for (const [k, t] of recentParentNotifies.entries()) if (now - t > 60_000) recentParentNotifies.delete(k)
+  }
+  return false
+}
+
 // ─── Real Host (SDK-backed) ─────────────────────────────────────────────────
 
 export function createRealHost(client: any, directory: string): LoopHost {
@@ -146,6 +160,10 @@ export function createRealHost(client: any, directory: string): LoopHost {
     },
 
     async notifyOwner(ownerSessionID, message) {
+      if (shouldDedupParentNotify(ownerSessionID, message)) {
+        await logServerEvent(directory, "parent.notify.deduped", { ownerSessionID, preview: message.slice(0, 160) })
+        return
+      }
       try {
         const result = await withTimeout<any>(
           client.session.promptAsync({
@@ -193,6 +211,7 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
 } {
   const sessions = new Map<string, string[]>()
   const prompts: string[] = []
+  const recentNotifies = new Map<string, number>()
 
   return {
     sessions,
@@ -227,6 +246,11 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
     },
 
     async notifyOwner(ownerSessionID, message) {
+      const key = `${ownerSessionID}:${message.slice(0, 200)}`
+      const now = Date.now()
+      const last = recentNotifies.get(key)
+      if (last !== undefined && now - last < 60_000) return
+      recentNotifies.set(key, now)
       // Fake host records for tests
       ;(sessions as any).notifications = (sessions as any).notifications || []
       ;(sessions as any).notifications.push({ ownerSessionID, message })

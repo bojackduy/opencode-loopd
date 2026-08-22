@@ -53,6 +53,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
   let knownWorkerSessionsLoaded = false
   // Guard against concurrent continuations for the same goal
   const inflightContinuations = new Set<GoalID>()
+  const recentForceFinishBlocked = new Map<GoalID, number>()
 
   async function loadWorkerSessionsIfneeded() {
     if (knownWorkerSessionsLoaded) return
@@ -200,7 +201,12 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
         await goalService.continueTurn(directory, goal.id, { forceFinish: true })
         return true
       }
-      // Second detection: child ignored the request — treat as dead/stuck
+      // Second detection: child ignored the request — treat as dead/stuck (dedup concurrent)
+      const blockedKey = goal.id
+      const nowBlocked = Date.now()
+      const lastBlocked = recentForceFinishBlocked.get(blockedKey)
+      if (lastBlocked !== undefined && nowBlocked - lastBlocked < 60_000) return true
+      recentForceFinishBlocked.set(blockedKey, nowBlocked)
       goal.status = "blocked"
       goal.updatedAt = new Date().toISOString()
       goal.blocker = {

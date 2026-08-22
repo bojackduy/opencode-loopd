@@ -792,6 +792,7 @@ function createLoopEngine(options) {
   let knownWorkerSessions = new Set;
   let knownWorkerSessionsLoaded = false;
   const inflightContinuations = new Set;
+  const recentForceFinishBlocked = new Map;
   async function loadWorkerSessionsIfneeded() {
     if (knownWorkerSessionsLoaded)
       return;
@@ -914,6 +915,12 @@ function createLoopEngine(options) {
         await goalService.continueTurn(directory, goal.id, { forceFinish: true });
         return true;
       }
+      const blockedKey = goal.id;
+      const nowBlocked = Date.now();
+      const lastBlocked = recentForceFinishBlocked.get(blockedKey);
+      if (lastBlocked !== undefined && nowBlocked - lastBlocked < 60000)
+        return true;
+      recentForceFinishBlocked.set(blockedKey, nowBlocked);
       goal.status = "blocked";
       goal.updatedAt = new Date().toISOString();
       goal.blocker = {
@@ -1618,6 +1625,21 @@ function createGoalService(host) {
 }
 
 // src/server/host-adapter.ts
+var recentParentNotifies = new Map;
+function shouldDedupParentNotify(ownerSessionID, message) {
+  const key = `${ownerSessionID}:${message.slice(0, 200)}`;
+  const now = Date.now();
+  const last = recentParentNotifies.get(key);
+  if (last !== undefined && now - last < 60000)
+    return true;
+  recentParentNotifies.set(key, now);
+  if (recentParentNotifies.size > 200) {
+    for (const [k, t] of recentParentNotifies.entries())
+      if (now - t > 60000)
+        recentParentNotifies.delete(k);
+  }
+  return false;
+}
 function createRealHost(client, directory) {
   return {
     async createWorker({ parentID, title, agent }) {
@@ -1709,6 +1731,10 @@ function createRealHost(client, directory) {
       } catch {}
     },
     async notifyOwner(ownerSessionID, message) {
+      if (shouldDedupParentNotify(ownerSessionID, message)) {
+        await logServerEvent(directory, "parent.notify.deduped", { ownerSessionID, preview: message.slice(0, 160) });
+        return;
+      }
       try {
         const result = await withTimeout(client.session.promptAsync({
           path: { id: ownerSessionID },
