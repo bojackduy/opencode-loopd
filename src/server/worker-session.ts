@@ -70,6 +70,7 @@ export function createWorkerManager(host: LoopHost): WorkerManager {
       await host.promptWorker({
         sessionID: worker.workerSessionID,
         prompt,
+        agent: goal.config.agent,
       })
     },
 

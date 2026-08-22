@@ -1139,7 +1139,8 @@ function createWorkerManager(host) {
       const prompt = buildContinuationSteering(goal, runtime, context);
       await host.promptWorker({
         sessionID: worker.workerSessionID,
-        prompt
+        prompt,
+        agent: goal.config.agent
       });
     },
     async isIdle(workerSessionID) {
