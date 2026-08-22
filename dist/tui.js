@@ -913,8 +913,8 @@ function LoopDashboard(props) {
     _$setProp(_el$25, "flexDirection", "row");
     _$setProp(_el$25, "alignItems", "center");
     _$setProp(_el$25, "border", true);
-    _$setProp(_el$25, "paddingLeft", 1);
-    _$setProp(_el$25, "paddingRight", 1);
+    _$setProp(_el$25, "paddingLeft", 0);
+    _$setProp(_el$25, "paddingRight", 0);
     _$setProp(_el$25, "flexShrink", 0);
     _$spread(_el$25, _$mergeProps({
       get borderColor() {
@@ -924,7 +924,7 @@ function LoopDashboard(props) {
       onMouseDown: handleBugReport
     }), true);
     _$insertNode(_el$26, _el$27);
-    _$insertNode(_el$27, _$createTextNode(`Bug`));
+    _$insertNode(_el$27, _$createTextNode(`Bug Report`));
     _$insertNode(_el$29, _el$34);
     _$setProp(_el$29, "flexDirection", "column");
     _$setProp(_el$29, "flexGrow", 1);
@@ -1439,22 +1439,41 @@ function LoopDashboard(props) {
             })()];
           })(), null);
           _$insert(_el$109, (() => {
-            var _c$1 = _$memo(() => !!rt()?.lastError);
-            return () => _c$1() && [(() => {
+            var _c$1 = _$memo(() => (goal().config.checks?.length ?? 0) > 0);
+            return () => _c$1() ? [(() => {
               var _el$138 = _$createElement("span"), _el$139 = _$createTextNode(`
-\u26A0 `);
+\u25A3 checks: `);
               _$insertNode(_el$138, _el$139);
               _$effect((_$p) => _$setProp(_el$138, "style", {
-                fg: theme().error
+                fg: theme().warning
               }, _$p));
               return _el$138;
             })(), (() => {
               var _el$141 = _$createElement("span");
-              _$insert(_el$141, () => rt().lastError.slice(0, 120));
+              _$insert(_el$141, () => goal().config.checks.join(", ").slice(0, 100));
               _$effect((_$p) => _$setProp(_el$141, "style", {
-                fg: theme().error
+                fg: theme().textMuted
               }, _$p));
               return _el$141;
+            })()] : null;
+          })(), null);
+          _$insert(_el$109, (() => {
+            var _c$10 = _$memo(() => !!rt()?.lastError);
+            return () => _c$10() && [(() => {
+              var _el$142 = _$createElement("span"), _el$143 = _$createTextNode(`
+\u26A0 `);
+              _$insertNode(_el$142, _el$143);
+              _$effect((_$p) => _$setProp(_el$142, "style", {
+                fg: theme().error
+              }, _$p));
+              return _el$142;
+            })(), (() => {
+              var _el$145 = _$createElement("span");
+              _$insert(_el$145, () => rt().lastError.slice(0, 120));
+              _$effect((_$p) => _$setProp(_el$145, "style", {
+                fg: theme().error
+              }, _$p));
+              return _el$145;
             })()];
           })(), null);
           _$effect((_p$) => {
@@ -1503,22 +1522,22 @@ function LoopDashboard(props) {
             return events().slice(-10);
           },
           children: (ev) => (() => {
-            var _el$142 = _$createElement("text"), _el$143 = _$createElement("span"), _el$144 = _$createElement("span"), _el$145 = _$createTextNode(` `);
-            _$insertNode(_el$142, _el$143);
-            _$insertNode(_el$142, _el$144);
-            _$insert(_el$143, () => String(ev.type));
-            _$insertNode(_el$144, _el$145);
-            _$insert(_el$144, () => ev.goalID?.slice(0, 8), null);
-            _$insert(_el$142, (() => {
-              var _c$10 = _$memo(() => !!ev.summary);
-              return () => _c$10() && (() => {
-                var _el$146 = _$createElement("span"), _el$147 = _$createTextNode(` \u2014 `);
-                _$insertNode(_el$146, _el$147);
-                _$insert(_el$146, () => String(ev.summary).slice(0, 60), null);
-                _$effect((_$p) => _$setProp(_el$146, "style", {
+            var _el$146 = _$createElement("text"), _el$147 = _$createElement("span"), _el$148 = _$createElement("span"), _el$149 = _$createTextNode(` `);
+            _$insertNode(_el$146, _el$147);
+            _$insertNode(_el$146, _el$148);
+            _$insert(_el$147, () => String(ev.type));
+            _$insertNode(_el$148, _el$149);
+            _$insert(_el$148, () => ev.goalID?.slice(0, 8), null);
+            _$insert(_el$146, (() => {
+              var _c$11 = _$memo(() => !!ev.summary);
+              return () => _c$11() && (() => {
+                var _el$150 = _$createElement("span"), _el$151 = _$createTextNode(` \u2014 `);
+                _$insertNode(_el$150, _el$151);
+                _$insert(_el$150, () => String(ev.summary).slice(0, 60), null);
+                _$effect((_$p) => _$setProp(_el$150, "style", {
                   fg: theme().text
                 }, _$p));
-                return _el$146;
+                return _el$150;
               })();
             })(), null);
             _$effect((_p$) => {
@@ -1528,14 +1547,14 @@ function LoopDashboard(props) {
               }, _v$41 = {
                 fg: theme().textMuted
               };
-              _v$40 !== _p$.e && (_p$.e = _$setProp(_el$143, "style", _v$40, _p$.e));
-              _v$41 !== _p$.t && (_p$.t = _$setProp(_el$144, "style", _v$41, _p$.t));
+              _v$40 !== _p$.e && (_p$.e = _$setProp(_el$147, "style", _v$40, _p$.e));
+              _v$41 !== _p$.t && (_p$.t = _$setProp(_el$148, "style", _v$41, _p$.t));
               return _p$;
             }, {
               e: undefined,
               t: undefined
             });
-            return _el$142;
+            return _el$146;
           })()
         }), null);
         _$effect((_p$) => {

@@ -10,6 +10,7 @@ import type { GoalRuntimeState, RunID } from "../domain/runtime"
 import { createRuntimeState, acquireLease, releaseLease, leaseIsValid, markProgress } from "../domain/runtime"
 import { readState, writeState, appendEvent, drainGoalInbox, readEvents, goalArtifactDir, ensureGoalArtifactDir } from "../infrastructure/state-repository"
 import * as path from "path"
+import { promises as fs } from "fs"
 import type { StoreState } from "../infrastructure/state-repository"
 import type { LoopHost } from "../server/host-adapter"
 import { createWorkerManager, type WorkerManager, type WorkerSession, type ContinuationContext } from "../server/worker-session"
@@ -236,11 +237,30 @@ export function createGoalService(host: LoopHost): GoalService {
       transcriptTail = []
     }
 
+    // Deterministic verification pre-screen (cheap, no shell)
+    let verification: ContinuationContext["verification"]
+    try {
+      const artifactDir = (goal.config as any).artifactDir as string | undefined
+      if (artifactDir) {
+        try {
+          const files = await fs.readdir(artifactDir)
+          verification = { artifactSummary: files.length ? `${files.length} file(s): ${files.slice(0, 8).join(", ")}` : "no artifacts yet" }
+        } catch {
+          verification = { artifactSummary: "no artifacts yet" }
+        }
+      }
+      if (goal.config.checks?.length) {
+        const c = `checks configured: ${goal.config.checks.length} — run them before claiming completion`
+        verification = { ...(verification || {}), failedChecks: [c], checksPassed: undefined }
+      }
+    } catch {}
+
     const context: ContinuationContext = {
       inboxMessages: inboxMessages.length > 0 ? inboxMessages : undefined,
       progressHistory: progressHistory.length > 0 ? progressHistory : undefined,
       transcriptTail: transcriptTail && transcriptTail.length > 0 ? transcriptTail : undefined,
       forceFinish: opts?.forceFinish || undefined,
+      verification,
     }
 
     await workers.continueWorker(session, goal, runtime, context)

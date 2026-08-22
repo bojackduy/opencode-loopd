@@ -24,6 +24,12 @@ export interface ContinuationContext {
   transcriptTail?: SessionMessage[]
   /** When set, the engine requires the child to wrap up . */
   forceFinish?: boolean
+  /** Deterministic verification pre-screen (host-owned, not semantic judgment). */
+  verification?: {
+    checksPassed?: boolean
+    failedChecks?: string[]
+    artifactSummary?: string
+  }
 }
 
 export interface WorkerManager {
@@ -154,6 +160,30 @@ function buildContinuationSteering(goal: Goal, runtime: GoalRuntimeState, contex
     // ── Output location (turn 2+) ─────────────────────────────────────────
     parts.push(...outputLocationBlock())
 
+    // ── Verification pre-screen (deterministic, host-owned) ─────────────────
+    if (context?.verification) {
+      const v = context.verification
+      parts.push(``, `## VERIFICATION (deterministic pre-screen)`)
+      if (v.checksPassed !== undefined) {
+        if (v.checksPassed) parts.push(`- checks: all passed`)
+        else if (v.failedChecks?.length) parts.push(`- checks FAILED: ${v.failedChecks.join(", ")} — fix before claiming completion`)
+        else parts.push(`- checks: not yet run`)
+      }
+      if (v.artifactSummary) parts.push(`- artifacts: ${v.artifactSummary}`)
+    }
+
+    // ── Completion audit — model IS the evaluator (Codex-faithful) ───────────
+    parts.push(
+      ``,
+      `## COMPLETION AUDIT — you ARE the evaluator`,
+      `Before deciding the goal is achieved, treat completion as unproven:`,
+      `1. Derive concrete requirements from the objective and any referenced files/plans/specs/issues. Preserve original scope; do not redefine success.`,
+      `2. For _every_ explicit requirement, numbered item, named artifact, command, test, gate, invariant, deliverable → identify authoritative evidence: files, command output, test results, PR state, rendered artifacts, runtime behavior.`,
+      `3. Judge each per-requirement: proves | contradicts | incomplete | too weak/indirect | missing — matching scope narrowly (narrow check ≠ broad claim).`,
+      `4. Treat tests/manifests/verifiers as evidence only after confirming they cover the relevant requirement. Treat uncertain/indirect as NOT achieved.`,
+      `5. Only call complete_goal when _every_ requirement's current-state evidence proves it and no required work remains. If any requirement is missing/incomplete/weak → keep working, do not call complete_goal.`,
+    )
+
     // ── Force-finish vs normal instructions ────────────────────────────────
     if (context?.forceFinish) {
       parts.push(
@@ -163,7 +193,7 @@ function buildContinuationSteering(goal: Goal, runtime: GoalRuntimeState, contex
         `Call complete_goal NOW with:`,
         `- summary: a specific semantic summary of what was accomplished (files changed, results, key findings)`,
         `- evidence: concrete proof (commands run, files created, checks passed)`,
-        `If you cannot complete, call block_goal with the reason.`,
+        `If you cannot complete truthfully, call block_goal with the reason — do not fabricate evidence.`,
       )
     } else {
       parts.push(
@@ -172,9 +202,7 @@ function buildContinuationSteering(goal: Goal, runtime: GoalRuntimeState, contex
         `1. Inspect current workspace state — read files, check what exists. Do NOT redo completed work.`,
         `2. Continue concrete progress toward the objective.`,
         `3. After completing a batch, call report_goal_progress with what you did and what's next.`,
-        `4. Verify completion requirement-by-requirement before calling complete_goal.`,
-        `5. Call block_goal only if the same blocker persists across 3+ consecutive turns.`,
-        `6. Use the built-in question tool only for genuinely risky ambiguity.`,
+        `4. Use the built-in question tool only for genuinely risky ambiguity.`,
       )
     }
   }

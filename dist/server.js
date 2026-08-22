@@ -1118,6 +1118,7 @@ function createLoopEngine(options) {
 import { randomUUID as randomUUID4 } from "crypto";
 init_state_repository();
 import * as path2 from "path";
+import { promises as fs2 } from "fs";
 
 // src/server/worker-session.ts
 function createWorkerManager(host) {
@@ -1197,10 +1198,25 @@ function buildContinuationSteering(goal, runtime, context) {
       }
     }
     parts.push(...outputLocationBlock());
+    if (context?.verification) {
+      const v = context.verification;
+      parts.push(``, `## VERIFICATION (deterministic pre-screen)`);
+      if (v.checksPassed !== undefined) {
+        if (v.checksPassed)
+          parts.push(`- checks: all passed`);
+        else if (v.failedChecks?.length)
+          parts.push(`- checks FAILED: ${v.failedChecks.join(", ")} \u2014 fix before claiming completion`);
+        else
+          parts.push(`- checks: not yet run`);
+      }
+      if (v.artifactSummary)
+        parts.push(`- artifacts: ${v.artifactSummary}`);
+    }
+    parts.push(``, `## COMPLETION AUDIT \u2014 you ARE the evaluator`, `Before deciding the goal is achieved, treat completion as unproven:`, `1. Derive concrete requirements from the objective and any referenced files/plans/specs/issues. Preserve original scope; do not redefine success.`, `2. For _every_ explicit requirement, numbered item, named artifact, command, test, gate, invariant, deliverable \u2192 identify authoritative evidence: files, command output, test results, PR state, rendered artifacts, runtime behavior.`, `3. Judge each per-requirement: proves | contradicts | incomplete | too weak/indirect | missing \u2014 matching scope narrowly (narrow check \u2260 broad claim).`, `4. Treat tests/manifests/verifiers as evidence only after confirming they cover the relevant requirement. Treat uncertain/indirect as NOT achieved.`, `5. Only call complete_goal when _every_ requirement's current-state evidence proves it and no required work remains. If any requirement is missing/incomplete/weak \u2192 keep working, do not call complete_goal.`);
     if (context?.forceFinish) {
-      parts.push(``, `## FINAL REPORT REQUIRED \u2014 STOPPING SOON`, `The system requires you to wrap up now. Do NOT start new work.`, `Call complete_goal NOW with:`, `- summary: a specific semantic summary of what was accomplished (files changed, results, key findings)`, `- evidence: concrete proof (commands run, files created, checks passed)`, `If you cannot complete, call block_goal with the reason.`);
+      parts.push(``, `## FINAL REPORT REQUIRED \u2014 STOPPING SOON`, `The system requires you to wrap up now. Do NOT start new work.`, `Call complete_goal NOW with:`, `- summary: a specific semantic summary of what was accomplished (files changed, results, key findings)`, `- evidence: concrete proof (commands run, files created, checks passed)`, `If you cannot complete truthfully, call block_goal with the reason \u2014 do not fabricate evidence.`);
     } else {
-      parts.push(``, `## INSTRUCTIONS`, `1. Inspect current workspace state \u2014 read files, check what exists. Do NOT redo completed work.`, `2. Continue concrete progress toward the objective.`, `3. After completing a batch, call report_goal_progress with what you did and what's next.`, `4. Verify completion requirement-by-requirement before calling complete_goal.`, `5. Call block_goal only if the same blocker persists across 3+ consecutive turns.`, `6. Use the built-in question tool only for genuinely risky ambiguity.`);
+      parts.push(``, `## INSTRUCTIONS`, `1. Inspect current workspace state \u2014 read files, check what exists. Do NOT redo completed work.`, `2. Continue concrete progress toward the objective.`, `3. After completing a batch, call report_goal_progress with what you did and what's next.`, `4. Use the built-in question tool only for genuinely risky ambiguity.`);
     }
   }
   if (context?.inboxMessages && context.inboxMessages.length > 0) {
@@ -1365,11 +1381,28 @@ function createGoalService(host) {
     } catch {
       transcriptTail = [];
     }
+    let verification;
+    try {
+      const artifactDir = goal.config.artifactDir;
+      if (artifactDir) {
+        try {
+          const files = await fs2.readdir(artifactDir);
+          verification = { artifactSummary: files.length ? `${files.length} file(s): ${files.slice(0, 8).join(", ")}` : "no artifacts yet" };
+        } catch {
+          verification = { artifactSummary: "no artifacts yet" };
+        }
+      }
+      if (goal.config.checks?.length) {
+        const c = `checks configured: ${goal.config.checks.length} \u2014 run them before claiming completion`;
+        verification = { ...verification || {}, failedChecks: [c], checksPassed: undefined };
+      }
+    } catch {}
     const context = {
       inboxMessages: inboxMessages.length > 0 ? inboxMessages : undefined,
       progressHistory: progressHistory.length > 0 ? progressHistory : undefined,
       transcriptTail: transcriptTail && transcriptTail.length > 0 ? transcriptTail : undefined,
-      forceFinish: opts?.forceFinish || undefined
+      forceFinish: opts?.forceFinish || undefined,
+      verification
     };
     await workers.continueWorker(session, goal, runtime, context);
   }

@@ -468,6 +468,7 @@ export function LoopDashboard(props: Props) {
                     {goal().lastProgress && <><span style={{ fg: theme().success }}>{"\n"}✔ </span><span style={{ fg: theme().text }}>{goal().lastProgress!.summary.slice(0, 100)}</span><span style={{ fg: theme().textMuted }}> → {goal().lastProgress!.next?.slice(0, 60) || ""}</span></>}
                     {goal().blocker && <><span style={{ fg: theme().error, bold: true }}>{"\n"}✖ blocked: </span><span style={{ fg: theme().error }}>{goal().blocker!.reason.slice(0, 140)}</span><span style={{ fg: theme().textMuted }}> — {goal().blocker!.needed.slice(0, 60)}</span></>}
                     {goal().config.artifactDir && <><span style={{ fg: theme().accent }}>{"\n"}📁 </span><span style={{ fg: theme().textMuted }}>{String(goal().config.artifactDir).replace(String(props.directory), ".")}</span></>}
+                    {(goal().config.checks?.length ?? 0) > 0 ? <><span style={{ fg: theme().warning }}>{"\n"}▣ checks: </span><span style={{ fg: theme().textMuted }}>{(goal().config.checks as string[]).join(", ").slice(0, 100)}</span></> : null}
                     {rt()?.lastError && <><span style={{ fg: theme().error }}>{"\n"}⚠ </span><span style={{ fg: theme().error }}>{rt()!.lastError!.slice(0, 120)}</span></>}
                   </text>
                 </box>
