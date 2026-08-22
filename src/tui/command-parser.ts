@@ -82,8 +82,8 @@ function tokenize(input: string): string[] {
 
 export function commandHelp(): string {
   return [
-    "Modes: : insert → send/commands, Ctrl+N → normal, ? toggle help, Shift+B bug report",
-    "Nav: j/k move │ g/G top/bottom │ o open child │ p/r/R/x pause/resume/retry/clear │ L logs │ q close",
+    "Modes: : insert → send/commands | Ctrl+N → normal | ? toggle help | Shift+B bug report",
+    "Nav: j/k move | g/G top/bottom | o open child | p/r/R/x pause/resume/retry/clear | L logs | q close",
     "Commands (insert mode, : prefix):",
     "  :send <message>                           Send instruction to selected goal",
     "  :open                                     Open child session (same as o)",

@@ -347,12 +347,63 @@ export function LoopDashboard(props: Props) {
               <text>
                 <span style={{ fg: "yellow", bold: true }}>━━━ Keys: ? toggle  : insert  Ctrl+N normal  o open  B bug  q close ━━━</span>
                 <For each={commandHelp().split("\n")}>{(line) => {
-                  const isHeader = line.startsWith("Modes:") || line.startsWith("Nav:") || line.startsWith("Commands")
-                  const isCmd = line.trim().startsWith(":")
+                  // Modes / Nav — split into label + segments, color keys vs descs
+                  if (line.startsWith("Modes:") || line.startsWith("Nav:")) {
+                    const label = line.startsWith("Modes:") ? "Modes:" : "Nav:"
+                    const rest = line.slice(label.length).trim()
+                    const segments = rest.split(" | ")
+                    return (
+                      <>
+                        {"\n"}
+                        <span style={{ fg: theme().primary, bold: true }}>{label}</span>
+                        <span style={{ fg: theme().textMuted }}> </span>
+                        <For each={segments}>{(seg, idx) => {
+                          const hasArrow = seg.includes("→")
+                          if (hasArrow) {
+                            const [k, d] = seg.split("→").map((s) => s.trim())
+                            return (
+                              <>
+                                {idx() > 0 && <span style={{ fg: theme().textMuted }}> | </span>}
+                                <span style={{ fg: theme().warning, bold: true }}>{k}</span>
+                                <span style={{ fg: theme().textMuted }}> → </span>
+                                <span style={{ fg: theme().text }}>{d}</span>
+                              </>
+                            )
+                          }
+                          const sp = seg.indexOf(" ")
+                          const k = sp > 0 ? seg.slice(0, sp) : seg
+                          const d = sp > 0 ? seg.slice(sp + 1) : ""
+                          return (
+                            <>
+                              {idx() > 0 && <span style={{ fg: theme().textMuted }}> | </span>}
+                              <span style={{ fg: theme().warning, bold: true }}>{k}</span>
+                              {d && <span style={{ fg: theme().text }}> {d}</span>}
+                            </>
+                          )
+                        }}</For>
+                      </>
+                    )
+                  }
+                  // Commands like ":send <message>                           Send instruction..."
+                  if (line.trim().startsWith(":")) {
+                    const m = line.match(/^(\s*)(:\S+(?:\s+\S+)*?)\s{2,}(.*)$/)
+                    const indent = m?.[1] ?? line.match(/^\s*/)?.[0] ?? ""
+                    const key = m?.[2] ?? line.trim().split(/\s{2,}/)[0] ?? line.trim()
+                    const desc = m?.[3] ?? line.split(/\s{2,}/)[1] ?? ""
+                    return (
+                      <>
+                        {"\n"}
+                        <span style={{ fg: theme().textMuted }}>{indent}</span>
+                        <span style={{ fg: theme().warning, bold: true }}>{key}</span>
+                        {desc && <><span style={{ fg: theme().textMuted }}>  </span><span style={{ fg: theme().textMuted }}>{desc}</span></>}
+                      </>
+                    )
+                  }
+                  const isHeader = line.startsWith("Commands")
                   return (
                     <>
                       {"\n"}
-                      <span style={{ fg: isHeader ? theme().primary : isCmd ? theme().warning : theme().text, bold: isHeader }}>{line}</span>
+                      <span style={{ fg: isHeader ? theme().primary : theme().textMuted, bold: isHeader }}>{line}</span>
                     </>
                   )
                 }}</For>
