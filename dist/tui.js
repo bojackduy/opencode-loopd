@@ -921,7 +921,7 @@ function LoopDashboard(props) {
         return theme().error;
       }
     }, {
-      onClick: handleBugReport
+      onMouseDown: handleBugReport
     }), true);
     _$insertNode(_el$26, _el$27);
     _$insertNode(_el$27, _$createTextNode(`Bug`));

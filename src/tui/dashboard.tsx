@@ -21,7 +21,7 @@ function debugLog(...args: unknown[]) {
   try {
     const { appendFileSync } = require("node:fs") as typeof import("node:fs")
     appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${args.map((a) => typeof a === "string" ? a : JSON.stringify(a)).join(" ")}\n`)
-  } catch {}
+  } catch { }
 }
 function prevent(evt: ParsedKey) {
   const e = evt as ParsedKey & { preventDefault?: () => void; stopPropagation?: () => void }
@@ -159,7 +159,7 @@ export function LoopDashboard(props: Props) {
   })
 
   onMount(() => {
-    try { const { writeFileSync } = require("node:fs") as typeof import("node:fs"); writeFileSync(LOG_FILE, `[${new Date().toISOString()}] dashboard mounted dir=${props.directory} mode=${mode()} dialogOpen=${props.api.ui.dialog.open}\n`) } catch {}
+    try { const { writeFileSync } = require("node:fs") as typeof import("node:fs"); writeFileSync(LOG_FILE, `[${new Date().toISOString()}] dashboard mounted dir=${props.directory} mode=${mode()} dialogOpen=${props.api.ui.dialog.open}\n`) } catch { }
     debugLog("mounted", "dialogOpen", props.api.ui.dialog.open, "directory", props.directory)
     focusInput()
   })
@@ -330,12 +330,12 @@ export function LoopDashboard(props: Props) {
             alignItems="center"
             border={true}
             borderColor={theme().error as unknown as string}
-            paddingLeft={1}
-            paddingRight={1}
+            paddingLeft={0}
+            paddingRight={0}
             flexShrink={0}
-            {...({ onClick: handleBugReport } as any)}
+            {...({ onMouseDown: handleBugReport } as any)}
           >
-            <text><span style={{ fg: theme().error, bold: true }}>Bug</span></text>
+            <text><span style={{ fg: theme().error, bold: true }}>Bug Report</span></text>
           </box>
         </box>
 
@@ -512,7 +512,7 @@ export function LoopDashboard(props: Props) {
               const name = evt.name || ""
               const seq = (evt as unknown as { sequence?: string }).sequence || ""
               debugLog("input onKeyDown", `name=${name} seq=${JSON.stringify(seq)} mode=${mode()} value=${JSON.stringify(commandInput())}`)
-              if (mode() !== "insert") { if ((evt.name||"").length===1) prevent(evt); return }
+              if (mode() !== "insert") { if ((evt.name || "").length === 1) prevent(evt); return }
               if (name === "return" || name === "enter") { prevent(evt); debugLog("input enter -> execute"); void executeCommand(commandInput()); return }
               if (evt.ctrl && name.toLowerCase() === "n") { prevent(evt); debugLog("input ctrl+n -> normal"); returnToNormalMode(); return }
             }}
