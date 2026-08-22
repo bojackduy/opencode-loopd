@@ -353,6 +353,8 @@ export function createGoalService(host: LoopHost): GoalService {
       runtime.consecutiveFailures = 0
       runtime.lastError = undefined
       runtime.forceFinishRequested = undefined
+      runtime.lastParentNotifiedAt = undefined
+      runtime.lastParentNotifiedFor = undefined
       runtime.phase = "idle"
       runtime.updatedAt = new Date().toISOString()
     }

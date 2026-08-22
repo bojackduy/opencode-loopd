@@ -261,6 +261,27 @@ describe("Loop Engine", () => {
       updatedState = await readState(dir)
       expect(updatedState.goals[0].status).toBe("blocked")
     })
+
+    it("dedupes parent notification within 60s", async () => {
+      const { goal } = await goalService.start(dir, {
+        name: "dedupe",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { maxFailures: 1 },
+      })
+      await engine.handleEvent({
+        type: "session.error",
+        properties: { sessionID: goal.workerSessionID, error: { message: "boom" } },
+      })
+      const notifications = (host.sessions as any).notifications as Array<any> | undefined
+      expect(notifications?.length).toBe(1)
+      // Second error would re-block but should be deduped by engine's failed guard (status already blocked → no event)
+      await engine.handleEvent({
+        type: "session.error",
+        properties: { sessionID: goal.workerSessionID, error: { message: "boom again" } },
+      })
+      expect((host.sessions as any).notifications?.length).toBe(1)
+    })
   })
 
   describe("lifecycle", () => {

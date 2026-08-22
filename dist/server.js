@@ -332,6 +332,76 @@ function delay(ms) {
 var CURRENT_VERSION = 2, LOCK_STALE_MS = 1e4;
 var init_state_repository = () => {};
 
+// src/domain/runtime.ts
+var exports_runtime = {};
+__export(exports_runtime, {
+  shouldNotifyParent: () => shouldNotifyParent,
+  releaseLease: () => releaseLease,
+  markProgress: () => markProgress,
+  markParentNotified: () => markParentNotified,
+  leaseIsValid: () => leaseIsValid,
+  createRuntimeState: () => createRuntimeState,
+  acquireLease: () => acquireLease
+});
+function createRuntimeState(goalID) {
+  const now = new Date().toISOString();
+  return {
+    goalID,
+    phase: "idle",
+    consecutiveFailures: 0,
+    runCount: 0,
+    turnCount: 0,
+    noProgressCount: 0,
+    progressDuringTurn: false,
+    createdAt: now,
+    updatedAt: now
+  };
+}
+function acquireLease(rt, timeoutMs) {
+  const now = Date.now();
+  const expires = new Date(now + timeoutMs).toISOString();
+  return {
+    ...rt,
+    phase: "running",
+    leaseExpiresAt: expires,
+    turnStartedAt: new Date(now).toISOString(),
+    progressDuringTurn: false,
+    turnTokensUsed: 0,
+    updatedAt: new Date(now).toISOString()
+  };
+}
+function releaseLease(rt) {
+  return {
+    ...rt,
+    phase: "idle",
+    leaseExpiresAt: undefined,
+    turnStartedAt: undefined,
+    updatedAt: new Date().toISOString()
+  };
+}
+function leaseIsValid(rt) {
+  if (!rt.leaseExpiresAt)
+    return false;
+  return Date.now() < Date.parse(rt.leaseExpiresAt);
+}
+function markProgress(rt) {
+  return { ...rt, progressDuringTurn: true, lastProgressAt: new Date().toISOString() };
+}
+function shouldNotifyParent(runtime, type) {
+  if (!runtime.lastParentNotifiedAt || !runtime.lastParentNotifiedFor)
+    return true;
+  if (runtime.lastParentNotifiedFor !== type)
+    return true;
+  const elapsed = Date.now() - Date.parse(runtime.lastParentNotifiedAt);
+  return !Number.isFinite(elapsed) || elapsed > PARENT_NOTIFY_DEDUPE_MS;
+}
+function markParentNotified(runtime, type) {
+  runtime.lastParentNotifiedFor = type;
+  runtime.lastParentNotifiedAt = new Date().toISOString();
+  runtime.updatedAt = new Date().toISOString();
+}
+var PARENT_NOTIFY_DEDUPE_MS = 60000;
+
 // src/application/control-worker.ts
 init_state_repository();
 import { randomUUID as randomUUID2 } from "crypto";
@@ -707,52 +777,6 @@ function createGoal(input) {
   return { ...input, tokensUsed: 0, timeUsedSeconds: 0, createdAt: now, updatedAt: now };
 }
 
-// src/domain/runtime.ts
-function createRuntimeState(goalID) {
-  const now = new Date().toISOString();
-  return {
-    goalID,
-    phase: "idle",
-    consecutiveFailures: 0,
-    runCount: 0,
-    turnCount: 0,
-    noProgressCount: 0,
-    progressDuringTurn: false,
-    createdAt: now,
-    updatedAt: now
-  };
-}
-function acquireLease(rt, timeoutMs) {
-  const now = Date.now();
-  const expires = new Date(now + timeoutMs).toISOString();
-  return {
-    ...rt,
-    phase: "running",
-    leaseExpiresAt: expires,
-    turnStartedAt: new Date(now).toISOString(),
-    progressDuringTurn: false,
-    turnTokensUsed: 0,
-    updatedAt: new Date(now).toISOString()
-  };
-}
-function releaseLease(rt) {
-  return {
-    ...rt,
-    phase: "idle",
-    leaseExpiresAt: undefined,
-    turnStartedAt: undefined,
-    updatedAt: new Date().toISOString()
-  };
-}
-function leaseIsValid(rt) {
-  if (!rt.leaseExpiresAt)
-    return false;
-  return Date.now() < Date.parse(rt.leaseExpiresAt);
-}
-function markProgress(rt) {
-  return { ...rt, progressDuringTurn: true, lastProgressAt: new Date().toISOString() };
-}
-
 // src/application/loop-engine.ts
 var HANDLED_EVENT_TYPES = new Set([
   "session.idle",
@@ -898,6 +922,9 @@ function createLoopEngine(options) {
         at: new Date().toISOString()
       };
       runtime.forceFinishRequested = undefined;
+      const shouldNotify = shouldNotifyParent(runtime, "stopped");
+      if (shouldNotify)
+        markParentNotified(runtime, "stopped");
       await writeState(directory, state);
       await appendEvent(directory, {
         version: 1,
@@ -909,7 +936,9 @@ function createLoopEngine(options) {
         timestamp: new Date().toISOString(),
         revision: state.revision
       });
-      await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" stopped: ${limitResult.reason} (child did not wrap up). Status: blocked. Last progress: ${goal.lastProgress?.summary || "none"}.`);
+      if (shouldNotify) {
+        await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" stopped: ${limitResult.reason} (child did not wrap up). Status: blocked. Last progress: ${goal.lastProgress?.summary || "none"}.`);
+      }
       return true;
     }
     if (limitResult.stop === "budget") {
@@ -990,7 +1019,10 @@ function createLoopEngine(options) {
         timestamp: new Date().toISOString(),
         revision: state.revision
       });
-      await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" blocked after ${runtime.consecutiveFailures} failures. Last error: ${message}.`);
+      if (shouldNotifyParent(runtime, "failed")) {
+        markParentNotified(runtime, "failed");
+        await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" blocked after ${runtime.consecutiveFailures} failures. Last error: ${message}.`);
+      }
     } else {
       const backoffMs = Math.min(30000, 1000 * Math.pow(2, runtime.consecutiveFailures));
       runtime.retryAfter = new Date(Date.now() + backoffMs).toISOString();
@@ -1482,6 +1514,8 @@ function createGoalService(host) {
       runtime.consecutiveFailures = 0;
       runtime.lastError = undefined;
       runtime.forceFinishRequested = undefined;
+      runtime.lastParentNotifiedAt = undefined;
+      runtime.lastParentNotifiedFor = undefined;
       runtime.phase = "idle";
       runtime.updatedAt = new Date().toISOString();
     }
@@ -2418,11 +2452,20 @@ var server = async ({ client, directory }) => {
           const goalID = parsed.goalID;
           if (!goalID)
             return;
-          const { readState: readState2 } = await Promise.resolve().then(() => (init_state_repository(), exports_state_repository));
+          const { readState: readState2, writeState: writeState2 } = await Promise.resolve().then(() => (init_state_repository(), exports_state_repository));
+          const { shouldNotifyParent: shouldNotifyParent2, markParentNotified: markParentNotified2 } = await Promise.resolve().then(() => exports_runtime);
           const state = await readState2(directory);
           const goal = state.goals.find((g) => g.id === goalID);
           if (!goal)
             return;
+          const runtime = state.runtimes.find((r) => r.goalID === goalID);
+          const notifyType = parsed.status === "complete" ? "complete" : "blocked";
+          if (runtime && !shouldNotifyParent2(runtime, notifyType))
+            return;
+          if (runtime) {
+            markParentNotified2(runtime, notifyType);
+            await writeState2(directory, state);
+          }
           const message = parsed.status === "complete" ? `Loop goal "${goal.name}" completed: ${parsed.summary || ""}. Evidence: ${parsed.evidence || ""}. Artifacts: ${goal.config.artifactDir || "n/a"}.` : `Loop goal "${goal.name}" blocked: ${parsed.reason || ""}. Needed: ${parsed.needed || ""}.`;
           await host.notifyOwner(goal.ownerSessionID, message);
         } catch {}

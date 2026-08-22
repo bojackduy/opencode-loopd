@@ -70,7 +70,7 @@ const server: Plugin = async ({ client, directory }) => {
         reconcileInBackground()
       }
 
-      // Forward terminal worker events to the parent session
+      // Forward terminal worker events to the parent session (deduped)
       if (input.tool === "complete_goal" || input.tool === "block_goal") {
         try {
           const raw = (output as any)?.output as string | undefined
@@ -79,10 +79,18 @@ const server: Plugin = async ({ client, directory }) => {
           if (parsed.status !== "complete" && parsed.status !== "blocked") return
           const goalID = parsed.goalID as string | undefined
           if (!goalID) return
-          const { readState } = await import("../infrastructure/state-repository")
+          const { readState, writeState } = await import("../infrastructure/state-repository")
+          const { shouldNotifyParent, markParentNotified } = await import("../domain/runtime")
           const state = await readState(directory)
           const goal = state.goals.find((g) => g.id === goalID)
           if (!goal) return
+          const runtime = state.runtimes.find((r) => r.goalID === goalID)
+          const notifyType = parsed.status === "complete" ? ("complete" as const) : ("blocked" as const)
+          if (runtime && !shouldNotifyParent(runtime, notifyType)) return
+          if (runtime) {
+            markParentNotified(runtime, notifyType)
+            await writeState(directory, state)
+          }
           const message =
             parsed.status === "complete"
               ? `Loop goal "${goal.name}" completed: ${parsed.summary || ""}. Evidence: ${parsed.evidence || ""}. Artifacts: ${goal.config.artifactDir || "n/a"}.`

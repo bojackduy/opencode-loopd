@@ -56,6 +56,10 @@ export interface GoalRuntimeState {
   /** Whether the engine has already asked the child to wrap up . */
   forceFinishRequested?: boolean
 
+  /** Last parent notification dedup — prevents tool + engine double-inject. */
+  lastParentNotifiedAt?: string
+  lastParentNotifiedFor?: "complete" | "blocked" | "failed" | "stopped"
+
   /** Timestamps. */
   lastRunAt?: string
   lastProgressAt?: string
@@ -110,4 +114,19 @@ export function leaseIsValid(rt: GoalRuntimeState): boolean {
 
 export function markProgress(rt: GoalRuntimeState): GoalRuntimeState {
   return { ...rt, progressDuringTurn: true, lastProgressAt: new Date().toISOString() }
+}
+
+const PARENT_NOTIFY_DEDUPE_MS = 60_000
+
+export function shouldNotifyParent(runtime: GoalRuntimeState, type: GoalRuntimeState["lastParentNotifiedFor"]): boolean {
+  if (!runtime.lastParentNotifiedAt || !runtime.lastParentNotifiedFor) return true
+  if (runtime.lastParentNotifiedFor !== type) return true
+  const elapsed = Date.now() - Date.parse(runtime.lastParentNotifiedAt)
+  return !Number.isFinite(elapsed) || elapsed > PARENT_NOTIFY_DEDUPE_MS
+}
+
+export function markParentNotified(runtime: GoalRuntimeState, type: NonNullable<GoalRuntimeState["lastParentNotifiedFor"]>): void {
+  runtime.lastParentNotifiedFor = type
+  runtime.lastParentNotifiedAt = new Date().toISOString()
+  runtime.updatedAt = new Date().toISOString()
 }

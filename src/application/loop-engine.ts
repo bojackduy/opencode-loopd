@@ -10,6 +10,8 @@ import { isTerminal } from "../domain/goal"
 import type { GoalID } from "../domain/goal"
 import {
   releaseLease,
+  shouldNotifyParent,
+  markParentNotified,
   type GoalRuntimeState,
 } from "../domain/runtime"
 import type { LoopEvent } from "../domain/events"
@@ -207,6 +209,8 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
         at: new Date().toISOString(),
       }
       runtime.forceFinishRequested = undefined
+      const shouldNotify = shouldNotifyParent(runtime, "stopped")
+      if (shouldNotify) markParentNotified(runtime, "stopped")
       await writeState(directory, state)
       await appendEvent(directory, {
         version: 1,
@@ -218,10 +222,12 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
         timestamp: new Date().toISOString(),
         revision: state.revision,
       } satisfies LoopEvent)
-      await host.notifyOwner(
-        goal.ownerSessionID,
-        `Loop goal "${goal.name}" stopped: ${limitResult.reason} (child did not wrap up). Status: blocked. Last progress: ${goal.lastProgress?.summary || "none"}.`,
-      )
+      if (shouldNotify) {
+        await host.notifyOwner(
+          goal.ownerSessionID,
+          `Loop goal "${goal.name}" stopped: ${limitResult.reason} (child did not wrap up). Status: blocked. Last progress: ${goal.lastProgress?.summary || "none"}.`,
+        )
+      }
       return true
     }
     if (limitResult.stop === "budget") {
@@ -322,10 +328,13 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
         timestamp: new Date().toISOString(),
         revision: state.revision,
       } satisfies LoopEvent)
-      await host.notifyOwner(
-        goal.ownerSessionID,
-        `Loop goal "${goal.name}" blocked after ${runtime.consecutiveFailures} failures. Last error: ${message}.`,
-      )
+      if (shouldNotifyParent(runtime, "failed")) {
+        markParentNotified(runtime, "failed")
+        await host.notifyOwner(
+          goal.ownerSessionID,
+          `Loop goal "${goal.name}" blocked after ${runtime.consecutiveFailures} failures. Last error: ${message}.`,
+        )
+      }
     } else {
       // Set retry backoff
       const backoffMs = Math.min(30_000, 1_000 * Math.pow(2, runtime.consecutiveFailures))
