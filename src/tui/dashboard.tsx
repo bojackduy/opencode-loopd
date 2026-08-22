@@ -220,11 +220,7 @@ export function LoopDashboard(props: Props) {
     }
     if (key === "B") {
       prevent(evt)
-      const goal = selectedGoal()
-      const extra = goal ? `Goal: ${goal.name} (${goal.id.slice(0,8)}) status=${goal.status} objective=${goal.objective.slice(0,120)}` : "No goal selected"
-      const url = bugReportUrl({ runtimeLabel: `opencode-loopd dashboard`, extra })
-      const res = openBrowserUrl(url)
-      setStatusText(res.status === "opened" ? "Opening bug report in browser…" : `Could not open browser: ${res.reason} — ${url}`)
+      handleBugReport()
       return
     }
     if (key === "q") { prevent(evt); props.api.ui.dialog.clear(); return }
@@ -278,11 +274,7 @@ export function LoopDashboard(props: Props) {
         case "goal": { setStatusText("Create goals via /goal in the parent chat (agent clarifies first). Dashboard: :send to steer the worker."); break }
         case "bug":
         case "report": {
-          const goal = selectedGoal()
-          const extra = goal ? `Goal: ${goal.name} (${goal.id.slice(0,8)}) status=${goal.status} objective=${goal.objective.slice(0,120)}` : "No goal selected"
-          const url = bugReportUrl({ runtimeLabel: `opencode-loopd dashboard`, extra })
-          const res = openBrowserUrl(url)
-          setStatusText(res.status === "opened" ? "Opening bug report in browser…" : `Could not open browser: ${res.reason} — ${url}`)
+          handleBugReport()
           break
         }
         case "logs": setShowLogs(!showLogs()); break
@@ -305,13 +297,21 @@ export function LoopDashboard(props: Props) {
   const runningCount = () => state()?.runtimes.filter((runtime) => runtime.phase === "running").length || 0
   const runningFrame = () => ["|", "/", "-", "\\"][Math.floor(clock() / 500) % 4]
 
+  function handleBugReport() {
+    const goal = selectedGoal()
+    const extra = goal ? `Goal: ${goal.name} (${goal.id.slice(0, 8)}) status=${goal.status} objective=${goal.objective.slice(0, 120)}` : "No goal selected"
+    const url = bugReportUrl({ runtimeLabel: `opencode-loopd dashboard`, extra })
+    const res = openBrowserUrl(url)
+    setStatusText(res.status === "opened" ? "Opening bug report in browser…" : `Could not open browser: ${res.reason} — ${url}`)
+  }
+
   createEffect(() => setSelectedGoal(activeGoals()[selected()] || null))
 
   return (
     <box flexDirection="column" width="100%" alignItems="center" padding={1}>
       <box flexDirection="column" width="90%" border={true} borderColor={theme().border} padding={1}>
         {/* Header — always visible, vivid */}
-        <box flexDirection="row" padding={0} flexShrink={0}>
+        <box flexDirection="row" justifyContent="space-between" alignItems="center" padding={0} flexShrink={0} gap={1}>
           <text>
             <span style={{ fg: theme().primary, bold: true }}>⬢ Loop Dashboard</span>
             <span style={{ fg: theme().textMuted }}> │ </span>
@@ -325,6 +325,18 @@ export function LoopDashboard(props: Props) {
             <span style={{ fg: theme().info, bold: true }}>{state()?.goals.filter((g) => g.status === "complete").length || 0}</span>
             <span style={{ fg: theme().textMuted }}> done</span>
           </text>
+          <box
+            flexDirection="row"
+            alignItems="center"
+            border={true}
+            borderColor={theme().error as unknown as string}
+            paddingLeft={1}
+            paddingRight={1}
+            flexShrink={0}
+            {...({ onClick: handleBugReport } as any)}
+          >
+            <text><span style={{ fg: theme().error, bold: true }}>Bug</span></text>
+          </box>
         </box>
 
         {/* Scrollable body — grows, hides overflow */}
