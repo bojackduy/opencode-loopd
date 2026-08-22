@@ -1,8 +1,8 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "@bojackduy/opencode-loopd",
-  "version": "1.1.0",
-  "description": "Codex-inspired background goal engine for OpenCode \u2014 autonomous subagents, engine-driven loop, child worker sessions and modal TUI dashboard. Like Claude Code loop for OpenCode.",
+  "version": "1.2.0",
+  "description": "Codex-inspired background goal engine for OpenCode — autonomous subagents, engine-driven loop, child worker sessions and modal TUI dashboard. Like Claude Code loop for OpenCode.",
   "type": "module",
   "license": "AGPL-3.0-only",
   "private": false,
