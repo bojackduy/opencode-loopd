@@ -55,6 +55,7 @@ export function createWorkerManager(host: LoopHost): WorkerManager {
       const workerSessionID = await host.createWorker({
         parentID: goal.ownerSessionID,
         title: `loopd: ${goal.name}`,
+        agent: goal.config.agent,
       })
 
       return {

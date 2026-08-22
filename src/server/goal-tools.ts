@@ -35,6 +35,7 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
         maxFailures: tool.schema.number().optional().describe("Block after N consecutive failures."),
         compactEvery: tool.schema.number().optional().describe("Compact the worker session every N turns."),
         timeoutMs: tool.schema.number().optional().describe("Per-turn timeout in ms."),
+        agent: tool.schema.string().optional().describe("Agent to run the worker as (e.g. \"dumb-agent\", \"build\"). Defaults to primary agent."),
       },
       execute: async (args, context) => {
         const sessionID = context?.sessionID || hostSessionID
@@ -57,6 +58,7 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
         if (args.maxFailures !== undefined) config.maxFailures = args.maxFailures
         if (args.compactEvery !== undefined) config.compactEvery = args.compactEvery
         if (args.timeoutMs !== undefined) config.timeoutMs = args.timeoutMs
+        if (args.agent !== undefined) config.agent = args.agent as any
 
         try {
           const { goal, worker } = await goalService.start(dir, {

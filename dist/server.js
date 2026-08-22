@@ -1126,7 +1126,8 @@ function createWorkerManager(host) {
     async createWorker(goal) {
       const workerSessionID = await host.createWorker({
         parentID: goal.ownerSessionID,
-        title: `loopd: ${goal.name}`
+        title: `loopd: ${goal.name}`,
+        agent: goal.config.agent
       });
       return {
         goalID: goal.id,
@@ -1584,9 +1585,12 @@ function createGoalService(host) {
 // src/server/host-adapter.ts
 function createRealHost(client, directory) {
   return {
-    async createWorker({ parentID, title }) {
+    async createWorker({ parentID, title, agent }) {
       try {
-        const result = await withTimeout(client.session.create({ body: { parentID, title } }), 1e4, "OpenCode session.create");
+        const body = { parentID, title };
+        if (agent)
+          body.agent = agent;
+        const result = await withTimeout(client.session.create({ body }), 1e4, "OpenCode session.create");
         const data = result?.data;
         if (result?.error || !data?.id) {
           const detail = describeError(result?.error || "response contained no session ID");
@@ -1721,7 +1725,8 @@ function goalTools(dir, goalService, hostSessionID) {
         maxNoProgress: tool.schema.number().optional().describe("Block after N turns without progress."),
         maxFailures: tool.schema.number().optional().describe("Block after N consecutive failures."),
         compactEvery: tool.schema.number().optional().describe("Compact the worker session every N turns."),
-        timeoutMs: tool.schema.number().optional().describe("Per-turn timeout in ms.")
+        timeoutMs: tool.schema.number().optional().describe("Per-turn timeout in ms."),
+        agent: tool.schema.string().optional().describe('Agent to run the worker as (e.g. "dumb-agent", "build"). Defaults to primary agent.')
       },
       execute: async (args, context) => {
         const sessionID = context?.sessionID || hostSessionID;
@@ -1751,6 +1756,8 @@ function goalTools(dir, goalService, hostSessionID) {
           config.compactEvery = args.compactEvery;
         if (args.timeoutMs !== undefined)
           config.timeoutMs = args.timeoutMs;
+        if (args.agent !== undefined)
+          config.agent = args.agent;
         try {
           const { goal, worker } = await goalService.start(dir, {
             name: args.name,

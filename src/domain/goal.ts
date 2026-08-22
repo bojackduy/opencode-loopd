@@ -90,6 +90,9 @@ export interface GoalConfig {
 
   /** Per-goal artifact directory. Computed at creation; not user-supplied. */
   artifactDir?: string
+
+  /** Agent that runs the worker session. Defaults to primary. */
+  agent?: string
 }
 
 // ─── Transition Rules ────────────────────────────────────────────────────────

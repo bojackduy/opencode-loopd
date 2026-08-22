@@ -25,7 +25,7 @@ export interface SessionUsage {
 export type SessionStatusType = "idle" | "busy" | "retry"
 
 export interface LoopHost {
-  createWorker(input: { parentID: string; title: string }): Promise<string>
+  createWorker(input: { parentID: string; title: string; agent?: string }): Promise<string>
   promptWorker(input: {
     sessionID: string
     prompt: string
@@ -43,10 +43,12 @@ export interface LoopHost {
 
 export function createRealHost(client: any, directory: string): LoopHost {
   return {
-    async createWorker({ parentID, title }) {
+    async createWorker({ parentID, title, agent }) {
       try {
+        const body: any = { parentID, title }
+        if (agent) body.agent = agent
         const result = await withTimeout<any>(
-          client.session.create({ body: { parentID, title } }),
+          client.session.create({ body }),
           10_000,
           "OpenCode session.create",
         )
@@ -195,9 +197,10 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
   return {
     sessions,
     prompts,
-    async createWorker({ parentID, title }) {
+    async createWorker({ parentID, title, agent }) {
       const id = `worker-${crypto.randomUUID().slice(0, 8)}`
       sessions.set(id, [])
+      if (agent) (sessions as any).agents = { ...((sessions as any).agents || {}), [id]: agent }
       return id
     },
     async promptWorker({ sessionID, prompt }) {
