@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/package.json",
   "name": "@bojackduy/opencode-loopd",
   "version": "1.1.0",
-  "description": "Codex-inspired background goal engine for OpenCode — autonomous subagents, engine-driven loop, child worker sessions and modal TUI dashboard. Like Claude Code loop for OpenCode.",
+  "description": "Codex-inspired background goal engine for OpenCode \u2014 autonomous subagents, engine-driven loop, child worker sessions and modal TUI dashboard. Like Claude Code loop for OpenCode.",
   "type": "module",
   "license": "AGPL-3.0-only",
   "private": false,
@@ -10,7 +10,7 @@
     "type": "git",
     "url": "git+https://github.com/bojackduy/opencode-loopd.git"
   },
-  "homepage": "https://github.com/bojackduy/opencode-loopd#readme",
+  "homepage": "https://bojackduy.github.io/opencode-loopd/",
   "bugs": {
     "url": "https://github.com/bojackduy/opencode-loopd/issues"
   },
