@@ -328,14 +328,13 @@ export function LoopDashboard(props: Props) {
           <box
             flexDirection="row"
             alignItems="center"
-            border={true}
-            borderColor={theme().error as unknown as string}
-            paddingLeft={0}
-            paddingRight={0}
+            backgroundColor={theme().error as unknown as string}
+            paddingLeft={1}
+            paddingRight={1}
             flexShrink={0}
             {...({ onMouseDown: handleBugReport } as any)}
           >
-            <text><span style={{ fg: theme().error, bold: true }}>Bug Report</span></text>
+            <text><span style={{ fg: "white", bold: true }}>Bug Report</span></text>
           </box>
         </box>
 

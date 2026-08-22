@@ -912,12 +912,11 @@ function LoopDashboard(props) {
     _$insertNode(_el$25, _el$26);
     _$setProp(_el$25, "flexDirection", "row");
     _$setProp(_el$25, "alignItems", "center");
-    _$setProp(_el$25, "border", true);
-    _$setProp(_el$25, "paddingLeft", 0);
-    _$setProp(_el$25, "paddingRight", 0);
+    _$setProp(_el$25, "paddingLeft", 1);
+    _$setProp(_el$25, "paddingRight", 1);
     _$setProp(_el$25, "flexShrink", 0);
     _$spread(_el$25, _$mergeProps({
-      get borderColor() {
+      get backgroundColor() {
         return theme().error;
       }
     }, {
@@ -925,6 +924,10 @@ function LoopDashboard(props) {
     }), true);
     _$insertNode(_el$26, _el$27);
     _$insertNode(_el$27, _$createTextNode(`Bug Report`));
+    _$setProp(_el$27, "style", {
+      fg: "white",
+      bold: true
+    });
     _$insertNode(_el$29, _el$34);
     _$setProp(_el$29, "flexDirection", "column");
     _$setProp(_el$29, "flexGrow", 1);
@@ -1134,37 +1137,37 @@ function LoopDashboard(props) {
           _$insertNode(_el$84, _$createTextNode(`:force`));
           _$insertNode(_el$86, _$createTextNode(` to complete manually.`));
           _$effect((_p$) => {
-            var _v$22 = {
+            var _v$21 = {
               fg: theme().textMuted
-            }, _v$23 = {
+            }, _v$22 = {
               fg: theme().accent
+            }, _v$23 = {
+              fg: theme().textMuted
             }, _v$24 = {
               fg: theme().textMuted
             }, _v$25 = {
-              fg: theme().textMuted
+              fg: theme().warning
             }, _v$26 = {
-              fg: theme().warning
+              fg: theme().textMuted
             }, _v$27 = {
-              fg: theme().textMuted
+              fg: theme().warning
             }, _v$28 = {
-              fg: theme().warning
-            }, _v$29 = {
               fg: theme().textMuted
-            }, _v$30 = {
+            }, _v$29 = {
               fg: theme().warning
-            }, _v$31 = {
+            }, _v$30 = {
               fg: theme().textMuted
             };
-            _v$22 !== _p$.e && (_p$.e = _$setProp(_el$67, "style", _v$22, _p$.e));
-            _v$23 !== _p$.t && (_p$.t = _$setProp(_el$69, "style", _v$23, _p$.t));
-            _v$24 !== _p$.a && (_p$.a = _$setProp(_el$71, "style", _v$24, _p$.a));
-            _v$25 !== _p$.o && (_p$.o = _$setProp(_el$74, "style", _v$25, _p$.o));
-            _v$26 !== _p$.i && (_p$.i = _$setProp(_el$76, "style", _v$26, _p$.i));
-            _v$27 !== _p$.n && (_p$.n = _$setProp(_el$78, "style", _v$27, _p$.n));
-            _v$28 !== _p$.s && (_p$.s = _$setProp(_el$80, "style", _v$28, _p$.s));
-            _v$29 !== _p$.h && (_p$.h = _$setProp(_el$82, "style", _v$29, _p$.h));
-            _v$30 !== _p$.r && (_p$.r = _$setProp(_el$84, "style", _v$30, _p$.r));
-            _v$31 !== _p$.d && (_p$.d = _$setProp(_el$86, "style", _v$31, _p$.d));
+            _v$21 !== _p$.e && (_p$.e = _$setProp(_el$67, "style", _v$21, _p$.e));
+            _v$22 !== _p$.t && (_p$.t = _$setProp(_el$69, "style", _v$22, _p$.t));
+            _v$23 !== _p$.a && (_p$.a = _$setProp(_el$71, "style", _v$23, _p$.a));
+            _v$24 !== _p$.o && (_p$.o = _$setProp(_el$74, "style", _v$24, _p$.o));
+            _v$25 !== _p$.i && (_p$.i = _$setProp(_el$76, "style", _v$25, _p$.i));
+            _v$26 !== _p$.n && (_p$.n = _$setProp(_el$78, "style", _v$26, _p$.n));
+            _v$27 !== _p$.s && (_p$.s = _$setProp(_el$80, "style", _v$27, _p$.s));
+            _v$28 !== _p$.h && (_p$.h = _$setProp(_el$82, "style", _v$28, _p$.h));
+            _v$29 !== _p$.r && (_p$.r = _$setProp(_el$84, "style", _v$29, _p$.r));
+            _v$30 !== _p$.d && (_p$.d = _$setProp(_el$86, "style", _v$30, _p$.d));
             return _p$;
           }, {
             e: undefined,
@@ -1284,19 +1287,19 @@ function LoopDashboard(props) {
                 })();
               })(), null);
               _$effect((_p$) => {
-                var _v$32 = isActive() ? theme().backgroundElement : undefined, _v$33 = {
+                var _v$31 = isActive() ? theme().backgroundElement : undefined, _v$32 = {
                   fg: statusColor(goal.status, theme()),
                   bold: isActive()
-                }, _v$34 = {
+                }, _v$33 = {
                   fg: theme().textMuted
-                }, _v$35 = {
+                }, _v$34 = {
                   fg: statusColor(goal.status, theme()),
                   bold: true
                 };
-                _v$32 !== _p$.e && (_p$.e = _$setProp(_el$88, "backgroundColor", _v$32, _p$.e));
-                _v$33 !== _p$.t && (_p$.t = _$setProp(_el$90, "style", _v$33, _p$.t));
-                _v$34 !== _p$.a && (_p$.a = _$setProp(_el$91, "style", _v$34, _p$.a));
-                _v$35 !== _p$.o && (_p$.o = _$setProp(_el$93, "style", _v$35, _p$.o));
+                _v$31 !== _p$.e && (_p$.e = _$setProp(_el$88, "backgroundColor", _v$31, _p$.e));
+                _v$32 !== _p$.t && (_p$.t = _$setProp(_el$90, "style", _v$32, _p$.t));
+                _v$33 !== _p$.a && (_p$.a = _$setProp(_el$91, "style", _v$33, _p$.a));
+                _v$34 !== _p$.o && (_p$.o = _$setProp(_el$93, "style", _v$34, _p$.o));
                 return _p$;
               }, {
                 e: undefined,
@@ -1477,18 +1480,18 @@ function LoopDashboard(props) {
             })()];
           })(), null);
           _$effect((_p$) => {
-            var _v$36 = borderColorForStatus(goal().status, theme()), _v$37 = {
+            var _v$35 = borderColorForStatus(goal().status, theme()), _v$36 = {
               fg: statusColor(goal().status, theme()),
               bold: true
-            }, _v$38 = {
+            }, _v$37 = {
               fg: statusColor(goal().status, theme())
-            }, _v$39 = {
+            }, _v$38 = {
               fg: theme().text
             };
-            _v$36 !== _p$.e && (_p$.e = _$setProp(_el$108, "borderColor", _v$36, _p$.e));
-            _v$37 !== _p$.t && (_p$.t = _$setProp(_el$110, "style", _v$37, _p$.t));
-            _v$38 !== _p$.a && (_p$.a = _$setProp(_el$112, "style", _v$38, _p$.a));
-            _v$39 !== _p$.o && (_p$.o = _$setProp(_el$115, "style", _v$39, _p$.o));
+            _v$35 !== _p$.e && (_p$.e = _$setProp(_el$108, "borderColor", _v$35, _p$.e));
+            _v$36 !== _p$.t && (_p$.t = _$setProp(_el$110, "style", _v$36, _p$.t));
+            _v$37 !== _p$.a && (_p$.a = _$setProp(_el$112, "style", _v$37, _p$.a));
+            _v$38 !== _p$.o && (_p$.o = _$setProp(_el$115, "style", _v$38, _p$.o));
             return _p$;
           }, {
             e: undefined,
@@ -1541,14 +1544,14 @@ function LoopDashboard(props) {
               })();
             })(), null);
             _$effect((_p$) => {
-              var _v$40 = {
+              var _v$39 = {
                 fg: eventColor(String(ev.type), theme()),
                 bold: true
-              }, _v$41 = {
+              }, _v$40 = {
                 fg: theme().textMuted
               };
-              _v$40 !== _p$.e && (_p$.e = _$setProp(_el$147, "style", _v$40, _p$.e));
-              _v$41 !== _p$.t && (_p$.t = _$setProp(_el$148, "style", _v$41, _p$.t));
+              _v$39 !== _p$.e && (_p$.e = _$setProp(_el$147, "style", _v$39, _p$.e));
+              _v$40 !== _p$.t && (_p$.t = _$setProp(_el$148, "style", _v$40, _p$.t));
               return _p$;
             }, {
               e: undefined,
@@ -1650,14 +1653,11 @@ function LoopDashboard(props) {
         bold: true
       }, _v$13 = {
         fg: theme().textMuted
-      }, _v$14 = {
-        fg: theme().error,
-        bold: true
-      }, _v$15 = mode() === "insert" ? theme().warning : theme().border, _v$16 = {
+      }, _v$14 = mode() === "insert" ? theme().warning : theme().border, _v$15 = {
         fg: mode() === "insert" ? theme().warning : theme().success,
         bold: true,
         bg: mode() === "insert" ? theme().backgroundElement : undefined
-      }, _v$17 = mode() === "insert" ? ":send hello  or  :force done --evidence proof  or  :open  (Ctrl+N: normal)" : statusText() || "Press : to send/command  \xB7  ? help  \xB7  o open child  \xB7  q close", _v$18 = theme().textMuted, _v$19 = theme().primary, _v$20 = theme().text, _v$21 = theme().background;
+      }, _v$16 = mode() === "insert" ? ":send hello  or  :force done --evidence proof  or  :open  (Ctrl+N: normal)" : statusText() || "Press : to send/command  \xB7  ? help  \xB7  o open child  \xB7  q close", _v$17 = theme().textMuted, _v$18 = theme().primary, _v$19 = theme().text, _v$20 = theme().background;
       _v$4 !== _p$.e && (_p$.e = _$setProp(_el$2, "borderColor", _v$4, _p$.e));
       _v$5 !== _p$.t && (_p$.t = _$setProp(_el$5, "style", _v$5, _p$.t));
       _v$6 !== _p$.a && (_p$.a = _$setProp(_el$7, "style", _v$6, _p$.a));
@@ -1670,14 +1670,13 @@ function LoopDashboard(props) {
       _v$11 !== _p$.d && (_p$.d = _$setProp(_el$20, "style", _v$11, _p$.d));
       _v$12 !== _p$.l && (_p$.l = _$setProp(_el$22, "style", _v$12, _p$.l));
       _v$13 !== _p$.u && (_p$.u = _$setProp(_el$23, "style", _v$13, _p$.u));
-      _v$14 !== _p$.c && (_p$.c = _$setProp(_el$27, "style", _v$14, _p$.c));
-      _v$15 !== _p$.w && (_p$.w = _$setProp(_el$41, "borderColor", _v$15, _p$.w));
-      _v$16 !== _p$.m && (_p$.m = _$setProp(_el$43, "style", _v$16, _p$.m));
-      _v$17 !== _p$.f && (_p$.f = _$setProp(_el$44, "placeholder", _v$17, _p$.f));
-      _v$18 !== _p$.y && (_p$.y = _$setProp(_el$44, "placeholderColor", _v$18, _p$.y));
-      _v$19 !== _p$.g && (_p$.g = _$setProp(_el$44, "cursorColor", _v$19, _p$.g));
-      _v$20 !== _p$.p && (_p$.p = _$setProp(_el$44, "focusedTextColor", _v$20, _p$.p));
-      _v$21 !== _p$.b && (_p$.b = _$setProp(_el$44, "focusedBackgroundColor", _v$21, _p$.b));
+      _v$14 !== _p$.c && (_p$.c = _$setProp(_el$41, "borderColor", _v$14, _p$.c));
+      _v$15 !== _p$.w && (_p$.w = _$setProp(_el$43, "style", _v$15, _p$.w));
+      _v$16 !== _p$.m && (_p$.m = _$setProp(_el$44, "placeholder", _v$16, _p$.m));
+      _v$17 !== _p$.f && (_p$.f = _$setProp(_el$44, "placeholderColor", _v$17, _p$.f));
+      _v$18 !== _p$.y && (_p$.y = _$setProp(_el$44, "cursorColor", _v$18, _p$.y));
+      _v$19 !== _p$.g && (_p$.g = _$setProp(_el$44, "focusedTextColor", _v$19, _p$.g));
+      _v$20 !== _p$.p && (_p$.p = _$setProp(_el$44, "focusedBackgroundColor", _v$20, _p$.p));
       return _p$;
     }, {
       e: undefined,
@@ -1698,8 +1697,7 @@ function LoopDashboard(props) {
       f: undefined,
       y: undefined,
       g: undefined,
-      p: undefined,
-      b: undefined
+      p: undefined
     });
     return _el$;
   })();
