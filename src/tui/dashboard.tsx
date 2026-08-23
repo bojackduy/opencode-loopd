@@ -427,7 +427,7 @@ export function LoopDashboard(props: Props) {
                   const maxTurns = (goal.config as any)?.maxTurns as number | undefined
                   const turnColor = () => {
                     if (!runtime() || !maxTurns) return phaseColor(runtime()?.phase || "idle", theme())
-                    const ratio = runtime()!.turnCount / maxTurns
+                    const ratio = runtime()!.budgetTurnCount / maxTurns
                     if (ratio >= 1) return theme().error
                     if (ratio >= 0.8) return theme().warning
                     return phaseColor(runtime()!.phase || "idle", theme())
@@ -441,7 +441,7 @@ export function LoopDashboard(props: Props) {
                         {runtime() && <>
                           <span style={{ fg: theme().textMuted }}> │ </span>
                           <span style={{ fg: turnColor(), bold: runtime()!.phase === "running" }}>{runtime()!.phase === "running" ? runningFrame() : phaseIcon(runtime()!.phase)} {runtime()!.phase.toUpperCase()}</span>
-                          <span style={{ fg: turnColor() }}> {runtime()!.turnCount}{maxTurns ? `/${maxTurns}` : ""}</span>
+                          <span style={{ fg: turnColor() }}> {runtime()!.budgetTurnCount}{maxTurns ? `/${maxTurns}` : ""}</span>
                           <span style={{ fg: theme().textMuted }}> {ageLabel(runtime()!.lastProgressAt || runtime()!.lastRunAt, clock())}</span>
                         </>}
                         {runtime() && runtime()!.consecutiveFailures > 0 && <span style={{ fg: theme().error, bold: true }}> │ ⚠ {runtime()!.consecutiveFailures} fail</span>}
@@ -465,7 +465,7 @@ export function LoopDashboard(props: Props) {
                   <text>
                     <span style={{ fg: statusColor(goal().status, theme()), bold: true }}>{statusIcon(goal().status)} {goal().name}</span>
                     <span style={{ fg: statusColor(goal().status, theme()) }}> {goal().status.toUpperCase()}</span>
-                    {rt() && <><span style={{ fg: theme().textMuted }}> │ </span><span style={{ fg: phaseColor(rt()!.phase, theme()), bold: true }}>{phaseIcon(rt()!.phase)} {rt()!.phase}</span><span style={{ fg: theme().textMuted }}> turn {rt()!.turnCount}</span></>}
+                    {rt() && <><span style={{ fg: theme().textMuted }}> │ </span><span style={{ fg: phaseColor(rt()!.phase, theme()), bold: true }}>{phaseIcon(rt()!.phase)} {rt()!.phase}</span><span style={{ fg: theme().textMuted }}> run {rt()!.runCount} (budget {rt()!.budgetTurnCount})</span></>}
                     {"\n"}
                     <span style={{ fg: theme().text }}>{goal().objective.slice(0, 160)}</span>
                     {lp() && <><span style={{ fg: theme().success }}>{"\n"}✔ </span><span style={{ fg: theme().text }}>{lp()!.summary.slice(0, 100)}</span><span style={{ fg: theme().textMuted }}> → {lp()!.next?.slice(0, 60) || ""}</span></>}

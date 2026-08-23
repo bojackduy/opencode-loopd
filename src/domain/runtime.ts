@@ -2,6 +2,7 @@
 // Runtime execution state — separate from goal status.
 
 import type { GoalID } from "./goal"
+import type { VerificationAttempt } from "./verification"
 
 export type RuntimePhase =
   | "idle"       // no active run
@@ -35,11 +36,11 @@ export interface GoalRuntimeState {
   /** When to retry (ISO timestamp). */
   retryAfter?: string
 
-  /** Run counter for this goal. */
+  /** Run counter — every prompt sent to the worker. Monotonic, never decremented. */
   runCount: number
 
-  /** Turn counter (incremented on each continuation). */
-  turnCount: number
+  /** Turns charged against maxTurns. Monotonic, never decremented. */
+  budgetTurnCount: number
 
   /** Progress count from the no-progress guard. */
   noProgressCount: number
@@ -53,11 +54,38 @@ export interface GoalRuntimeState {
   /** Number of tokens consumed during current turn. */
   turnTokensUsed?: number
 
-  /** Whether the engine has already asked the child to wrap up . */
+  /** Whether the engine has already asked the child to wrap up. */
   forceFinishRequested?: boolean
 
   /** How many times the evaluator has rejected the child's completion claim. */
   evaluatorRejectionCount?: number
+
+  /** Details from the last rejection (failed checks, error messages). */
+  lastRejectionDetails?: string
+
+  /** Most recent verification attempt. */
+  lastVerificationAttempt?: VerificationAttempt
+
+  /** Bounded list of recent verification attempts (last 10). */
+  recentVerificationAttempts?: VerificationAttempt[]
+
+  /** Whether a free retry is pending from a rejection (un-charged turn). */
+  freeRetryPending?: boolean
+
+  /** Current run generation — fence against stale idle/tool events. */
+  runGeneration: number
+
+  /** SDK messageID of the active prompt sent to the worker. */
+  activePromptMessageID?: string
+
+  /** Last observed worker activity (tool calls, message updates). ISO timestamp. */
+  lastActivityAt?: string
+
+  /** When an idle candidate was first detected. ISO timestamp. */
+  idleCandidateAt?: string
+
+  /** Active tool call IDs tracked during a run. */
+  activeToolCallIDs?: string[]
 
   /** Last parent notification dedup — prevents tool + engine double-inject. */
   lastParentNotifiedAt?: string
@@ -78,9 +106,10 @@ export function createRuntimeState(goalID: GoalID): GoalRuntimeState {
     phase: "idle",
     consecutiveFailures: 0,
     runCount: 0,
-    turnCount: 0,
+    budgetTurnCount: 0,
     noProgressCount: 0,
     progressDuringTurn: false,
+    runGeneration: 0,
     createdAt: now,
     updatedAt: now,
   }
@@ -96,6 +125,10 @@ export function acquireLease(rt: GoalRuntimeState, timeoutMs: number): GoalRunti
     turnStartedAt: new Date(now).toISOString(),
     progressDuringTurn: false,
     turnTokensUsed: 0,
+    runGeneration: rt.runGeneration + 1,
+    lastActivityAt: new Date(now).toISOString(),
+    idleCandidateAt: undefined,
+    activeToolCallIDs: [],
     updatedAt: new Date(now).toISOString(),
   }
 }
@@ -106,6 +139,8 @@ export function releaseLease(rt: GoalRuntimeState): GoalRuntimeState {
     phase: "idle",
     leaseExpiresAt: undefined,
     turnStartedAt: undefined,
+    activePromptMessageID: undefined,
+    activeToolCallIDs: [],
     updatedAt: new Date().toISOString(),
   }
 }
@@ -132,4 +167,45 @@ export function markParentNotified(runtime: GoalRuntimeState, type: NonNullable<
   runtime.lastParentNotifiedFor = type
   runtime.lastParentNotifiedAt = new Date().toISOString()
   runtime.updatedAt = new Date().toISOString()
+}
+
+// ─── Activity Tracking ───────────────────────────────────────────────────────
+
+/** Record worker activity (tool call, message update). Invalidates idle candidate. */
+export function recordActivity(rt: GoalRuntimeState): GoalRuntimeState {
+  return {
+    ...rt,
+    lastActivityAt: new Date().toISOString(),
+    idleCandidateAt: undefined,
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+/** Add an active tool call. */
+export function addToolCall(rt: GoalRuntimeState, callID: string): GoalRuntimeState {
+  const ids = new Set(rt.activeToolCallIDs || [])
+  ids.add(callID)
+  return {
+    ...rt,
+    activeToolCallIDs: Array.from(ids),
+    lastActivityAt: new Date().toISOString(),
+    idleCandidateAt: undefined,
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+/** Remove an active tool call. */
+export function removeToolCall(rt: GoalRuntimeState, callID: string): GoalRuntimeState {
+  const ids = (rt.activeToolCallIDs || []).filter((id) => id !== callID)
+  return {
+    ...rt,
+    activeToolCallIDs: ids,
+    lastActivityAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+/** Check if the runtime has active tool calls. */
+export function hasActiveToolCalls(rt: GoalRuntimeState): boolean {
+  return (rt.activeToolCallIDs?.length ?? 0) > 0
 }

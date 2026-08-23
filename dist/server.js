@@ -13,32 +13,127 @@ var __export = (target, all) => {
       set: __exportSetter.bind(all, name)
     });
 };
-var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
+
+// src/domain/runtime.ts
+var exports_runtime = {};
+__export(exports_runtime, {
+  shouldNotifyParent: () => shouldNotifyParent,
+  removeToolCall: () => removeToolCall,
+  releaseLease: () => releaseLease,
+  recordActivity: () => recordActivity,
+  markProgress: () => markProgress,
+  markParentNotified: () => markParentNotified,
+  leaseIsValid: () => leaseIsValid,
+  hasActiveToolCalls: () => hasActiveToolCalls,
+  createRuntimeState: () => createRuntimeState,
+  addToolCall: () => addToolCall,
+  acquireLease: () => acquireLease
+});
+function createRuntimeState(goalID) {
+  const now = new Date().toISOString();
+  return {
+    goalID,
+    phase: "idle",
+    consecutiveFailures: 0,
+    runCount: 0,
+    budgetTurnCount: 0,
+    noProgressCount: 0,
+    progressDuringTurn: false,
+    runGeneration: 0,
+    createdAt: now,
+    updatedAt: now
+  };
+}
+function acquireLease(rt, timeoutMs) {
+  const now = Date.now();
+  const expires = new Date(now + timeoutMs).toISOString();
+  return {
+    ...rt,
+    phase: "running",
+    leaseExpiresAt: expires,
+    turnStartedAt: new Date(now).toISOString(),
+    progressDuringTurn: false,
+    turnTokensUsed: 0,
+    runGeneration: rt.runGeneration + 1,
+    lastActivityAt: new Date(now).toISOString(),
+    idleCandidateAt: undefined,
+    activeToolCallIDs: [],
+    updatedAt: new Date(now).toISOString()
+  };
+}
+function releaseLease(rt) {
+  return {
+    ...rt,
+    phase: "idle",
+    leaseExpiresAt: undefined,
+    turnStartedAt: undefined,
+    activePromptMessageID: undefined,
+    activeToolCallIDs: [],
+    updatedAt: new Date().toISOString()
+  };
+}
+function leaseIsValid(rt) {
+  if (!rt.leaseExpiresAt)
+    return false;
+  return Date.now() < Date.parse(rt.leaseExpiresAt);
+}
+function markProgress(rt) {
+  return { ...rt, progressDuringTurn: true, lastProgressAt: new Date().toISOString() };
+}
+function shouldNotifyParent(runtime, type) {
+  if (!runtime.lastParentNotifiedAt || !runtime.lastParentNotifiedFor)
+    return true;
+  if (runtime.lastParentNotifiedFor !== type)
+    return true;
+  const elapsed = Date.now() - Date.parse(runtime.lastParentNotifiedAt);
+  return !Number.isFinite(elapsed) || elapsed > PARENT_NOTIFY_DEDUPE_MS;
+}
+function markParentNotified(runtime, type) {
+  runtime.lastParentNotifiedFor = type;
+  runtime.lastParentNotifiedAt = new Date().toISOString();
+  runtime.updatedAt = new Date().toISOString();
+}
+function recordActivity(rt) {
+  return {
+    ...rt,
+    lastActivityAt: new Date().toISOString(),
+    idleCandidateAt: undefined,
+    updatedAt: new Date().toISOString()
+  };
+}
+function addToolCall(rt, callID) {
+  const ids = new Set(rt.activeToolCallIDs || []);
+  ids.add(callID);
+  return {
+    ...rt,
+    activeToolCallIDs: Array.from(ids),
+    lastActivityAt: new Date().toISOString(),
+    idleCandidateAt: undefined,
+    updatedAt: new Date().toISOString()
+  };
+}
+function removeToolCall(rt, callID) {
+  const ids = (rt.activeToolCallIDs || []).filter((id) => id !== callID);
+  return {
+    ...rt,
+    activeToolCallIDs: ids,
+    lastActivityAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+}
+function hasActiveToolCalls(rt) {
+  return (rt.activeToolCallIDs?.length ?? 0) > 0;
+}
+var PARENT_NOTIFY_DEDUPE_MS = 60000;
+
+// src/application/control-worker.ts
+import { randomUUID } from "crypto";
 
 // src/infrastructure/state-repository.ts
-var exports_state_repository = {};
-__export(exports_state_repository, {
-  writeState: () => writeState,
-  writeControlResponse: () => writeControlResponse,
-  writeControlRequest: () => writeControlRequest,
-  recoverStaleProcessing: () => recoverStaleProcessing,
-  readState: () => readState,
-  readEvents: () => readEvents,
-  readControlResponse: () => readControlResponse,
-  readControlRequest: () => readControlRequest,
-  mutateState: () => mutateState,
-  listPendingRequests: () => listPendingRequests,
-  goalArtifactDir: () => goalArtifactDir,
-  ensureGoalArtifactDir: () => ensureGoalArtifactDir,
-  drainGoalInbox: () => drainGoalInbox,
-  claimControlRequest: () => claimControlRequest,
-  appendGoalInbox: () => appendGoalInbox,
-  appendEvent: () => appendEvent
-});
 import { promises as fs } from "fs";
 import path from "path";
 import os from "os";
-import { randomUUID } from "crypto";
+var CURRENT_VERSION = 4;
 function emptyState() {
   return { version: CURRENT_VERSION, revision: 0, goals: [], runtimes: [], commandLedger: [] };
 }
@@ -58,11 +153,11 @@ function lockDir(directory) {
 function lockFile(directory, key) {
   return path.join(lockDir(directory), `${key}.lock`);
 }
+var LOCK_STALE_MS = 1e4;
 async function acquireLock(directory, key, operation) {
   const dir = lockDir(directory);
   await fs.mkdir(dir, { recursive: true });
   const lockPath = lockFile(directory, key);
-  const lockID = randomUUID();
   for (let attempt = 0;attempt < 10; attempt++) {
     try {
       try {
@@ -73,31 +168,35 @@ async function acquireLock(directory, key, operation) {
           await fs.rm(lockPath, { force: true });
         }
       } catch {}
-      const temp = lockPath + `.${lockID}.tmp`;
       const meta = { pid: process.pid, operation, acquiredAt: new Date().toISOString() };
-      await fs.writeFile(temp, JSON.stringify(meta), "utf8");
+      const fd = await fs.open(lockPath, "wx");
       try {
-        await fs.rename(temp, lockPath);
-        return;
-      } catch (error) {
-        await fs.rm(temp, { force: true });
-        if (error?.code !== "EEXIST")
-          throw error;
+        await fd.writeFile(JSON.stringify(meta), "utf8");
+      } finally {
+        await fd.close();
       }
+      return;
     } catch (error) {
-      if (error?.code === "ENOENT") {
+      if (error?.code === "EEXIST") {} else if (error?.code === "ENOENT") {
         await fs.mkdir(dir, { recursive: true });
         continue;
+      } else {
+        throw error;
       }
-      throw error;
     }
     await delay(25 * (attempt + 1));
   }
   throw new Error(`failed to acquire lock "${key}" for "${operation}" after retries`);
 }
 async function releaseLock(directory, key) {
+  const lockPath = lockFile(directory, key);
   try {
-    await fs.rm(lockFile(directory, key), { force: true });
+    const raw = await fs.readFile(lockPath, "utf8");
+    const meta = JSON.parse(raw);
+    const age = Date.now() - Date.parse(meta.acquiredAt);
+    if (meta.pid === process.pid || age > LOCK_STALE_MS) {
+      await fs.rm(lockPath, { force: true });
+    }
   } catch {}
 }
 async function readState(directory) {
@@ -139,6 +238,33 @@ function migrate(state) {
       lastProgress: g.lastProgress ?? undefined,
       completionEvidence: g.completionEvidence ?? undefined,
       blocker: g.blocker ?? undefined
+    }));
+  }
+  if (result.version < 3) {
+    result.version = 3;
+    result.runtimes = result.runtimes.map((rt) => {
+      const oldTurnCount = rt.turnCount ?? 0;
+      return {
+        ...rt,
+        budgetTurnCount: rt.budgetTurnCount ?? oldTurnCount,
+        runCount: rt.runCount ?? oldTurnCount,
+        runGeneration: rt.runGeneration ?? 0,
+        freeRetryPending: rt.freeRetryPending ?? false,
+        lastRejectionDetails: rt.lastRejectionDetails ?? undefined,
+        activePromptMessageID: rt.activePromptMessageID ?? undefined,
+        lastActivityAt: rt.lastActivityAt ?? undefined,
+        idleCandidateAt: rt.idleCandidateAt ?? undefined,
+        activeToolCallIDs: rt.activeToolCallIDs ?? [],
+        turnCount: undefined
+      };
+    });
+  }
+  if (result.version < 4) {
+    result.version = 4;
+    result.runtimes = result.runtimes.map((rt) => ({
+      ...rt,
+      lastVerificationAttempt: rt.lastVerificationAttempt ?? undefined,
+      recentVerificationAttempts: rt.recentVerificationAttempts ?? []
     }));
   }
   return result;
@@ -213,19 +339,6 @@ function processingFile(directory, requestID) {
 function responseFile(directory, requestID) {
   return path.join(controlDir(directory), "responses", `${requestID}.json`);
 }
-async function writeControlRequest(directory, request) {
-  const dir = path.join(controlDir(directory), "requests");
-  await fs.mkdir(dir, { recursive: true });
-  await writeAtomic(requestFile(directory, request.requestID), JSON.stringify(request, null, 2));
-}
-async function readControlRequest(directory, requestID) {
-  try {
-    const raw = await fs.readFile(requestFile(directory, requestID), "utf8");
-    return JSON.parse(raw);
-  } catch {
-    return;
-  }
-}
 async function claimControlRequest(directory, requestID) {
   const src = requestFile(directory, requestID);
   const dst = processingFile(directory, requestID);
@@ -271,28 +384,6 @@ async function listPendingRequests(directory) {
     return [];
   }
 }
-async function recoverStaleProcessing(directory) {
-  const dir = path.join(controlDir(directory), "processing");
-  try {
-    const files = await fs.readdir(dir);
-    const recovered = [];
-    for (const file of files) {
-      if (!file.endsWith(".json"))
-        continue;
-      const processingPath = path.join(dir, file);
-      const requestPath = path.join(controlDir(directory), "requests", file);
-      try {
-        const raw = await fs.readFile(processingPath, "utf8");
-        const request = JSON.parse(raw);
-        await fs.rename(processingPath, requestPath);
-        recovered.push(request);
-      } catch {}
-    }
-    return recovered;
-  } catch {
-    return [];
-  }
-}
 function goalArtifactDir(directory, goalID) {
   return path.join(loopDir(directory), "goals", goalID);
 }
@@ -329,82 +420,6 @@ async function drainGoalInbox(directory, goalID) {
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-var CURRENT_VERSION = 2, LOCK_STALE_MS = 1e4;
-var init_state_repository = () => {};
-
-// src/domain/runtime.ts
-var exports_runtime = {};
-__export(exports_runtime, {
-  shouldNotifyParent: () => shouldNotifyParent,
-  releaseLease: () => releaseLease,
-  markProgress: () => markProgress,
-  markParentNotified: () => markParentNotified,
-  leaseIsValid: () => leaseIsValid,
-  createRuntimeState: () => createRuntimeState,
-  acquireLease: () => acquireLease
-});
-function createRuntimeState(goalID) {
-  const now = new Date().toISOString();
-  return {
-    goalID,
-    phase: "idle",
-    consecutiveFailures: 0,
-    runCount: 0,
-    turnCount: 0,
-    noProgressCount: 0,
-    progressDuringTurn: false,
-    createdAt: now,
-    updatedAt: now
-  };
-}
-function acquireLease(rt, timeoutMs) {
-  const now = Date.now();
-  const expires = new Date(now + timeoutMs).toISOString();
-  return {
-    ...rt,
-    phase: "running",
-    leaseExpiresAt: expires,
-    turnStartedAt: new Date(now).toISOString(),
-    progressDuringTurn: false,
-    turnTokensUsed: 0,
-    updatedAt: new Date(now).toISOString()
-  };
-}
-function releaseLease(rt) {
-  return {
-    ...rt,
-    phase: "idle",
-    leaseExpiresAt: undefined,
-    turnStartedAt: undefined,
-    updatedAt: new Date().toISOString()
-  };
-}
-function leaseIsValid(rt) {
-  if (!rt.leaseExpiresAt)
-    return false;
-  return Date.now() < Date.parse(rt.leaseExpiresAt);
-}
-function markProgress(rt) {
-  return { ...rt, progressDuringTurn: true, lastProgressAt: new Date().toISOString() };
-}
-function shouldNotifyParent(runtime, type) {
-  if (!runtime.lastParentNotifiedAt || !runtime.lastParentNotifiedFor)
-    return true;
-  if (runtime.lastParentNotifiedFor !== type)
-    return true;
-  const elapsed = Date.now() - Date.parse(runtime.lastParentNotifiedAt);
-  return !Number.isFinite(elapsed) || elapsed > PARENT_NOTIFY_DEDUPE_MS;
-}
-function markParentNotified(runtime, type) {
-  runtime.lastParentNotifiedFor = type;
-  runtime.lastParentNotifiedAt = new Date().toISOString();
-  runtime.updatedAt = new Date().toISOString();
-}
-var PARENT_NOTIFY_DEDUPE_MS = 60000;
-
-// src/application/control-worker.ts
-init_state_repository();
-import { randomUUID as randomUUID2 } from "crypto";
 
 // src/infrastructure/server-log.ts
 import { appendFile } from "fs/promises";
@@ -654,7 +669,7 @@ function createControlWorker(options) {
         await writeState(directory, state2);
         await appendEvent(directory, {
           version: 1,
-          eventID: randomUUID2(),
+          eventID: randomUUID(),
           goalID: goal.id,
           type: "goal.completed",
           summary: goal.completionEvidence.summary,
@@ -694,7 +709,7 @@ function createControlWorker(options) {
         await writeState(directory, state2);
         await appendEvent(directory, {
           version: 1,
-          eventID: randomUUID2(),
+          eventID: randomUUID(),
           goalID: goal.id,
           type: "goal.blocked",
           reason: goal.blocker.reason,
@@ -740,8 +755,7 @@ function createControlWorker(options) {
 }
 
 // src/application/loop-engine.ts
-init_state_repository();
-import { randomUUID as randomUUID3 } from "crypto";
+import { randomUUID as randomUUID2 } from "crypto";
 
 // src/domain/goal.ts
 var MODEL_TRANSITIONS = {
@@ -780,6 +794,7 @@ function createGoal(input) {
   return { ...input, tokensUsed: 0, timeUsedSeconds: 0, createdAt: now, updatedAt: now };
 }
 // src/application/loop-engine.ts
+var CONFIRM_IDLE_DURATION_MS = 2000;
 var HANDLED_EVENT_TYPES = new Set([
   "session.idle",
   "session.status",
@@ -883,12 +898,32 @@ function createLoopEngine(options) {
         return false;
     }
   }
+  function checkTwoStageIdle(runtime) {
+    const now = Date.now();
+    if (!runtime.idleCandidateAt) {
+      runtime.idleCandidateAt = new Date(now).toISOString();
+      return false;
+    }
+    const elapsed = now - Date.parse(runtime.idleCandidateAt);
+    if (elapsed < CONFIRM_IDLE_DURATION_MS)
+      return false;
+    if (runtime.lastActivityAt && runtime.lastActivityAt >= runtime.idleCandidateAt) {
+      runtime.idleCandidateAt = undefined;
+      return false;
+    }
+    runtime.idleCandidateAt = undefined;
+    return true;
+  }
   async function handleSessionIdle(state, goal) {
     const runtime = state.runtimes.find((r) => r.goalID === goal.id);
     if (!runtime)
       return false;
     if (inflightContinuations.has(goal.id))
       return false;
+    if (!checkTwoStageIdle(runtime)) {
+      await writeState(directory, state);
+      return true;
+    }
     if (runtime.phase === "running") {
       const completedRunID = runtime.activeRunID;
       Object.assign(runtime, releaseLease(runtime));
@@ -898,7 +933,7 @@ function createLoopEngine(options) {
       if (completedRunID) {
         await appendEvent(directory, {
           version: 1,
-          eventID: randomUUID3(),
+          eventID: randomUUID2(),
           goalID: goal.id,
           type: "run.completed",
           runID: completedRunID,
@@ -937,7 +972,7 @@ function createLoopEngine(options) {
       await writeState(directory, state);
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID3(),
+        eventID: randomUUID2(),
         goalID: goal.id,
         type: "goal.blocked",
         reason: limitResult.reason + " (force-finish ignored)",
@@ -954,7 +989,7 @@ function createLoopEngine(options) {
       await writeState(directory, state);
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID3(),
+        eventID: randomUUID2(),
         goalID: goal.id,
         type: "goal.status_changed",
         from: "active",
@@ -995,12 +1030,13 @@ function createLoopEngine(options) {
     runtime.consecutiveFailures += 1;
     runtime.lastError = message;
     runtime.updatedAt = new Date().toISOString();
+    runtime.idleCandidateAt = undefined;
     if (runtime.phase === "running") {
       Object.assign(runtime, releaseLease(runtime));
     }
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID3(),
+      eventID: randomUUID2(),
       goalID: goal.id,
       type: "run.failed",
       runID: runtime.activeRunID || "unknown",
@@ -1020,7 +1056,7 @@ function createLoopEngine(options) {
       };
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID3(),
+        eventID: randomUUID2(),
         goalID: goal.id,
         type: "goal.blocked",
         reason: `Failed ${runtime.consecutiveFailures} times`,
@@ -1049,7 +1085,7 @@ function createLoopEngine(options) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID3(),
+      eventID: randomUUID2(),
       goalID: goal.id,
       type: "compaction.completed",
       timestamp: new Date().toISOString(),
@@ -1060,7 +1096,7 @@ function createLoopEngine(options) {
   function enforceLimits(goal, runtime) {
     const noResult = { stop: "none", blocked: false, event: "goal.status_changed", reason: "" };
     const maxTurns = goal.config?.maxTurns;
-    if (maxTurns && runtime.turnCount >= maxTurns) {
+    if (maxTurns && runtime.budgetTurnCount >= maxTurns) {
       return {
         stop: "force_finish",
         blocked: true,
@@ -1093,7 +1129,7 @@ function createLoopEngine(options) {
     const compactEvery = goal.config?.compactEvery;
     if (!compactEvery)
       return false;
-    return runtime.turnCount > 0 && runtime.turnCount % compactEvery === 0;
+    return runtime.runCount > 0 && runtime.runCount % compactEvery === 0;
   }
   async function doCompact(goal, runtime) {
     if (!goal.workerSessionID)
@@ -1105,7 +1141,7 @@ function createLoopEngine(options) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID3(),
+      eventID: randomUUID2(),
       goalID: goal.id,
       type: "compaction.started",
       timestamp: new Date().toISOString(),
@@ -1156,8 +1192,7 @@ function createLoopEngine(options) {
 }
 
 // src/application/goal-service.ts
-import { randomUUID as randomUUID4 } from "crypto";
-init_state_repository();
+import { randomUUID as randomUUID3 } from "crypto";
 import * as path2 from "path";
 import { promises as fs2 } from "fs";
 
@@ -1178,11 +1213,12 @@ function createWorkerManager(host) {
     },
     async continueWorker(worker, goal, runtime, context) {
       const prompt = buildContinuationSteering(goal, runtime, context);
-      await host.promptWorker({
+      const result = await host.promptWorker({
         sessionID: worker.workerSessionID,
         prompt,
         agent: goal.config.agent
       });
+      return result;
     },
     async isIdle(workerSessionID) {
       const status = await host.sessionStatus(workerSessionID);
@@ -1211,11 +1247,11 @@ function buildContinuationSteering(goal, runtime, context) {
       `Exception: if the objective explicitly specifies a different output directory, follow the objective instead.`
     ];
   }
-  if (runtime.turnCount <= 1) {
+  if (runtime.runCount <= 1) {
     parts.push(`You are a worker for an active goal.`, ``, `Call get_goal to read the authoritative objective, acceptance criteria, and current state.`, `Perform one concrete batch of work. After durable verification:`, ``, `- Call report_goal_progress if work remains.`, `- Call complete_goal only if ALL acceptance criteria pass with concrete evidence.`, `- Call block_goal only for a real external blocker requiring user intervention.`, `- Use the built-in question tool when you need clarification only the user can provide.`, ``, `Do not ask questions unnecessarily. Make reasonable assumptions and work directly.`);
     parts.push(...outputLocationBlock());
   } else {
-    parts.push(`This is continuation turn ${runtime.turnCount} for the goal below.`, ``, `## GOAL (user-provided data)`, goal.objective);
+    parts.push(`This is continuation run ${runtime.runCount} for the goal below.`, ``, `## GOAL (user-provided data)`, goal.objective);
     const progress = context?.progressHistory;
     if (progress && progress.length > 0) {
       parts.push(``, `## PROGRESS SO FAR`);
@@ -1243,22 +1279,32 @@ function buildContinuationSteering(goal, runtime, context) {
     parts.push(...outputLocationBlock());
     if (context?.verification) {
       const v = context.verification;
-      parts.push(``, `## VERIFICATION (deterministic pre-screen)`);
-      if (v.checksPassed !== undefined) {
-        if (v.checksPassed)
-          parts.push(`- checks: all passed`);
-        else if (v.failedChecks?.length)
-          parts.push(`- checks FAILED: ${v.failedChecks.join(", ")} \u2014 fix before claiming completion`);
-        else
-          parts.push(`- checks: not yet run`);
-      }
-      if (v.artifactSummary)
-        parts.push(`- artifacts: ${v.artifactSummary}`);
       if (v.evaluatorRejectionCount && v.evaluatorRejectionCount > 0) {
-        parts.push(`- evaluator rejected ${v.evaluatorRejectionCount} time(s): previous completion claim had weak evidence \u2014 fix the issues and call complete_goal again with stronger evidence`);
+        parts.push(``, `## HOST VERDICT: COMPLETION REJECTED`);
+        parts.push(`Rejection #${v.evaluatorRejectionCount}`);
+        if (v.lastRejectionDetails) {
+          parts.push(v.lastRejectionDetails);
+        }
+        parts.push(``, `Required action:`);
+        parts.push(`- Fix the behavior causing the command(s) above to fail.`);
+        parts.push(`- Do NOT merely rewrite the completion evidence.`);
+        parts.push(`- Rerun the command from the stated directory.`);
+        parts.push(`- Call complete_goal only after the command passes.`);
+      } else {
+        parts.push(``, `## VERIFICATION (deterministic pre-screen)`);
+        if (v.checksPassed !== undefined) {
+          if (v.checksPassed)
+            parts.push(`- checks: all passed`);
+          else if (v.failedChecks?.length)
+            parts.push(`- checks FAILED: ${v.failedChecks.join(", ")} \u2014 fix before claiming completion`);
+          else
+            parts.push(`- checks: not yet run`);
+        }
+        if (v.artifactSummary)
+          parts.push(`- artifacts: ${v.artifactSummary}`);
       }
     }
-    parts.push(``, `## COMPLETION AUDIT \u2014 you ARE the evaluator`, `Before deciding the goal is achieved, treat completion as unproven:`, `1. Derive concrete requirements from the objective and any referenced files/plans/specs/issues. Preserve original scope; do not redefine success.`, `2. For _every_ explicit requirement, numbered item, named artifact, command, test, gate, invariant, deliverable \u2192 identify authoritative evidence: files, command output, test results, PR state, rendered artifacts, runtime behavior.`, `3. Judge each per-requirement: proves | contradicts | incomplete | too weak/indirect | missing \u2014 matching scope narrowly (narrow check \u2260 broad claim).`, `4. Treat tests/manifests/verifiers as evidence only after confirming they cover the relevant requirement. Treat uncertain/indirect as NOT achieved.`, `5. Only call complete_goal when _every_ requirement's current-state evidence proves it and no required work remains. If any requirement is missing/incomplete/weak \u2192 keep working, do not call complete_goal.`);
+    parts.push(``, `## COMPLETION REVIEW`, `You are the semantic reviewer. The host is the acceptance authority.`, `Before proposing completion:`, `1. Derive concrete requirements from the objective and any referenced files/plans/specs/issues.`, `2. For each requirement, identify authoritative evidence: files, command output, test results.`, `3. Judge each: proves | contradicts | incomplete | missing.`, `4. Only call complete_goal when you have verified every requirement yourself.`, `5. If objective and checks appear contradictory, call block_goal \u2014 do not silently violate either.`);
     if (context?.forceFinish) {
       parts.push(``, `## FINAL REPORT REQUIRED \u2014 STOPPING SOON`, `The system requires you to wrap up now. Do NOT start new work.`, `Call complete_goal NOW with:`, `- summary: a specific semantic summary of what was accomplished (files changed, results, key findings)`, `- evidence: concrete proof (commands run, files created, checks passed)`, `If you cannot complete truthfully, call block_goal with the reason \u2014 do not fabricate evidence.`);
     } else {
@@ -1280,8 +1326,7 @@ function createGoalService(host) {
   const workers = createWorkerManager(host);
   const sessions = new Map;
   async function start(directory, input) {
-    const state = await readState(directory);
-    const id = randomUUID4();
+    const id = randomUUID3();
     const goal = createGoal({
       id,
       name: input.name,
@@ -1298,77 +1343,100 @@ function createGoalService(host) {
     if (!goal.config.progressFile)
       goal.config.progressFile = path2.join(artifactDir, "progress.md");
     await ensureGoalArtifactDir(directory, id);
-    state.goals.push(goal);
-    state.runtimes.push(createRuntimeState(id));
-    const runtime = state.runtimes.find((r) => r.goalID === id);
-    if (runtime) {
-      runtime.phase = "queued";
-      await writeState(directory, state);
-    }
+    const state1 = await mutateState(directory, `goal.create:${id}`, async (state) => {
+      state.goals.push(goal);
+      state.runtimes.push(createRuntimeState(id));
+      const runtime2 = state.runtimes.find((r) => r.goalID === id);
+      if (runtime2)
+        runtime2.phase = "queued";
+      return state;
+    });
+    let runtime = state1.runtimes.find((r) => r.goalID === id);
     let worker;
     try {
       worker = await workers.createWorker(goal);
     } catch (error) {
       const detail = describeError(error);
-      goal.status = "blocked";
-      goal.updatedAt = new Date().toISOString();
-      goal.blocker = {
-        reason: detail,
-        needed: "Start the goal again from a valid OpenCode session after correcting the worker creation error.",
-        at: new Date().toISOString()
-      };
-      if (runtime) {
-        runtime.phase = "idle";
-        runtime.lastError = detail;
-        runtime.updatedAt = new Date().toISOString();
-      }
-      await writeState(directory, state);
+      const blockedState = await mutateState(directory, `goal.blocked:${id}`, async (state) => {
+        const g = state.goals.find((item) => item.id === id);
+        if (!g)
+          return state;
+        g.status = "blocked";
+        g.updatedAt = new Date().toISOString();
+        g.blocker = {
+          reason: detail,
+          needed: "Start the goal again from a valid OpenCode session after correcting the worker creation error.",
+          at: new Date().toISOString()
+        };
+        const rt = state.runtimes.find((item) => item.goalID === id);
+        if (rt) {
+          rt.phase = "idle";
+          rt.lastError = detail;
+          rt.updatedAt = new Date().toISOString();
+        }
+        return state;
+      });
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID4(),
+        eventID: randomUUID3(),
         goalID: id,
         type: "goal.blocked",
         reason: detail,
         needed: goal.blocker.needed,
         timestamp: new Date().toISOString(),
-        revision: state.revision
+        revision: blockedState.revision
       });
       await logServerEvent(directory, "goal.start.failed", { goalID: id, ownerSessionID: input.ownerSessionID, detail });
       throw error;
     }
     sessions.set(id, worker);
-    goal.workerSessionID = worker.workerSessionID;
-    await writeState(directory, state);
+    const state2 = await mutateState(directory, `goal.worker-assign:${id}`, async (state) => {
+      const g = state.goals.find((item) => item.id === id);
+      if (!g)
+        return state;
+      g.workerSessionID = worker.workerSessionID;
+      const rt = state.runtimes.find((item) => item.goalID === id);
+      if (rt) {
+        Object.assign(rt, acquireLease(rt, g.config.timeoutMs || 300000));
+        rt.activeRunID = randomUUID3();
+        rt.runCount = 1;
+        rt.budgetTurnCount = 1;
+        rt.lastRunAt = new Date().toISOString();
+      }
+      return state;
+    });
+    runtime = state2.runtimes.find((r) => r.goalID === id);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID4(),
+      eventID: randomUUID3(),
       goalID: id,
       type: "goal.created",
       name: input.name,
       objective: input.objective,
       ownerSessionID: input.ownerSessionID,
       timestamp: new Date().toISOString(),
-      revision: state.revision
+      revision: state2.revision
     });
     if (runtime) {
-      const runID = randomUUID4();
-      Object.assign(runtime, acquireLease(runtime, goal.config.timeoutMs || 300000));
-      runtime.activeRunID = runID;
-      runtime.turnCount = 1;
-      runtime.runCount = 1;
-      runtime.lastRunAt = new Date().toISOString();
-      await writeState(directory, state);
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID4(),
+        eventID: randomUUID3(),
         goalID: id,
         type: "run.started",
-        runID,
-        turnCount: runtime.turnCount,
+        runID: runtime.activeRunID,
+        turnCount: runtime.runCount,
         timestamp: new Date().toISOString(),
-        revision: state.revision
+        revision: state2.revision
       });
-      await workers.continueWorker(worker, goal, runtime);
+      const result = await workers.continueWorker(worker, goal, runtime);
+      if (result.messageID) {
+        await mutateState(directory, `goal.message-id:${id}`, async (state) => {
+          const rt = state.runtimes.find((item) => item.goalID === id);
+          if (rt)
+            rt.activePromptMessageID = result.messageID;
+          return state;
+        });
+      }
     }
     return { goal, worker };
   }
@@ -1398,19 +1466,23 @@ function createGoalService(host) {
     const timeoutMs = goal.config.timeoutMs || 300000;
     const leased = acquireLease(runtime, timeoutMs);
     Object.assign(runtime, leased);
-    const runID = randomUUID4();
+    const runID = randomUUID3();
     runtime.activeRunID = runID;
-    runtime.turnCount += 1;
     runtime.runCount += 1;
+    if (runtime.freeRetryPending) {
+      runtime.freeRetryPending = false;
+    } else {
+      runtime.budgetTurnCount += 1;
+    }
     runtime.lastRunAt = new Date().toISOString();
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID4(),
+      eventID: randomUUID3(),
       goalID,
       type: "run.started",
       runID,
-      turnCount: runtime.turnCount,
+      turnCount: runtime.runCount,
       timestamp: new Date().toISOString(),
       revision: state.revision
     });
@@ -1444,6 +1516,9 @@ function createGoalService(host) {
       }
       if (runtime.evaluatorRejectionCount && runtime.evaluatorRejectionCount > 0) {
         verification = { ...verification || {}, evaluatorRejectionCount: runtime.evaluatorRejectionCount };
+      }
+      if (runtime.lastRejectionDetails) {
+        verification = { ...verification || {}, lastRejectionDetails: runtime.lastRejectionDetails };
       }
     } catch {}
     const context = {
@@ -1480,7 +1555,7 @@ function createGoalService(host) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID4(),
+      eventID: randomUUID3(),
       goalID,
       type: "goal.status_changed",
       from: "active",
@@ -1507,7 +1582,7 @@ function createGoalService(host) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID4(),
+      eventID: randomUUID3(),
       goalID,
       type: "goal.status_changed",
       from: "paused",
@@ -1537,7 +1612,7 @@ function createGoalService(host) {
     await writeState(directory, state);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID4(),
+      eventID: randomUUID3(),
       goalID,
       type: "goal.status_changed",
       from: "blocked",
@@ -1563,7 +1638,7 @@ function createGoalService(host) {
     }
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID4(),
+      eventID: randomUUID3(),
       goalID,
       type: "goal.cleared",
       timestamp: new Date().toISOString(),
@@ -1672,10 +1747,12 @@ function createRealHost(client, directory) {
         throw new Error(`OpenCode session.create failed for parent "${parentID}": ${detail}`);
       }
     },
-    async promptWorker({ sessionID, prompt, model, agent }) {
+    async promptWorker({ sessionID, prompt, messageID, model, agent }) {
       const body = {
         parts: [{ type: "text", text: prompt }]
       };
+      if (messageID)
+        body.messageID = messageID;
       if (model)
         body.model = model;
       if (agent)
@@ -1690,22 +1767,23 @@ function createRealHost(client, directory) {
         throw new Error(`OpenCode session.promptAsync failed for worker "${sessionID}": ${detail}`);
       }
       await logServerEvent(directory, "worker.prompted", { sessionID });
+      return { messageID: result?.data?.messageID };
     },
     async sessionStatus(sessionID) {
       try {
         const result = await client.session.status({});
         const data = result?.data;
         if (!data || typeof data !== "object")
-          return "idle";
+          return "unknown";
         const status = data[sessionID];
         if (!status || typeof status !== "object")
-          return "idle";
+          return "unknown";
         const type = status.type;
         if (type === "busy" || type === "retry")
           return type;
         return "idle";
       } catch {
-        return "idle";
+        return "unknown";
       }
     },
     async abortSession(sessionID) {
@@ -1775,27 +1853,37 @@ async function withTimeout(promise, timeoutMs, operation) {
 }
 
 // src/server/goal-tools.ts
-init_state_repository();
-import { randomUUID as randomUUID5 } from "crypto";
+import { randomUUID as randomUUID4 } from "crypto";
 import { tool } from "@opencode-ai/plugin/tool";
+// src/domain/verification.ts
+var MAX_RECENT_ATTEMPTS = 10;
+function appendVerificationAttempt(recent, attempt) {
+  const next = [...recent, attempt];
+  if (next.length > MAX_RECENT_ATTEMPTS) {
+    return next.slice(next.length - MAX_RECENT_ATTEMPTS);
+  }
+  return next;
+}
+
+// src/server/goal-tools.ts
 import { exec as execChild } from "child_process";
 import { promisify } from "util";
 var execAsync = promisify(execChild);
 function goalTools(dir, goalService, hostSessionID) {
   return {
     loopd_create_goal: tool({
-      description: "Create a new background loop goal. The engine spawns a dedicated worker session " + "that does the work autonomously \u2014 it never runs in this chat. " + "Call this after clarifying the goal name, objective, and any config with the user. " + "The goal immediately starts in the background; the user can monitor it via /loop.",
+      description: "Create a new background loop goal. The engine spawns a dedicated worker session " + "that does the work autonomously \u2014 it never runs in this chat. " + "Call this after clarifying the goal name, objective, and any config with the user. " + "The goal immediately starts in the background; the user can monitor it via /loop. " + "IMPORTANT: Always specify the 'agent' parameter to control which model runs the worker.",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
+        agent: tool.schema.string().describe('REQUIRED: Agent to run the worker as (e.g. "smart-agent", "sloppy-agent"). Check opencode.jsonc for available agents.'),
         checks: tool.schema.array(tool.schema.string()).optional().describe('Shell commands that must pass for completion to be accepted. E.g. ["npm test"].'),
         progressFile: tool.schema.string().optional().describe("Markdown file the worker reads/writes as its transaction state."),
         maxTurns: tool.schema.number().optional().describe("Max turns before auto-block."),
         maxNoProgress: tool.schema.number().optional().describe("Block after N turns without progress."),
         maxFailures: tool.schema.number().optional().describe("Block after N consecutive failures."),
         compactEvery: tool.schema.number().optional().describe("Compact the worker session every N turns."),
-        timeoutMs: tool.schema.number().optional().describe("Per-turn timeout in ms."),
-        agent: tool.schema.string().optional().describe('Agent to run the worker as (e.g. "dumb-agent", "build"). Defaults to primary agent.')
+        timeoutMs: tool.schema.number().optional().describe("Per-turn timeout in ms.")
       },
       execute: async (args, context) => {
         const sessionID = context?.sessionID || hostSessionID;
@@ -1912,7 +2000,7 @@ function goalTools(dir, goalService, hostSessionID) {
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID5(),
+          eventID: randomUUID4(),
           goalID: goal.id,
           type: "goal.progress",
           summary: args.summary,
@@ -1927,7 +2015,7 @@ function goalTools(dir, goalService, hostSessionID) {
             goalName: goal.name,
             summary: args.summary,
             next: args.next,
-            turn: runtime?.turnCount
+            turn: runtime?.runCount
           })
         };
       }
@@ -1949,16 +2037,81 @@ function goalTools(dir, goalService, hostSessionID) {
           return { title: "Invalid transition", output: `Cannot complete goal in ${goal.status} state.` };
         }
         if (goal.config.checks?.length) {
-          const checkResults = await runCompletionChecks(goal.config.checks);
+          const checkCwd = goal.config.checkCwd;
+          const cwd = checkCwd || goal.config.artifactDir || dir;
+          const checkResults = await runCompletionChecks(goal.config.checks, cwd);
           if (!checkResults.passed) {
             const runtime2 = state.runtimes.find((r) => r.goalID === goal.id);
             if (runtime2) {
               runtime2.evaluatorRejectionCount = (runtime2.evaluatorRejectionCount || 0) + 1;
-              if (runtime2.evaluatorRejectionCount >= 3) {
-                runtime2.forceFinishRequested = true;
+              const failureDetails = checkResults.failures.map((f) => {
+                return `Command: ${f.command}
+Exit code: ${f.exitCode}
+Stderr: ${f.stderr.slice(0, 500)}`;
+              }).join(`
+
+`);
+              runtime2.lastRejectionDetails = `Rejection #${runtime2.evaluatorRejectionCount} at ${new Date().toISOString()}
+
+Working directory: ${cwd}
+
+${failureDetails}`;
+              const attemptID = randomUUID4();
+              const verificationAttempt = {
+                id: attemptID,
+                sequence: runtime2.evaluatorRejectionCount,
+                runGeneration: runtime2.runGeneration,
+                claimedSummary: args.summary,
+                claimedEvidence: args.evidence,
+                startedAt: new Date().toISOString(),
+                completedAt: new Date().toISOString(),
+                status: "failed",
+                cwd,
+                checks: checkResults.failures.map((f) => ({
+                  command: f.command,
+                  exitCode: f.exitCode,
+                  stderr: f.stderr
+                }))
+              };
+              runtime2.lastVerificationAttempt = verificationAttempt;
+              runtime2.recentVerificationAttempts = appendVerificationAttempt(runtime2.recentVerificationAttempts || [], verificationAttempt);
+              const rejectEvent = {
+                version: 1,
+                eventID: randomUUID4(),
+                goalID: goal.id,
+                type: "goal.completion_rejected",
+                attemptID,
+                rejectionCount: runtime2.evaluatorRejectionCount,
+                failedCheckCount: checkResults.failures.length,
+                failureSummary: failureDetails.slice(0, 500),
+                timestamp: new Date().toISOString(),
+                revision: state.revision
+              };
+              await appendEvent(dir, rejectEvent);
+              const maxRejections = goal.config.maxEvaluatorRejections || 3;
+              if (runtime2.evaluatorRejectionCount >= maxRejections) {
+                goal.status = "blocked";
+                goal.updatedAt = new Date().toISOString();
+                goal.blocker = {
+                  reason: `Evaluator rejected ${runtime2.evaluatorRejectionCount} time(s). Last failure:
+${failureDetails.slice(0, 500)}`,
+                  needed: "Fix the failing checks and retry the goal.",
+                  at: new Date().toISOString()
+                };
+                runtime2.forceFinishRequested = undefined;
+                await appendEvent(dir, {
+                  version: 1,
+                  eventID: randomUUID4(),
+                  goalID: goal.id,
+                  type: "goal.blocked",
+                  reason: goal.blocker.reason,
+                  needed: goal.blocker.needed,
+                  timestamp: new Date().toISOString(),
+                  revision: state.revision
+                });
               } else {
                 runtime2.forceFinishRequested = false;
-                runtime2.turnCount = Math.max(0, runtime2.turnCount - 1);
+                runtime2.freeRetryPending = true;
               }
               runtime2.updatedAt = new Date().toISOString();
               await writeState(dir, state);
@@ -1969,7 +2122,8 @@ function goalTools(dir, goalService, hostSessionID) {
                 passed: false,
                 failedChecks: checkResults.failures,
                 message: "Evaluator rejected completion. Fix the issues above and try again.",
-                rejectionCount: runtime2?.evaluatorRejectionCount || 0
+                rejectionCount: runtime2?.evaluatorRejectionCount || 0,
+                status: goal.status
               })
             };
           }
@@ -1985,11 +2139,32 @@ function goalTools(dir, goalService, hostSessionID) {
         if (runtime) {
           runtime.phase = "idle";
           runtime.lastError = undefined;
+          const attemptID = randomUUID4();
+          const checkCwd = goal.config.checkCwd;
+          const cwd = checkCwd || goal.config.artifactDir || dir;
+          const checks = (goal.config.checks || []).map((cmd) => ({
+            command: cmd,
+            exitCode: 0
+          }));
+          const verificationAttempt = {
+            id: attemptID,
+            sequence: (runtime.evaluatorRejectionCount || 0) + 1,
+            runGeneration: runtime.runGeneration,
+            claimedSummary: args.summary,
+            claimedEvidence: args.evidence,
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+            status: "passed",
+            cwd,
+            checks
+          };
+          runtime.lastVerificationAttempt = verificationAttempt;
+          runtime.recentVerificationAttempts = appendVerificationAttempt(runtime.recentVerificationAttempts || [], verificationAttempt);
         }
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID5(),
+          eventID: randomUUID4(),
           goalID: goal.id,
           type: "goal.completed",
           summary: args.summary,
@@ -2041,7 +2216,7 @@ function goalTools(dir, goalService, hostSessionID) {
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID5(),
+          eventID: randomUUID4(),
           goalID: goal.id,
           type: "goal.blocked",
           reason: args.reason,
@@ -2097,28 +2272,35 @@ function formatGoalStructured(goal, runtime) {
   if (runtime) {
     output.runtime = {
       phase: runtime.phase,
-      turnCount: runtime.turnCount,
       runCount: runtime.runCount,
+      budgetTurnCount: runtime.budgetTurnCount,
+      runGeneration: runtime.runGeneration,
+      evaluatorRejectionCount: runtime.evaluatorRejectionCount,
+      freeRetryPending: runtime.freeRetryPending,
+      lastRejectionDetails: runtime.lastRejectionDetails,
       consecutiveFailures: runtime.consecutiveFailures,
       noProgressCount: runtime.noProgressCount,
       lastError: runtime.lastError,
       lastProgressAt: runtime.lastProgressAt,
       lastRunAt: runtime.lastRunAt,
-      lastCompactAt: runtime.lastCompactAt
+      lastCompactAt: runtime.lastCompactAt,
+      lastActivityAt: runtime.lastActivityAt,
+      lastVerificationAttempt: runtime.lastVerificationAttempt,
+      recentVerificationAttempts: runtime.recentVerificationAttempts
     };
   }
   return JSON.stringify(output, null, 2);
 }
-async function runCompletionChecks(checks) {
+async function runCompletionChecks(checks, cwd) {
   const failures = [];
   for (const cmd of checks) {
     try {
-      await execAsync(cmd, { timeout: 30000 });
+      await execAsync(cmd, { timeout: 30000, cwd });
     } catch (error) {
       failures.push({
         command: cmd,
         exitCode: error.code || 1,
-        stderr: error.stderr || error.message || "unknown error"
+        stderr: (error.stderr || error.message || "unknown error").slice(0, 1000)
       });
     }
   }
@@ -2129,7 +2311,6 @@ async function runCompletionChecks(checks) {
 }
 
 // src/server/owner-tools.ts
-init_state_repository();
 import { tool as tool2 } from "@opencode-ai/plugin/tool";
 function ownerTools(options) {
   const { directory, host, goalService } = options;
@@ -2164,7 +2345,7 @@ function ownerTools(options) {
             name: g.name,
             status: g.status,
             phase: runtime?.phase ?? "unknown",
-            turn: runtime?.turnCount ?? 0,
+            turn: runtime?.runCount ?? 0,
             lastProgress: g.lastProgress?.summary?.slice(0, 120),
             lastProgressAt: g.lastProgress?.at,
             blocker: g.blocker?.reason?.slice(0, 120)
@@ -2216,8 +2397,11 @@ function ownerTools(options) {
             timeUsedSeconds: goal.timeUsedSeconds,
             runtime: runtime ? {
               phase: runtime.phase,
-              turnCount: runtime.turnCount,
               runCount: runtime.runCount,
+              budgetTurnCount: runtime.budgetTurnCount,
+              runGeneration: runtime.runGeneration,
+              evaluatorRejectionCount: runtime.evaluatorRejectionCount,
+              freeRetryPending: runtime.freeRetryPending,
               consecutiveFailures: runtime.consecutiveFailures,
               lastError: runtime.lastError,
               lastProgressAt: runtime.lastProgressAt,
@@ -2439,7 +2623,6 @@ function ownerTools(options) {
     })
   };
 }
-
 // src/server/plugin.ts
 var PLUGIN_ID = "opencode-loopd.server";
 var server = async ({ client, directory }) => {
@@ -2483,10 +2666,48 @@ var server = async ({ client, directory }) => {
         reconcileInBackground();
     },
     tool: { ...goalTools(directory, goalService), ...ownerTools({ directory, host, goalService }) },
+    "tool.execute.before": async (input, _output) => {
+      const activeWorkers = goalService.getActiveWorkers();
+      let matchedGoalID;
+      for (const [goalID, worker2] of activeWorkers) {
+        if (worker2.workerSessionID === input.sessionID) {
+          matchedGoalID = goalID;
+          break;
+        }
+      }
+      if (!matchedGoalID)
+        return;
+      try {
+        const state = await readState(directory);
+        const runtime = state.runtimes.find((r) => r.goalID === matchedGoalID);
+        if (!runtime)
+          return;
+        Object.assign(runtime, addToolCall(runtime, input.callID));
+        await writeState(directory, state);
+      } catch {}
+    },
     "tool.execute.after": async (input, output) => {
       if (input.tool === "loopd_create_goal" || input.tool === "get_goal" || input.tool === "report_goal_progress") {
         ensureStarted();
         reconcileInBackground();
+      }
+      const activeWorkers = goalService.getActiveWorkers();
+      let matchedGoalID;
+      for (const [goalID, worker2] of activeWorkers) {
+        if (worker2.workerSessionID === input.sessionID) {
+          matchedGoalID = goalID;
+          break;
+        }
+      }
+      if (matchedGoalID) {
+        try {
+          const state = await readState(directory);
+          const runtime = state.runtimes.find((r) => r.goalID === matchedGoalID);
+          if (runtime) {
+            Object.assign(runtime, removeToolCall(runtime, input.callID));
+            await writeState(directory, state);
+          }
+        } catch {}
       }
       if (input.tool === "complete_goal" || input.tool === "block_goal") {
         try {
@@ -2499,9 +2720,8 @@ var server = async ({ client, directory }) => {
           const goalID = parsed.goalID;
           if (!goalID)
             return;
-          const { readState: readState2, writeState: writeState2 } = await Promise.resolve().then(() => (init_state_repository(), exports_state_repository));
           const { shouldNotifyParent: shouldNotifyParent2, markParentNotified: markParentNotified2 } = await Promise.resolve().then(() => exports_runtime);
-          const state = await readState2(directory);
+          const state = await readState(directory);
           const goal = state.goals.find((g) => g.id === goalID);
           if (!goal)
             return;
@@ -2511,7 +2731,7 @@ var server = async ({ client, directory }) => {
             return;
           if (runtime) {
             markParentNotified2(runtime, notifyType);
-            await writeState2(directory, state);
+            await writeState(directory, state);
           }
           const message = parsed.status === "complete" ? `Loop goal "${goal.name}" completed: ${parsed.summary || ""}. Evidence: ${parsed.evidence || ""}. Artifacts: ${goal.config.artifactDir || "n/a"}.` : `Loop goal "${goal.name}" blocked: ${parsed.reason || ""}. Needed: ${parsed.needed || ""}.`;
           await host.notifyOwner(goal.ownerSessionID, message);

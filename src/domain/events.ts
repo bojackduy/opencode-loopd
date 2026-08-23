@@ -52,6 +52,14 @@ export interface GoalClearedEvent extends BaseEvent {
   type: "goal.cleared"
 }
 
+export interface GoalCompletionRejectedEvent extends BaseEvent {
+  type: "goal.completion_rejected"
+  attemptID: string
+  rejectionCount: number
+  failedCheckCount: number
+  failureSummary: string
+}
+
 // ─── Runtime Events ──────────────────────────────────────────────────────────
 
 export interface RunStartedEvent extends BaseEvent {
@@ -110,6 +118,7 @@ export type LoopEvent =
   | GoalCompletedEvent
   | GoalBlockedEvent
   | GoalClearedEvent
+  | GoalCompletionRejectedEvent
   | RunStartedEvent
   | RunCompletedEvent
   | RunFailedEvent

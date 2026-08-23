@@ -201,7 +201,7 @@ describe("Loop Engine", () => {
       expect(result).toBe(true)
       expect(host.prompts).toHaveLength(2)
       const runtime = (await readState(dir)).runtimes[0]
-      expect(runtime.turnCount).toBe(2)
+      expect(runtime.budgetTurnCount).toBe(2)
       expect(runtime.runCount).toBe(2)
     })
   })

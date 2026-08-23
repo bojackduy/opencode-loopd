@@ -22,16 +22,17 @@ export interface SessionUsage {
   totalTokens?: number
 }
 
-export type SessionStatusType = "idle" | "busy" | "retry"
+export type SessionStatusType = "idle" | "busy" | "retry" | "unknown"
 
 export interface LoopHost {
   createWorker(input: { parentID: string; title: string; agent?: string }): Promise<string>
   promptWorker(input: {
     sessionID: string
     prompt: string
+    messageID?: string
     model?: ModelRef
     agent?: string
-  }): Promise<void>
+  }): Promise<{ messageID?: string }>
   sessionStatus(sessionID: string): Promise<SessionStatusType>
   abortSession(sessionID: string): Promise<void>
   readMessages(sessionID: string, limit?: number): Promise<SessionMessage[]>
@@ -82,10 +83,11 @@ export function createRealHost(client: any, directory: string): LoopHost {
       }
     },
 
-    async promptWorker({ sessionID, prompt, model, agent }) {
+    async promptWorker({ sessionID, prompt, messageID, model, agent }) {
       const body: any = {
         parts: [{ type: "text", text: prompt }],
       }
+      if (messageID) body.messageID = messageID
       if (model) body.model = model
       if (agent) body.agent = agent
       const result = await withTimeout<any>(
@@ -102,20 +104,22 @@ export function createRealHost(client: any, directory: string): LoopHost {
         throw new Error(`OpenCode session.promptAsync failed for worker "${sessionID}": ${detail}`)
       }
       await logServerEvent(directory, "worker.prompted", { sessionID })
+      // SDK may return the created message ID in response headers or body
+      return { messageID: result?.data?.messageID }
     },
 
     async sessionStatus(sessionID) {
       try {
         const result = await client.session.status({})
         const data = result?.data
-        if (!data || typeof data !== "object") return "idle"
+        if (!data || typeof data !== "object") return "unknown"
         const status = data[sessionID]
-        if (!status || typeof status !== "object") return "idle"
+        if (!status || typeof status !== "object") return "unknown"
         const type = status.type as string
         if (type === "busy" || type === "retry") return type
         return "idle"
       } catch {
-        return "idle"
+        return "unknown"
       }
     },
 
@@ -222,7 +226,7 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
       if (agent) (sessions as any).agents = { ...((sessions as any).agents || {}), [id]: agent }
       return id
     },
-    async promptWorker({ sessionID, prompt }) {
+    async promptWorker({ sessionID, prompt, messageID }) {
       const msgs = sessions.get(sessionID) || []
       msgs.push(prompt)
       sessions.set(sessionID, msgs)
@@ -230,6 +234,8 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
       if (options.workerDelay) {
         await new Promise((r) => setTimeout(r, options.workerDelay))
       }
+      // Return the provided messageID or generate one for tests
+      return { messageID: messageID || `msg-${crypto.randomUUID().slice(0, 8)}` }
     },
     async sessionStatus(sessionID) {
       if (sessions.has(sessionID)) return "idle"

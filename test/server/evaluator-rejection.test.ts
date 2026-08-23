@@ -57,7 +57,7 @@ describe("Evaluator Rejection Path", () => {
     expect(runtime?.forceFinishRequested).toBeFalsy()
   })
 
-  it("resets forceFinishRequested on rejection", async () => {
+  it("sets freeRetryPending on rejection and resets forceFinishRequested", async () => {
     // Create a goal with a failing check
     const { goal } = await goalService.start(dir, {
       name: "test",
@@ -73,7 +73,7 @@ describe("Evaluator Rejection Path", () => {
     const runtime = state.runtimes.find((r) => r.goalID === goal.id)
     if (runtime) {
       runtime.forceFinishRequested = true
-      runtime.turnCount = 5
+      runtime.budgetTurnCount = 5
     }
     await fs.writeFile(
       path.join(dir, ".opencode", "loopd", "state.json"),
@@ -91,14 +91,15 @@ describe("Evaluator Rejection Path", () => {
       context,
     )
 
-    // Check that forceFinishRequested was reset and turnCount decremented
+    // Check that forceFinishRequested was reset and freeRetryPending set
     const newState = await readState(dir)
     const newRuntime = newState.runtimes.find((r) => r.goalID === goal.id)
     expect(newRuntime?.forceFinishRequested).toBe(false)
-    expect(newRuntime?.turnCount).toBe(4) // decremented from 5
+    expect(newRuntime?.freeRetryPending).toBe(true)
+    expect(newRuntime?.budgetTurnCount).toBe(5) // not decremented
   })
 
-  it("sets forceFinishRequested after 3 rejections", async () => {
+  it("blocks goal after 3 rejections", async () => {
     // Create a goal with a failing check
     const { goal } = await goalService.start(dir, {
       name: "test",
@@ -122,14 +123,15 @@ describe("Evaluator Rejection Path", () => {
       )
     }
 
-    // Check that forceFinishRequested is now true
+    // Check that goal is blocked after 3 rejections
     const state = await readState(dir)
     const runtime = state.runtimes.find((r) => r.goalID === goal.id)
     expect(runtime?.evaluatorRejectionCount).toBe(3)
-    expect(runtime?.forceFinishRequested).toBe(true)
+    expect(state.goals[0].status).toBe("blocked")
+    expect(state.goals[0].blocker?.reason).toContain("rejected")
   })
 
-  it("does not decrement turnCount below 0", async () => {
+  it("does not decrement budgetTurnCount on rejection", async () => {
     // Create a goal with a failing check
     const { goal } = await goalService.start(dir, {
       name: "test",
@@ -140,11 +142,11 @@ describe("Evaluator Rejection Path", () => {
       },
     })
 
-    // Set turnCount to 0
+    // Set budgetTurnCount to 1
     const state = await readState(dir)
     const runtime = state.runtimes.find((r) => r.goalID === goal.id)
     if (runtime) {
-      runtime.turnCount = 0
+      runtime.budgetTurnCount = 1
     }
     await fs.writeFile(
       path.join(dir, ".opencode", "loopd", "state.json"),
@@ -162,10 +164,11 @@ describe("Evaluator Rejection Path", () => {
       context,
     )
 
-    // Check that turnCount is still 0 (not negative)
+    // Check that budgetTurnCount is not decremented
     const newState = await readState(dir)
     const newRuntime = newState.runtimes.find((r) => r.goalID === goal.id)
-    expect(newRuntime?.turnCount).toBe(0)
+    expect(newRuntime?.budgetTurnCount).toBe(1) // not decremented
+    expect(newRuntime?.freeRetryPending).toBe(true) // but free retry is granted
   })
 
   it("returns rejection count in output", async () => {

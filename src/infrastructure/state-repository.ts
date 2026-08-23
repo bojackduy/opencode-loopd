@@ -5,11 +5,11 @@
 import { promises as fs } from "fs"
 import path from "path"
 import os from "os"
-import { randomUUID } from "crypto"
+
 import type { Goal, GoalID } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
 
-const CURRENT_VERSION = 2
+const CURRENT_VERSION = 4
 
 export interface StoreState {
   version: number
@@ -70,7 +70,6 @@ async function acquireLock(directory: string, key: string, operation: string): P
   await fs.mkdir(dir, { recursive: true })
 
   const lockPath = lockFile(directory, key)
-  const lockID = randomUUID()
 
   for (let attempt = 0; attempt < 10; attempt++) {
     try {
@@ -85,23 +84,24 @@ async function acquireLock(directory: string, key: string, operation: string): P
         }
       } catch {}
 
-      // Try to create the lock file exclusively
-      const temp = lockPath + `.${lockID}.tmp`
+      // Try to create the lock file exclusively — "wx" fails with EEXIST if it exists
       const meta: LockMeta = { pid: process.pid, operation, acquiredAt: new Date().toISOString() }
-      await fs.writeFile(temp, JSON.stringify(meta), "utf8")
+      const fd = await fs.open(lockPath, "wx")
       try {
-        await fs.rename(temp, lockPath)
-        return // Lock acquired
-      } catch (error: any) {
-        await fs.rm(temp, { force: true })
-        if (error?.code !== "EEXIST") throw error
+        await fd.writeFile(JSON.stringify(meta), "utf8")
+      } finally {
+        await fd.close()
       }
+      return // Lock acquired
     } catch (error: any) {
-      if (error?.code === "ENOENT") {
+      if (error?.code === "EEXIST") {
+        // Lock held by another process — retry
+      } else if (error?.code === "ENOENT") {
         await fs.mkdir(dir, { recursive: true })
         continue
+      } else {
+        throw error
       }
-      throw error
     }
     await delay(25 * (attempt + 1))
   }
@@ -109,9 +109,18 @@ async function acquireLock(directory: string, key: string, operation: string): P
 }
 
 async function releaseLock(directory: string, key: string): Promise<void> {
+  const lockPath = lockFile(directory, key)
   try {
-    await fs.rm(lockFile(directory, key), { force: true })
-  } catch {}
+    const raw = await fs.readFile(lockPath, "utf8")
+    const meta: LockMeta = JSON.parse(raw)
+    // Only release if we own the lock (same PID) or it's stale
+    const age = Date.now() - Date.parse(meta.acquiredAt)
+    if (meta.pid === process.pid || age > LOCK_STALE_MS) {
+      await fs.rm(lockPath, { force: true })
+    }
+  } catch {
+    // Lock file doesn't exist or is unreadable — nothing to release
+  }
 }
 
 // ─── Read ────────────────────────────────────────────────────────────────────
@@ -163,6 +172,38 @@ function migrate(state: StoreState): StoreState {
       lastProgress: (g as any).lastProgress ?? undefined,
       completionEvidence: (g as any).completionEvidence ?? undefined,
       blocker: (g as any).blocker ?? undefined,
+    }))
+  }
+
+  if (result.version < 3) {
+    result.version = 3
+    // Migrate turnCount -> budgetTurnCount + runGeneration
+    result.runtimes = result.runtimes.map((rt: any) => {
+      const oldTurnCount = rt.turnCount ?? 0
+      return {
+        ...rt,
+        budgetTurnCount: rt.budgetTurnCount ?? oldTurnCount,
+        runCount: rt.runCount ?? oldTurnCount,
+        runGeneration: rt.runGeneration ?? 0,
+        freeRetryPending: rt.freeRetryPending ?? false,
+        lastRejectionDetails: rt.lastRejectionDetails ?? undefined,
+        activePromptMessageID: rt.activePromptMessageID ?? undefined,
+        lastActivityAt: rt.lastActivityAt ?? undefined,
+        idleCandidateAt: rt.idleCandidateAt ?? undefined,
+        activeToolCallIDs: rt.activeToolCallIDs ?? [],
+        // Remove deprecated turnCount field
+        turnCount: undefined,
+      }
+    })
+  }
+
+  if (result.version < 4) {
+    result.version = 4
+    // Add verification attempt fields to runtimes
+    result.runtimes = result.runtimes.map((rt: any) => ({
+      ...rt,
+      lastVerificationAttempt: rt.lastVerificationAttempt ?? undefined,
+      recentVerificationAttempts: rt.recentVerificationAttempts ?? [],
     }))
   }
 

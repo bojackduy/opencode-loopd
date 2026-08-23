@@ -12,6 +12,10 @@ import {
   releaseLease,
   leaseIsValid,
   markProgress,
+  recordActivity,
+  addToolCall,
+  removeToolCall,
+  hasActiveToolCalls,
 } from "../../src/domain/runtime"
 
 describe("Goal Domain", () => {
@@ -91,7 +95,9 @@ describe("Runtime Domain", () => {
 
       expect(rt.phase).toBe("idle")
       expect(rt.consecutiveFailures).toBe(0)
-      expect(rt.turnCount).toBe(0)
+      expect(rt.budgetTurnCount).toBe(0)
+      expect(rt.runCount).toBe(0)
+      expect(rt.runGeneration).toBe(0)
       expect(rt.noProgressCount).toBe(0)
       expect(rt.progressDuringTurn).toBe(false)
     })
@@ -141,6 +147,50 @@ describe("Runtime Domain", () => {
 
       expect(marked.progressDuringTurn).toBe(true)
       expect(marked.lastProgressAt).toBeTruthy()
+    })
+  })
+
+  describe("activity tracking", () => {
+    it("recordActivity sets lastActivityAt and clears idleCandidateAt", () => {
+      const rt = createRuntimeState("g1" as any)
+      const updated = recordActivity(rt)
+
+      expect(updated.lastActivityAt).toBeTruthy()
+      expect(updated.idleCandidateAt).toBeUndefined()
+    })
+
+    it("addToolCall adds to activeToolCallIDs and clears idleCandidateAt", () => {
+      const rt = createRuntimeState("g1" as any)
+      const updated = addToolCall(rt, "call-1")
+
+      expect(updated.activeToolCallIDs).toContain("call-1")
+      expect(updated.idleCandidateAt).toBeUndefined()
+    })
+
+    it("removeToolCall removes from activeToolCallIDs", () => {
+      const rt = createRuntimeState("g1" as any)
+      let updated = addToolCall(rt, "call-1")
+      updated = addToolCall(updated, "call-2")
+      updated = removeToolCall(updated, "call-1")
+
+      expect(updated.activeToolCallIDs).not.toContain("call-1")
+      expect(updated.activeToolCallIDs).toContain("call-2")
+    })
+
+    it("hasActiveToolCalls returns true when tool calls exist", () => {
+      const rt = createRuntimeState("g1" as any)
+      expect(hasActiveToolCalls(rt)).toBe(false)
+
+      const updated = addToolCall(rt, "call-1")
+      expect(hasActiveToolCalls(updated)).toBe(true)
+    })
+
+    it("acquireLease increments runGeneration", () => {
+      const rt = createRuntimeState("g1" as any)
+      const leased = acquireLease(rt, 60_000)
+
+      expect(leased.runGeneration).toBe(1)
+      expect(leased.activeToolCallIDs).toEqual([])
     })
   })
 })

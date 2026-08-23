@@ -10,6 +10,8 @@ import { createRealHost } from "./host-adapter"
 import { goalTools } from "./goal-tools"
 import { ownerTools } from "./owner-tools"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
+import { addToolCall, removeToolCall } from "../domain/runtime"
+import { readState, writeState } from "../infrastructure/state-repository"
 
 const PLUGIN_ID = "opencode-loopd.server"
 
@@ -63,11 +65,51 @@ const server: Plugin = async ({ client, directory }) => {
       if (type?.startsWith("session.")) reconcileInBackground()
     },
     tool: { ...goalTools(directory, goalService), ...ownerTools({ directory, host, goalService }) },
+    "tool.execute.before": async (input, _output) => {
+      // Track tool call start for worker sessions only
+      const activeWorkers = goalService.getActiveWorkers()
+      let matchedGoalID: string | undefined
+      for (const [goalID, worker] of activeWorkers) {
+        if (worker.workerSessionID === input.sessionID) {
+          matchedGoalID = goalID
+          break
+        }
+      }
+      if (!matchedGoalID) return
+
+      try {
+        const state = await readState(directory)
+        const runtime = state.runtimes.find((r) => r.goalID === matchedGoalID)
+        if (!runtime) return
+        Object.assign(runtime, addToolCall(runtime, input.callID))
+        await writeState(directory, state)
+      } catch {}
+    },
     "tool.execute.after": async (input, output) => {
       // Lazy start when goal tools are used
       if (input.tool === "loopd_create_goal" || input.tool === "get_goal" || input.tool === "report_goal_progress") {
         ensureStarted()
         reconcileInBackground()
+      }
+
+      // Track tool call end for worker sessions only
+      const activeWorkers = goalService.getActiveWorkers()
+      let matchedGoalID: string | undefined
+      for (const [goalID, worker] of activeWorkers) {
+        if (worker.workerSessionID === input.sessionID) {
+          matchedGoalID = goalID
+          break
+        }
+      }
+      if (matchedGoalID) {
+        try {
+          const state = await readState(directory)
+          const runtime = state.runtimes.find((r) => r.goalID === matchedGoalID)
+          if (runtime) {
+            Object.assign(runtime, removeToolCall(runtime, input.callID))
+            await writeState(directory, state)
+          }
+        } catch {}
       }
 
       // Forward terminal worker events to the parent session (deduped)
@@ -79,7 +121,6 @@ const server: Plugin = async ({ client, directory }) => {
           if (parsed.status !== "complete" && parsed.status !== "blocked") return
           const goalID = parsed.goalID as string | undefined
           if (!goalID) return
-          const { readState, writeState } = await import("../infrastructure/state-repository")
           const { shouldNotifyParent, markParentNotified } = await import("../domain/runtime")
           const state = await readState(directory)
           const goal = state.goals.find((g) => g.id === goalID)

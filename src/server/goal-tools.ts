@@ -10,6 +10,8 @@ import { canTransition } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
 import { markProgress } from "../domain/runtime"
 import type { LoopEvent } from "../domain/events"
+import type { VerificationAttempt } from "../domain/verification"
+import { appendVerificationAttempt } from "../domain/verification"
 import { exec as execChild } from "child_process"
 import { promisify } from "util"
 import type { GoalService } from "../application/goal-service"
@@ -24,10 +26,12 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
         "Create a new background loop goal. The engine spawns a dedicated worker session " +
         "that does the work autonomously — it never runs in this chat. " +
         "Call this after clarifying the goal name, objective, and any config with the user. " +
-        "The goal immediately starts in the background; the user can monitor it via /loop.",
+        "The goal immediately starts in the background; the user can monitor it via /loop. " +
+        "IMPORTANT: Always specify the 'agent' parameter to control which model runs the worker.",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
+        agent: tool.schema.string().describe("REQUIRED: Agent to run the worker as (e.g. \"smart-agent\", \"sloppy-agent\"). Check opencode.jsonc for available agents."),
         checks: tool.schema.array(tool.schema.string()).optional().describe("Shell commands that must pass for completion to be accepted. E.g. [\"npm test\"]."),
         progressFile: tool.schema.string().optional().describe("Markdown file the worker reads/writes as its transaction state."),
         maxTurns: tool.schema.number().optional().describe("Max turns before auto-block."),
@@ -35,7 +39,6 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
         maxFailures: tool.schema.number().optional().describe("Block after N consecutive failures."),
         compactEvery: tool.schema.number().optional().describe("Compact the worker session every N turns."),
         timeoutMs: tool.schema.number().optional().describe("Per-turn timeout in ms."),
-        agent: tool.schema.string().optional().describe("Agent to run the worker as (e.g. \"dumb-agent\", \"build\"). Defaults to primary agent."),
       },
       execute: async (args, context) => {
         const sessionID = context?.sessionID || hostSessionID
@@ -176,7 +179,7 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
             goalName: goal.name,
             summary: args.summary,
             next: args.next,
-            turn: runtime?.turnCount,
+            turn: runtime?.runCount,
           }),
         }
       },
@@ -205,19 +208,86 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
 
         // Run completion checks
         if (goal.config.checks?.length) {
-          const checkResults = await runCompletionChecks(goal.config.checks)
+          // Resolve check working directory
+          const checkCwd = (goal.config as any).checkCwd as string | undefined
+          const cwd = checkCwd || (goal.config as any).artifactDir as string || dir
+          const checkResults = await runCompletionChecks(goal.config.checks, cwd)
           if (!checkResults.passed) {
             // Evaluator rejected — child gets a free retry turn
             const runtime = state.runtimes.find((r) => r.goalID === goal.id)
             if (runtime) {
               runtime.evaluatorRejectionCount = (runtime.evaluatorRejectionCount || 0) + 1
-              // After 3 rejections, give up and let engine block
-              if (runtime.evaluatorRejectionCount >= 3) {
-                runtime.forceFinishRequested = true
+              // Build detailed rejection message
+              const failureDetails = checkResults.failures.map((f) => {
+                return `Command: ${f.command}\nExit code: ${f.exitCode}\nStderr: ${f.stderr.slice(0, 500)}`
+              }).join("\n\n")
+              runtime.lastRejectionDetails = `Rejection #${runtime.evaluatorRejectionCount} at ${new Date().toISOString()}\n\nWorking directory: ${cwd}\n\n${failureDetails}`
+
+              // Create a VerificationAttempt for this rejection
+              const attemptID = randomUUID()
+              const verificationAttempt: VerificationAttempt = {
+                id: attemptID,
+                sequence: runtime.evaluatorRejectionCount,
+                runGeneration: runtime.runGeneration,
+                claimedSummary: args.summary,
+                claimedEvidence: args.evidence,
+                startedAt: new Date().toISOString(),
+                completedAt: new Date().toISOString(),
+                status: "failed",
+                cwd,
+                checks: checkResults.failures.map((f) => ({
+                  command: f.command,
+                  exitCode: f.exitCode,
+                  stderr: f.stderr,
+                })),
+              }
+              runtime.lastVerificationAttempt = verificationAttempt
+              runtime.recentVerificationAttempts = appendVerificationAttempt(
+                runtime.recentVerificationAttempts || [],
+                verificationAttempt,
+              )
+
+              // Emit goal.completion_rejected event
+              const rejectEvent: LoopEvent = {
+                version: 1,
+                eventID: randomUUID(),
+                goalID: goal.id,
+                type: "goal.completion_rejected",
+                attemptID,
+                rejectionCount: runtime.evaluatorRejectionCount,
+                failedCheckCount: checkResults.failures.length,
+                failureSummary: failureDetails.slice(0, 500),
+                timestamp: new Date().toISOString(),
+                revision: state.revision,
+              }
+              await appendEvent(dir, rejectEvent)
+
+              // After maxEvaluatorRejections (default 3), block immediately
+              const maxRejections = (goal.config as any).maxEvaluatorRejections || 3
+              if (runtime.evaluatorRejectionCount >= maxRejections) {
+                goal.status = "blocked"
+                goal.updatedAt = new Date().toISOString()
+                goal.blocker = {
+                  reason: `Evaluator rejected ${runtime.evaluatorRejectionCount} time(s). Last failure:\n${failureDetails.slice(0, 500)}`,
+                  needed: "Fix the failing checks and retry the goal.",
+                  at: new Date().toISOString(),
+                }
+                runtime.forceFinishRequested = undefined
+                // Emit blocked event
+                await appendEvent(dir, {
+                  version: 1,
+                  eventID: randomUUID(),
+                  goalID: goal.id,
+                  type: "goal.blocked",
+                  reason: goal.blocker.reason,
+                  needed: goal.blocker.needed,
+                  timestamp: new Date().toISOString(),
+                  revision: state.revision,
+                } satisfies LoopEvent)
               } else {
-                // Free retry: reset force-finish and undo turn increment
+                // Free retry: grant un-charged continuation
                 runtime.forceFinishRequested = false
-                runtime.turnCount = Math.max(0, runtime.turnCount - 1)
+                runtime.freeRetryPending = true
               }
               runtime.updatedAt = new Date().toISOString()
               await writeState(dir, state)
@@ -229,6 +299,7 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
                 failedChecks: checkResults.failures,
                 message: "Evaluator rejected completion. Fix the issues above and try again.",
                 rejectionCount: runtime?.evaluatorRejectionCount || 0,
+                status: goal.status,
               }),
             }
           }
@@ -246,6 +317,32 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
         if (runtime) {
           runtime.phase = "idle"
           runtime.lastError = undefined
+
+          // Persist a passing verification attempt
+          const attemptID = randomUUID()
+          const checkCwd = (goal.config as any).checkCwd as string | undefined
+          const cwd = checkCwd || (goal.config as any).artifactDir as string || dir
+          const checks = (goal.config.checks || []).map((cmd) => ({
+            command: cmd,
+            exitCode: 0,
+          }))
+          const verificationAttempt: VerificationAttempt = {
+            id: attemptID,
+            sequence: (runtime.evaluatorRejectionCount || 0) + 1,
+            runGeneration: runtime.runGeneration,
+            claimedSummary: args.summary,
+            claimedEvidence: args.evidence,
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+            status: "passed",
+            cwd,
+            checks,
+          }
+          runtime.lastVerificationAttempt = verificationAttempt
+          runtime.recentVerificationAttempts = appendVerificationAttempt(
+            runtime.recentVerificationAttempts || [],
+            verificationAttempt,
+          )
         }
 
         await writeState(dir, state)
@@ -381,14 +478,21 @@ function formatGoalStructured(goal: Goal, runtime?: GoalRuntimeState): string {
   if (runtime) {
     output.runtime = {
       phase: runtime.phase,
-      turnCount: runtime.turnCount,
       runCount: runtime.runCount,
+      budgetTurnCount: runtime.budgetTurnCount,
+      runGeneration: runtime.runGeneration,
+      evaluatorRejectionCount: runtime.evaluatorRejectionCount,
+      freeRetryPending: runtime.freeRetryPending,
+      lastRejectionDetails: runtime.lastRejectionDetails,
       consecutiveFailures: runtime.consecutiveFailures,
       noProgressCount: runtime.noProgressCount,
       lastError: runtime.lastError,
       lastProgressAt: runtime.lastProgressAt,
       lastRunAt: runtime.lastRunAt,
       lastCompactAt: runtime.lastCompactAt,
+      lastActivityAt: runtime.lastActivityAt,
+      lastVerificationAttempt: runtime.lastVerificationAttempt,
+      recentVerificationAttempts: runtime.recentVerificationAttempts,
     }
   }
 
@@ -400,17 +504,17 @@ interface CheckResult {
   failures: Array<{ command: string; exitCode: number; stderr: string }>
 }
 
-async function runCompletionChecks(checks: string[]): Promise<CheckResult> {
+async function runCompletionChecks(checks: string[], cwd?: string): Promise<CheckResult> {
   const failures: CheckResult["failures"] = []
 
   for (const cmd of checks) {
     try {
-      await execAsync(cmd, { timeout: 30_000 })
+      await execAsync(cmd, { timeout: 30_000, cwd })
     } catch (error: any) {
       failures.push({
         command: cmd,
         exitCode: error.code || 1,
-        stderr: error.stderr || error.message || "unknown error",
+        stderr: (error.stderr || error.message || "unknown error").slice(0, 1000),
       })
     }
   }

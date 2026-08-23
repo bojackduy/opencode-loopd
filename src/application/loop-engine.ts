@@ -19,6 +19,9 @@ import type { GoalService } from "./goal-service"
 import type { LoopHost } from "../server/host-adapter"
 import { describeError } from "../infrastructure/server-log"
 
+/** Two-stage idle debounce — require two idle signals 2s apart with no activity in between. */
+const CONFIRM_IDLE_DURATION_MS = 2000
+
 const HANDLED_EVENT_TYPES = new Set([
   "session.idle",
   "session.status",
@@ -160,6 +163,34 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     }
   }
 
+  // ─── Two-stage idle check ─────────────────────────────────────────────────
+  // Returns true if the run is confirmed idle and should be finalized.
+  // Returns false if we're still waiting (first idle signal or debounce).
+  function checkTwoStageIdle(runtime: GoalRuntimeState): boolean {
+    const now = Date.now()
+
+    if (!runtime.idleCandidateAt) {
+      // First idle signal — record timestamp and wait
+      runtime.idleCandidateAt = new Date(now).toISOString()
+      return false
+    }
+
+    // Check if debounce has elapsed
+    const elapsed = now - Date.parse(runtime.idleCandidateAt)
+    if (elapsed < CONFIRM_IDLE_DURATION_MS) return false
+
+    // Check if any activity occurred after the idle candidate was recorded
+    if (runtime.lastActivityAt && runtime.lastActivityAt >= runtime.idleCandidateAt) {
+      // Activity occurred after idle candidate — stale idle, reset
+      runtime.idleCandidateAt = undefined
+      return false
+    }
+
+    // Confirmed idle — clear candidate and finalize
+    runtime.idleCandidateAt = undefined
+    return true
+  }
+
   // ─── Idle Handler ─────────────────────────────────────────────────────────
 
   async function handleSessionIdle(state: StoreState, goal: any): Promise<boolean> {
@@ -168,6 +199,12 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
 
     // Guard against concurrent continuations
     if (inflightContinuations.has(goal.id)) return false
+
+    // Two-stage idle: first idle sets candidate, second idle (after debounce) finalizes
+    if (!checkTwoStageIdle(runtime)) {
+      await writeState(directory, state)
+      return true
+    }
 
     // Release current lease
     if (runtime.phase === "running") {
@@ -296,6 +333,9 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     runtime.lastError = message
     runtime.updatedAt = new Date().toISOString()
 
+    // Clear any pending idle candidate — error means activity is happening
+    runtime.idleCandidateAt = undefined
+
     // Release lease
     if (runtime.phase === "running") {
       Object.assign(runtime, releaseLease(runtime))
@@ -391,7 +431,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
 
     // Max turns — force child to wrap up with a semantic summary
     const maxTurns = goal.config?.maxTurns
-    if (maxTurns && runtime.turnCount >= maxTurns) {
+    if (maxTurns && runtime.budgetTurnCount >= maxTurns) {
       return {
         stop: "force_finish",
         blocked: true,
@@ -431,7 +471,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
   function shouldCompact(goal: any, runtime: GoalRuntimeState): boolean {
     const compactEvery = goal.config?.compactEvery
     if (!compactEvery) return false
-    return runtime.turnCount > 0 && runtime.turnCount % compactEvery === 0
+    return runtime.runCount > 0 && runtime.runCount % compactEvery === 0
   }
 
   async function doCompact(goal: any, runtime: GoalRuntimeState) {

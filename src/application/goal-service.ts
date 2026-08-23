@@ -8,7 +8,7 @@ import type { Goal, GoalID } from "../domain/goal"
 import { createGoal, canTransition, isTerminal } from "../domain/goal"
 import type { GoalRuntimeState, RunID } from "../domain/runtime"
 import { createRuntimeState, acquireLease, releaseLease, leaseIsValid, markProgress } from "../domain/runtime"
-import { readState, writeState, appendEvent, drainGoalInbox, readEvents, goalArtifactDir, ensureGoalArtifactDir } from "../infrastructure/state-repository"
+import { readState, writeState, mutateState, appendEvent, drainGoalInbox, readEvents, goalArtifactDir, ensureGoalArtifactDir } from "../infrastructure/state-repository"
 import * as path from "path"
 import { promises as fs } from "fs"
 import type { StoreState } from "../infrastructure/state-repository"
@@ -63,9 +63,9 @@ export function createGoalService(host: LoopHost): GoalService {
     ownerSessionID: string
     config?: Goal["config"]
   }) {
-    const state = await readState(directory)
     const id = randomUUID() as GoalID
 
+    // Create goal and artifact directory (external I/O before lock)
     const goal = createGoal({
       id,
       name: input.name,
@@ -77,42 +77,46 @@ export function createGoalService(host: LoopHost): GoalService {
         ...input.config,
       },
     })
-
-    // Compute per-goal artifact directory and wire defaults
     const artifactDir = goalArtifactDir(directory, id)
     goal.config.artifactDir = artifactDir
     if (!goal.config.progressFile) goal.config.progressFile = path.join(artifactDir, "progress.md")
     await ensureGoalArtifactDir(directory, id)
 
-    state.goals.push(goal)
-    state.runtimes.push(createRuntimeState(id))
+    // Atomically persist goal and set queued phase
+    const state1 = await mutateState(directory, `goal.create:${id}`, async (state) => {
+      state.goals.push(goal)
+      state.runtimes.push(createRuntimeState(id))
+      const runtime = state.runtimes.find((r) => r.goalID === id)
+      if (runtime) runtime.phase = "queued"
+      return state
+    })
+    let runtime = state1.runtimes.find((r) => r.goalID === id)
 
-    // Persist state with goal in queued phase before creating worker
-    const runtime = state.runtimes.find((r) => r.goalID === id)
-    if (runtime) {
-      runtime.phase = "queued"
-      await writeState(directory, state)
-    }
-
-    // Create worker session
+    // Create worker session (external I/O — not under lock)
     let worker: WorkerSession
     try {
       worker = await workers.createWorker(goal)
     } catch (error) {
       const detail = describeError(error)
-      goal.status = "blocked"
-      goal.updatedAt = new Date().toISOString()
-      goal.blocker = {
-        reason: detail,
-        needed: "Start the goal again from a valid OpenCode session after correcting the worker creation error.",
-        at: new Date().toISOString(),
-      }
-      if (runtime) {
-        runtime.phase = "idle"
-        runtime.lastError = detail
-        runtime.updatedAt = new Date().toISOString()
-      }
-      await writeState(directory, state)
+      // Persist blocked state atomically
+      const blockedState = await mutateState(directory, `goal.blocked:${id}`, async (state) => {
+        const g = state.goals.find((item) => item.id === id)
+        if (!g) return state
+        g.status = "blocked"
+        g.updatedAt = new Date().toISOString()
+        g.blocker = {
+          reason: detail,
+          needed: "Start the goal again from a valid OpenCode session after correcting the worker creation error.",
+          at: new Date().toISOString(),
+        }
+        const rt = state.runtimes.find((item) => item.goalID === id)
+        if (rt) {
+          rt.phase = "idle"
+          rt.lastError = detail
+          rt.updatedAt = new Date().toISOString()
+        }
+        return state
+      })
       await appendEvent(directory, {
         version: 1,
         eventID: randomUUID(),
@@ -121,16 +125,29 @@ export function createGoalService(host: LoopHost): GoalService {
         reason: detail,
         needed: goal.blocker.needed,
         timestamp: new Date().toISOString(),
-        revision: state.revision,
+        revision: blockedState.revision,
       } satisfies LoopEvent)
       await logServerEvent(directory, "goal.start.failed", { goalID: id, ownerSessionID: input.ownerSessionID, detail })
       throw error
     }
     sessions.set(id, worker)
-    goal.workerSessionID = worker.workerSessionID
 
-    // Persist worker session ID before prompting
-    await writeState(directory, state)
+    // Persist worker session ID and acquire lease atomically
+    const state2 = await mutateState(directory, `goal.worker-assign:${id}`, async (state) => {
+      const g = state.goals.find((item) => item.id === id)
+      if (!g) return state
+      g.workerSessionID = worker.workerSessionID
+      const rt = state.runtimes.find((item) => item.goalID === id)
+      if (rt) {
+        Object.assign(rt, acquireLease(rt, g.config.timeoutMs || 300_000))
+        rt.activeRunID = randomUUID() as RunID
+        rt.runCount = 1
+        rt.budgetTurnCount = 1
+        rt.lastRunAt = new Date().toISOString()
+      }
+      return state
+    })
+    runtime = state2.runtimes.find((r) => r.goalID === id)
 
     await appendEvent(directory, {
       version: 1,
@@ -141,40 +158,41 @@ export function createGoalService(host: LoopHost): GoalService {
       objective: input.objective,
       ownerSessionID: input.ownerSessionID,
       timestamp: new Date().toISOString(),
-      revision: state.revision,
+      revision: state2.revision,
     } satisfies LoopEvent)
 
-    // Send first continuation
+    // Send first continuation (external I/O — not under lock)
     if (runtime) {
-      const runID = randomUUID() as RunID
-      Object.assign(runtime, acquireLease(runtime, goal.config.timeoutMs || 300_000))
-      runtime.activeRunID = runID
-      runtime.turnCount = 1
-      runtime.runCount = 1
-      runtime.lastRunAt = new Date().toISOString()
-      await writeState(directory, state)
       await appendEvent(directory, {
         version: 1,
         eventID: randomUUID(),
         goalID: id,
         type: "run.started",
-        runID,
-        turnCount: runtime.turnCount,
+        runID: runtime.activeRunID!,
+        turnCount: runtime.runCount,
         timestamp: new Date().toISOString(),
-        revision: state.revision,
+        revision: state2.revision,
       } satisfies LoopEvent)
-      await workers.continueWorker(worker, goal, runtime)
+      const result = await workers.continueWorker(worker, goal, runtime)
+      if (result.messageID) {
+        await mutateState(directory, `goal.message-id:${id}`, async (state) => {
+          const rt = state.runtimes.find((item) => item.goalID === id)
+          if (rt) rt.activePromptMessageID = result.messageID
+          return state
+        })
+      }
     }
 
     return { goal, worker }
   }
 
   async function continueTurn(directory: string, goalID: GoalID, opts?: { forceFinish?: boolean }) {
-    const state = await readState(directory)
-    const goal = state.goals.find((g) => g.id === goalID)
+    // Read state for pre-checks (lease validity, worker idle)
+    const preState = await readState(directory)
+    const goal = preState.goals.find((g) => g.id === goalID)
     if (!goal || isTerminal(goal.status)) return
 
-    const runtime = state.runtimes.find((r) => r.goalID === goalID)
+    const runtime = preState.runtimes.find((r) => r.goalID === goalID)
     if (!runtime) return
 
     // Check lease
@@ -195,28 +213,40 @@ export function createGoalService(host: LoopHost): GoalService {
     // Check worker idle
     if (!(await workers.isIdle(session.workerSessionID))) return
 
-    // Acquire lease
-    const timeoutMs = goal.config.timeoutMs || 300_000
-    const leased = acquireLease(runtime, timeoutMs)
-    Object.assign(runtime, leased)
-    const runID = randomUUID() as RunID
-    runtime.activeRunID = runID
-    runtime.turnCount += 1
-    runtime.runCount += 1
-    runtime.lastRunAt = new Date().toISOString()
-    await writeState(directory, state)
+    // Acquire lease and increment run count atomically
+    const state = await mutateState(directory, `turn.acquire:${goalID}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goalID)
+      if (!g || isTerminal(g.status)) return s
+      const rt = s.runtimes.find((item) => item.goalID === goalID)
+      if (!rt) return s
+      const timeoutMs = g.config.timeoutMs || 300_000
+      Object.assign(rt, acquireLease(rt, timeoutMs))
+      rt.activeRunID = randomUUID() as RunID
+      rt.runCount += 1
+      if (rt.freeRetryPending) {
+        rt.freeRetryPending = false
+      } else {
+        rt.budgetTurnCount += 1
+      }
+      rt.lastRunAt = new Date().toISOString()
+      return s
+    })
+    const freshGoal = state.goals.find((g) => g.id === goalID)
+    const freshRuntime = state.runtimes.find((r) => r.goalID === goalID)
+    if (!freshGoal || !freshRuntime) return
+
     await appendEvent(directory, {
       version: 1,
       eventID: randomUUID(),
       goalID,
       type: "run.started",
-      runID,
-      turnCount: runtime.turnCount,
+      runID: freshRuntime.activeRunID!,
+      turnCount: freshRuntime.runCount,
       timestamp: new Date().toISOString(),
       revision: state.revision,
     } satisfies LoopEvent)
 
-    // Send continuation with accumulated context
+    // Send continuation with accumulated context (external I/O — not under lock)
     const inboxMessages = await drainGoalInbox(directory, goalID)
 
     // Gather progress history from events
@@ -232,7 +262,7 @@ export function createGoalService(host: LoopHost): GoalService {
     // Gather last 5 transcript messages from the worker session
     let transcriptTail: ContinuationContext["transcriptTail"]
     try {
-      transcriptTail = await host.readMessages(goal.workerSessionID!, 5)
+      transcriptTail = await host.readMessages(freshGoal.workerSessionID!, 5)
     } catch {
       transcriptTail = []
     }
@@ -240,7 +270,7 @@ export function createGoalService(host: LoopHost): GoalService {
     // Deterministic verification pre-screen (cheap, no shell)
     let verification: ContinuationContext["verification"]
     try {
-      const artifactDir = (goal.config as any).artifactDir as string | undefined
+      const artifactDir = (freshGoal.config as any).artifactDir as string | undefined
       if (artifactDir) {
         try {
           const files = await fs.readdir(artifactDir)
@@ -249,13 +279,17 @@ export function createGoalService(host: LoopHost): GoalService {
           verification = { artifactSummary: "no artifacts yet" }
         }
       }
-      if (goal.config.checks?.length) {
-        const c = `checks configured: ${goal.config.checks.length} — run them before claiming completion`
+      if (freshGoal.config.checks?.length) {
+        const c = `checks configured: ${freshGoal.config.checks.length} — run them before claiming completion`
         verification = { ...(verification || {}), failedChecks: [c], checksPassed: undefined }
       }
-      // Pass evaluator rejection count to steering
-      if (runtime.evaluatorRejectionCount && runtime.evaluatorRejectionCount > 0) {
-        verification = { ...(verification || {}), evaluatorRejectionCount: runtime.evaluatorRejectionCount }
+      // Pass evaluator rejection count and details to steering
+      if (freshRuntime.evaluatorRejectionCount && freshRuntime.evaluatorRejectionCount > 0) {
+        verification = { ...(verification || {}), evaluatorRejectionCount: freshRuntime.evaluatorRejectionCount }
+      }
+      // Pass last rejection details for exact failure context
+      if (freshRuntime.lastRejectionDetails) {
+        verification = { ...(verification || {}), lastRejectionDetails: freshRuntime.lastRejectionDetails }
       }
     } catch {}
 
@@ -267,20 +301,28 @@ export function createGoalService(host: LoopHost): GoalService {
       verification,
     }
 
-    await workers.continueWorker(session, goal, runtime, context)
+    await workers.continueWorker(session, freshGoal, freshRuntime, context)
   }
 
   async function pause(directory: string, goalID: GoalID) {
-    const state = await readState(directory)
-    const goal = state.goals.find((g) => g.id === goalID)
+    const preState = await readState(directory)
+    const goal = preState.goals.find((g) => g.id === goalID)
     if (!goal) return
 
     if (!canTransition(goal.status, "paused", "user")) return
 
-    goal.status = "paused"
-    goal.updatedAt = new Date().toISOString()
+    const state = await mutateState(directory, `goal.pause:${goalID}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goalID)
+      if (!g) return s
+      g.status = "paused"
+      g.updatedAt = new Date().toISOString()
 
-    // Abort worker from cache or persisted state
+      const rt = s.runtimes.find((r) => r.goalID === goalID)
+      if (rt) Object.assign(rt, releaseLease(rt))
+      return s
+    })
+
+    // Abort worker from cache or persisted state (external I/O — not under lock)
     const session = sessions.get(goalID) || (goal.workerSessionID ? {
       goalID: goal.id,
       workerSessionID: goal.workerSessionID,
@@ -291,13 +333,6 @@ export function createGoalService(host: LoopHost): GoalService {
       sessions.delete(goalID)
     }
 
-    // Release lease
-    const runtime = state.runtimes.find((r) => r.goalID === goalID)
-    if (runtime) {
-      Object.assign(runtime, releaseLease(runtime))
-    }
-
-    await writeState(directory, state)
     await appendEvent(directory, {
       version: 1,
       eventID: randomUUID(),
@@ -311,24 +346,30 @@ export function createGoalService(host: LoopHost): GoalService {
   }
 
   async function resume(directory: string, goalID: GoalID) {
-    const state = await readState(directory)
+    const state = await mutateState(directory, `goal.resume:${goalID}`, async (state) => {
+      const goal = state.goals.find((g) => g.id === goalID)
+      if (!goal) return state
+      if (!canTransition(goal.status, "active", "user")) return state
+      goal.status = "active"
+      goal.updatedAt = new Date().toISOString()
+      return state
+    })
+
     const goal = state.goals.find((g) => g.id === goalID)
     if (!goal) return
 
-    if (!canTransition(goal.status, "active", "user")) return
-
-    goal.status = "active"
-    goal.updatedAt = new Date().toISOString()
-
-    // Get or recreate worker
+    // Get or recreate worker (external I/O — not under lock)
     let session = sessions.get(goalID)
     if (!session) {
       session = await workers.createWorker(goal)
       sessions.set(goalID, session)
-      goal.workerSessionID = session.workerSessionID
+      await mutateState(directory, `goal.set-worker:${goalID}`, async (s) => {
+        const g = s.goals.find((x) => x.id === goalID)
+        if (g) g.workerSessionID = session!.workerSessionID
+        return s
+      })
     }
 
-    await writeState(directory, state)
     await appendEvent(directory, {
       version: 1,
       eventID: randomUUID(),
@@ -345,25 +386,27 @@ export function createGoalService(host: LoopHost): GoalService {
   }
 
   async function retry(directory: string, goalID: GoalID) {
-    const state = await readState(directory)
+    const state = await mutateState(directory, `goal.retry:${goalID}`, async (state) => {
+      const goal = state.goals.find((g) => g.id === goalID)
+      if (!goal || goal.status !== "blocked") return state
+      goal.status = "active"
+      goal.updatedAt = new Date().toISOString()
+      const runtime = state.runtimes.find((r) => r.goalID === goalID)
+      if (runtime) {
+        runtime.consecutiveFailures = 0
+        runtime.lastError = undefined
+        runtime.forceFinishRequested = undefined
+        runtime.lastParentNotifiedAt = undefined
+        runtime.lastParentNotifiedFor = undefined
+        runtime.phase = "idle"
+        runtime.updatedAt = new Date().toISOString()
+      }
+      return state
+    })
+
     const goal = state.goals.find((g) => g.id === goalID)
-    if (!goal || goal.status !== "blocked") return
+    if (!goal || goal.status !== "active") return
 
-    goal.status = "active"
-    goal.updatedAt = new Date().toISOString()
-
-    const runtime = state.runtimes.find((r) => r.goalID === goalID)
-    if (runtime) {
-      runtime.consecutiveFailures = 0
-      runtime.lastError = undefined
-      runtime.forceFinishRequested = undefined
-      runtime.lastParentNotifiedAt = undefined
-      runtime.lastParentNotifiedFor = undefined
-      runtime.phase = "idle"
-      runtime.updatedAt = new Date().toISOString()
-    }
-
-    await writeState(directory, state)
     await appendEvent(directory, {
       version: 1,
       eventID: randomUUID(),
@@ -383,7 +426,7 @@ export function createGoalService(host: LoopHost): GoalService {
     const goal = state.goals.find((g) => g.id === goalID)
     if (!goal) return
 
-    // Abort worker from cache or persisted state
+    // Abort worker from cache or persisted state (external I/O — not under lock)
     const session = sessions.get(goalID) || (goal.workerSessionID ? {
       goalID: goal.id,
       workerSessionID: goal.workerSessionID,
@@ -394,6 +437,12 @@ export function createGoalService(host: LoopHost): GoalService {
       sessions.delete(goalID)
     }
 
+    await mutateState(directory, `goal.clear:${goalID}`, async (s) => {
+      s.goals = s.goals.filter((g) => g.id !== goalID)
+      s.runtimes = s.runtimes.filter((r) => r.goalID !== goalID)
+      return s
+    })
+
     await appendEvent(directory, {
       version: 1,
       eventID: randomUUID(),
@@ -402,11 +451,6 @@ export function createGoalService(host: LoopHost): GoalService {
       timestamp: new Date().toISOString(),
       revision: state.revision,
     } satisfies LoopEvent)
-
-    state.goals = state.goals.filter((g) => g.id !== goalID)
-    state.runtimes = state.runtimes.filter((r) => r.goalID !== goalID)
-
-    await writeState(directory, state)
   }
 
   function getWorker(goalID: GoalID): WorkerSession | undefined {
