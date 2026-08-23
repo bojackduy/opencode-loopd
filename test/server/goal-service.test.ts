@@ -116,6 +116,57 @@ describe("Goal Service", () => {
       const state = await readState(dir)
       expect(state.goals[0].status).toBe("active")
     })
+
+    it("resume reuses the existing worker session when it still exists", async () => {
+      const { goal, worker } = await svc.start(dir, {
+        name: "reuse",
+        objective: "o",
+        ownerSessionID: "owner-1",
+      })
+      const originalSession = worker.workerSessionID
+
+      // Pause removes the session from cache; resume should re-attach to the
+      // existing session (fake host keeps it alive) instead of creating a new one.
+      await svc.pause(dir, goal.id)
+      await svc.resume(dir, goal.id)
+
+      const state = await readState(dir)
+      expect(state.goals[0].status).toBe("active")
+      expect(state.goals[0].workerSessionID).toBe(originalSession)
+      expect(svc.getWorker(goal.id)?.workerSessionID).toBe(originalSession)
+    })
+  })
+
+  describe("nudge", () => {
+    it("forces a continuation for an active goal", async () => {
+      const { goal } = await svc.start(dir, {
+        name: "nudge",
+        objective: "o",
+        ownerSessionID: "owner-1",
+      })
+
+      const result = await svc.nudge(dir, goal.id)
+      expect(result.ok).toBe(true)
+      // Initial prompt + nudge continuation
+      expect(host.prompts.length).toBeGreaterThanOrEqual(2)
+    })
+
+    it("rejects nudging a complete goal", async () => {
+      const { goal } = await svc.start(dir, {
+        name: "done",
+        objective: "o",
+        ownerSessionID: "owner-1",
+      })
+      const state = await readState(dir)
+      state.goals[0].status = "complete"
+      await fs.writeFile(
+        path.join(dir, ".opencode", "loopd", "state.json"),
+        JSON.stringify(state, null, 2),
+      )
+
+      const result = await svc.nudge(dir, goal.id)
+      expect(result.ok).toBe(false)
+    })
   })
 
   describe("clear", () => {

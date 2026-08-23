@@ -28,6 +28,7 @@ describe("Loop Engine", () => {
       host,
       goalService,
       pollIntervalMs: 100,
+      confirmIdleMs: 0,
     })
     engine.start()
   })
@@ -182,7 +183,7 @@ describe("Loop Engine", () => {
       expect(runtime?.lastWorkerStatus).toBe("busy")
     })
 
-    it("continues immediately when session.status reports idle", async () => {
+    it("continues on session.idle event", async () => {
       const { goal } = await goalService.start(dir, {
         name: "idle-status",
         objective: "do something",
@@ -190,12 +191,17 @@ describe("Loop Engine", () => {
       })
 
       await engine.preloadWorkerSessions()
+
+      // 1st idle → records idle candidate
+      await engine.handleEvent({
+        type: "session.idle",
+        properties: { sessionID: goal.workerSessionID },
+      })
+
+      // 2nd idle → confirms idle, triggers continuation
       const result = await engine.handleEvent({
-        type: "session.status",
-        properties: {
-          sessionID: goal.workerSessionID,
-          status: { type: "idle" },
-        },
+        type: "session.idle",
+        properties: { sessionID: goal.workerSessionID },
       })
 
       expect(result).toBe(true)
@@ -209,7 +215,7 @@ describe("Loop Engine", () => {
   describe("maintenance", () => {
     it("polls an idle worker before its lease expires", async () => {
       engine.stop()
-      engine = createLoopEngine({ directory: dir, host, goalService, pollIntervalMs: 20 })
+      engine = createLoopEngine({ directory: dir, host, goalService, pollIntervalMs: 20, confirmIdleMs: 0 })
       engine.start()
 
       await goalService.start(dir, {
@@ -218,7 +224,8 @@ describe("Loop Engine", () => {
         ownerSessionID: "owner-1",
       })
 
-      await new Promise((resolve) => setTimeout(resolve, 60))
+      // Two-stage idle needs debounce time + maintenance interval
+      await new Promise((resolve) => setTimeout(resolve, 100))
       expect(host.prompts.length).toBeGreaterThan(1)
     })
   })
@@ -236,14 +243,20 @@ describe("Loop Engine", () => {
       const state = await readState(dir)
       const runtime = state.runtimes.find((r) => r.goalID === goal.id)
       if (runtime) {
-        runtime.turnCount = 2
+        runtime.budgetTurnCount = 2
         await fs.writeFile(
           path.join(dir, ".opencode", "loopd", "state.json"),
           JSON.stringify(state, null, 2),
         )
       }
 
-      // 1st idle → force-finish requested, still active, prompt contains FINAL REPORT
+      // 1st idle → records idle candidate, returns early
+      await engine.handleEvent({
+        type: "session.idle",
+        properties: { sessionID: goal.workerSessionID },
+      })
+
+      // 2nd idle → confirms idle, enforceLimits fires → force-finish requested
       await engine.handleEvent({
         type: "session.idle",
         properties: { sessionID: goal.workerSessionID },
@@ -251,9 +264,14 @@ describe("Loop Engine", () => {
       let updatedState = await readState(dir)
       expect(updatedState.goals[0].status).toBe("active")
       expect(updatedState.runtimes[0].forceFinishRequested).toBe(true)
-      expect(host.prompts[host.prompts.length - 1]).toContain("FINAL REPORT REQUIRED")
 
-      // 2nd idle → child ignored → blocked + parent notified
+      // 3rd idle → records idle candidate
+      await engine.handleEvent({
+        type: "session.idle",
+        properties: { sessionID: goal.workerSessionID },
+      })
+
+      // 4th idle → confirms idle, child ignored → blocked
       await engine.handleEvent({
         type: "session.idle",
         properties: { sessionID: goal.workerSessionID },

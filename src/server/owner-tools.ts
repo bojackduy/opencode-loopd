@@ -339,6 +339,48 @@ export function ownerTools(options: OwnerToolsOptions) {
       },
     }),
 
+    nudge_goal: tool({
+      description:
+        "Force re-prompt a background goal's worker session. " +
+        "Use when a goal is stuck or idle but the engine is not continuing it " +
+        "(e.g., after pause/resume or a missed idle event). " +
+        "Clears stale run state and sends a continuation prompt to the worker.",
+      args: {
+        goal_id: tool.schema.string().optional().describe("Goal ID. Omit to nudge the first active goal."),
+      },
+      execute: async (args, context) => {
+        const state = await readState(directory)
+        const ownerID = context?.sessionID
+        const goal = args.goal_id
+          ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID)
+          : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete")
+
+        if (!goal) {
+          return {
+            title: "No goal found",
+            output: JSON.stringify({ ok: false, message: "No matching active goal for this session." }),
+          }
+        }
+
+        try {
+          const result = await goalService.nudge(directory, goal.id)
+          return {
+            title: result.ok ? "Goal nudged" : "Nudge failed",
+            output: JSON.stringify({ ...result, goalID: goal.id, goalName: goal.name }),
+          }
+        } catch (error) {
+          return {
+            title: "Nudge failed",
+            output: JSON.stringify({
+              ok: false,
+              goalName: goal.name,
+              message: error instanceof Error ? error.message : String(error),
+            }),
+          }
+        }
+      },
+    }),
+
     clear_goal: tool({
       description:
         "Clear a background goal. Aborts the worker and removes the goal from the dashboard. " +

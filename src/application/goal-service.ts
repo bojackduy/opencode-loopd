@@ -8,7 +8,7 @@ import type { Goal, GoalID } from "../domain/goal"
 import { createGoal, canTransition, isTerminal } from "../domain/goal"
 import type { GoalRuntimeState, RunID } from "../domain/runtime"
 import { createRuntimeState, acquireLease, releaseLease, leaseIsValid, markProgress } from "../domain/runtime"
-import { readState, writeState, mutateState, appendEvent, drainGoalInbox, readEvents, goalArtifactDir, ensureGoalArtifactDir } from "../infrastructure/state-repository"
+import { readState, mutateState, appendEvent, drainGoalInbox, readEvents, goalArtifactDir, ensureGoalArtifactDir } from "../infrastructure/state-repository"
 import * as path from "path"
 import { promises as fs } from "fs"
 import type { StoreState } from "../infrastructure/state-repository"
@@ -27,7 +27,10 @@ export interface GoalService {
   }): Promise<{ goal: Goal; worker: WorkerSession }>
 
   /** Drive one continuation turn for a goal. */
-  continueTurn(directory: string, goalID: GoalID, opts?: { forceFinish?: boolean }): Promise<void>
+  continueTurn(directory: string, goalID: GoalID, opts?: { forceFinish?: boolean; force?: boolean }): Promise<void>
+
+  /** Force re-prompt a stuck worker even if the session reports non-idle. */
+  nudge(directory: string, goalID: GoalID): Promise<{ ok: boolean; message: string }>
 
   /** Pause a goal and abort its worker. */
   pause(directory: string, goalID: GoalID): Promise<void>
@@ -123,7 +126,7 @@ export function createGoalService(host: LoopHost): GoalService {
         goalID: id,
         type: "goal.blocked",
         reason: detail,
-        needed: goal.blocker.needed,
+        needed: goal.blocker?.needed || "",
         timestamp: new Date().toISOString(),
         revision: blockedState.revision,
       } satisfies LoopEvent)
@@ -137,6 +140,7 @@ export function createGoalService(host: LoopHost): GoalService {
       const g = state.goals.find((item) => item.id === id)
       if (!g) return state
       g.workerSessionID = worker.workerSessionID
+      goal.workerSessionID = worker.workerSessionID
       const rt = state.runtimes.find((item) => item.goalID === id)
       if (rt) {
         Object.assign(rt, acquireLease(rt, g.config.timeoutMs || 300_000))
@@ -186,7 +190,7 @@ export function createGoalService(host: LoopHost): GoalService {
     return { goal, worker }
   }
 
-  async function continueTurn(directory: string, goalID: GoalID, opts?: { forceFinish?: boolean }) {
+  async function continueTurn(directory: string, goalID: GoalID, opts?: { forceFinish?: boolean; force?: boolean }) {
     // Read state for pre-checks (lease validity, worker idle)
     const preState = await readState(directory)
     const goal = preState.goals.find((g) => g.id === goalID)
@@ -210,8 +214,8 @@ export function createGoalService(host: LoopHost): GoalService {
     }
     if (!session) return
 
-    // Check worker idle
-    if (!(await workers.isIdle(session.workerSessionID))) return
+    // Check worker idle — unless force is set (nudge/re-prompt)
+    if (!opts?.force && !(await workers.isIdle(session.workerSessionID))) return
 
     // Acquire lease and increment run count atomically
     const state = await mutateState(directory, `turn.acquire:${goalID}`, async (s) => {
@@ -360,6 +364,18 @@ export function createGoalService(host: LoopHost): GoalService {
 
     // Get or recreate worker (external I/O — not under lock)
     let session = sessions.get(goalID)
+    if (!session && goal.workerSessionID) {
+      // Try to REUSE the existing subagent session so its context/files survive (BUG-002).
+      const status = await host.sessionStatus(goal.workerSessionID)
+      if (status === "idle" || status === "busy") {
+        session = {
+          goalID: goal.id,
+          workerSessionID: goal.workerSessionID,
+          startedAt: goal.createdAt,
+        }
+        sessions.set(goalID, session)
+      }
+    }
     if (!session) {
       session = await workers.createWorker(goal)
       sessions.set(goalID, session)
@@ -468,31 +484,43 @@ export function createGoalService(host: LoopHost): GoalService {
       if (isTerminal(goal.status)) continue
       if (goal.status === "paused") continue
 
-      // Active goal without worker ID: create a worker
+      // Active goal without worker ID: create a worker (external I/O — not under lock)
       if (!goal.workerSessionID) {
+        let worker: WorkerSession | undefined
         try {
-          const worker = await workers.createWorker(goal)
+          worker = await workers.createWorker(goal)
           sessions.set(goal.id, worker)
-          goal.workerSessionID = worker.workerSessionID
-          goal.updatedAt = new Date().toISOString()
         } catch (error) {
           const detail = describeError(error)
-          goal.status = "blocked"
-          goal.updatedAt = new Date().toISOString()
-          goal.blocker = {
-            reason: detail,
-            needed: "Clear this goal and start it again from a valid OpenCode session.",
-            at: new Date().toISOString(),
-          }
-          const runtime = state.runtimes.find((item) => item.goalID === goal.id)
-          if (runtime) {
-            runtime.phase = "idle"
-            runtime.lastError = detail
-            runtime.updatedAt = new Date().toISOString()
-          }
+          await mutateState(directory, `reconcile.block:${goal.id}`, async (s) => {
+            const g = s.goals.find((item) => item.id === goal.id)
+            if (!g) return s
+            g.status = "blocked"
+            g.updatedAt = new Date().toISOString()
+            g.blocker = {
+              reason: detail,
+              needed: "Clear this goal and start it again from a valid OpenCode session.",
+              at: new Date().toISOString(),
+            }
+            const rt = s.runtimes.find((item) => item.goalID === goal.id)
+            if (rt) {
+              rt.phase = "idle"
+              rt.lastError = detail
+              rt.updatedAt = new Date().toISOString()
+            }
+            return s
+          })
           await logServerEvent(directory, "goal.reconcile.failed", { goalID: goal.id, ownerSessionID: goal.ownerSessionID, detail })
           continue
         }
+        await mutateState(directory, `reconcile.set-worker:${goal.id}`, async (s) => {
+          const g = s.goals.find((item) => item.id === goal.id)
+          if (g) {
+            g.workerSessionID = worker!.workerSessionID
+            g.updatedAt = new Date().toISOString()
+          }
+          return s
+        })
       }
 
       // Active goal with worker ID: cache the worker session
@@ -505,18 +533,52 @@ export function createGoalService(host: LoopHost): GoalService {
       }
 
       // Active goal with expired lease and idle worker: release and resume
-      const runtime = state.runtimes.find((r) => r.goalID === goal.id)
-      if (runtime?.phase === "running" && !leaseIsValid(runtime)) {
+      const preRt = state.runtimes.find((r) => r.goalID === goal.id)
+      if (preRt?.phase === "running" && !leaseIsValid(preRt)) {
         const session = sessions.get(goal.id)
         if (session && await workers.isIdle(session.workerSessionID)) {
-          Object.assign(runtime, releaseLease(runtime))
-          goal.updatedAt = new Date().toISOString()
+          await mutateState(directory, `reconcile.release-lease:${goal.id}`, async (s) => {
+            const rt = s.runtimes.find((r) => r.goalID === goal.id)
+            if (rt) {
+              Object.assign(rt, releaseLease(rt))
+              const g = s.goals.find((item) => item.id === goal.id)
+              if (g) g.updatedAt = new Date().toISOString()
+            }
+            return s
+          })
         }
       }
     }
-
-    await writeState(directory, state)
   }
 
-  return { start, continueTurn, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile }
+  async function nudge(directory: string, goalID: GoalID): Promise<{ ok: boolean; message: string }> {
+    const preState = await readState(directory)
+    const goal = preState.goals.find((g) => g.id === goalID)
+    if (!goal) return { ok: false, message: "Goal not found." }
+    if (isTerminal(goal.status)) return { ok: false, message: `Goal is ${goal.status}; cannot nudge.` }
+    if (goal.status === "paused") return { ok: false, message: "Goal is paused. Use resume_goal first." }
+
+    // Clear stale run state so the continuation is not gated on an old lease/run.
+    const cleared = await mutateState(directory, `goal.nudge:${goalID}`, async (s) => {
+      const rt = s.runtimes.find((r) => r.goalID === goalID)
+      if (!rt) return s
+      rt.phase = "idle"
+      rt.activeRunID = undefined
+      rt.idleCandidateAt = undefined
+      rt.activePromptMessageID = undefined
+      rt.activeToolCallIDs = []
+      rt.updatedAt = new Date().toISOString()
+      return s
+    })
+    const freshGoal = cleared.goals.find((g) => g.id === goalID)
+    if (!freshGoal || !freshGoal.workerSessionID) {
+      return { ok: false, message: "Goal has no worker session. Use resume_goal or retry_goal." }
+    }
+
+    // Force a continuation even if the session reports non-idle.
+    await continueTurn(directory, goalID, { force: true })
+    return { ok: true, message: `Re-prompted worker for "${freshGoal.name}".` }
+  }
+
+  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile }
 }

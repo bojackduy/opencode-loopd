@@ -4,7 +4,7 @@
 // Zero-cost when no goals exist: event hook filters by type before disk read.
 
 import { randomUUID } from "crypto"
-import { readState, writeState, appendEvent } from "../infrastructure/state-repository"
+import { readState, mutateState, appendEvent } from "../infrastructure/state-repository"
 import type { StoreState } from "../infrastructure/state-repository"
 import { isTerminal } from "../domain/goal"
 import type { GoalID } from "../domain/goal"
@@ -34,6 +34,7 @@ export interface LoopEngineOptions {
   host: LoopHost
   goalService: GoalService
   pollIntervalMs?: number
+  confirmIdleMs?: number
 }
 
 export interface LoopEngine {
@@ -49,6 +50,7 @@ export interface LoopEngine {
 export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
   const { directory, host, goalService } = options
   const maintenanceMs = options.pollIntervalMs ?? 30_000
+  const confirmIdleMs = options.confirmIdleMs ?? CONFIRM_IDLE_DURATION_MS
 
   let running = false
   let maintenanceTimer: ReturnType<typeof setInterval> | undefined
@@ -177,10 +179,10 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
 
     // Check if debounce has elapsed
     const elapsed = now - Date.parse(runtime.idleCandidateAt)
-    if (elapsed < CONFIRM_IDLE_DURATION_MS) return false
+    if (elapsed < confirmIdleMs) return false
 
-    // Check if any activity occurred after the idle candidate was recorded
-    if (runtime.lastActivityAt && runtime.lastActivityAt >= runtime.idleCandidateAt) {
+    // Check if any activity occurred AFTER the idle candidate was recorded
+    if (runtime.lastActivityAt && runtime.lastActivityAt > runtime.idleCandidateAt) {
       // Activity occurred after idle candidate — stale idle, reset
       runtime.idleCandidateAt = undefined
       return false
@@ -194,79 +196,118 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
   // ─── Idle Handler ─────────────────────────────────────────────────────────
 
   async function handleSessionIdle(state: StoreState, goal: any): Promise<boolean> {
-    const runtime = state.runtimes.find((r) => r.goalID === goal.id)
-    if (!runtime) return false
-
+    const goalID = goal.id
     // Guard against concurrent continuations
-    if (inflightContinuations.has(goal.id)) return false
+    if (inflightContinuations.has(goalID)) return false
 
-    // Two-stage idle: first idle sets candidate, second idle (after debounce) finalizes
-    if (!checkTwoStageIdle(runtime)) {
-      await writeState(directory, state)
-      return true
-    }
+    // Two-stage idle + lease release in one atomic mutation
+    let completedRunID: string | undefined
+    const afterIdle = await mutateState(directory, `idle:${goalID}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goalID)
+      if (!g) return s
+      if (isTerminal(g.status) || g.status === "paused") return s
+      const rt = s.runtimes.find((r) => r.goalID === goalID)
+      if (!rt) return s
 
-    // Release current lease
-    if (runtime.phase === "running") {
-      const completedRunID = runtime.activeRunID
-      Object.assign(runtime, releaseLease(runtime))
-      runtime.activeRunID = undefined
-      runtime.lastWorkerStatus = "idle"
-      await writeState(directory, state)
-      if (completedRunID) {
-        await appendEvent(directory, {
-          version: 1,
-          eventID: randomUUID(),
-          goalID: goal.id,
-          type: "run.completed",
-          runID: completedRunID,
-          timestamp: new Date().toISOString(),
-          revision: state.revision,
-        } satisfies LoopEvent)
+      // Two-stage idle check — inline
+      const now = Date.now()
+      if (!rt.idleCandidateAt) {
+        rt.idleCandidateAt = new Date(now).toISOString()
+        return s
       }
-    }
+      const elapsed = now - Date.parse(rt.idleCandidateAt)
+      if (elapsed < confirmIdleMs) return s
+      if (rt.lastActivityAt && rt.lastActivityAt > rt.idleCandidateAt) {
+        rt.idleCandidateAt = undefined
+        return s
+      }
+      rt.idleCandidateAt = undefined
 
-    // Check if goal is still active
-    if (goal.status !== "active") return false
+      // Release lease
+      if (rt.phase === "running") {
+        completedRunID = rt.activeRunID
+        Object.assign(rt, releaseLease(rt))
+        rt.activeRunID = undefined
+        rt.lastWorkerStatus = "idle"
+      }
 
-    // Enforce limits
-    const limitResult = enforceLimits(goal, runtime)
-    if (limitResult.stop === "force_finish") {
-      if (!runtime.forceFinishRequested) {
-        // First detection: ask child to wrap up with a semantic summary
-        runtime.forceFinishRequested = true
-        await writeState(directory, state)
-        await goalService.continueTurn(directory, goal.id, { forceFinish: true })
+      return s
+    })
+
+    if (completedRunID) {
+      await appendEvent(directory, {
+        version: 1,
+        eventID: randomUUID(),
+        goalID,
+        type: "run.completed",
+        runID: completedRunID,
+        timestamp: new Date().toISOString(),
+        revision: afterIdle.revision,
+      } satisfies LoopEvent)
+    } else {
+      // Two-stage idle not confirmed yet or no lease to release
+      const checkState = await readState(directory)
+      const checkRt = checkState.runtimes.find((r) => r.goalID === goalID)
+      if (!checkRt || (checkRt.phase !== "idle" && checkRt.idleCandidateAt)) {
         return true
       }
-      // Second detection: child ignored the request — treat as dead/stuck (dedup concurrent)
-      const blockedKey = goal.id
+    }
+
+    // Re-read fresh state for limit enforcement
+    const freshState = await readState(directory)
+    const freshGoal = freshState.goals.find((g) => g.id === goalID)
+    if (!freshGoal || freshGoal.status !== "active") return false
+    const freshRuntime = freshState.runtimes.find((r) => r.goalID === goalID)
+    if (!freshRuntime) return false
+
+    const limitResult = enforceLimits(freshGoal, freshRuntime)
+    if (limitResult.stop === "force_finish") {
+      if (!freshRuntime.forceFinishRequested) {
+        await mutateState(directory, `idle.force-finish:${goalID}`, async (s) => {
+          const rt = s.runtimes.find((r) => r.goalID === goalID)
+          if (rt) rt.forceFinishRequested = true
+          return s
+        })
+        await goalService.continueTurn(directory, goalID, { forceFinish: true })
+        return true
+      }
+      const blockedKey = goalID
       const nowBlocked = Date.now()
       const lastBlocked = recentForceFinishBlocked.get(blockedKey)
       if (lastBlocked !== undefined && nowBlocked - lastBlocked < 60_000) return true
       recentForceFinishBlocked.set(blockedKey, nowBlocked)
-      goal.status = "blocked"
-      goal.updatedAt = new Date().toISOString()
-      goal.blocker = {
-        reason: limitResult.reason + " (force-finish ignored)",
-        needed: "User intervention required. Use retry to attempt again.",
-        at: new Date().toISOString(),
-      }
-      runtime.forceFinishRequested = undefined
-      const shouldNotify = shouldNotifyParent(runtime, "stopped")
-      if (shouldNotify) markParentNotified(runtime, "stopped")
-      await writeState(directory, state)
+      let shouldNotifyBlocked = false
+      const blockedState = await mutateState(directory, `idle.blocked:${goalID}`, async (s) => {
+        const g = s.goals.find((item) => item.id === goalID)
+        if (!g) return s
+        g.status = "blocked"
+        g.updatedAt = new Date().toISOString()
+        g.blocker = {
+          reason: limitResult.reason + " (force-finish ignored)",
+          needed: "User intervention required. Use retry to attempt again.",
+          at: new Date().toISOString(),
+        }
+        const rt = s.runtimes.find((r) => r.goalID === goalID)
+        if (rt) {
+          rt.forceFinishRequested = undefined
+          if (shouldNotifyParent(rt, "stopped")) {
+            markParentNotified(rt, "stopped")
+            shouldNotifyBlocked = true
+          }
+        }
+        return s
+      })
       await appendEvent(directory, {
         version: 1,
         eventID: randomUUID(),
-        goalID: goal.id,
+        goalID,
         type: "goal.blocked",
         reason: limitResult.reason + " (force-finish ignored)",
-        needed: goal.blocker.needed,
+        needed: "User intervention required. Use retry to attempt again.",
         timestamp: new Date().toISOString(),
-        revision: state.revision,
+        revision: blockedState.revision,
       } satisfies LoopEvent)
-      if (shouldNotify) {
+      if (shouldNotifyBlocked) {
         await host.notifyOwner(
           goal.ownerSessionID,
           `Loop goal "${goal.name}" stopped: ${limitResult.reason} (child did not wrap up). Status: blocked. Last progress: ${goal.lastProgress?.summary || "none"}.`,
@@ -275,29 +316,33 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       return true
     }
     if (limitResult.stop === "budget") {
-      await writeState(directory, state)
+      const budgetState = await mutateState(directory, `idle.budget:${goalID}`, async (s) => {
+        const g = s.goals.find((item) => item.id === goalID)
+        if (g) {
+          g.status = "budget_limited"
+          g.updatedAt = new Date().toISOString()
+        }
+        return s
+      })
       await appendEvent(directory, {
         version: 1,
         eventID: randomUUID(),
-        goalID: goal.id,
+        goalID,
         type: "goal.status_changed",
         from: "active",
-        to: goal.status,
+        to: "budget_limited",
         timestamp: new Date().toISOString(),
-        revision: state.revision,
+        revision: budgetState.revision,
       } satisfies LoopEvent)
       return true
     }
 
-    // Check compaction due
-    if (shouldCompact(goal, runtime)) {
-      await doCompact(goal, runtime)
+    if (shouldCompact(freshGoal, freshRuntime)) {
+      await doCompact(freshGoal, freshRuntime)
       return true
     }
 
-    // Schedule next turn
-    await continueGoal(goal.id)
-
+    await continueGoal(goalID)
     return true
   }
 
@@ -313,10 +358,13 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
 
     if (statusType === "idle") return handleSessionIdle(state, goal)
 
-    runtime.lastWorkerStatus = statusType as any
-    runtime.updatedAt = new Date().toISOString()
-
-    await writeState(directory, state)
+    await mutateState(directory, `status:${goal.id}`, async (s) => {
+      const rt = s.runtimes.find((r) => r.goalID === goal.id)
+      if (!rt) return s
+      rt.lastWorkerStatus = statusType as any
+      rt.updatedAt = new Date().toISOString()
+      return s
+    })
     return true
   }
 
@@ -329,19 +377,45 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     const error = event.properties?.error
     const message = describeError(error) || "unknown error"
 
-    runtime.consecutiveFailures += 1
-    runtime.lastError = message
-    runtime.updatedAt = new Date().toISOString()
+    let shouldNotify = false
+    const newState = await mutateState(directory, `error:${goal.id}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goal.id)
+      const rt = s.runtimes.find((r) => r.goalID === goal.id)
+      if (!rt) return s
 
-    // Clear any pending idle candidate — error means activity is happening
-    runtime.idleCandidateAt = undefined
+      rt.consecutiveFailures += 1
+      rt.lastError = message
+      rt.updatedAt = new Date().toISOString()
+      rt.idleCandidateAt = undefined
 
-    // Release lease
-    if (runtime.phase === "running") {
-      Object.assign(runtime, releaseLease(runtime))
-    }
+      // Release lease
+      if (rt.phase === "running") {
+        Object.assign(rt, releaseLease(rt))
+      }
 
-    // Record failure event
+      if (rt.consecutiveFailures >= (goal.config?.maxFailures || 5)) {
+        if (g) {
+          g.status = "blocked"
+          g.updatedAt = new Date().toISOString()
+          g.blocker = {
+            reason: `Failed ${rt.consecutiveFailures} times. Last error: ${message}`,
+            needed: "User intervention required. Use retry to attempt again.",
+            at: new Date().toISOString(),
+          }
+        }
+        if (shouldNotifyParent(rt, "failed")) {
+          markParentNotified(rt, "failed")
+          shouldNotify = true
+        }
+      } else {
+        const backoffMs = Math.min(30_000, 1_000 * Math.pow(2, rt.consecutiveFailures))
+        rt.retryAfter = new Date(Date.now() + backoffMs).toISOString()
+        rt.phase = "waiting_retry"
+      }
+
+      return s
+    })
+
     await appendEvent(directory, {
       version: 1,
       eventID: randomUUID(),
@@ -349,47 +423,31 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       type: "run.failed",
       runID: runtime.activeRunID || "unknown",
       error: message,
-      consecutiveFailures: runtime.consecutiveFailures,
+      consecutiveFailures: runtime.consecutiveFailures + 1,
       timestamp: new Date().toISOString(),
-      revision: state.revision,
+      revision: newState.revision,
     } satisfies LoopEvent)
 
-    // Check max failures
-    const maxFailures = goal.config?.maxFailures || 5
-    if (runtime.consecutiveFailures >= maxFailures) {
-      goal.status = "blocked"
-      goal.updatedAt = new Date().toISOString()
-      goal.blocker = {
-        reason: `Failed ${runtime.consecutiveFailures} times. Last error: ${message}`,
-        needed: "User intervention required. Use retry to attempt again.",
-        at: new Date().toISOString(),
-      }
-
+    const updatedGoal = newState.goals.find((g) => g.id === goal.id)
+    if (updatedGoal?.status === "blocked") {
       await appendEvent(directory, {
         version: 1,
         eventID: randomUUID(),
         goalID: goal.id,
         type: "goal.blocked",
-        reason: `Failed ${runtime.consecutiveFailures} times`,
+        reason: `Failed ${runtime.consecutiveFailures + 1} times`,
         needed: "User intervention required",
         timestamp: new Date().toISOString(),
-        revision: state.revision,
+        revision: newState.revision,
       } satisfies LoopEvent)
-      if (shouldNotifyParent(runtime, "failed")) {
-        markParentNotified(runtime, "failed")
+      if (shouldNotify) {
         await host.notifyOwner(
           goal.ownerSessionID,
-          `Loop goal "${goal.name}" blocked after ${runtime.consecutiveFailures} failures. Last error: ${message}.`,
+          `Loop goal "${goal.name}" blocked after ${runtime.consecutiveFailures + 1} failures. Last error: ${message}.`,
         )
       }
-    } else {
-      // Set retry backoff
-      const backoffMs = Math.min(30_000, 1_000 * Math.pow(2, runtime.consecutiveFailures))
-      runtime.retryAfter = new Date(Date.now() + backoffMs).toISOString()
-      runtime.phase = "waiting_retry"
     }
 
-    await writeState(directory, state)
     return true
   }
 
@@ -399,10 +457,13 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     const runtime = state.runtimes.find((r) => r.goalID === goal.id)
     if (!runtime) return false
 
-    runtime.lastCompactAt = new Date().toISOString()
-    runtime.updatedAt = new Date().toISOString()
-
-    await writeState(directory, state)
+    const newState = await mutateState(directory, `compacted:${goal.id}`, async (s) => {
+      const rt = s.runtimes.find((r) => r.goalID === goal.id)
+      if (!rt) return s
+      rt.lastCompactAt = new Date().toISOString()
+      rt.updatedAt = new Date().toISOString()
+      return s
+    })
 
     await appendEvent(directory, {
       version: 1,
@@ -410,7 +471,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       goalID: goal.id,
       type: "compaction.completed",
       timestamp: new Date().toISOString(),
-      revision: state.revision,
+      revision: newState.revision,
     } satisfies LoopEvent)
 
     return true
@@ -478,11 +539,14 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     if (!goal.workerSessionID) return
 
     const prevPhase = runtime.phase
-    runtime.phase = "compacting"
-    runtime.lastCompactAt = new Date().toISOString()
 
-    const state = await readState(directory)
-    await writeState(directory, state)
+    const state = await mutateState(directory, `compact.start:${goal.id}`, async (s) => {
+      const rt = s.runtimes.find((r) => r.goalID === goal.id)
+      if (!rt) return s
+      rt.phase = "compacting"
+      rt.lastCompactAt = new Date().toISOString()
+      return s
+    })
 
     await appendEvent(directory, {
       version: 1,
@@ -499,13 +563,11 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       // Best-effort compaction
     }
 
-    // Restore phase after compaction
-    const updatedState = await readState(directory)
-    const updatedRuntime = updatedState.runtimes.find((r) => r.goalID === goal.id)
-    if (updatedRuntime) {
-      updatedRuntime.phase = prevPhase
-      await writeState(directory, updatedState)
-    }
+    await mutateState(directory, `compact.end:${goal.id}`, async (s) => {
+      const rt = s.runtimes.find((r) => r.goalID === goal.id)
+      if (rt) rt.phase = prevPhase
+      return s
+    })
   }
 
   // ─── Maintenance ──────────────────────────────────────────────────────────
@@ -531,10 +593,14 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       // Handle waiting_retry: check if retry time has passed
       if (runtime.phase === "waiting_retry" && runtime.retryAfter) {
         if (Date.now() >= Date.parse(runtime.retryAfter)) {
-          runtime.retryAfter = undefined
-          runtime.phase = "idle"
-          await writeState(directory, state)
-          // Trigger continuation
+          await mutateState(directory, `retry-ready:${goal.id}`, async (s) => {
+            const rt = s.runtimes.find((r) => r.goalID === goal.id)
+            if (rt) {
+              rt.retryAfter = undefined
+              rt.phase = "idle"
+            }
+            return s
+          })
           goalService.continueTurn(directory, goal.id).catch(() => {})
         }
       }

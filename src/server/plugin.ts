@@ -11,7 +11,7 @@ import { goalTools } from "./goal-tools"
 import { ownerTools } from "./owner-tools"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
 import { addToolCall, removeToolCall } from "../domain/runtime"
-import { readState, writeState } from "../infrastructure/state-repository"
+import { readState, mutateState } from "../infrastructure/state-repository"
 
 const PLUGIN_ID = "opencode-loopd.server"
 
@@ -78,11 +78,11 @@ const server: Plugin = async ({ client, directory }) => {
       if (!matchedGoalID) return
 
       try {
-        const state = await readState(directory)
-        const runtime = state.runtimes.find((r) => r.goalID === matchedGoalID)
-        if (!runtime) return
-        Object.assign(runtime, addToolCall(runtime, input.callID))
-        await writeState(directory, state)
+        await mutateState(directory, `tool-call.start:${matchedGoalID}:${input.callID}`, async (s) => {
+          const runtime = s.runtimes.find((r) => r.goalID === matchedGoalID)
+          if (runtime) Object.assign(runtime, addToolCall(runtime, input.callID))
+          return s
+        })
       } catch {}
     },
     "tool.execute.after": async (input, output) => {
@@ -103,12 +103,11 @@ const server: Plugin = async ({ client, directory }) => {
       }
       if (matchedGoalID) {
         try {
-          const state = await readState(directory)
-          const runtime = state.runtimes.find((r) => r.goalID === matchedGoalID)
-          if (runtime) {
-            Object.assign(runtime, removeToolCall(runtime, input.callID))
-            await writeState(directory, state)
-          }
+          await mutateState(directory, `tool-call.end:${matchedGoalID}:${input.callID}`, async (s) => {
+            const runtime = s.runtimes.find((r) => r.goalID === matchedGoalID)
+            if (runtime) Object.assign(runtime, removeToolCall(runtime, input.callID))
+            return s
+          })
         } catch {}
       }
 
@@ -129,8 +128,11 @@ const server: Plugin = async ({ client, directory }) => {
           const notifyType = parsed.status === "complete" ? ("complete" as const) : ("blocked" as const)
           if (runtime && !shouldNotifyParent(runtime, notifyType)) return
           if (runtime) {
-            markParentNotified(runtime, notifyType)
-            await writeState(directory, state)
+            await mutateState(directory, `notify-parent:${goalID}`, async (s) => {
+              const rt = s.runtimes.find((r) => r.goalID === goalID)
+              if (rt) markParentNotified(rt, notifyType)
+              return s
+            })
           }
           const message =
             parsed.status === "complete"
