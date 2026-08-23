@@ -110,12 +110,13 @@ export function LoopDashboard(props: Props) {
   const [mode, setMode] = createSignal<Mode>("normal")
   const [selected, setSelected] = createSignal(0)
   const [commandInput, setCommandInput] = createSignal("")
-  const [statusText, setStatusText] = createSignal("Press : to send/command, ? help, o open, q close")
+  const [statusText, setStatusText] = createSignal("Press : to send/command, ? help, c toggle done, o open, q close")
   const [state, setState] = createSignal<StoreState | null>(null)
   const [events, setEvents] = createSignal<Record<string, unknown>[]>([])
   const [selectedGoal, setSelectedGoal] = createSignal<Goal | null>(null)
   const [showLogs, setShowLogs] = createSignal(false)
   const [showHelp, setShowHelp] = createSignal(false)
+  const [showCompleted, setShowCompleted] = createSignal(false)
   const [clock, setClock] = createSignal(Date.now())
   let inputEl: InputRenderable | undefined
   let focusTimer: ReturnType<typeof setTimeout> | undefined
@@ -135,7 +136,7 @@ export function LoopDashboard(props: Props) {
     try {
       const s = await client.getState()
       setState(s)
-      const goals = s.goals.filter((g) => g.status !== "complete")
+      const goals = s.goals.filter((g) => showCompleted() || g.status !== "complete")
       if (goals.length > 0 && selected() >= goals.length) setSelected(goals.length - 1)
       setSelectedGoal(goals[selected()] || null)
       setEvents(await client.getEvents(20))
@@ -199,7 +200,8 @@ export function LoopDashboard(props: Props) {
     if (isColon) { prevent(evt); enterInsertMode(); debugLog("normal -> insert"); return }
     if (isQuestion) { prevent(evt); setShowHelp((value) => !value); debugLog("toggle help"); return }
     const key = raw || seq || name
-    const currentGoals = state()?.goals.filter((goal) => goal.status !== "complete") || []
+    if (key === "c") { prevent(evt); setShowCompleted((v) => !v); debugLog("toggle completed"); return }
+    const currentGoals = state()?.goals.filter((goal) => showCompleted() || goal.status !== "complete") || []
     if (name === "down" || key === "j") { prevent(evt); setSelected((index) => Math.min(currentGoals.length - 1, index + 1)); return }
     if (name === "up" || key === "k") { prevent(evt); setSelected((index) => Math.max(0, index - 1)); return }
     if (key === "g") { prevent(evt); setSelected(0); return }
@@ -293,7 +295,7 @@ export function LoopDashboard(props: Props) {
     returnToNormalMode()
   }
 
-  const activeGoals = () => state()?.goals.filter((g) => g.status !== "complete") || []
+  const activeGoals = () => state()?.goals.filter((g) => showCompleted() || g.status !== "complete") || []
   const runningCount = () => state()?.runtimes.filter((runtime) => runtime.phase === "running").length || 0
   const runningFrame = () => ["|", "/", "-", "\\"][Math.floor(clock() / 500) % 4]
 
@@ -344,7 +346,7 @@ export function LoopDashboard(props: Props) {
           <Show when={showHelp()}>
             <box flexDirection="column" padding={1} border={true} borderColor="yellow" backgroundColor={theme().background} flexShrink={0} maxHeight={14} overflow="hidden">
               <text>
-                <span style={{ fg: "yellow", bold: true }}>━━━ Keys: ? toggle  : insert  Ctrl+N normal  o open  B bug  q close ━━━</span>
+                <span style={{ fg: "yellow", bold: true }}>━━━ Keys: ? toggle help  c toggle done  : insert  Ctrl+N normal  o open  Bug report  q close ━━━</span>
                 <For each={commandHelp().split("\n")}>{(line) => {
                   // Modes / Nav — split into label + segments, color keys vs descs
                   if (line.startsWith("Modes:") || line.startsWith("Nav:")) {
@@ -478,14 +480,17 @@ export function LoopDashboard(props: Props) {
           {/* Logs — bounded, clipped, per-event coloring */}
           <Show when={showLogs() && events().length > 0}>
             <box flexDirection="column" border={true} borderColor={theme().border} padding={1} maxHeight={7} flexShrink={0} overflow="hidden">
-              <text><span style={{ fg: theme().accent, bold: true }}>◈ Recent Events</span><span style={{ fg: theme().textMuted }}> — :logs to hide</span></text>
-              <For each={events().slice(-10)}>{(ev) => (
-                <text>
-                  <span style={{ fg: eventColor(String((ev as any).type), theme()), bold: true }}>{String((ev as any).type)}</span>
-                  <span style={{ fg: theme().textMuted }}> {(ev as any).goalID?.slice(0, 8)}</span>
-                  {(ev as any).summary && <span style={{ fg: theme().text }}> — {String((ev as any).summary).slice(0, 60)}</span>}
-                </text>
-              )}</For>
+              <text>
+                <span style={{ fg: theme().accent, bold: true }}>◈ Recent Events</span><span style={{ fg: theme().textMuted }}> — :logs to hide</span>
+                <For each={events().slice(-10)}>{(ev) => (
+                  <>
+                    {"\n"}
+                    <span style={{ fg: eventColor(String((ev as any).type), theme()), bold: true }}>{String((ev as any).type)}</span>
+                    <span style={{ fg: theme().textMuted }}> {(ev as any).goalID?.slice(0, 8)}</span>
+                    {(ev as any).summary && <span style={{ fg: theme().text }}> — {String((ev as any).summary).slice(0, 60)}</span>}
+                  </>
+                )}</For>
+              </text>
             </box>
           </Show>
         </box>

@@ -249,7 +249,7 @@ function tokenize(input) {
 function commandHelp() {
   return [
     "Modes: : insert \u2192 send/commands | Ctrl+N \u2192 normal | ? toggle help | Shift+B bug report",
-    "Nav: j/k move | g/G top/bottom | o open child | p/r/R/x pause/resume/retry/clear | L logs | q close",
+    "Nav: j/k move | g/G top/bottom | o open child | c toggle done | p/r/R/x pause/resume/retry/clear | L logs | q close",
     "Commands (insert mode, : prefix):",
     "  :send <message>                           Send instruction to selected goal",
     "  :open                                     Open child session (same as o)",
@@ -464,12 +464,13 @@ function LoopDashboard(props) {
   const [mode, setMode] = createSignal("normal");
   const [selected, setSelected] = createSignal(0);
   const [commandInput, setCommandInput] = createSignal("");
-  const [statusText, setStatusText] = createSignal("Press : to send/command, ? help, o open, q close");
+  const [statusText, setStatusText] = createSignal("Press : to send/command, ? help, c toggle done, o open, q close");
   const [state, setState] = createSignal(null);
   const [events, setEvents] = createSignal([]);
   const [selectedGoal, setSelectedGoal] = createSignal(null);
   const [showLogs, setShowLogs] = createSignal(false);
   const [showHelp, setShowHelp] = createSignal(false);
+  const [showCompleted, setShowCompleted] = createSignal(false);
   const [clock, setClock] = createSignal(Date.now());
   let inputEl;
   let focusTimer;
@@ -489,7 +490,7 @@ function LoopDashboard(props) {
     try {
       const s = await client.getState();
       setState(s);
-      const goals2 = s.goals.filter((g) => g.status !== "complete");
+      const goals2 = s.goals.filter((g) => showCompleted() || g.status !== "complete");
       if (goals2.length > 0 && selected() >= goals2.length)
         setSelected(goals2.length - 1);
       setSelectedGoal(goals2[selected()] || null);
@@ -568,7 +569,13 @@ function LoopDashboard(props) {
       return;
     }
     const key = raw || seq || name;
-    const currentGoals = state()?.goals.filter((goal) => goal.status !== "complete") || [];
+    if (key === "c") {
+      prevent(evt);
+      setShowCompleted((v) => !v);
+      debugLog("toggle completed");
+      return;
+    }
+    const currentGoals = state()?.goals.filter((goal) => showCompleted() || goal.status !== "complete") || [];
     if (name === "down" || key === "j") {
       prevent(evt);
       setSelected((index) => Math.min(currentGoals.length - 1, index + 1));
@@ -843,7 +850,7 @@ function LoopDashboard(props) {
     }
     returnToNormalMode();
   }
-  const activeGoals = () => state()?.goals.filter((g) => g.status !== "complete") || [];
+  const activeGoals = () => state()?.goals.filter((g) => showCompleted() || g.status !== "complete") || [];
   const runningCount = () => state()?.runtimes.filter((runtime) => runtime.phase === "running").length || 0;
   const runningFrame = () => ["|", "/", "-", "\\"][Math.floor(clock() / 500) % 4];
   function handleBugReport() {
@@ -948,7 +955,7 @@ function LoopDashboard(props) {
         _$setProp(_el$30, "maxHeight", 14);
         _$setProp(_el$30, "overflow", "hidden");
         _$insertNode(_el$31, _el$32);
-        _$insertNode(_el$32, _$createTextNode(`\u2501\u2501\u2501 Keys: ? toggle : insert Ctrl+N normal o open B bug q close \u2501\u2501\u2501`));
+        _$insertNode(_el$32, _$createTextNode(`\u2501\u2501\u2501 Keys: ? toggle help c toggle done : insert Ctrl+N normal o open Bug report q close \u2501\u2501\u2501`));
         _$setProp(_el$32, "style", {
           fg: "yellow",
           bold: true
@@ -1520,45 +1527,36 @@ function LoopDashboard(props) {
         _$insertNode(_el$36, _el$39);
         _$insertNode(_el$37, _$createTextNode(`\u25C8 Recent Events`));
         _$insertNode(_el$39, _$createTextNode(` \u2014 :logs to hide`));
-        _$insert(_el$35, _$createComponent(For, {
+        _$insert(_el$36, _$createComponent(For, {
           get each() {
             return events().slice(-10);
           },
-          children: (ev) => (() => {
-            var _el$146 = _$createElement("text"), _el$147 = _$createElement("span"), _el$148 = _$createElement("span"), _el$149 = _$createTextNode(` `);
-            _$insertNode(_el$146, _el$147);
-            _$insertNode(_el$146, _el$148);
-            _$insert(_el$147, () => String(ev.type));
-            _$insertNode(_el$148, _el$149);
-            _$insert(_el$148, () => ev.goalID?.slice(0, 8), null);
-            _$insert(_el$146, (() => {
-              var _c$11 = _$memo(() => !!ev.summary);
-              return () => _c$11() && (() => {
-                var _el$150 = _$createElement("span"), _el$151 = _$createTextNode(` \u2014 `);
-                _$insertNode(_el$150, _el$151);
-                _$insert(_el$150, () => String(ev.summary).slice(0, 60), null);
-                _$effect((_$p) => _$setProp(_el$150, "style", {
-                  fg: theme().text
-                }, _$p));
-                return _el$150;
-              })();
-            })(), null);
-            _$effect((_p$) => {
-              var _v$39 = {
-                fg: eventColor(String(ev.type), theme()),
-                bold: true
-              }, _v$40 = {
-                fg: theme().textMuted
-              };
-              _v$39 !== _p$.e && (_p$.e = _$setProp(_el$147, "style", _v$39, _p$.e));
-              _v$40 !== _p$.t && (_p$.t = _$setProp(_el$148, "style", _v$40, _p$.t));
-              return _p$;
-            }, {
-              e: undefined,
-              t: undefined
-            });
+          children: (ev) => [`
+`, (() => {
+            var _el$146 = _$createElement("span");
+            _$insert(_el$146, () => String(ev.type));
+            _$effect((_$p) => _$setProp(_el$146, "style", {
+              fg: eventColor(String(ev.type), theme()),
+              bold: true
+            }, _$p));
             return _el$146;
-          })()
+          })(), (() => {
+            var _el$147 = _$createElement("span"), _el$148 = _$createTextNode(` `);
+            _$insertNode(_el$147, _el$148);
+            _$insert(_el$147, () => ev.goalID?.slice(0, 8), null);
+            _$effect((_$p) => _$setProp(_el$147, "style", {
+              fg: theme().textMuted
+            }, _$p));
+            return _el$147;
+          })(), _$memo(() => _$memo(() => !!ev.summary)() && (() => {
+            var _el$149 = _$createElement("span"), _el$150 = _$createTextNode(` \u2014 `);
+            _$insertNode(_el$149, _el$150);
+            _$insert(_el$149, () => String(ev.summary).slice(0, 60), null);
+            _$effect((_$p) => _$setProp(_el$149, "style", {
+              fg: theme().text
+            }, _$p));
+            return _el$149;
+          })())]
         }), null);
         _$effect((_p$) => {
           var _v$ = theme().border, _v$2 = {
