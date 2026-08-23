@@ -56,6 +56,9 @@ export interface GoalRuntimeState {
   /** Whether the engine has already asked the child to wrap up . */
   forceFinishRequested?: boolean
 
+  /** How many times the evaluator has rejected the child's completion claim. */
+  evaluatorRejectionCount?: number
+
   /** Last parent notification dedup — prevents tool + engine double-inject. */
   lastParentNotifiedAt?: string
   lastParentNotifiedFor?: "complete" | "blocked" | "failed" | "stopped"

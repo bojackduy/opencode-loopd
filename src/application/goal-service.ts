@@ -253,6 +253,10 @@ export function createGoalService(host: LoopHost): GoalService {
         const c = `checks configured: ${goal.config.checks.length} — run them before claiming completion`
         verification = { ...(verification || {}), failedChecks: [c], checksPassed: undefined }
       }
+      // Pass evaluator rejection count to steering
+      if (runtime.evaluatorRejectionCount && runtime.evaluatorRejectionCount > 0) {
+        verification = { ...(verification || {}), evaluatorRejectionCount: runtime.evaluatorRejectionCount }
+      }
     } catch {}
 
     const context: ContinuationContext = {

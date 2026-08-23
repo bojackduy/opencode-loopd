@@ -29,6 +29,7 @@ export interface ContinuationContext {
     checksPassed?: boolean
     failedChecks?: string[]
     artifactSummary?: string
+    evaluatorRejectionCount?: number
   }
 }
 
@@ -172,6 +173,9 @@ function buildContinuationSteering(goal: Goal, runtime: GoalRuntimeState, contex
         else parts.push(`- checks: not yet run`)
       }
       if (v.artifactSummary) parts.push(`- artifacts: ${v.artifactSummary}`)
+      if (v.evaluatorRejectionCount && v.evaluatorRejectionCount > 0) {
+        parts.push(`- evaluator rejected ${v.evaluatorRejectionCount} time(s): previous completion claim had weak evidence — fix the issues and call complete_goal again with stronger evidence`)
+      }
     }
 
     // ── Completion audit — model IS the evaluator (Codex-faithful) ───────────

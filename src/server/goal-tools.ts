@@ -207,12 +207,28 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
         if (goal.config.checks?.length) {
           const checkResults = await runCompletionChecks(goal.config.checks)
           if (!checkResults.passed) {
+            // Evaluator rejected — child gets a free retry turn
+            const runtime = state.runtimes.find((r) => r.goalID === goal.id)
+            if (runtime) {
+              runtime.evaluatorRejectionCount = (runtime.evaluatorRejectionCount || 0) + 1
+              // After 3 rejections, give up and let engine block
+              if (runtime.evaluatorRejectionCount >= 3) {
+                runtime.forceFinishRequested = true
+              } else {
+                // Free retry: reset force-finish and undo turn increment
+                runtime.forceFinishRequested = false
+                runtime.turnCount = Math.max(0, runtime.turnCount - 1)
+              }
+              runtime.updatedAt = new Date().toISOString()
+              await writeState(dir, state)
+            }
             return {
-              title: "Checks failed",
+              title: "Completion rejected — keep working",
               output: JSON.stringify({
                 passed: false,
                 failedChecks: checkResults.failures,
-                message: "Completion checks failed. Fix issues and try again.",
+                message: "Evaluator rejected completion. Fix the issues above and try again.",
+                rejectionCount: runtime?.evaluatorRejectionCount || 0,
               }),
             }
           }
