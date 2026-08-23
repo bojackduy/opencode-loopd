@@ -458,6 +458,8 @@ export function LoopDashboard(props: Props) {
           <Show when={selectedGoal()}>
             {(goal) => {
               const rt = () => state()?.runtimes.find((r) => r.goalID === goal().id)
+              const lp = () => goal().lastProgress
+              const blk = () => goal().blocker
               return (
                 <box flexDirection="column" border={true} borderColor={borderColorForStatus(goal().status, theme())} padding={1} flexShrink={0} maxHeight={10}>
                   <text>
@@ -466,8 +468,8 @@ export function LoopDashboard(props: Props) {
                     {rt() && <><span style={{ fg: theme().textMuted }}> │ </span><span style={{ fg: phaseColor(rt()!.phase, theme()), bold: true }}>{phaseIcon(rt()!.phase)} {rt()!.phase}</span><span style={{ fg: theme().textMuted }}> turn {rt()!.turnCount}</span></>}
                     {"\n"}
                     <span style={{ fg: theme().text }}>{goal().objective.slice(0, 160)}</span>
-                    {goal().lastProgress && <><span style={{ fg: theme().success }}>{"\n"}✔ </span><span style={{ fg: theme().text }}>{goal().lastProgress!.summary.slice(0, 100)}</span><span style={{ fg: theme().textMuted }}> → {goal().lastProgress!.next?.slice(0, 60) || ""}</span></>}
-                    {goal().blocker && <><span style={{ fg: theme().error, bold: true }}>{"\n"}✖ blocked: </span><span style={{ fg: theme().error }}>{goal().blocker!.reason.slice(0, 140)}</span><span style={{ fg: theme().textMuted }}> — {goal().blocker!.needed.slice(0, 60)}</span></>}
+                    {lp() && <><span style={{ fg: theme().success }}>{"\n"}✔ </span><span style={{ fg: theme().text }}>{lp()!.summary.slice(0, 100)}</span><span style={{ fg: theme().textMuted }}> → {lp()!.next?.slice(0, 60) || ""}</span></>}
+                    {blk() && <><span style={{ fg: theme().error, bold: true }}>{"\n"}✖ blocked: </span><span style={{ fg: theme().error }}>{blk()!.reason.slice(0, 140)}</span><span style={{ fg: theme().textMuted }}> — {blk()!.needed.slice(0, 60)}</span></>}
                     {goal().config.artifactDir && <><span style={{ fg: theme().accent }}>{"\n"}📁 </span><span style={{ fg: theme().textMuted }}>{String(goal().config.artifactDir).replace(String(props.directory), ".")}</span></>}
                     {(goal().config.checks?.length ?? 0) > 0 ? <><span style={{ fg: theme().warning }}>{"\n"}▣ checks: </span><span style={{ fg: theme().textMuted }}>{(goal().config.checks as string[]).join(", ").slice(0, 100)}</span></> : null}
                     {rt()?.lastError && <><span style={{ fg: theme().error }}>{"\n"}⚠ </span><span style={{ fg: theme().error }}>{rt()!.lastError!.slice(0, 120)}</span></>}
