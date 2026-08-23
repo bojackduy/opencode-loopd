@@ -17,6 +17,7 @@ import {
 import type { LoopEvent } from "../domain/events"
 import type { GoalService } from "./goal-service"
 import type { LoopHost } from "../server/host-adapter"
+import { describeError } from "../infrastructure/server-log"
 
 const HANDLED_EVENT_TYPES = new Set([
   "session.idle",
@@ -289,7 +290,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     if (!runtime) return false
 
     const error = event.properties?.error
-    const message = error?.message || error?.toString() || "unknown error"
+    const message = describeError(error) || "unknown error"
 
     runtime.consecutiveFailures += 1
     runtime.lastError = message

@@ -425,6 +425,9 @@ function describeError(value) {
     return value.message;
   if (typeof value === "string")
     return value;
+  if (typeof value === "object" && value !== null && "message" in value) {
+    return String(value.message);
+  }
   try {
     return JSON.stringify(value, errorReplacer);
   } catch {
@@ -776,7 +779,6 @@ function createGoal(input) {
   const now = new Date().toISOString();
   return { ...input, tokensUsed: 0, timeUsedSeconds: 0, createdAt: now, updatedAt: now };
 }
-
 // src/application/loop-engine.ts
 var HANDLED_EVENT_TYPES = new Set([
   "session.idle",
@@ -989,7 +991,7 @@ function createLoopEngine(options) {
     if (!runtime)
       return false;
     const error = event.properties?.error;
-    const message = error?.message || error?.toString() || "unknown error";
+    const message = describeError(error) || "unknown error";
     runtime.consecutiveFailures += 1;
     runtime.lastError = message;
     runtime.updatedAt = new Date().toISOString();
@@ -1252,6 +1254,9 @@ function buildContinuationSteering(goal, runtime, context) {
       }
       if (v.artifactSummary)
         parts.push(`- artifacts: ${v.artifactSummary}`);
+      if (v.evaluatorRejectionCount && v.evaluatorRejectionCount > 0) {
+        parts.push(`- evaluator rejected ${v.evaluatorRejectionCount} time(s): previous completion claim had weak evidence \u2014 fix the issues and call complete_goal again with stronger evidence`);
+      }
     }
     parts.push(``, `## COMPLETION AUDIT \u2014 you ARE the evaluator`, `Before deciding the goal is achieved, treat completion as unproven:`, `1. Derive concrete requirements from the objective and any referenced files/plans/specs/issues. Preserve original scope; do not redefine success.`, `2. For _every_ explicit requirement, numbered item, named artifact, command, test, gate, invariant, deliverable \u2192 identify authoritative evidence: files, command output, test results, PR state, rendered artifacts, runtime behavior.`, `3. Judge each per-requirement: proves | contradicts | incomplete | too weak/indirect | missing \u2014 matching scope narrowly (narrow check \u2260 broad claim).`, `4. Treat tests/manifests/verifiers as evidence only after confirming they cover the relevant requirement. Treat uncertain/indirect as NOT achieved.`, `5. Only call complete_goal when _every_ requirement's current-state evidence proves it and no required work remains. If any requirement is missing/incomplete/weak \u2192 keep working, do not call complete_goal.`);
     if (context?.forceFinish) {
@@ -1436,6 +1441,9 @@ function createGoalService(host) {
       if (goal.config.checks?.length) {
         const c = `checks configured: ${goal.config.checks.length} \u2014 run them before claiming completion`;
         verification = { ...verification || {}, failedChecks: [c], checksPassed: undefined };
+      }
+      if (runtime.evaluatorRejectionCount && runtime.evaluatorRejectionCount > 0) {
+        verification = { ...verification || {}, evaluatorRejectionCount: runtime.evaluatorRejectionCount };
       }
     } catch {}
     const context = {
@@ -1943,12 +1951,25 @@ function goalTools(dir, goalService, hostSessionID) {
         if (goal.config.checks?.length) {
           const checkResults = await runCompletionChecks(goal.config.checks);
           if (!checkResults.passed) {
+            const runtime2 = state.runtimes.find((r) => r.goalID === goal.id);
+            if (runtime2) {
+              runtime2.evaluatorRejectionCount = (runtime2.evaluatorRejectionCount || 0) + 1;
+              if (runtime2.evaluatorRejectionCount >= 3) {
+                runtime2.forceFinishRequested = true;
+              } else {
+                runtime2.forceFinishRequested = false;
+                runtime2.turnCount = Math.max(0, runtime2.turnCount - 1);
+              }
+              runtime2.updatedAt = new Date().toISOString();
+              await writeState(dir, state);
+            }
             return {
-              title: "Checks failed",
+              title: "Completion rejected \u2014 keep working",
               output: JSON.stringify({
                 passed: false,
                 failedChecks: checkResults.failures,
-                message: "Completion checks failed. Fix issues and try again."
+                message: "Evaluator rejected completion. Fix the issues above and try again.",
+                rejectionCount: runtime2?.evaluatorRejectionCount || 0
               })
             };
           }

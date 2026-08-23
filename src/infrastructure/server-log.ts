@@ -22,6 +22,9 @@ export async function logServerEvent(
 export function describeError(value: unknown): string {
   if (value instanceof Error) return value.message
   if (typeof value === "string") return value
+  if (typeof value === "object" && value !== null && "message" in value) {
+    return String((value as { message: unknown }).message)
+  }
   try {
     return JSON.stringify(value, errorReplacer)
   } catch {

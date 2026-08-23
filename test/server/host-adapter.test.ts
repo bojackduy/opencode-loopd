@@ -20,6 +20,6 @@ describe("Real Host Adapter", () => {
     }, "/tmp/loopd-host-test")
 
     await expect(host.createWorker({ parentID: "missing", title: "loopd: test" }))
-      .rejects.toThrow('OpenCode session.create failed for parent "missing": {"name":"BadRequest","message":"parent session not found"}')
+      .rejects.toThrow('OpenCode session.create failed for parent "missing": parent session not found')
   })
 })
