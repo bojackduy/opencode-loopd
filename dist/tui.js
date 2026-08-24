@@ -1776,7 +1776,7 @@ var tui = async (api) => {
       run: open
     }],
     bindings: [{
-      key: "<leader>d",
+      key: "<leader>o",
       cmd: "opencode.loopd.dashboard",
       desc: "Open loop dashboard"
     }]

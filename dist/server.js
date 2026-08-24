@@ -2537,7 +2537,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}) {
               workspaceWrite: resolution.config.workspaceWrite,
               defaultsApplied: resolution.defaultsApplied,
               name: args.name,
-              message: `Goal "${args.name}" created and started in the background. Artifacts: ${goal.config.artifactDir}. Monitor with /loop (<leader>d).`
+              message: `Goal "${args.name}" created and started in the background. Artifacts: ${goal.config.artifactDir}. Monitor with /loop (<leader>o).`
             })
           };
         } catch (error) {
