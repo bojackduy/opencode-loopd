@@ -80,19 +80,24 @@ function migrate(state) {
     result.version = 3;
     result.runtimes = result.runtimes.map((rt) => {
       const oldTurnCount = rt.turnCount ?? 0;
-      return {
+      let normalizedPromptID = rt.activePromptMessageID;
+      if (typeof normalizedPromptID === "string" && normalizedPromptID && !normalizedPromptID.startsWith("msg-")) {
+        normalizedPromptID = `msg-${normalizedPromptID.replace(/^msg-?/, "")}`;
+      }
+      const migrated = {
         ...rt,
         budgetTurnCount: rt.budgetTurnCount ?? oldTurnCount,
         runCount: rt.runCount ?? oldTurnCount,
         runGeneration: rt.runGeneration ?? 0,
         freeRetryPending: rt.freeRetryPending ?? false,
         lastRejectionDetails: rt.lastRejectionDetails ?? undefined,
-        activePromptMessageID: rt.activePromptMessageID ?? undefined,
+        activePromptMessageID: normalizedPromptID ?? undefined,
         lastActivityAt: rt.lastActivityAt ?? undefined,
         idleCandidateAt: rt.idleCandidateAt ?? undefined,
-        activeToolCallIDs: rt.activeToolCallIDs ?? [],
-        turnCount: undefined
+        activeToolCallIDs: rt.activeToolCallIDs ?? []
       };
+      delete migrated.turnCount;
+      return migrated;
     });
   }
   if (result.version < 4) {

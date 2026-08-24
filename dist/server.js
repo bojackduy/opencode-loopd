@@ -258,19 +258,24 @@ function migrate(state) {
     result.version = 3;
     result.runtimes = result.runtimes.map((rt) => {
       const oldTurnCount = rt.turnCount ?? 0;
-      return {
+      let normalizedPromptID = rt.activePromptMessageID;
+      if (typeof normalizedPromptID === "string" && normalizedPromptID && !normalizedPromptID.startsWith("msg-")) {
+        normalizedPromptID = `msg-${normalizedPromptID.replace(/^msg-?/, "")}`;
+      }
+      const migrated = {
         ...rt,
         budgetTurnCount: rt.budgetTurnCount ?? oldTurnCount,
         runCount: rt.runCount ?? oldTurnCount,
         runGeneration: rt.runGeneration ?? 0,
         freeRetryPending: rt.freeRetryPending ?? false,
         lastRejectionDetails: rt.lastRejectionDetails ?? undefined,
-        activePromptMessageID: rt.activePromptMessageID ?? undefined,
+        activePromptMessageID: normalizedPromptID ?? undefined,
         lastActivityAt: rt.lastActivityAt ?? undefined,
         idleCandidateAt: rt.idleCandidateAt ?? undefined,
-        activeToolCallIDs: rt.activeToolCallIDs ?? [],
-        turnCount: undefined
+        activeToolCallIDs: rt.activeToolCallIDs ?? []
       };
+      delete migrated.turnCount;
+      return migrated;
     });
   }
   if (result.version < 4) {
@@ -1040,22 +1045,6 @@ function createLoopEngine(options) {
     });
     return matched;
   }
-  function checkTwoStageIdle(runtime) {
-    const now = Date.now();
-    if (!runtime.idleCandidateAt) {
-      runtime.idleCandidateAt = new Date(now).toISOString();
-      return false;
-    }
-    const elapsed = now - Date.parse(runtime.idleCandidateAt);
-    if (elapsed < confirmIdleMs)
-      return false;
-    if (runtime.lastActivityAt && runtime.lastActivityAt > runtime.idleCandidateAt) {
-      runtime.idleCandidateAt = undefined;
-      return false;
-    }
-    runtime.idleCandidateAt = undefined;
-    return true;
-  }
   async function handleSessionIdle(state, goal) {
     const goalID = goal.id;
     if (inflightContinuations.has(goalID))
@@ -1720,7 +1709,7 @@ function createGoalService(host) {
         goal.status = "blocked";
         goal.blocker = {
           reason: `Worker prompt delivery failed: ${detail}`,
-          needed: "Retry after the OpenCode worker/session API is available.",
+          needed: detail.includes("session.create") || detail.includes("session.promptAsync") ? "Retry after the OpenCode worker/session API is available. If the worker session is missing, retry or recreate the goal." : "Fix the prompt delivery error and retry the goal (or recreate it if the worker session is gone).",
           at: new Date().toISOString()
         };
       } else {
@@ -1732,6 +1721,11 @@ function createGoalService(host) {
       rt.updatedAt = new Date().toISOString();
       return s;
     });
+    const persistedNeeded = (() => {
+      const g = state.goals.find((item) => item.id === goalID);
+      return g?.blocker?.needed;
+    })();
+    const neededText = persistedNeeded || (detail.includes("session.create") || detail.includes("session.promptAsync") ? "Retry after the OpenCode worker/session API is available. If the worker session is missing, retry or recreate the goal." : "Fix the prompt delivery error and retry the goal (or recreate it if the worker session is gone).");
     await appendEvent(directory, {
       version: 1,
       eventID: randomUUID3(),
@@ -1750,7 +1744,7 @@ function createGoalService(host) {
         goalID,
         type: "goal.blocked",
         reason: `Worker prompt delivery failed: ${detail}`,
-        needed: "Retry after the OpenCode worker/session API is available.",
+        needed: neededText,
         timestamp: new Date().toISOString(),
         revision: state.revision
       });
@@ -2331,7 +2325,7 @@ function createRealHost(client, directory) {
         parts: [{ type: "text", text: prompt }]
       };
       if (messageID)
-        body.messageID = messageID.startsWith("msg") ? messageID : `msg-${messageID}`;
+        body.messageID = messageID.startsWith("msg-") ? messageID : `msg-${messageID.replace(/^msg-?/, "")}`;
       if (model)
         body.model = model;
       if (agent)
@@ -2651,9 +2645,12 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}) {
             if (runtime2) {
               runtime2.evaluatorRejectionCount = (runtime2.evaluatorRejectionCount || 0) + 1;
               const failureDetails = checkResults.failures.map((f) => {
+                const out = f.stdout ? `
+Stdout: ${f.stdout.slice(0, 500)}` : "";
+                const err = f.stderr ? `
+Stderr: ${f.stderr.slice(0, 500)}` : "";
                 return `Command: ${f.command}
-Exit code: ${f.exitCode}
-Stderr: ${f.stderr.slice(0, 500)}`;
+Exit code: ${f.exitCode}${out}${err}`;
               }).join(`
 
 `);
@@ -2676,6 +2673,7 @@ ${failureDetails}`;
                 checks: checkResults.failures.map((f) => ({
                   command: f.command,
                   exitCode: f.exitCode,
+                  stdout: f.stdout,
                   stderr: f.stderr
                 }))
               };
@@ -2915,7 +2913,8 @@ async function runCompletionChecks(checks, cwd) {
       failures.push({
         command: cmd,
         exitCode: error.code || 1,
-        stderr: (error.stderr || error.message || "unknown error").slice(0, 1000)
+        stdout: String(error.stdout || "").slice(0, 1000),
+        stderr: String(error.stderr || error.message || "unknown error").slice(0, 1000)
       });
     }
   }
