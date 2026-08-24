@@ -127,7 +127,7 @@ operate on Entity B (state.json) and only *indirectly* affect Entity A via
 
 ---
 
-## 4. Bugs Found During This Session (BUGS-NEW.md + new)
+## 4. Bugs Found During This Session (`bugs/bugs-new.md` + new)
 
 | Bug | Severity | Status |
 |-----|----------|--------|

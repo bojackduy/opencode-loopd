@@ -107,7 +107,7 @@ bridge open.** That is BUG-001.
 
 ---
 
-## 3. New Bugs (BUGS-NEW.md — all reproduced in live runs)
+## 3. New Bugs (`bugs/bugs-new.md` — all reproduced in live runs)
 
 | Bug | Severity | Status | Evidence |
 |-----|----------|--------|----------|
@@ -116,7 +116,7 @@ bridge open.** That is BUG-001.
 | BUG-003: activeRunID not cleared on idle | LOW | PARTIALLY FIXED | `releaseLease()` clears it now, but the stale `activeRunID` observed in live state came from paths where releaseLease wasn't called. |
 | BUG-004: Maintenance misses stale idle | MEDIUM | CONFIRMED | Maintenance polls `sessionStatus` but if it returns `unknown` or the lease is stale, it never calls handleSessionIdle. |
 
-### NEW (found during this session, not yet in BUGS-NEW.md)
+### NEW (found during this session, not yet in `bugs/bugs-new.md`)
 
 | Bug | Severity | Evidence |
 |-----|----------|----------|
@@ -157,6 +157,6 @@ bun test:        135 pass / 0 fail
 bun run typecheck: clean
 bun run build:    server.js 106 KB + TUI
 git status:       modified goal-service, loop-engine, plugin, 2 test files
-                  + untracked BUGS-NEW.md
+                  + untracked bugs/bugs-new.md (now docs/bugs/bugs-new.md)
 state.json:       all 6 goals complete (e2e, lock, activity, verification, idle, mutateState)
 ```
