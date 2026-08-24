@@ -89,7 +89,7 @@ export function createRealHost(client: any, directory: string): LoopHost {
       const body: any = {
         parts: [{ type: "text", text: prompt }],
       }
-      if (messageID) body.messageID = messageID
+      if (messageID) body.messageID = messageID.startsWith("msg") ? messageID : `msg-${messageID}`
       if (model) body.model = model
       if (agent) body.agent = agent
       const result = await withTimeout<any>(

@@ -228,7 +228,7 @@ export function LoopDashboard(props: Props) {
     if (key === "q") { prevent(evt); props.api.ui.dialog.clear(); return }
   })
 
-  const goals = () => state()?.goals.filter((g) => g.status !== "complete") || []
+  const goals = () => state()?.goals.filter((g) => showCompleted() || g.status !== "complete") || []
 
   async function executeCommand(cmd: string) {
     debugLog("executeCommand raw=", JSON.stringify(cmd))

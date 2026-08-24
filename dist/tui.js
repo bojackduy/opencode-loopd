@@ -690,7 +690,7 @@ function LoopDashboard(props) {
       return;
     }
   });
-  const goals = () => state()?.goals.filter((g) => g.status !== "complete") || [];
+  const goals = () => state()?.goals.filter((g) => showCompleted() || g.status !== "complete") || [];
   async function executeCommand(cmd) {
     debugLog("executeCommand raw=", JSON.stringify(cmd));
     const parsed = parseCommand(cmd);

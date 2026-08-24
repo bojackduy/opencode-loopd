@@ -2333,7 +2333,7 @@ function createRealHost(client, directory) {
         parts: [{ type: "text", text: prompt }]
       };
       if (messageID)
-        body.messageID = messageID;
+        body.messageID = messageID.startsWith("msg") ? messageID : `msg-${messageID}`;
       if (model)
         body.model = model;
       if (agent)
