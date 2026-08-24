@@ -1861,7 +1861,7 @@ function createGoalService(host) {
       if (rt) {
         Object.assign(rt, acquireLease(rt, g.config.timeoutMs || 300000));
         rt.activeRunID = randomUUID3();
-        rt.activePromptMessageID = randomUUID3();
+        rt.activePromptMessageID = `msg-${randomUUID3()}`;
         rt.runCount = 1;
         rt.budgetTurnCount = 1;
         rt.lastRunAt = new Date().toISOString();
@@ -1936,7 +1936,7 @@ function createGoalService(host) {
       const timeoutMs = g.config.timeoutMs || 300000;
       Object.assign(rt, acquireLease(rt, timeoutMs));
       rt.activeRunID = randomUUID3();
-      rt.activePromptMessageID = randomUUID3();
+      rt.activePromptMessageID = `msg-${randomUUID3()}`;
       rt.runCount += 1;
       if (rt.freeRetryPending) {
         rt.freeRetryPending = false;

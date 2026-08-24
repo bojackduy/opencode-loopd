@@ -274,7 +274,7 @@ export function createGoalService(host: LoopHost): GoalService {
       if (rt) {
         Object.assign(rt, acquireLease(rt, g.config.timeoutMs || 300_000))
         rt.activeRunID = randomUUID() as RunID
-        rt.activePromptMessageID = randomUUID()
+        rt.activePromptMessageID = `msg-${randomUUID()}`
         rt.runCount = 1
         rt.budgetTurnCount = 1
         rt.lastRunAt = new Date().toISOString()
@@ -356,7 +356,7 @@ export function createGoalService(host: LoopHost): GoalService {
       const timeoutMs = g.config.timeoutMs || 300_000
       Object.assign(rt, acquireLease(rt, timeoutMs))
       rt.activeRunID = randomUUID() as RunID
-      rt.activePromptMessageID = randomUUID()
+      rt.activePromptMessageID = `msg-${randomUUID()}`
       rt.runCount += 1
       if (rt.freeRetryPending) {
         rt.freeRetryPending = false
