@@ -20,6 +20,10 @@ import {
   type ControlResponse,
 } from "../infrastructure/state-repository"
 import type { GoalService } from "./goal-service"
+import {
+  resolveGoalCreationConfig,
+  type GoalCreationDefaults,
+} from "./goal-policy"
 import { describeError, logServerEvent, SERVER_LOG_FILE } from "../infrastructure/server-log"
 
 const MAX_LEDGER_SIZE = 100
@@ -29,6 +33,7 @@ export interface ControlWorkerOptions {
   directory: string
   goalService: GoalService
   pollIntervalMs?: number
+  defaults?: GoalCreationDefaults
   onRequest?: (request: ControlRequest) => void
   onResponse?: (response: ControlResponse) => void
 }
@@ -153,11 +158,26 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
           }
           break
         }
+        const resolution = resolveGoalCreationConfig({
+          directory,
+          objective: args.objective,
+          config: args.config,
+          defaults: options.defaults,
+        })
+        if (!resolution.ok) {
+          response = {
+            ...base,
+            ok: false,
+            message: resolution.message,
+            errorCode: resolution.errorCode,
+          }
+          break
+        }
         const { goal } = await goalSvc.start(directory, {
           name: args.name,
           objective: args.objective,
           ownerSessionID: args.ownerSessionID,
-          config: args.config,
+          config: resolution.config,
         })
         const state = await readState(directory)
         response = {

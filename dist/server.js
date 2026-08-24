@@ -39,6 +39,7 @@ function createRuntimeState(goalID) {
     budgetTurnCount: 0,
     noProgressCount: 0,
     progressDuringTurn: false,
+    unknownStatusCount: 0,
     runGeneration: 0,
     createdAt: now,
     updatedAt: now
@@ -57,6 +58,10 @@ function acquireLease(rt, timeoutMs) {
     runGeneration: rt.runGeneration + 1,
     lastActivityAt: new Date(now).toISOString(),
     idleCandidateAt: undefined,
+    idleCandidateGeneration: undefined,
+    activePromptObservedAt: undefined,
+    activeAssistantMessageID: undefined,
+    activeAssistantCompletedAt: undefined,
     activeToolCallIDs: [],
     updatedAt: new Date(now).toISOString()
   };
@@ -68,6 +73,11 @@ function releaseLease(rt) {
     leaseExpiresAt: undefined,
     turnStartedAt: undefined,
     activePromptMessageID: undefined,
+    activePromptObservedAt: undefined,
+    activeAssistantMessageID: undefined,
+    activeAssistantCompletedAt: undefined,
+    idleCandidateAt: undefined,
+    idleCandidateGeneration: undefined,
     activeToolCallIDs: [],
     updatedAt: new Date().toISOString()
   };
@@ -98,6 +108,7 @@ function recordActivity(rt) {
     ...rt,
     lastActivityAt: new Date().toISOString(),
     idleCandidateAt: undefined,
+    idleCandidateGeneration: undefined,
     updatedAt: new Date().toISOString()
   };
 }
@@ -109,6 +120,7 @@ function addToolCall(rt, callID) {
     activeToolCallIDs: Array.from(ids),
     lastActivityAt: new Date().toISOString(),
     idleCandidateAt: undefined,
+    idleCandidateGeneration: undefined,
     updatedAt: new Date().toISOString()
   };
 }
@@ -118,6 +130,8 @@ function removeToolCall(rt, callID) {
     ...rt,
     activeToolCallIDs: ids,
     lastActivityAt: new Date().toISOString(),
+    idleCandidateAt: undefined,
+    idleCandidateGeneration: undefined,
     updatedAt: new Date().toISOString()
   };
 }
@@ -133,7 +147,7 @@ import { randomUUID } from "crypto";
 import { promises as fs } from "fs";
 import path from "path";
 import os from "os";
-var CURRENT_VERSION = 4;
+var CURRENT_VERSION = 5;
 function emptyState() {
   return { version: CURRENT_VERSION, revision: 0, goals: [], runtimes: [], commandLedger: [] };
 }
@@ -265,6 +279,26 @@ function migrate(state) {
       ...rt,
       lastVerificationAttempt: rt.lastVerificationAttempt ?? undefined,
       recentVerificationAttempts: rt.recentVerificationAttempts ?? []
+    }));
+  }
+  if (result.version < 5) {
+    result.version = 5;
+    result.goals = result.goals.map((goal) => ({
+      ...goal,
+      config: {
+        ...goal.config,
+        workspaceWrite: goal.config?.workspaceWrite ?? true
+      }
+    }));
+    result.runtimes = result.runtimes.map((rt) => ({
+      ...rt,
+      activePromptObservedAt: rt.activePromptObservedAt ?? undefined,
+      activeAssistantMessageID: rt.activeAssistantMessageID ?? undefined,
+      activeAssistantCompletedAt: rt.activeAssistantCompletedAt ?? undefined,
+      idleCandidateGeneration: rt.idleCandidateGeneration ?? undefined,
+      unknownStatusCount: rt.unknownStatusCount ?? 0,
+      lastUnknownStatusAt: rt.lastUnknownStatusAt ?? undefined,
+      workerUnreachableNotifiedAt: rt.workerUnreachableNotifiedAt ?? undefined
     }));
   }
   return result;
@@ -421,6 +455,58 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// src/application/goal-policy.ts
+function resolveGoalCreationConfig(input) {
+  const requested = input.config || {};
+  const defaults = input.defaults || {};
+  const explicitAgent = cleanText(requested.agent);
+  const defaultAgent = cleanText(defaults.defaultAgent);
+  const agent = explicitAgent || defaultAgent;
+  if (!agent) {
+    return {
+      ok: false,
+      errorCode: "missing_agent",
+      message: "An agent is required. Pass agent explicitly or configure plugin option defaultAgent."
+    };
+  }
+  const workspaceWrite = requested.workspaceWrite ?? true;
+  const explicitChecks = cleanList(requested.checks);
+  const defaultChecks = workspaceWrite ? cleanList(defaults.defaultChecks) : [];
+  const checks = explicitChecks.length > 0 ? explicitChecks : defaultChecks;
+  if (workspaceWrite && checks.length === 0) {
+    return {
+      ok: false,
+      errorCode: "missing_checks",
+      message: "Workspace-writing goals require completion checks. Pass checks or configure plugin option defaultChecks."
+    };
+  }
+  return {
+    ok: true,
+    config: {
+      ...requested,
+      agent,
+      workspaceWrite,
+      checks: checks.length > 0 ? checks : undefined,
+      checkCwd: requested.checkCwd || (workspaceWrite ? input.directory : undefined)
+    },
+    defaultsApplied: {
+      agent: !explicitAgent && Boolean(defaultAgent),
+      checks: explicitChecks.length === 0 && defaultChecks.length > 0
+    }
+  };
+}
+function cleanText(value) {
+  if (typeof value !== "string")
+    return;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+function cleanList(value) {
+  if (!Array.isArray(value))
+    return [];
+  return value.map(cleanText).filter((item) => Boolean(item));
+}
+
 // src/infrastructure/server-log.ts
 import { appendFile } from "fs/promises";
 var SERVER_LOG_FILE = "/tmp/loopd-server.log";
@@ -563,11 +649,26 @@ function createControlWorker(options) {
           };
           break;
         }
+        const resolution = resolveGoalCreationConfig({
+          directory,
+          objective: args.objective,
+          config: args.config,
+          defaults: options.defaults
+        });
+        if (!resolution.ok) {
+          response = {
+            ...base,
+            ok: false,
+            message: resolution.message,
+            errorCode: resolution.errorCode
+          };
+          break;
+        }
         const { goal } = await goalSvc.start(directory, {
           name: args.name,
           objective: args.objective,
           ownerSessionID: args.ownerSessionID,
-          config: args.config
+          config: resolution.config
         });
         const state2 = await readState(directory);
         response = {
@@ -799,12 +900,15 @@ var HANDLED_EVENT_TYPES = new Set([
   "session.idle",
   "session.status",
   "session.error",
-  "session.compacted"
+  "session.compacted",
+  "message.updated",
+  "message.part.updated"
 ]);
 function createLoopEngine(options) {
   const { directory, host, goalService } = options;
   const maintenanceMs = options.pollIntervalMs ?? 30000;
   const confirmIdleMs = options.confirmIdleMs ?? CONFIRM_IDLE_DURATION_MS;
+  const unknownStatusThreshold = Math.max(1, options.unknownStatusThreshold ?? 3);
   let running = false;
   let maintenanceTimer;
   let knownWorkerSessions = new Set;
@@ -869,7 +973,7 @@ function createLoopEngine(options) {
     const type = event.type;
     if (!type || !HANDLED_EVENT_TYPES.has(type))
       return false;
-    const sessionID = event.properties?.sessionID;
+    const sessionID = eventSessionID(event);
     if (!sessionID)
       return false;
     await loadWorkerSessionsIfneeded();
@@ -884,7 +988,7 @@ function createLoopEngine(options) {
       return false;
     if (goal.workerSessionID)
       knownWorkerSessions.add(goal.workerSessionID);
-    if (isTerminal(goal.status) || goal.status === "paused")
+    if (goal.status !== "active")
       return false;
     switch (type) {
       case "session.idle":
@@ -895,9 +999,46 @@ function createLoopEngine(options) {
         return await handleSessionError(state, goal, event);
       case "session.compacted":
         return await handleSessionCompacted(state, goal);
+      case "message.updated":
+      case "message.part.updated":
+        return await handleMessageActivity(goal, event);
       default:
         return false;
     }
+  }
+  function eventSessionID(event) {
+    return event.properties?.sessionID || event.properties?.info?.sessionID || event.properties?.part?.sessionID;
+  }
+  async function handleMessageActivity(goal, event) {
+    let matched = false;
+    await mutateState(directory, `message-activity:${goal.id}`, async (s) => {
+      const rt = s.runtimes.find((r) => r.goalID === goal.id);
+      if (!rt || rt.phase !== "running" || !rt.activePromptMessageID)
+        return s;
+      if (event.type === "message.updated") {
+        const info = event.properties?.info;
+        if (info?.role === "user" && info.id === rt.activePromptMessageID) {
+          Object.assign(rt, recordActivity(rt));
+          rt.activePromptObservedAt = new Date().toISOString();
+          matched = true;
+        } else if (info?.role === "assistant" && info.parentID === rt.activePromptMessageID) {
+          Object.assign(rt, recordActivity(rt));
+          rt.activeAssistantMessageID = info.id;
+          if (info.time?.completed) {
+            rt.activeAssistantCompletedAt = new Date(info.time.completed).toISOString();
+          }
+          matched = true;
+        }
+      } else {
+        const part = event.properties?.part;
+        if (part?.messageID && part.messageID === rt.activeAssistantMessageID) {
+          Object.assign(rt, recordActivity(rt));
+          matched = true;
+        }
+      }
+      return s;
+    });
+    return matched;
   }
   function checkTwoStageIdle(runtime) {
     const now = Date.now();
@@ -920,7 +1061,8 @@ function createLoopEngine(options) {
     if (inflightContinuations.has(goalID))
       return false;
     let completedRunID;
-    const afterIdle = await mutateState(directory, `idle:${goalID}`, async (s) => {
+    let confirmation;
+    let afterIdle = await mutateState(directory, `idle:${goalID}`, async (s) => {
       const g = s.goals.find((item) => item.id === goalID);
       if (!g)
         return s;
@@ -929,9 +1071,17 @@ function createLoopEngine(options) {
       const rt = s.runtimes.find((r) => r.goalID === goalID);
       if (!rt)
         return s;
+      if (rt.phase !== "running")
+        return s;
+      if ((rt.activeToolCallIDs?.length ?? 0) > 0) {
+        rt.idleCandidateAt = undefined;
+        rt.idleCandidateGeneration = undefined;
+        return s;
+      }
       const now = Date.now();
-      if (!rt.idleCandidateAt) {
+      if (!rt.idleCandidateAt || rt.idleCandidateGeneration !== rt.runGeneration) {
         rt.idleCandidateAt = new Date(now).toISOString();
+        rt.idleCandidateGeneration = rt.runGeneration;
         return s;
       }
       const elapsed = now - Date.parse(rt.idleCandidateAt);
@@ -939,10 +1089,17 @@ function createLoopEngine(options) {
         return s;
       if (rt.lastActivityAt && rt.lastActivityAt > rt.idleCandidateAt) {
         rt.idleCandidateAt = undefined;
+        rt.idleCandidateGeneration = undefined;
         return s;
       }
-      rt.idleCandidateAt = undefined;
-      if (rt.phase === "running") {
+      if (rt.activePromptMessageID) {
+        confirmation = {
+          generation: rt.runGeneration,
+          promptMessageID: rt.activePromptMessageID,
+          candidateAt: rt.idleCandidateAt,
+          assistantCompleted: Boolean(rt.activeAssistantCompletedAt)
+        };
+      } else {
         completedRunID = rt.activeRunID;
         Object.assign(rt, releaseLease(rt));
         rt.activeRunID = undefined;
@@ -950,6 +1107,38 @@ function createLoopEngine(options) {
       }
       return s;
     });
+    if (confirmation) {
+      const candidate = confirmation;
+      const transcript = await inspectPromptTurn(goal.workerSessionID, candidate.promptMessageID);
+      if (!transcript.latestUserPrompt || !candidate.assistantCompleted && !transcript.assistantCompleted) {
+        return true;
+      }
+      afterIdle = await mutateState(directory, `idle.confirm:${goalID}`, async (s) => {
+        const g = s.goals.find((item) => item.id === goalID);
+        const rt = s.runtimes.find((r) => r.goalID === goalID);
+        if (!g || !rt || isTerminal(g.status) || g.status === "paused")
+          return s;
+        if (rt.phase !== "running")
+          return s;
+        if (rt.runGeneration !== candidate.generation)
+          return s;
+        if (rt.activePromptMessageID !== candidate.promptMessageID)
+          return s;
+        if (rt.idleCandidateGeneration !== candidate.generation)
+          return s;
+        if (rt.idleCandidateAt !== candidate.candidateAt)
+          return s;
+        if (rt.lastActivityAt && rt.lastActivityAt > candidate.candidateAt)
+          return s;
+        if ((rt.activeToolCallIDs?.length ?? 0) > 0)
+          return s;
+        completedRunID = rt.activeRunID;
+        Object.assign(rt, releaseLease(rt));
+        rt.activeRunID = undefined;
+        rt.lastWorkerStatus = "idle";
+        return s;
+      });
+    }
     if (completedRunID) {
       await appendEvent(directory, {
         version: 1,
@@ -961,11 +1150,7 @@ function createLoopEngine(options) {
         revision: afterIdle.revision
       });
     } else {
-      const checkState = await readState(directory);
-      const checkRt = checkState.runtimes.find((r) => r.goalID === goalID);
-      if (!checkRt || checkRt.phase !== "idle" && checkRt.idleCandidateAt) {
-        return true;
-      }
+      return true;
     }
     const freshState = await readState(directory);
     const freshGoal = freshState.goals.find((g) => g.id === goalID);
@@ -1057,6 +1242,26 @@ function createLoopEngine(options) {
     await continueGoal(goalID);
     return true;
   }
+  async function inspectPromptTurn(workerSessionID, promptMessageID) {
+    const noMatch = { latestUserPrompt: false, assistantCompleted: false };
+    if (!workerSessionID)
+      return noMatch;
+    let messages;
+    try {
+      messages = await host.readMessages(workerSessionID, 50);
+    } catch {
+      return noMatch;
+    }
+    const users = messages.filter((message) => message.role === "user");
+    if (users.length === 0)
+      return noMatch;
+    const allTimestamped = users.every((message) => message.timestamp && Number.isFinite(Date.parse(message.timestamp)));
+    const ordered = allTimestamped ? [...users].sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp)) : users;
+    return {
+      latestUserPrompt: ordered.at(-1)?.messageID === promptMessageID,
+      assistantCompleted: messages.some((message) => message.role === "assistant" && message.parentMessageID === promptMessageID && Boolean(message.completedAt))
+    };
+  }
   async function handleSessionStatus(state, goal, event) {
     const runtime = state.runtimes.find((r) => r.goalID === goal.id);
     if (!runtime)
@@ -1071,6 +1276,9 @@ function createLoopEngine(options) {
       const rt = s.runtimes.find((r) => r.goalID === goal.id);
       if (!rt)
         return s;
+      if (statusType === "busy" || statusType === "retry") {
+        Object.assign(rt, recordActivity(rt));
+      }
       rt.lastWorkerStatus = statusType;
       rt.updatedAt = new Date().toISOString();
       return s;
@@ -1241,11 +1449,11 @@ function createLoopEngine(options) {
     if (knownWorkerSessions.size === 0)
       return;
     const state = await readState(directory);
-    const hasActiveGoals = state.goals.some((g) => !isTerminal(g.status) && g.status !== "paused");
+    const hasActiveGoals = state.goals.some((g) => g.status === "active");
     if (!hasActiveGoals)
       return;
     for (const goal of state.goals) {
-      if (isTerminal(goal.status) || goal.status === "paused")
+      if (goal.status !== "active")
         continue;
       const runtime = state.runtimes.find((r) => r.goalID === goal.id);
       if (!runtime)
@@ -1264,9 +1472,64 @@ function createLoopEngine(options) {
         }
       }
       if ((runtime.phase === "running" || runtime.phase === "idle") && goal.workerSessionID) {
+        if (runtime.phase === "idle" && runtime.activeRunID) {
+          await mutateState(directory, `maintenance.clear-stale-run:${goal.id}`, async (s) => {
+            const rt = s.runtimes.find((r) => r.goalID === goal.id);
+            if (rt?.phase === "idle" && rt.activeRunID) {
+              Object.assign(rt, releaseLease(rt));
+              rt.activeRunID = undefined;
+              rt.lastWorkerStatus = "idle";
+            }
+            return s;
+          });
+          await logServerEvent(directory, "maintenance.stale-run-cleared", { goalID: goal.id });
+        }
         const status = await host.sessionStatus(goal.workerSessionID);
+        if (status === "unknown") {
+          let shouldNotify = false;
+          const unknownState = await mutateState(directory, `maintenance.unknown-status:${goal.id}`, async (s) => {
+            const rt = s.runtimes.find((r) => r.goalID === goal.id);
+            if (!rt)
+              return s;
+            rt.unknownStatusCount = Math.min(unknownStatusThreshold, (rt.unknownStatusCount ?? 0) + 1);
+            rt.lastUnknownStatusAt = new Date().toISOString();
+            if (rt.unknownStatusCount >= unknownStatusThreshold && !rt.workerUnreachableNotifiedAt) {
+              rt.workerUnreachableNotifiedAt = new Date().toISOString();
+              shouldNotify = true;
+            }
+            rt.updatedAt = new Date().toISOString();
+            return s;
+          });
+          const unknownRuntime = unknownState.runtimes.find((r) => r.goalID === goal.id);
+          if (shouldNotify) {
+            await logServerEvent(directory, "maintenance.worker-unreachable", {
+              goalID: goal.id,
+              workerSessionID: goal.workerSessionID,
+              count: unknownRuntime?.unknownStatusCount
+            });
+            await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" worker is unreachable after ${unknownRuntime?.unknownStatusCount ?? unknownStatusThreshold} status checks. The goal remains active; use inspect_background_goal, nudge_goal, pause_goal, or resume_goal to recover it.`);
+          }
+          continue;
+        }
+        if ((runtime.unknownStatusCount ?? 0) > 0 || runtime.workerUnreachableNotifiedAt) {
+          await mutateState(directory, `maintenance.status-recovered:${goal.id}`, async (s) => {
+            const rt = s.runtimes.find((r) => r.goalID === goal.id);
+            if (rt) {
+              rt.unknownStatusCount = 0;
+              rt.lastUnknownStatusAt = undefined;
+              rt.workerUnreachableNotifiedAt = undefined;
+              rt.updatedAt = new Date().toISOString();
+            }
+            return s;
+          });
+          await logServerEvent(directory, "maintenance.worker-recovered", { goalID: goal.id });
+        }
         if (status === "idle") {
-          await handleSessionIdle(state, goal);
+          if (runtime.phase === "idle") {
+            await continueGoal(goal.id);
+          } else {
+            await handleSessionIdle(state, goal);
+          }
           continue;
         }
       }
@@ -1300,6 +1563,7 @@ function createWorkerManager(host) {
       const result = await host.promptWorker({
         sessionID: worker.workerSessionID,
         prompt,
+        messageID: runtime.activePromptMessageID,
         agent: goal.config.agent
       });
       return result;
@@ -1409,8 +1673,119 @@ function buildContinuationSteering(goal, runtime, context) {
 function createGoalService(host) {
   const workers = createWorkerManager(host);
   const sessions = new Map;
+  const goalOperations = new Map;
+  async function withGoalOperation(goalID, fn) {
+    const previous = goalOperations.get(goalID) || Promise.resolve();
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const current = previous.catch(() => {}).then(() => gate);
+    goalOperations.set(goalID, current);
+    await previous.catch(() => {});
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (goalOperations.get(goalID) === current)
+        goalOperations.delete(goalID);
+    }
+  }
+  function assertWorkspaceWriteAvailable(state, goal) {
+    if (!goal.config.workspaceWrite)
+      return;
+    const activeWriter = state.goals.find((item) => item.id !== goal.id && item.status === "active" && item.config.workspaceWrite);
+    if (activeWriter) {
+      throw new Error(`Workspace-writing goal "${activeWriter.name}" (${activeWriter.id}) is already active. ` + "Pause, block, complete, or clear it before activating another workspace-writing goal.");
+    }
+  }
+  async function recordPromptFailure(directory, goalID, error, blockImmediately = false) {
+    const detail = describeError(error);
+    let runID = "unknown";
+    let failureCount = 0;
+    let blocked = false;
+    const state = await mutateState(directory, `turn.prompt-failed:${goalID}`, async (s) => {
+      const goal = s.goals.find((item) => item.id === goalID);
+      const rt = s.runtimes.find((item) => item.goalID === goalID);
+      if (!goal || !rt)
+        return s;
+      runID = rt.activeRunID || "unknown";
+      failureCount = rt.consecutiveFailures + 1;
+      Object.assign(rt, releaseLease(rt));
+      rt.activeRunID = undefined;
+      rt.consecutiveFailures = failureCount;
+      rt.lastError = detail;
+      blocked = blockImmediately || failureCount >= (goal.config.maxFailures || 5);
+      if (blocked) {
+        goal.status = "blocked";
+        goal.blocker = {
+          reason: `Worker prompt delivery failed: ${detail}`,
+          needed: "Retry after the OpenCode worker/session API is available.",
+          at: new Date().toISOString()
+        };
+      } else {
+        const backoffMs = Math.min(30000, 1000 * Math.pow(2, failureCount));
+        rt.phase = "waiting_retry";
+        rt.retryAfter = new Date(Date.now() + backoffMs).toISOString();
+      }
+      goal.updatedAt = new Date().toISOString();
+      rt.updatedAt = new Date().toISOString();
+      return s;
+    });
+    await appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID3(),
+      goalID,
+      type: "run.failed",
+      runID,
+      error: detail,
+      consecutiveFailures: failureCount,
+      timestamp: new Date().toISOString(),
+      revision: state.revision
+    });
+    if (blocked) {
+      await appendEvent(directory, {
+        version: 1,
+        eventID: randomUUID3(),
+        goalID,
+        type: "goal.blocked",
+        reason: `Worker prompt delivery failed: ${detail}`,
+        needed: "Retry after the OpenCode worker/session API is available.",
+        timestamp: new Date().toISOString(),
+        revision: state.revision
+      });
+    }
+  }
+  async function ensureWorkerSession(directory, goal) {
+    let session = sessions.get(goal.id);
+    if (!session && goal.workerSessionID) {
+      const status = await host.sessionStatus(goal.workerSessionID);
+      if (status !== "unknown") {
+        session = {
+          goalID: goal.id,
+          workerSessionID: goal.workerSessionID,
+          startedAt: goal.createdAt
+        };
+        sessions.set(goal.id, session);
+      }
+    }
+    if (session)
+      return session;
+    session = await workers.createWorker(goal);
+    sessions.set(goal.id, session);
+    await mutateState(directory, `goal.set-worker:${goal.id}`, async (s) => {
+      const persisted = s.goals.find((item) => item.id === goal.id);
+      if (persisted)
+        persisted.workerSessionID = session.workerSessionID;
+      return s;
+    });
+    return session;
+  }
   async function start(directory, input) {
     const id = randomUUID3();
+    return withGoalOperation(id, () => startUnlocked(directory, input, id));
+  }
+  async function startUnlocked(directory, input, id) {
     const goal = createGoal({
       id,
       name: input.name,
@@ -1419,6 +1794,7 @@ function createGoalService(host) {
       ownerSessionID: input.ownerSessionID,
       config: {
         maxTurns: 50,
+        workspaceWrite: true,
         ...input.config
       }
     });
@@ -1428,6 +1804,7 @@ function createGoalService(host) {
       goal.config.progressFile = path2.join(artifactDir, "progress.md");
     await ensureGoalArtifactDir(directory, id);
     const state1 = await mutateState(directory, `goal.create:${id}`, async (state) => {
+      assertWorkspaceWriteAvailable(state, goal);
       state.goals.push(goal);
       state.runtimes.push(createRuntimeState(id));
       const runtime2 = state.runtimes.find((r) => r.goalID === id);
@@ -1484,6 +1861,7 @@ function createGoalService(host) {
       if (rt) {
         Object.assign(rt, acquireLease(rt, g.config.timeoutMs || 300000));
         rt.activeRunID = randomUUID3();
+        rt.activePromptMessageID = randomUUID3();
         rt.runCount = 1;
         rt.budgetTurnCount = 1;
         rt.lastRunAt = new Date().toISOString();
@@ -1513,22 +1891,19 @@ function createGoalService(host) {
         timestamp: new Date().toISOString(),
         revision: state2.revision
       });
-      const result = await workers.continueWorker(worker, goal, runtime);
-      if (result.messageID) {
-        await mutateState(directory, `goal.message-id:${id}`, async (state) => {
-          const rt = state.runtimes.find((item) => item.goalID === id);
-          if (rt)
-            rt.activePromptMessageID = result.messageID;
-          return state;
-        });
+      try {
+        await workers.continueWorker(worker, goal, runtime);
+      } catch (error) {
+        await recordPromptFailure(directory, id, error, true);
+        throw error;
       }
     }
     return { goal, worker };
   }
-  async function continueTurn(directory, goalID, opts) {
+  async function continueTurnUnlocked(directory, goalID, opts) {
     const preState = await readState(directory);
     const goal = preState.goals.find((g) => g.id === goalID);
-    if (!goal || isTerminal(goal.status))
+    if (!goal || goal.status !== "active")
       return;
     const runtime = preState.runtimes.find((r) => r.goalID === goalID);
     if (!runtime)
@@ -1548,16 +1923,20 @@ function createGoalService(host) {
       return;
     if (!opts?.force && !await workers.isIdle(session.workerSessionID))
       return;
+    let acquired = false;
     const state = await mutateState(directory, `turn.acquire:${goalID}`, async (s) => {
       const g = s.goals.find((item) => item.id === goalID);
-      if (!g || isTerminal(g.status))
+      if (!g || g.status !== "active")
         return s;
       const rt = s.runtimes.find((item) => item.goalID === goalID);
       if (!rt)
         return s;
+      if (rt.phase === "running" && leaseIsValid(rt))
+        return s;
       const timeoutMs = g.config.timeoutMs || 300000;
       Object.assign(rt, acquireLease(rt, timeoutMs));
       rt.activeRunID = randomUUID3();
+      rt.activePromptMessageID = randomUUID3();
       rt.runCount += 1;
       if (rt.freeRetryPending) {
         rt.freeRetryPending = false;
@@ -1565,11 +1944,12 @@ function createGoalService(host) {
         rt.budgetTurnCount += 1;
       }
       rt.lastRunAt = new Date().toISOString();
+      acquired = true;
       return s;
     });
     const freshGoal = state.goals.find((g) => g.id === goalID);
     const freshRuntime = state.runtimes.find((r) => r.goalID === goalID);
-    if (!freshGoal || !freshRuntime)
+    if (!acquired || !freshGoal || freshGoal.status !== "active" || !freshRuntime?.activeRunID)
       return;
     await appendEvent(directory, {
       version: 1,
@@ -1623,9 +2003,14 @@ function createGoalService(host) {
       forceFinish: opts?.forceFinish || undefined,
       verification
     };
-    await workers.continueWorker(session, freshGoal, freshRuntime, context);
+    try {
+      await workers.continueWorker(session, freshGoal, freshRuntime, context);
+    } catch (error) {
+      await recordPromptFailure(directory, goalID, error);
+      throw error;
+    }
   }
-  async function pause(directory, goalID) {
+  async function pauseUnlocked(directory, goalID) {
     const preState = await readState(directory);
     const goal = preState.goals.find((g) => g.id === goalID);
     if (!goal)
@@ -1663,41 +2048,33 @@ function createGoalService(host) {
       revision: state.revision
     });
   }
-  async function resume(directory, goalID) {
+  async function resumeUnlocked(directory, goalID) {
+    let resumed = false;
     const state = await mutateState(directory, `goal.resume:${goalID}`, async (state2) => {
       const goal2 = state2.goals.find((g) => g.id === goalID);
       if (!goal2)
         return state2;
       if (!canTransition(goal2.status, "active", "user"))
         return state2;
+      assertWorkspaceWriteAvailable(state2, goal2);
       goal2.status = "active";
       goal2.updatedAt = new Date().toISOString();
+      resumed = true;
       return state2;
     });
     const goal = state.goals.find((g) => g.id === goalID);
-    if (!goal)
+    if (!goal || !resumed)
       return;
-    let session = sessions.get(goalID);
-    if (!session && goal.workerSessionID) {
-      const status = await host.sessionStatus(goal.workerSessionID);
-      if (status === "idle" || status === "busy") {
-        session = {
-          goalID: goal.id,
-          workerSessionID: goal.workerSessionID,
-          startedAt: goal.createdAt
-        };
-        sessions.set(goalID, session);
-      }
-    }
-    if (!session) {
-      session = await workers.createWorker(goal);
-      sessions.set(goalID, session);
-      await mutateState(directory, `goal.set-worker:${goalID}`, async (s) => {
-        const g = s.goals.find((x) => x.id === goalID);
-        if (g)
-          g.workerSessionID = session.workerSessionID;
+    try {
+      await ensureWorkerSession(directory, goal);
+    } catch (error) {
+      await mutateState(directory, `goal.resume-rollback:${goalID}`, async (s) => {
+        const g = s.goals.find((item) => item.id === goalID);
+        if (g?.status === "active")
+          g.status = "paused";
         return s;
       });
+      throw error;
     }
     await appendEvent(directory, {
       version: 1,
@@ -1709,15 +2086,18 @@ function createGoalService(host) {
       timestamp: new Date().toISOString(),
       revision: state.revision
     });
-    await continueTurn(directory, goalID);
+    await continueTurnUnlocked(directory, goalID);
   }
-  async function retry(directory, goalID) {
+  async function retryUnlocked(directory, goalID) {
+    let retried = false;
     const state = await mutateState(directory, `goal.retry:${goalID}`, async (state2) => {
       const goal2 = state2.goals.find((g) => g.id === goalID);
       if (!goal2 || goal2.status !== "blocked")
         return state2;
+      assertWorkspaceWriteAvailable(state2, goal2);
       goal2.status = "active";
       goal2.updatedAt = new Date().toISOString();
+      retried = true;
       const runtime = state2.runtimes.find((r) => r.goalID === goalID);
       if (runtime) {
         runtime.consecutiveFailures = 0;
@@ -1731,8 +2111,19 @@ function createGoalService(host) {
       return state2;
     });
     const goal = state.goals.find((g) => g.id === goalID);
-    if (!goal || goal.status !== "active")
+    if (!goal || !retried)
       return;
+    try {
+      await ensureWorkerSession(directory, goal);
+    } catch (error) {
+      await mutateState(directory, `goal.retry-rollback:${goalID}`, async (s) => {
+        const g = s.goals.find((item) => item.id === goalID);
+        if (g?.status === "active")
+          g.status = "blocked";
+        return s;
+      });
+      throw error;
+    }
     await appendEvent(directory, {
       version: 1,
       eventID: randomUUID3(),
@@ -1743,9 +2134,9 @@ function createGoalService(host) {
       timestamp: new Date().toISOString(),
       revision: state.revision
     });
-    await continueTurn(directory, goalID);
+    await continueTurnUnlocked(directory, goalID);
   }
-  async function clear(directory, goalID) {
+  async function clearUnlocked(directory, goalID) {
     const state = await readState(directory);
     const goal = state.goals.find((g) => g.id === goalID);
     if (!goal)
@@ -1849,15 +2240,14 @@ function createGoalService(host) {
       }
     }
   }
-  async function nudge(directory, goalID) {
+  async function nudgeUnlocked(directory, goalID) {
     const preState = await readState(directory);
     const goal = preState.goals.find((g) => g.id === goalID);
     if (!goal)
       return { ok: false, message: "Goal not found." };
-    if (isTerminal(goal.status))
-      return { ok: false, message: `Goal is ${goal.status}; cannot nudge.` };
-    if (goal.status === "paused")
-      return { ok: false, message: "Goal is paused. Use resume_goal first." };
+    if (goal.status !== "active") {
+      return { ok: false, message: `Goal is ${goal.status}; resume or retry it before nudging.` };
+    }
     const cleared = await mutateState(directory, `goal.nudge:${goalID}`, async (s) => {
       const rt = s.runtimes.find((r) => r.goalID === goalID);
       if (!rt)
@@ -1874,8 +2264,26 @@ function createGoalService(host) {
     if (!freshGoal || !freshGoal.workerSessionID) {
       return { ok: false, message: "Goal has no worker session. Use resume_goal or retry_goal." };
     }
-    await continueTurn(directory, goalID, { force: true });
+    await continueTurnUnlocked(directory, goalID, { force: true });
     return { ok: true, message: `Re-prompted worker for "${freshGoal.name}".` };
+  }
+  function continueTurn(directory, goalID, opts) {
+    return withGoalOperation(goalID, () => continueTurnUnlocked(directory, goalID, opts));
+  }
+  function pause(directory, goalID) {
+    return withGoalOperation(goalID, () => pauseUnlocked(directory, goalID));
+  }
+  function resume(directory, goalID) {
+    return withGoalOperation(goalID, () => resumeUnlocked(directory, goalID));
+  }
+  function retry(directory, goalID) {
+    return withGoalOperation(goalID, () => retryUnlocked(directory, goalID));
+  }
+  function clear(directory, goalID) {
+    return withGoalOperation(goalID, () => clearUnlocked(directory, goalID));
+  }
+  function nudge(directory, goalID) {
+    return withGoalOperation(goalID, () => nudgeUnlocked(directory, goalID));
   }
   return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile };
 }
@@ -1977,8 +2385,10 @@ function createRealHost(client, directory) {
           role: m.info?.role || "assistant",
           content: m.parts?.filter((p) => p.type === "text").map((p) => p.text).join(`
 `) || "",
-          timestamp: m.info?.time?.completed ? new Date(m.info.time.completed).toISOString() : undefined,
-          messageID: m.id
+          timestamp: m.info?.time?.completed || m.info?.time?.created ? new Date(m.info.time.completed || m.info.time.created).toISOString() : undefined,
+          messageID: m.info?.id || m.id,
+          parentMessageID: m.info?.parentID,
+          completedAt: m.info?.time?.completed ? new Date(m.info.time.completed).toISOString() : undefined
         }));
       } catch {
         return [];
@@ -2042,15 +2452,17 @@ function appendVerificationAttempt(recent, attempt) {
 import { exec as execChild } from "child_process";
 import { promisify } from "util";
 var execAsync = promisify(execChild);
-function goalTools(dir, goalService, hostSessionID) {
+function goalTools(dir, goalService, hostSessionID, defaults = {}) {
   return {
     loopd_create_goal: tool({
-      description: "Create a new background loop goal. The engine spawns a dedicated worker session " + "that does the work autonomously \u2014 it never runs in this chat. " + "Call this after clarifying the goal name, objective, and any config with the user. " + "The goal immediately starts in the background; the user can monitor it via /loop. " + "IMPORTANT: Always specify the 'agent' parameter to control which model runs the worker.",
+      description: "Create a new background loop goal. The engine spawns a dedicated worker session " + "that does the work autonomously \u2014 it never runs in this chat. " + "Call this after clarifying the goal name, objective, and any config with the user. " + "The goal immediately starts in the background; the user can monitor it via /loop. " + "Workspace-writing goals are serialized and require completion checks. " + "Specify 'agent', or configure the plugin's defaultAgent option.",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
-        agent: tool.schema.string().describe('REQUIRED: Agent to run the worker as (e.g. "smart-agent", "sloppy-agent"). Check opencode.jsonc for available agents.'),
+        agent: tool.schema.string().optional().describe("Agent to run the worker as. Required unless the plugin has defaultAgent configured."),
         checks: tool.schema.array(tool.schema.string()).optional().describe('Shell commands that must pass for completion to be accepted. E.g. ["npm test"].'),
+        checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
+        workspaceWrite: tool.schema.boolean().optional().describe("Whether this goal edits the shared project workspace. Defaults to true; explicitly set false for artifact-only/read-only work."),
         progressFile: tool.schema.string().optional().describe("Markdown file the worker reads/writes as its transaction state."),
         maxTurns: tool.schema.number().optional().describe("Max turns before auto-block."),
         maxNoProgress: tool.schema.number().optional().describe("Block after N turns without progress."),
@@ -2072,8 +2484,14 @@ function goalTools(dir, goalService, hostSessionID) {
         const config = {
           maxTurns: 50
         };
+        if (args.agent)
+          config.agent = args.agent;
         if (args.checks)
           config.checks = args.checks;
+        if (args.checkCwd)
+          config.checkCwd = args.checkCwd;
+        if (args.workspaceWrite !== undefined)
+          config.workspaceWrite = args.workspaceWrite;
         if (args.progressFile)
           config.progressFile = args.progressFile;
         if (args.maxTurns !== undefined)
@@ -2086,14 +2504,28 @@ function goalTools(dir, goalService, hostSessionID) {
           config.compactEvery = args.compactEvery;
         if (args.timeoutMs !== undefined)
           config.timeoutMs = args.timeoutMs;
-        if (args.agent !== undefined)
-          config.agent = args.agent;
+        const resolution = resolveGoalCreationConfig({
+          directory: dir,
+          objective: args.objective,
+          config,
+          defaults
+        });
+        if (!resolution.ok) {
+          return {
+            title: "Goal not created",
+            output: JSON.stringify({
+              ok: false,
+              message: resolution.message,
+              errorCode: resolution.errorCode
+            })
+          };
+        }
         try {
           const { goal, worker } = await goalService.start(dir, {
             name: args.name,
             objective: args.objective,
             ownerSessionID: sessionID,
-            config
+            config: resolution.config
           });
           return {
             title: "Goal created",
@@ -2102,6 +2534,10 @@ function goalTools(dir, goalService, hostSessionID) {
               goalID: goal.id,
               workerSessionID: worker.workerSessionID,
               artifactDir: goal.config.artifactDir,
+              agent: resolution.config.agent,
+              checks: resolution.config.checks || [],
+              workspaceWrite: resolution.config.workspaceWrite,
+              defaultsApplied: resolution.defaultsApplied,
               name: args.name,
               message: `Goal "${args.name}" created and started in the background. Artifacts: ${goal.config.artifactDir}. Monitor with /loop (<leader>d).`
             })
@@ -2210,8 +2646,7 @@ function goalTools(dir, goalService, hostSessionID) {
           return { title: "Invalid transition", output: `Cannot complete goal in ${goal.status} state.` };
         }
         if (goal.config.checks?.length) {
-          const checkCwd = goal.config.checkCwd;
-          const cwd = checkCwd || goal.config.artifactDir || dir;
+          const cwd = goal.config.checkCwd || goal.config.artifactDir || dir;
           const checkResults = await runCompletionChecks(goal.config.checks, cwd);
           if (!checkResults.passed) {
             const runtime2 = state.runtimes.find((r) => r.goalID === goal.id);
@@ -2313,8 +2748,7 @@ ${failureDetails.slice(0, 500)}`,
           runtime.phase = "idle";
           runtime.lastError = undefined;
           const attemptID = randomUUID4();
-          const checkCwd = goal.config.checkCwd;
-          const cwd = checkCwd || goal.config.artifactDir || dir;
+          const cwd = goal.config.checkCwd || goal.config.artifactDir || dir;
           const checks = (goal.config.checks || []).map((cmd) => ({
             command: cmd,
             exitCode: 0
@@ -2430,6 +2864,9 @@ function formatGoalStructured(goal, runtime) {
       progressFile: goal.config.progressFile,
       includeFiles: goal.config.includeFiles,
       checks: goal.config.checks,
+      checkCwd: goal.config.checkCwd,
+      workspaceWrite: goal.config.workspaceWrite,
+      agent: goal.config.agent,
       maxTurns: goal.config.maxTurns,
       maxNoProgress: goal.config.maxNoProgress,
       maxFailures: goal.config.maxFailures,
@@ -2458,6 +2895,13 @@ function formatGoalStructured(goal, runtime) {
       lastRunAt: runtime.lastRunAt,
       lastCompactAt: runtime.lastCompactAt,
       lastActivityAt: runtime.lastActivityAt,
+      activePromptMessageID: runtime.activePromptMessageID,
+      activeAssistantMessageID: runtime.activeAssistantMessageID,
+      activeAssistantCompletedAt: runtime.activeAssistantCompletedAt,
+      idleCandidateGeneration: runtime.idleCandidateGeneration,
+      unknownStatusCount: runtime.unknownStatusCount,
+      lastUnknownStatusAt: runtime.lastUnknownStatusAt,
+      workerUnreachableNotifiedAt: runtime.workerUnreachableNotifiedAt,
       lastVerificationAttempt: runtime.lastVerificationAttempt,
       recentVerificationAttempts: runtime.recentVerificationAttempts
     };
@@ -2561,7 +3005,10 @@ function ownerTools(options) {
               maxFailures: goal.config.maxFailures,
               timeoutMs: goal.config.timeoutMs,
               progressFile: goal.config.progressFile,
-              checks: goal.config.checks
+              checks: goal.config.checks,
+              checkCwd: goal.config.checkCwd,
+              workspaceWrite: goal.config.workspaceWrite,
+              agent: goal.config.agent
             },
             lastProgress: goal.lastProgress,
             completionEvidence: goal.completionEvidence,
@@ -2831,13 +3278,15 @@ function ownerTools(options) {
 }
 // src/server/plugin.ts
 var PLUGIN_ID = "opencode-loopd.server";
-var server = async ({ client, directory }) => {
+var server = async ({ client, directory }, pluginOptions) => {
+  const defaults = parsePluginDefaults(pluginOptions);
   const host = createRealHost(client, directory);
   const goalService = createGoalService(host);
   const worker = createControlWorker({
     directory,
     goalService,
-    pollIntervalMs: 1000
+    pollIntervalMs: 1000,
+    defaults
   });
   const engine = createLoopEngine({
     directory,
@@ -2871,7 +3320,7 @@ var server = async ({ client, directory }) => {
       if (type?.startsWith("session."))
         reconcileInBackground();
     },
-    tool: { ...goalTools(directory, goalService), ...ownerTools({ directory, host, goalService }) },
+    tool: { ...goalTools(directory, goalService, undefined, defaults), ...ownerTools({ directory, host, goalService }) },
     "tool.execute.before": async (input, _output) => {
       const activeWorkers = goalService.getActiveWorkers();
       let matchedGoalID;
@@ -2954,6 +3403,14 @@ var server = async ({ client, directory }) => {
     }
   };
 };
+function parsePluginDefaults(options) {
+  const agent = typeof options?.defaultAgent === "string" ? options.defaultAgent.trim() : "";
+  const checks = Array.isArray(options?.defaultChecks) ? options.defaultChecks.filter((item) => typeof item === "string").map((item) => item.trim()).filter(Boolean) : [];
+  return {
+    defaultAgent: agent || undefined,
+    defaultChecks: checks.length > 0 ? checks : undefined
+  };
+}
 var plugin_default = {
   id: PLUGIN_ID,
   server

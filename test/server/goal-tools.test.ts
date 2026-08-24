@@ -6,6 +6,7 @@ import { createGoalService } from "../../src/application/goal-service"
 import { createFakeHost } from "../../src/server/host-adapter"
 import { readState } from "../../src/infrastructure/state-repository"
 import type { GoalID } from "../../src/domain/goal"
+import { goalTools } from "../../src/server/goal-tools"
 
 function tmpDir(): string {
   return path.join(os.tmpdir(), `loopd-tools-test-${crypto.randomUUID()}`)
@@ -48,6 +49,67 @@ describe("Goal Tools", () => {
       })
 
       expect(goal.ownerSessionID).toBe("owner-1")
+    })
+
+    it("requires an explicit or configured default agent", async () => {
+      const create = goalTools(dir, goalService, "owner-1").loopd_create_goal
+      const result = await create.execute({
+        name: "missing-agent",
+        objective: "Analyze the existing implementation without changing files.",
+      }, { sessionID: "owner-1" })
+
+      expect(JSON.parse(result.output).ok).toBe(false)
+      expect((await readState(dir)).goals).toHaveLength(0)
+    })
+
+    it("applies configured agent and checks to a workspace-writing goal", async () => {
+      const create = goalTools(dir, goalService, "owner-1", {
+        defaultAgent: "smart-agent",
+        defaultChecks: ["bun test", "bun run typecheck"],
+      }).loopd_create_goal
+      const result = await create.execute({
+        name: "safe-code-change",
+        objective: "Fix the bug in the TypeScript source code.",
+      }, { sessionID: "owner-1" })
+
+      const output = JSON.parse(result.output)
+      expect(output.ok).toBe(true)
+      expect(output.defaultsApplied).toEqual({ agent: true, checks: true })
+      const goal = (await readState(dir)).goals[0]
+      expect(goal.config.agent).toBe("smart-agent")
+      expect(goal.config.checks).toEqual(["bun test", "bun run typecheck"])
+      expect(goal.config.checkCwd).toBe(dir)
+      expect(goal.config.workspaceWrite).toBe(true)
+    })
+
+    it("rejects workspace-writing goals without deterministic checks", async () => {
+      const create = goalTools(dir, goalService, "owner-1").loopd_create_goal
+      const result = await create.execute({
+        name: "unchecked-code-change",
+        objective: "Refactor the project source files.",
+        agent: "smart-agent",
+      }, { sessionID: "owner-1" })
+
+      expect(JSON.parse(result.output).ok).toBe(false)
+      expect((await readState(dir)).goals).toHaveLength(0)
+    })
+
+    it("does not apply project default checks to artifact-only goals", async () => {
+      const create = goalTools(dir, goalService, "owner-1", {
+        defaultAgent: "smart-agent",
+        defaultChecks: ["bun test"],
+      }).loopd_create_goal
+      const result = await create.execute({
+        name: "artifact-research",
+        objective: "Analyze behavior and save a report in the goal artifact directory.",
+        workspaceWrite: false,
+      }, { sessionID: "owner-1" })
+
+      expect(JSON.parse(result.output).ok).toBe(true)
+      const goal = (await readState(dir)).goals[0]
+      expect(goal.config.workspaceWrite).toBe(false)
+      expect(goal.config.checks).toBeUndefined()
+      expect(goal.config.checkCwd).toBeUndefined()
     })
   })
 

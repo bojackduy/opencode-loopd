@@ -72,6 +72,7 @@ export function createWorkerManager(host: LoopHost): WorkerManager {
       const result = await host.promptWorker({
         sessionID: worker.workerSessionID,
         prompt,
+        messageID: runtime.activePromptMessageID,
         agent: goal.config.agent,
       })
       return result

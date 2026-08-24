@@ -51,4 +51,38 @@ describe("Server Plugin Startup", () => {
     expect(createCalled).toBe(false)
     await hooks?.dispose?.()
   })
+
+  it("passes configured default agent and checks to goal creation", async () => {
+    const directory = path.join(os.tmpdir(), `loopd-plugin-defaults-${crypto.randomUUID()}`)
+    directories.push(directory)
+    await fs.mkdir(directory, { recursive: true })
+
+    let createdAgent: string | undefined
+    const hooks = await plugin.server({
+      client: {
+        session: {
+          create: ({ body }: any) => {
+            createdAgent = body.agent
+            return Promise.resolve({ data: { id: "worker-defaults" } })
+          },
+          promptAsync: () => Promise.resolve({ data: {} }),
+        },
+      },
+      directory,
+    } as any, {
+      defaultAgent: "smart-agent",
+      defaultChecks: ["bun test"],
+    })
+
+    const result = await hooks.tool!.loopd_create_goal.execute({
+      name: "plugin-defaults",
+      objective: "Fix the TypeScript source code.",
+    }, { sessionID: "owner-1" } as any)
+    const output = JSON.parse(result.output)
+
+    expect(output.ok).toBe(true)
+    expect(output.defaultsApplied).toEqual({ agent: true, checks: true })
+    expect(createdAgent).toBe("smart-agent")
+    await hooks.dispose?.()
+  })
 })

@@ -39,7 +39,7 @@ describe("State Repository", () => {
   describe("readState / writeState", () => {
     it("returns empty state for nonexistent directory", async () => {
       const state = await readState(path.join(dir, "nonexistent"))
-      expect(state.version).toBe(4)
+      expect(state.version).toBe(5)
       expect(state.revision).toBe(0)
       expect(state.goals).toEqual([])
       expect(state.runtimes).toEqual([])
@@ -91,7 +91,7 @@ describe("State Repository", () => {
       await fs.writeFile(tempFile, JSON.stringify(v1State), "utf8")
 
       const loaded = await readState(dir)
-      expect(loaded.version).toBe(4)
+      expect(loaded.version).toBe(5)
       expect(loaded.commandLedger).toEqual([])
     })
 
@@ -127,9 +127,10 @@ describe("State Repository", () => {
       await fs.writeFile(tempFile, JSON.stringify(v1State), "utf8")
 
       const loaded = await readState(dir)
-      expect(loaded.version).toBe(4)
+      expect(loaded.version).toBe(5)
       expect(loaded.goals).toHaveLength(1)
       expect(loaded.goals[0].name).toBe("test")
+      expect(loaded.goals[0].config.workspaceWrite).toBe(true)
       expect(loaded.runtimes[0].consecutiveFailures).toBe(2)
       expect(loaded.runtimes[0].progressDuringTurn).toBe(false)
       // v3 migration: turnCount -> budgetTurnCount

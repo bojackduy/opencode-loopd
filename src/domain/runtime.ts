@@ -51,6 +51,15 @@ export interface GoalRuntimeState {
   /** Last observed worker status from SDK. */
   lastWorkerStatus?: "idle" | "busy" | "retry"
 
+  /** Consecutive maintenance polls where worker status was unavailable. */
+  unknownStatusCount?: number
+
+  /** Last maintenance poll that returned an unknown worker status. */
+  lastUnknownStatusAt?: string
+
+  /** Set once the owner has been warned for the current unknown-status episode. */
+  workerUnreachableNotifiedAt?: string
+
   /** Number of tokens consumed during current turn. */
   turnTokensUsed?: number
 
@@ -78,11 +87,23 @@ export interface GoalRuntimeState {
   /** SDK messageID of the active prompt sent to the worker. */
   activePromptMessageID?: string
 
+  /** When the active prompt was observed in the worker transcript/event stream. */
+  activePromptObservedAt?: string
+
+  /** Assistant message responding to activePromptMessageID. */
+  activeAssistantMessageID?: string
+
+  /** When the active assistant response completed. */
+  activeAssistantCompletedAt?: string
+
   /** Last observed worker activity (tool calls, message updates). ISO timestamp. */
   lastActivityAt?: string
 
   /** When an idle candidate was first detected. ISO timestamp. */
   idleCandidateAt?: string
+
+  /** Run generation that produced idleCandidateAt. */
+  idleCandidateGeneration?: number
 
   /** Active tool call IDs tracked during a run. */
   activeToolCallIDs?: string[]
@@ -109,6 +130,7 @@ export function createRuntimeState(goalID: GoalID): GoalRuntimeState {
     budgetTurnCount: 0,
     noProgressCount: 0,
     progressDuringTurn: false,
+    unknownStatusCount: 0,
     runGeneration: 0,
     createdAt: now,
     updatedAt: now,
@@ -128,6 +150,10 @@ export function acquireLease(rt: GoalRuntimeState, timeoutMs: number): GoalRunti
     runGeneration: rt.runGeneration + 1,
     lastActivityAt: new Date(now).toISOString(),
     idleCandidateAt: undefined,
+    idleCandidateGeneration: undefined,
+    activePromptObservedAt: undefined,
+    activeAssistantMessageID: undefined,
+    activeAssistantCompletedAt: undefined,
     activeToolCallIDs: [],
     updatedAt: new Date(now).toISOString(),
   }
@@ -140,6 +166,11 @@ export function releaseLease(rt: GoalRuntimeState): GoalRuntimeState {
     leaseExpiresAt: undefined,
     turnStartedAt: undefined,
     activePromptMessageID: undefined,
+    activePromptObservedAt: undefined,
+    activeAssistantMessageID: undefined,
+    activeAssistantCompletedAt: undefined,
+    idleCandidateAt: undefined,
+    idleCandidateGeneration: undefined,
     activeToolCallIDs: [],
     updatedAt: new Date().toISOString(),
   }
@@ -177,6 +208,7 @@ export function recordActivity(rt: GoalRuntimeState): GoalRuntimeState {
     ...rt,
     lastActivityAt: new Date().toISOString(),
     idleCandidateAt: undefined,
+    idleCandidateGeneration: undefined,
     updatedAt: new Date().toISOString(),
   }
 }
@@ -190,6 +222,7 @@ export function addToolCall(rt: GoalRuntimeState, callID: string): GoalRuntimeSt
     activeToolCallIDs: Array.from(ids),
     lastActivityAt: new Date().toISOString(),
     idleCandidateAt: undefined,
+    idleCandidateGeneration: undefined,
     updatedAt: new Date().toISOString(),
   }
 }
@@ -201,6 +234,8 @@ export function removeToolCall(rt: GoalRuntimeState, callID: string): GoalRuntim
     ...rt,
     activeToolCallIDs: ids,
     lastActivityAt: new Date().toISOString(),
+    idleCandidateAt: undefined,
+    idleCandidateGeneration: undefined,
     updatedAt: new Date().toISOString(),
   }
 }

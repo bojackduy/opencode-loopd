@@ -89,6 +89,96 @@ describe("Goal Service", () => {
     })
   })
 
+  describe("continueTurn", () => {
+    it("does not prompt when the goal becomes non-active before lease acquisition", async () => {
+      const { goal } = await svc.start(dir, {
+        name: "acquire-race",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+      })
+      const state = await readState(dir)
+      state.runtimes[0].phase = "idle"
+      state.runtimes[0].activeRunID = undefined
+      state.runtimes[0].leaseExpiresAt = undefined
+      state.runtimes[0].activePromptMessageID = undefined
+      await fs.writeFile(
+        path.join(dir, ".opencode", "loopd", "state.json"),
+        JSON.stringify(state, null, 2),
+      )
+
+      host.sessionStatus = async () => {
+        const changed = await readState(dir)
+        changed.goals[0].status = "blocked"
+        await fs.writeFile(
+          path.join(dir, ".opencode", "loopd", "state.json"),
+          JSON.stringify(changed, null, 2),
+        )
+        return "idle"
+      }
+
+      const promptCount = host.prompts.length
+      await svc.continueTurn(dir, goal.id)
+
+      expect(host.prompts).toHaveLength(promptCount)
+      expect((await readState(dir)).goals[0].status).toBe("blocked")
+    })
+
+    it("serializes concurrent continuation attempts for one goal", async () => {
+      host = createFakeHost({ workerDelay: 20 })
+      svc = createGoalService(host)
+      const { goal } = await svc.start(dir, {
+        name: "concurrent-turns",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+      })
+      const state = await readState(dir)
+      state.runtimes[0].phase = "idle"
+      state.runtimes[0].activeRunID = undefined
+      state.runtimes[0].leaseExpiresAt = undefined
+      state.runtimes[0].activePromptMessageID = undefined
+      await fs.writeFile(
+        path.join(dir, ".opencode", "loopd", "state.json"),
+        JSON.stringify(state, null, 2),
+      )
+
+      await Promise.all([
+        svc.continueTurn(dir, goal.id),
+        svc.continueTurn(dir, goal.id),
+      ])
+
+      expect(host.prompts).toHaveLength(2)
+      expect((await readState(dir)).runtimes[0].runCount).toBe(2)
+    })
+
+    it("orders pause after in-flight prompt dispatch", async () => {
+      host = createFakeHost({ workerDelay: 20 })
+      svc = createGoalService(host)
+      const { goal } = await svc.start(dir, {
+        name: "pause-fence",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+      })
+      const state = await readState(dir)
+      state.runtimes[0].phase = "idle"
+      state.runtimes[0].activeRunID = undefined
+      state.runtimes[0].leaseExpiresAt = undefined
+      state.runtimes[0].activePromptMessageID = undefined
+      await fs.writeFile(
+        path.join(dir, ".opencode", "loopd", "state.json"),
+        JSON.stringify(state, null, 2),
+      )
+
+      const continuation = svc.continueTurn(dir, goal.id)
+      const pause = svc.pause(dir, goal.id)
+      await Promise.all([continuation, pause])
+
+      const after = await readState(dir)
+      expect(after.goals[0].status).toBe("paused")
+      expect(after.runtimes[0].phase).toBe("idle")
+      expect(host.sessions.has(goal.workerSessionID!)).toBe(false)
+    })
+  })
+
   describe("pause / resume", () => {
     it("pauses an active goal and aborts worker", async () => {
       const { goal } = await svc.start(dir, {
@@ -167,6 +257,43 @@ describe("Goal Service", () => {
       const result = await svc.nudge(dir, goal.id)
       expect(result.ok).toBe(false)
     })
+
+    it("releases the lease and schedules retry when prompt delivery fails", async () => {
+      const { goal } = await svc.start(dir, {
+        name: "prompt-retry",
+        objective: "o",
+        ownerSessionID: "owner-1",
+      })
+      host.promptWorker = async () => {
+        throw new Error("prompt unavailable")
+      }
+
+      await expect(svc.nudge(dir, goal.id)).rejects.toThrow("prompt unavailable")
+      const state = await readState(dir)
+      expect(state.goals[0].status).toBe("active")
+      expect(state.runtimes[0].phase).toBe("waiting_retry")
+      expect(state.runtimes[0].activeRunID).toBeUndefined()
+      expect(state.runtimes[0].lastError).toContain("prompt unavailable")
+    })
+  })
+
+  describe("prompt startup failure", () => {
+    it("blocks a newly created goal when its first prompt cannot be delivered", async () => {
+      host.promptWorker = async () => {
+        throw new Error("prompt unavailable")
+      }
+
+      await expect(svc.start(dir, {
+        name: "prompt-start-failure",
+        objective: "o",
+        ownerSessionID: "owner-1",
+      })).rejects.toThrow("prompt unavailable")
+
+      const state = await readState(dir)
+      expect(state.goals[0].status).toBe("blocked")
+      expect(state.runtimes[0].phase).toBe("idle")
+      expect(state.runtimes[0].activeRunID).toBeUndefined()
+    })
   })
 
   describe("clear", () => {
@@ -182,6 +309,34 @@ describe("Goal Service", () => {
       const state = await readState(dir)
       expect(state.goals).toHaveLength(0)
       expect(host.sessions.has(worker.workerSessionID)).toBe(false)
+    })
+  })
+
+  describe("workspace serialization", () => {
+    it("allows only one active workspace-writing goal", async () => {
+      const first = await svc.start(dir, {
+        name: "writer-one",
+        objective: "fix code",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: true, checks: ["bun test"], agent: "smart-agent" },
+      })
+
+      await expect(svc.start(dir, {
+        name: "writer-two",
+        objective: "fix more code",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: true, checks: ["bun test"], agent: "smart-agent" },
+      })).rejects.toThrow("already active")
+
+      await svc.pause(dir, first.goal.id)
+      const replacement = await svc.start(dir, {
+        name: "writer-after-pause",
+        objective: "fix other code",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: true, checks: ["bun test"], agent: "smart-agent" },
+      })
+      expect(replacement.goal.status).toBe("active")
+      await expect(svc.resume(dir, first.goal.id)).rejects.toThrow("already active")
     })
   })
 
@@ -209,11 +364,13 @@ describe("Goal Service", () => {
         name: "w1",
         objective: "o1",
         ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
       })
       const { goal: g2 } = await svc.start(dir, {
         name: "w2",
         objective: "o2",
         ownerSessionID: "owner-2",
+        config: { workspaceWrite: false },
       })
 
       const workers = svc.getActiveWorkers()

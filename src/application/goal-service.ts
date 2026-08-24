@@ -59,6 +59,125 @@ export function createGoalService(host: LoopHost): GoalService {
   // In-memory cache: goalID -> worker session
   // Persisted source of truth: goal.workerSessionID in state.json
   const sessions = new Map<GoalID, WorkerSession>()
+  const goalOperations = new Map<GoalID, Promise<void>>()
+
+  async function withGoalOperation<T>(goalID: GoalID, fn: () => Promise<T>): Promise<T> {
+    const previous = goalOperations.get(goalID) || Promise.resolve()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const current = previous.catch(() => {}).then(() => gate)
+    goalOperations.set(goalID, current)
+    await previous.catch(() => {})
+    try {
+      return await fn()
+    } finally {
+      release()
+      if (goalOperations.get(goalID) === current) goalOperations.delete(goalID)
+    }
+  }
+
+  function assertWorkspaceWriteAvailable(state: StoreState, goal: Goal): void {
+    if (!goal.config.workspaceWrite) return
+    const activeWriter = state.goals.find(
+      (item) => item.id !== goal.id && item.status === "active" && item.config.workspaceWrite,
+    )
+    if (activeWriter) {
+      throw new Error(
+        `Workspace-writing goal "${activeWriter.name}" (${activeWriter.id}) is already active. ` +
+        "Pause, block, complete, or clear it before activating another workspace-writing goal.",
+      )
+    }
+  }
+
+  async function recordPromptFailure(
+    directory: string,
+    goalID: GoalID,
+    error: unknown,
+    blockImmediately = false,
+  ): Promise<void> {
+    const detail = describeError(error)
+    let runID: string = "unknown"
+    let failureCount = 0
+    let blocked = false
+    const state = await mutateState(directory, `turn.prompt-failed:${goalID}`, async (s) => {
+      const goal = s.goals.find((item) => item.id === goalID)
+      const rt = s.runtimes.find((item) => item.goalID === goalID)
+      if (!goal || !rt) return s
+
+      runID = rt.activeRunID || "unknown"
+      failureCount = rt.consecutiveFailures + 1
+      Object.assign(rt, releaseLease(rt))
+      rt.activeRunID = undefined
+      rt.consecutiveFailures = failureCount
+      rt.lastError = detail
+
+      blocked = blockImmediately || failureCount >= (goal.config.maxFailures || 5)
+      if (blocked) {
+        goal.status = "blocked"
+        goal.blocker = {
+          reason: `Worker prompt delivery failed: ${detail}`,
+          needed: "Retry after the OpenCode worker/session API is available.",
+          at: new Date().toISOString(),
+        }
+      } else {
+        const backoffMs = Math.min(30_000, 1_000 * Math.pow(2, failureCount))
+        rt.phase = "waiting_retry"
+        rt.retryAfter = new Date(Date.now() + backoffMs).toISOString()
+      }
+      goal.updatedAt = new Date().toISOString()
+      rt.updatedAt = new Date().toISOString()
+      return s
+    })
+
+    await appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID(),
+      goalID,
+      type: "run.failed",
+      runID,
+      error: detail,
+      consecutiveFailures: failureCount,
+      timestamp: new Date().toISOString(),
+      revision: state.revision,
+    } satisfies LoopEvent)
+    if (blocked) {
+      await appendEvent(directory, {
+        version: 1,
+        eventID: randomUUID(),
+        goalID,
+        type: "goal.blocked",
+        reason: `Worker prompt delivery failed: ${detail}`,
+        needed: "Retry after the OpenCode worker/session API is available.",
+        timestamp: new Date().toISOString(),
+        revision: state.revision,
+      } satisfies LoopEvent)
+    }
+  }
+
+  async function ensureWorkerSession(directory: string, goal: Goal): Promise<WorkerSession> {
+    let session = sessions.get(goal.id)
+    if (!session && goal.workerSessionID) {
+      const status = await host.sessionStatus(goal.workerSessionID)
+      if (status !== "unknown") {
+        session = {
+          goalID: goal.id,
+          workerSessionID: goal.workerSessionID,
+          startedAt: goal.createdAt,
+        }
+        sessions.set(goal.id, session)
+      }
+    }
+    if (session) return session
+
+    session = await workers.createWorker(goal)
+    sessions.set(goal.id, session)
+    await mutateState(directory, `goal.set-worker:${goal.id}`, async (s) => {
+      const persisted = s.goals.find((item) => item.id === goal.id)
+      if (persisted) persisted.workerSessionID = session!.workerSessionID
+      return s
+    })
+    return session
+  }
 
   async function start(directory: string, input: {
     name: string
@@ -67,7 +186,15 @@ export function createGoalService(host: LoopHost): GoalService {
     config?: Goal["config"]
   }) {
     const id = randomUUID() as GoalID
+    return withGoalOperation(id, () => startUnlocked(directory, input, id))
+  }
 
+  async function startUnlocked(directory: string, input: {
+    name: string
+    objective: string
+    ownerSessionID: string
+    config?: Goal["config"]
+  }, id: GoalID) {
     // Create goal and artifact directory (external I/O before lock)
     const goal = createGoal({
       id,
@@ -77,6 +204,7 @@ export function createGoalService(host: LoopHost): GoalService {
       ownerSessionID: input.ownerSessionID,
       config: {
         maxTurns: 50,
+        workspaceWrite: true,
         ...input.config,
       },
     })
@@ -87,6 +215,7 @@ export function createGoalService(host: LoopHost): GoalService {
 
     // Atomically persist goal and set queued phase
     const state1 = await mutateState(directory, `goal.create:${id}`, async (state) => {
+      assertWorkspaceWriteAvailable(state, goal)
       state.goals.push(goal)
       state.runtimes.push(createRuntimeState(id))
       const runtime = state.runtimes.find((r) => r.goalID === id)
@@ -145,6 +274,7 @@ export function createGoalService(host: LoopHost): GoalService {
       if (rt) {
         Object.assign(rt, acquireLease(rt, g.config.timeoutMs || 300_000))
         rt.activeRunID = randomUUID() as RunID
+        rt.activePromptMessageID = randomUUID()
         rt.runCount = 1
         rt.budgetTurnCount = 1
         rt.lastRunAt = new Date().toISOString()
@@ -177,24 +307,22 @@ export function createGoalService(host: LoopHost): GoalService {
         timestamp: new Date().toISOString(),
         revision: state2.revision,
       } satisfies LoopEvent)
-      const result = await workers.continueWorker(worker, goal, runtime)
-      if (result.messageID) {
-        await mutateState(directory, `goal.message-id:${id}`, async (state) => {
-          const rt = state.runtimes.find((item) => item.goalID === id)
-          if (rt) rt.activePromptMessageID = result.messageID
-          return state
-        })
+      try {
+        await workers.continueWorker(worker, goal, runtime)
+      } catch (error) {
+        await recordPromptFailure(directory, id, error, true)
+        throw error
       }
     }
 
     return { goal, worker }
   }
 
-  async function continueTurn(directory: string, goalID: GoalID, opts?: { forceFinish?: boolean; force?: boolean }) {
+  async function continueTurnUnlocked(directory: string, goalID: GoalID, opts?: { forceFinish?: boolean; force?: boolean }) {
     // Read state for pre-checks (lease validity, worker idle)
     const preState = await readState(directory)
     const goal = preState.goals.find((g) => g.id === goalID)
-    if (!goal || isTerminal(goal.status)) return
+    if (!goal || goal.status !== "active") return
 
     const runtime = preState.runtimes.find((r) => r.goalID === goalID)
     if (!runtime) return
@@ -218,14 +346,17 @@ export function createGoalService(host: LoopHost): GoalService {
     if (!opts?.force && !(await workers.isIdle(session.workerSessionID))) return
 
     // Acquire lease and increment run count atomically
+    let acquired = false
     const state = await mutateState(directory, `turn.acquire:${goalID}`, async (s) => {
       const g = s.goals.find((item) => item.id === goalID)
-      if (!g || isTerminal(g.status)) return s
+      if (!g || g.status !== "active") return s
       const rt = s.runtimes.find((item) => item.goalID === goalID)
       if (!rt) return s
+      if (rt.phase === "running" && leaseIsValid(rt)) return s
       const timeoutMs = g.config.timeoutMs || 300_000
       Object.assign(rt, acquireLease(rt, timeoutMs))
       rt.activeRunID = randomUUID() as RunID
+      rt.activePromptMessageID = randomUUID()
       rt.runCount += 1
       if (rt.freeRetryPending) {
         rt.freeRetryPending = false
@@ -233,11 +364,12 @@ export function createGoalService(host: LoopHost): GoalService {
         rt.budgetTurnCount += 1
       }
       rt.lastRunAt = new Date().toISOString()
+      acquired = true
       return s
     })
     const freshGoal = state.goals.find((g) => g.id === goalID)
     const freshRuntime = state.runtimes.find((r) => r.goalID === goalID)
-    if (!freshGoal || !freshRuntime) return
+    if (!acquired || !freshGoal || freshGoal.status !== "active" || !freshRuntime?.activeRunID) return
 
     await appendEvent(directory, {
       version: 1,
@@ -305,10 +437,15 @@ export function createGoalService(host: LoopHost): GoalService {
       verification,
     }
 
-    await workers.continueWorker(session, freshGoal, freshRuntime, context)
+    try {
+      await workers.continueWorker(session, freshGoal, freshRuntime, context)
+    } catch (error) {
+      await recordPromptFailure(directory, goalID, error)
+      throw error
+    }
   }
 
-  async function pause(directory: string, goalID: GoalID) {
+  async function pauseUnlocked(directory: string, goalID: GoalID) {
     const preState = await readState(directory)
     const goal = preState.goals.find((g) => g.id === goalID)
     if (!goal) return
@@ -349,41 +486,32 @@ export function createGoalService(host: LoopHost): GoalService {
     } satisfies LoopEvent)
   }
 
-  async function resume(directory: string, goalID: GoalID) {
+  async function resumeUnlocked(directory: string, goalID: GoalID) {
+    let resumed = false
     const state = await mutateState(directory, `goal.resume:${goalID}`, async (state) => {
       const goal = state.goals.find((g) => g.id === goalID)
       if (!goal) return state
       if (!canTransition(goal.status, "active", "user")) return state
+      assertWorkspaceWriteAvailable(state, goal)
       goal.status = "active"
       goal.updatedAt = new Date().toISOString()
+      resumed = true
       return state
     })
 
     const goal = state.goals.find((g) => g.id === goalID)
-    if (!goal) return
+    if (!goal || !resumed) return
 
     // Get or recreate worker (external I/O — not under lock)
-    let session = sessions.get(goalID)
-    if (!session && goal.workerSessionID) {
-      // Try to REUSE the existing subagent session so its context/files survive (BUG-002).
-      const status = await host.sessionStatus(goal.workerSessionID)
-      if (status === "idle" || status === "busy") {
-        session = {
-          goalID: goal.id,
-          workerSessionID: goal.workerSessionID,
-          startedAt: goal.createdAt,
-        }
-        sessions.set(goalID, session)
-      }
-    }
-    if (!session) {
-      session = await workers.createWorker(goal)
-      sessions.set(goalID, session)
-      await mutateState(directory, `goal.set-worker:${goalID}`, async (s) => {
-        const g = s.goals.find((x) => x.id === goalID)
-        if (g) g.workerSessionID = session!.workerSessionID
+    try {
+      await ensureWorkerSession(directory, goal)
+    } catch (error) {
+      await mutateState(directory, `goal.resume-rollback:${goalID}`, async (s) => {
+        const g = s.goals.find((item) => item.id === goalID)
+        if (g?.status === "active") g.status = "paused"
         return s
       })
+      throw error
     }
 
     await appendEvent(directory, {
@@ -398,15 +526,18 @@ export function createGoalService(host: LoopHost): GoalService {
     } satisfies LoopEvent)
 
     // Drive first continuation
-    await continueTurn(directory, goalID)
+    await continueTurnUnlocked(directory, goalID)
   }
 
-  async function retry(directory: string, goalID: GoalID) {
+  async function retryUnlocked(directory: string, goalID: GoalID) {
+    let retried = false
     const state = await mutateState(directory, `goal.retry:${goalID}`, async (state) => {
       const goal = state.goals.find((g) => g.id === goalID)
       if (!goal || goal.status !== "blocked") return state
+      assertWorkspaceWriteAvailable(state, goal)
       goal.status = "active"
       goal.updatedAt = new Date().toISOString()
+      retried = true
       const runtime = state.runtimes.find((r) => r.goalID === goalID)
       if (runtime) {
         runtime.consecutiveFailures = 0
@@ -421,7 +552,18 @@ export function createGoalService(host: LoopHost): GoalService {
     })
 
     const goal = state.goals.find((g) => g.id === goalID)
-    if (!goal || goal.status !== "active") return
+    if (!goal || !retried) return
+
+    try {
+      await ensureWorkerSession(directory, goal)
+    } catch (error) {
+      await mutateState(directory, `goal.retry-rollback:${goalID}`, async (s) => {
+        const g = s.goals.find((item) => item.id === goalID)
+        if (g?.status === "active") g.status = "blocked"
+        return s
+      })
+      throw error
+    }
 
     await appendEvent(directory, {
       version: 1,
@@ -434,10 +576,10 @@ export function createGoalService(host: LoopHost): GoalService {
       revision: state.revision,
     } satisfies LoopEvent)
 
-    await continueTurn(directory, goalID)
+    await continueTurnUnlocked(directory, goalID)
   }
 
-  async function clear(directory: string, goalID: GoalID) {
+  async function clearUnlocked(directory: string, goalID: GoalID) {
     const state = await readState(directory)
     const goal = state.goals.find((g) => g.id === goalID)
     if (!goal) return
@@ -551,12 +693,13 @@ export function createGoalService(host: LoopHost): GoalService {
     }
   }
 
-  async function nudge(directory: string, goalID: GoalID): Promise<{ ok: boolean; message: string }> {
+  async function nudgeUnlocked(directory: string, goalID: GoalID): Promise<{ ok: boolean; message: string }> {
     const preState = await readState(directory)
     const goal = preState.goals.find((g) => g.id === goalID)
     if (!goal) return { ok: false, message: "Goal not found." }
-    if (isTerminal(goal.status)) return { ok: false, message: `Goal is ${goal.status}; cannot nudge.` }
-    if (goal.status === "paused") return { ok: false, message: "Goal is paused. Use resume_goal first." }
+    if (goal.status !== "active") {
+      return { ok: false, message: `Goal is ${goal.status}; resume or retry it before nudging.` }
+    }
 
     // Clear stale run state so the continuation is not gated on an old lease/run.
     const cleared = await mutateState(directory, `goal.nudge:${goalID}`, async (s) => {
@@ -576,8 +719,32 @@ export function createGoalService(host: LoopHost): GoalService {
     }
 
     // Force a continuation even if the session reports non-idle.
-    await continueTurn(directory, goalID, { force: true })
+    await continueTurnUnlocked(directory, goalID, { force: true })
     return { ok: true, message: `Re-prompted worker for "${freshGoal.name}".` }
+  }
+
+  function continueTurn(directory: string, goalID: GoalID, opts?: { forceFinish?: boolean; force?: boolean }) {
+    return withGoalOperation(goalID, () => continueTurnUnlocked(directory, goalID, opts))
+  }
+
+  function pause(directory: string, goalID: GoalID) {
+    return withGoalOperation(goalID, () => pauseUnlocked(directory, goalID))
+  }
+
+  function resume(directory: string, goalID: GoalID) {
+    return withGoalOperation(goalID, () => resumeUnlocked(directory, goalID))
+  }
+
+  function retry(directory: string, goalID: GoalID) {
+    return withGoalOperation(goalID, () => retryUnlocked(directory, goalID))
+  }
+
+  function clear(directory: string, goalID: GoalID) {
+    return withGoalOperation(goalID, () => clearUnlocked(directory, goalID))
+  }
+
+  function nudge(directory: string, goalID: GoalID) {
+    return withGoalOperation(goalID, () => nudgeUnlocked(directory, goalID))
   }
 
   return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile }

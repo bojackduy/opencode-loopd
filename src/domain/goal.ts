@@ -73,6 +73,12 @@ export interface GoalConfig {
   /** Shell commands that must pass for completion to be accepted. */
   checks?: string[]
 
+  /** Directory where completion checks run. Defaults to the artifact directory. */
+  checkCwd?: string
+
+  /** Whether this goal mutates the shared project workspace. Such goals are exclusive. */
+  workspaceWrite?: boolean
+
   /** Max turns before auto-pause. */
   maxTurns?: number
 

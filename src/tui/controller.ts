@@ -4,7 +4,7 @@
 import { randomUUID } from "crypto"
 import type { ControlClient } from "../infrastructure/control-client"
 import type { StoreState } from "../infrastructure/state-repository"
-import type { Goal } from "../domain/goal"
+import type { Goal, GoalConfig } from "../domain/goal"
 
 export interface DashboardState {
   goals: Goal[]
@@ -37,7 +37,7 @@ export interface DashboardController {
   moveLast(state: DashboardState): DashboardState
 
   /** Start a new goal. */
-  startGoal(ownerSessionID: string, name: string, objective: string): Promise<ControllerResult>
+  startGoal(ownerSessionID: string, name: string, objective: string, config?: GoalConfig): Promise<ControllerResult>
 
   /** Pause the selected goal. */
   pauseGoal(goal: Goal): Promise<ControllerResult>
@@ -100,13 +100,18 @@ export function createDashboardController(client: ControlClient): DashboardContr
     return { ...state, selected: last, selectedGoal: state.activeGoals[last] || null }
   }
 
-  async function startGoal(ownerSessionID: string, name: string, objective: string): Promise<ControllerResult> {
+  async function startGoal(
+    ownerSessionID: string,
+    name: string,
+    objective: string,
+    config: GoalConfig = {},
+  ): Promise<ControllerResult> {
     const result = await client.execute({
       version: 1,
       requestID: randomUUID(),
       requestedAt: new Date().toISOString(),
       command: "start",
-      args: { name, objective, config: {}, ownerSessionID },
+      args: { name, objective, config, ownerSessionID },
     })
     return {
       statusText: result.ok ? result.message : `Error: ${result.message}`,

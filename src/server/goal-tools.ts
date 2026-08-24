@@ -15,11 +15,22 @@ import { appendVerificationAttempt } from "../domain/verification"
 import { exec as execChild } from "child_process"
 import { promisify } from "util"
 import type { GoalService } from "../application/goal-service"
+import {
+  resolveGoalCreationConfig,
+  type GoalCreationDefaults,
+} from "../application/goal-policy"
 import { SERVER_LOG_FILE } from "../infrastructure/server-log"
 
 const execAsync = promisify(execChild)
 
-export function goalTools(dir: string, goalService: GoalService, hostSessionID?: string) {
+export type GoalToolDefaults = GoalCreationDefaults
+
+export function goalTools(
+  dir: string,
+  goalService: GoalService,
+  hostSessionID?: string,
+  defaults: GoalToolDefaults = {},
+) {
   return {
     loopd_create_goal: tool({
       description:
@@ -27,12 +38,15 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
         "that does the work autonomously — it never runs in this chat. " +
         "Call this after clarifying the goal name, objective, and any config with the user. " +
         "The goal immediately starts in the background; the user can monitor it via /loop. " +
-        "IMPORTANT: Always specify the 'agent' parameter to control which model runs the worker.",
+        "Workspace-writing goals are serialized and require completion checks. " +
+        "Specify 'agent', or configure the plugin's defaultAgent option.",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
-        agent: tool.schema.string().describe("REQUIRED: Agent to run the worker as (e.g. \"smart-agent\", \"sloppy-agent\"). Check opencode.jsonc for available agents."),
+        agent: tool.schema.string().optional().describe("Agent to run the worker as. Required unless the plugin has defaultAgent configured."),
         checks: tool.schema.array(tool.schema.string()).optional().describe("Shell commands that must pass for completion to be accepted. E.g. [\"npm test\"]."),
+        checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
+        workspaceWrite: tool.schema.boolean().optional().describe("Whether this goal edits the shared project workspace. Defaults to true; explicitly set false for artifact-only/read-only work."),
         progressFile: tool.schema.string().optional().describe("Markdown file the worker reads/writes as its transaction state."),
         maxTurns: tool.schema.number().optional().describe("Max turns before auto-block."),
         maxNoProgress: tool.schema.number().optional().describe("Block after N turns without progress."),
@@ -54,21 +68,40 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
         const config: GoalConfig = {
           maxTurns: 50,
         }
+        if (args.agent) config.agent = args.agent
         if (args.checks) config.checks = args.checks
+        if (args.checkCwd) config.checkCwd = args.checkCwd
+        if (args.workspaceWrite !== undefined) config.workspaceWrite = args.workspaceWrite
         if (args.progressFile) config.progressFile = args.progressFile
         if (args.maxTurns !== undefined) config.maxTurns = args.maxTurns
         if (args.maxNoProgress !== undefined) config.maxNoProgress = args.maxNoProgress
         if (args.maxFailures !== undefined) config.maxFailures = args.maxFailures
         if (args.compactEvery !== undefined) config.compactEvery = args.compactEvery
         if (args.timeoutMs !== undefined) config.timeoutMs = args.timeoutMs
-        if (args.agent !== undefined) config.agent = args.agent as any
+
+        const resolution = resolveGoalCreationConfig({
+          directory: dir,
+          objective: args.objective,
+          config,
+          defaults,
+        })
+        if (!resolution.ok) {
+          return {
+            title: "Goal not created",
+            output: JSON.stringify({
+              ok: false,
+              message: resolution.message,
+              errorCode: resolution.errorCode,
+            }),
+          }
+        }
 
         try {
           const { goal, worker } = await goalService.start(dir, {
             name: args.name,
             objective: args.objective,
             ownerSessionID: sessionID,
-            config,
+            config: resolution.config,
           })
           return {
             title: "Goal created",
@@ -77,6 +110,10 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
               goalID: goal.id,
               workerSessionID: worker.workerSessionID,
               artifactDir: goal.config.artifactDir,
+              agent: resolution.config.agent,
+              checks: resolution.config.checks || [],
+              workspaceWrite: resolution.config.workspaceWrite,
+              defaultsApplied: resolution.defaultsApplied,
               name: args.name,
               message: `Goal "${args.name}" created and started in the background. Artifacts: ${goal.config.artifactDir}. Monitor with /loop (<leader>d).`,
             }),
@@ -209,8 +246,7 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
         // Run completion checks
         if (goal.config.checks?.length) {
           // Resolve check working directory
-          const checkCwd = (goal.config as any).checkCwd as string | undefined
-          const cwd = checkCwd || (goal.config as any).artifactDir as string || dir
+          const cwd = goal.config.checkCwd || goal.config.artifactDir || dir
           const checkResults = await runCompletionChecks(goal.config.checks, cwd)
           if (!checkResults.passed) {
             // Evaluator rejected — child gets a free retry turn
@@ -320,8 +356,7 @@ export function goalTools(dir: string, goalService: GoalService, hostSessionID?:
 
           // Persist a passing verification attempt
           const attemptID = randomUUID()
-          const checkCwd = (goal.config as any).checkCwd as string | undefined
-          const cwd = checkCwd || (goal.config as any).artifactDir as string || dir
+          const cwd = goal.config.checkCwd || goal.config.artifactDir || dir
           const checks = (goal.config.checks || []).map((cmd) => ({
             command: cmd,
             exitCode: 0,
@@ -462,6 +497,9 @@ function formatGoalStructured(goal: Goal, runtime?: GoalRuntimeState): string {
       progressFile: goal.config.progressFile,
       includeFiles: goal.config.includeFiles,
       checks: goal.config.checks,
+      checkCwd: goal.config.checkCwd,
+      workspaceWrite: goal.config.workspaceWrite,
+      agent: goal.config.agent,
       maxTurns: goal.config.maxTurns,
       maxNoProgress: goal.config.maxNoProgress,
       maxFailures: goal.config.maxFailures,
@@ -491,6 +529,13 @@ function formatGoalStructured(goal: Goal, runtime?: GoalRuntimeState): string {
       lastRunAt: runtime.lastRunAt,
       lastCompactAt: runtime.lastCompactAt,
       lastActivityAt: runtime.lastActivityAt,
+      activePromptMessageID: runtime.activePromptMessageID,
+      activeAssistantMessageID: runtime.activeAssistantMessageID,
+      activeAssistantCompletedAt: runtime.activeAssistantCompletedAt,
+      idleCandidateGeneration: runtime.idleCandidateGeneration,
+      unknownStatusCount: runtime.unknownStatusCount,
+      lastUnknownStatusAt: runtime.lastUnknownStatusAt,
+      workerUnreachableNotifiedAt: runtime.workerUnreachableNotifiedAt,
       lastVerificationAttempt: runtime.lastVerificationAttempt,
       recentVerificationAttempts: runtime.recentVerificationAttempts,
     }

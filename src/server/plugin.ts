@@ -12,10 +12,12 @@ import { ownerTools } from "./owner-tools"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
 import { addToolCall, removeToolCall } from "../domain/runtime"
 import { readState, mutateState } from "../infrastructure/state-repository"
+import type { GoalToolDefaults } from "./goal-tools"
 
 const PLUGIN_ID = "opencode-loopd.server"
 
-const server: Plugin = async ({ client, directory }) => {
+const server: Plugin = async ({ client, directory }, pluginOptions) => {
+  const defaults = parsePluginDefaults(pluginOptions)
   const host = createRealHost(client, directory)
   const goalService = createGoalService(host)
 
@@ -23,6 +25,7 @@ const server: Plugin = async ({ client, directory }) => {
     directory,
     goalService,
     pollIntervalMs: 1_000,
+    defaults,
   })
 
   const engine = createLoopEngine({
@@ -64,7 +67,7 @@ const server: Plugin = async ({ client, directory }) => {
       await engine.handleEvent(event)
       if (type?.startsWith("session.")) reconcileInBackground()
     },
-    tool: { ...goalTools(directory, goalService), ...ownerTools({ directory, host, goalService }) },
+    tool: { ...goalTools(directory, goalService, undefined, defaults), ...ownerTools({ directory, host, goalService }) },
     "tool.execute.before": async (input, _output) => {
       // Track tool call start for worker sessions only
       const activeWorkers = goalService.getActiveWorkers()
@@ -146,6 +149,20 @@ const server: Plugin = async ({ client, directory }) => {
       engine.stop()
       await worker.stop()
     },
+  }
+}
+
+function parsePluginDefaults(options: Record<string, unknown> | undefined): GoalToolDefaults {
+  const agent = typeof options?.defaultAgent === "string" ? options.defaultAgent.trim() : ""
+  const checks = Array.isArray(options?.defaultChecks)
+    ? options.defaultChecks
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim())
+      .filter(Boolean)
+    : []
+  return {
+    defaultAgent: agent || undefined,
+    defaultChecks: checks.length > 0 ? checks : undefined,
   }
 }
 

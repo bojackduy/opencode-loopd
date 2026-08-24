@@ -42,7 +42,9 @@ Use `loopd_create_goal` after clarifying the objective with the user:
 loopd_create_goal({
   name: "short-name",
   objective: "Detailed description of what the goal should accomplish.",
+  agent: "smart-agent",                    // required unless defaultAgent is configured
   checks: ["npm test"],                    // optional: shell commands for completion verification
+  workspaceWrite: true,                    // code/shared workspace edits; serialized by loopd
   progressFile: ".opencode/loopd/progress.md", // optional: worker reads/writes this
   maxTurns: 50,                            // optional: safety budget
   maxNoProgress: 5,                        // optional: auto-block without progress
@@ -172,6 +174,8 @@ Open the dashboard with `/loop` or <leader>d.
 5. **Use checks for verification** — Set `checks` on goal creation to auto-verify completion (e.g., `["npm test", "test -f README.md"]`).
 6. **Set safety budgets** — Use `maxTurns`, `maxNoProgress`, and `maxFailures` to prevent runaway goals.
 7. **Compact periodically** — Use `compactEvery` to keep the worker session's context manageable.
+8. **Serialize workspace edits** — Set `workspaceWrite: true` for code/repository changes. Loopd allows only one active workspace-writing goal, preventing stash and file conflicts.
+9. **Checks are mandatory for workspace edits** — Supply `checks`, or configure plugin `defaultChecks`. They run from the project root unless `checkCwd` is supplied.
 
 ## Example: Creating and Monitoring a Goal
 
@@ -184,7 +188,9 @@ Agent: I'll set up a background goal for this.
 loopd_create_goal({
   name: "docs-write",
   objective: "Write a README.md covering: what it is, install, usage, architecture, and examples. Then create CHANGELOG.md with a v1.0.0 entry.",
+  agent: "smart-agent",
   checks: ["test -f README.md", "test -f CHANGELOG.md"],
+  workspaceWrite: true,
   progressFile: ".opencode/loopd/docs-progress.md",
   maxTurns: 20
 })

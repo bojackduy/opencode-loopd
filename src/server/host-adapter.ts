@@ -14,6 +14,8 @@ export interface SessionMessage {
   content: string
   timestamp?: string
   messageID?: string
+  parentMessageID?: string
+  completedAt?: string
 }
 
 export interface SessionUsage {
@@ -145,10 +147,14 @@ export function createRealHost(client: any, directory: string): LoopHost {
             ?.filter((p: any) => p.type === "text")
             .map((p: any) => p.text)
             .join("\n") || "",
-          timestamp: m.info?.time?.completed
+          timestamp: m.info?.time?.completed || m.info?.time?.created
+            ? new Date(m.info.time.completed || m.info.time.created).toISOString()
+            : undefined,
+          messageID: m.info?.id || m.id,
+          parentMessageID: m.info?.parentID,
+          completedAt: m.info?.time?.completed
             ? new Date(m.info.time.completed).toISOString()
             : undefined,
-          messageID: m.id,
         }))
       } catch {
         return []
@@ -207,45 +213,74 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operation:
 
 export interface FakeHostOptions {
   workerDelay?: number
+  sessionStatus?: SessionStatusType | ((sessionID: string) => SessionStatusType | Promise<SessionStatusType>)
+  autoCompletePrompts?: boolean
 }
 
 export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
   sessions: Map<string, string[]>
+  messages: Map<string, SessionMessage[]>
   prompts: string[]
 } {
   const sessions = new Map<string, string[]>()
+  const messages = new Map<string, SessionMessage[]>()
   const prompts: string[] = []
   const recentNotifies = new Map<string, number>()
 
   return {
     sessions,
+    messages,
     prompts,
     async createWorker({ parentID, title, agent }) {
       const id = `worker-${crypto.randomUUID().slice(0, 8)}`
       sessions.set(id, [])
+      messages.set(id, [])
       if (agent) (sessions as any).agents = { ...((sessions as any).agents || {}), [id]: agent }
       return id
     },
     async promptWorker({ sessionID, prompt, messageID }) {
+      const resolvedMessageID = messageID || `msg-${crypto.randomUUID().slice(0, 8)}`
       const msgs = sessions.get(sessionID) || []
       msgs.push(prompt)
       sessions.set(sessionID, msgs)
+      const transcript = messages.get(sessionID) || []
+      transcript.push({
+        role: "user",
+        content: prompt,
+        timestamp: new Date().toISOString(),
+        messageID: resolvedMessageID,
+      })
+      if (options.autoCompletePrompts !== false) {
+        const completedAt = new Date().toISOString()
+        transcript.push({
+          role: "assistant",
+          content: "completed",
+          timestamp: completedAt,
+          completedAt,
+          messageID: `assistant-${crypto.randomUUID().slice(0, 8)}`,
+          parentMessageID: resolvedMessageID,
+        })
+      }
+      messages.set(sessionID, transcript)
       prompts.push(prompt)
       if (options.workerDelay) {
         await new Promise((r) => setTimeout(r, options.workerDelay))
       }
       // Return the provided messageID or generate one for tests
-      return { messageID: messageID || `msg-${crypto.randomUUID().slice(0, 8)}` }
+      return { messageID: resolvedMessageID }
     },
     async sessionStatus(sessionID) {
+      if (typeof options.sessionStatus === "function") return options.sessionStatus(sessionID)
+      if (options.sessionStatus) return options.sessionStatus
       if (sessions.has(sessionID)) return "idle"
       return "idle"
     },
     async abortSession(sessionID) {
       sessions.delete(sessionID)
+      messages.delete(sessionID)
     },
-    async readMessages(sessionID) {
-      return []
+    async readMessages(sessionID, limit = 10) {
+      return (messages.get(sessionID) || []).slice(-limit)
     },
     async compactSession(sessionID) {
       // No-op for fake host

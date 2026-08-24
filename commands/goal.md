@@ -10,9 +10,12 @@ First, gather what you need to craft a good goal:
 
 When you have enough to write a concrete objective:
 1. Call `loopd_create_goal` with:
-   - `name` — a short slug (e.g. "pdf-notes")
-   - `objective` — a precise, self-contained statement including verification criteria
-   - `checks` — optional shell commands that must pass before the goal can be marked complete (e.g. `["npm test"]`)
+    - `name` — a short slug (e.g. "pdf-notes")
+    - `objective` — a precise, self-contained statement including verification criteria
+    - `agent` — required unless the plugin has `defaultAgent` configured
+    - `checks` — shell commands that must pass before completion; mandatory for code/shared workspace edits
+    - `workspaceWrite` — set true for code/repository edits and false for artifact-only research; loopd serializes workspace writers
+    - `checkCwd` — optional check directory; workspace-writing goals default to the project root
    - `progressFile` — optional path to a markdown progress file
    - limits — optional `maxTurns`, `maxNoProgress`, `maxFailures`, `compactEvery`, `timeoutMs`
 2. After it returns, tell the user the goal is running in the background and they can monitor it with `/loop` (or <leader>d).

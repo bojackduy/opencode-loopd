@@ -10,6 +10,7 @@ import { isTerminal } from "../domain/goal"
 import type { GoalID } from "../domain/goal"
 import {
   releaseLease,
+  recordActivity,
   shouldNotifyParent,
   markParentNotified,
   type GoalRuntimeState,
@@ -17,7 +18,7 @@ import {
 import type { LoopEvent } from "../domain/events"
 import type { GoalService } from "./goal-service"
 import type { LoopHost } from "../server/host-adapter"
-import { describeError } from "../infrastructure/server-log"
+import { describeError, logServerEvent } from "../infrastructure/server-log"
 
 /** Two-stage idle debounce — require two idle signals 2s apart with no activity in between. */
 const CONFIRM_IDLE_DURATION_MS = 2000
@@ -27,6 +28,8 @@ const HANDLED_EVENT_TYPES = new Set([
   "session.status",
   "session.error",
   "session.compacted",
+  "message.updated",
+  "message.part.updated",
 ])
 
 export interface LoopEngineOptions {
@@ -35,6 +38,7 @@ export interface LoopEngineOptions {
   goalService: GoalService
   pollIntervalMs?: number
   confirmIdleMs?: number
+  unknownStatusThreshold?: number
 }
 
 export interface LoopEngine {
@@ -51,6 +55,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
   const { directory, host, goalService } = options
   const maintenanceMs = options.pollIntervalMs ?? 30_000
   const confirmIdleMs = options.confirmIdleMs ?? CONFIRM_IDLE_DURATION_MS
+  const unknownStatusThreshold = Math.max(1, options.unknownStatusThreshold ?? 3)
 
   let running = false
   let maintenanceTimer: ReturnType<typeof setInterval> | undefined
@@ -127,7 +132,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     if (!type || !HANDLED_EVENT_TYPES.has(type)) return false
 
     // FAST PATH: check if this session is one we care about
-    const sessionID = event.properties?.sessionID as string | undefined
+    const sessionID = eventSessionID(event)
     if (!sessionID) return false
 
     // Load worker sessions on first event (lazy)
@@ -148,8 +153,9 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     // Update worker session cache
     if (goal.workerSessionID) knownWorkerSessions.add(goal.workerSessionID)
 
-    // Skip terminal or paused goals
-    if (isTerminal(goal.status) || goal.status === "paused") return false
+    // Only active goals own live worker runs. Blocked/limited/paused goals wait
+    // for an explicit owner transition.
+    if (goal.status !== "active") return false
 
     switch (type) {
       case "session.idle":
@@ -160,9 +166,50 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
         return await handleSessionError(state, goal, event)
       case "session.compacted":
         return await handleSessionCompacted(state, goal)
+      case "message.updated":
+      case "message.part.updated":
+        return await handleMessageActivity(goal, event)
       default:
         return false
     }
+  }
+
+  function eventSessionID(event: any): string | undefined {
+    return event.properties?.sessionID
+      || event.properties?.info?.sessionID
+      || event.properties?.part?.sessionID
+  }
+
+  async function handleMessageActivity(goal: any, event: any): Promise<boolean> {
+    let matched = false
+    await mutateState(directory, `message-activity:${goal.id}`, async (s) => {
+      const rt = s.runtimes.find((r) => r.goalID === goal.id)
+      if (!rt || rt.phase !== "running" || !rt.activePromptMessageID) return s
+
+      if (event.type === "message.updated") {
+        const info = event.properties?.info
+        if (info?.role === "user" && info.id === rt.activePromptMessageID) {
+          Object.assign(rt, recordActivity(rt))
+          rt.activePromptObservedAt = new Date().toISOString()
+          matched = true
+        } else if (info?.role === "assistant" && info.parentID === rt.activePromptMessageID) {
+          Object.assign(rt, recordActivity(rt))
+          rt.activeAssistantMessageID = info.id
+          if (info.time?.completed) {
+            rt.activeAssistantCompletedAt = new Date(info.time.completed).toISOString()
+          }
+          matched = true
+        }
+      } else {
+        const part = event.properties?.part
+        if (part?.messageID && part.messageID === rt.activeAssistantMessageID) {
+          Object.assign(rt, recordActivity(rt))
+          matched = true
+        }
+      }
+      return s
+    })
+    return matched
   }
 
   // ─── Two-stage idle check ─────────────────────────────────────────────────
@@ -200,39 +247,85 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     // Guard against concurrent continuations
     if (inflightContinuations.has(goalID)) return false
 
-    // Two-stage idle + lease release in one atomic mutation
+    // Stage an idle candidate under the current run generation. New prompts
+    // clear the candidate, and a stale event can never release a newer lease.
     let completedRunID: string | undefined
-    const afterIdle = await mutateState(directory, `idle:${goalID}`, async (s) => {
+    let confirmation: {
+      generation: number
+      promptMessageID: string
+      candidateAt: string
+      assistantCompleted: boolean
+    } | undefined
+    let afterIdle = await mutateState(directory, `idle:${goalID}`, async (s) => {
       const g = s.goals.find((item) => item.id === goalID)
       if (!g) return s
       if (isTerminal(g.status) || g.status === "paused") return s
       const rt = s.runtimes.find((r) => r.goalID === goalID)
       if (!rt) return s
+      if (rt.phase !== "running") return s
+      if ((rt.activeToolCallIDs?.length ?? 0) > 0) {
+        rt.idleCandidateAt = undefined
+        rt.idleCandidateGeneration = undefined
+        return s
+      }
 
-      // Two-stage idle check — inline
       const now = Date.now()
-      if (!rt.idleCandidateAt) {
+      if (!rt.idleCandidateAt || rt.idleCandidateGeneration !== rt.runGeneration) {
         rt.idleCandidateAt = new Date(now).toISOString()
+        rt.idleCandidateGeneration = rt.runGeneration
         return s
       }
       const elapsed = now - Date.parse(rt.idleCandidateAt)
       if (elapsed < confirmIdleMs) return s
       if (rt.lastActivityAt && rt.lastActivityAt > rt.idleCandidateAt) {
         rt.idleCandidateAt = undefined
+        rt.idleCandidateGeneration = undefined
         return s
       }
-      rt.idleCandidateAt = undefined
 
-      // Release lease
-      if (rt.phase === "running") {
+      if (rt.activePromptMessageID) {
+        confirmation = {
+          generation: rt.runGeneration,
+          promptMessageID: rt.activePromptMessageID,
+          candidateAt: rt.idleCandidateAt,
+          assistantCompleted: Boolean(rt.activeAssistantCompletedAt),
+        }
+      } else {
+        // Compatibility path for a run persisted by an older plugin version.
         completedRunID = rt.activeRunID
         Object.assign(rt, releaseLease(rt))
         rt.activeRunID = undefined
         rt.lastWorkerStatus = "idle"
       }
-
       return s
     })
+
+    if (confirmation) {
+      const candidate = confirmation
+      const transcript = await inspectPromptTurn(goal.workerSessionID, candidate.promptMessageID)
+      if (!transcript.latestUserPrompt || (!candidate.assistantCompleted && !transcript.assistantCompleted)) {
+        return true
+      }
+
+      afterIdle = await mutateState(directory, `idle.confirm:${goalID}`, async (s) => {
+        const g = s.goals.find((item) => item.id === goalID)
+        const rt = s.runtimes.find((r) => r.goalID === goalID)
+        if (!g || !rt || isTerminal(g.status) || g.status === "paused") return s
+        if (rt.phase !== "running") return s
+        if (rt.runGeneration !== candidate.generation) return s
+        if (rt.activePromptMessageID !== candidate.promptMessageID) return s
+        if (rt.idleCandidateGeneration !== candidate.generation) return s
+        if (rt.idleCandidateAt !== candidate.candidateAt) return s
+        if (rt.lastActivityAt && rt.lastActivityAt > candidate.candidateAt) return s
+        if ((rt.activeToolCallIDs?.length ?? 0) > 0) return s
+
+        completedRunID = rt.activeRunID
+        Object.assign(rt, releaseLease(rt))
+        rt.activeRunID = undefined
+        rt.lastWorkerStatus = "idle"
+        return s
+      })
+    }
 
     if (completedRunID) {
       await appendEvent(directory, {
@@ -245,12 +338,8 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
         revision: afterIdle.revision,
       } satisfies LoopEvent)
     } else {
-      // Two-stage idle not confirmed yet or no lease to release
-      const checkState = await readState(directory)
-      const checkRt = checkState.runtimes.find((r) => r.goalID === goalID)
-      if (!checkRt || (checkRt.phase !== "idle" && checkRt.idleCandidateAt)) {
-        return true
-      }
+      // Candidate not confirmed, transcript not anchored, or generation changed.
+      return true
     }
 
     // Re-read fresh state for limit enforcement
@@ -346,6 +435,35 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     return true
   }
 
+  async function inspectPromptTurn(
+    workerSessionID: string | undefined,
+    promptMessageID: string,
+  ): Promise<{ latestUserPrompt: boolean; assistantCompleted: boolean }> {
+    const noMatch = { latestUserPrompt: false, assistantCompleted: false }
+    if (!workerSessionID) return noMatch
+    let messages
+    try {
+      messages = await host.readMessages(workerSessionID, 50)
+    } catch {
+      return noMatch
+    }
+    const users = messages.filter((message) => message.role === "user")
+    if (users.length === 0) return noMatch
+
+    const allTimestamped = users.every((message) => message.timestamp && Number.isFinite(Date.parse(message.timestamp)))
+    const ordered = allTimestamped
+      ? [...users].sort((a, b) => Date.parse(a.timestamp!) - Date.parse(b.timestamp!))
+      : users
+    return {
+      latestUserPrompt: ordered.at(-1)?.messageID === promptMessageID,
+      assistantCompleted: messages.some(
+        (message) => message.role === "assistant"
+          && message.parentMessageID === promptMessageID
+          && Boolean(message.completedAt),
+      ),
+    }
+  }
+
   // ─── Status Handler ───────────────────────────────────────────────────────
 
   async function handleSessionStatus(state: StoreState, goal: any, event: any): Promise<boolean> {
@@ -361,6 +479,9 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     await mutateState(directory, `status:${goal.id}`, async (s) => {
       const rt = s.runtimes.find((r) => r.goalID === goal.id)
       if (!rt) return s
+      if (statusType === "busy" || statusType === "retry") {
+        Object.assign(rt, recordActivity(rt))
+      }
       rt.lastWorkerStatus = statusType as any
       rt.updatedAt = new Date().toISOString()
       return s
@@ -579,13 +700,11 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
 
     const state = await readState(directory)
     // FAST PATH: skip if no active goals
-    const hasActiveGoals = state.goals.some(
-      (g) => !isTerminal(g.status) && g.status !== "paused",
-    )
+    const hasActiveGoals = state.goals.some((g) => g.status === "active")
     if (!hasActiveGoals) return
 
     for (const goal of state.goals) {
-      if (isTerminal(goal.status) || goal.status === "paused") continue
+      if (goal.status !== "active") continue
 
       const runtime = state.runtimes.find((r) => r.goalID === goal.id)
       if (!runtime) continue
@@ -609,9 +728,72 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       // completed turn is continued on the maintenance cadence, not lease expiry.
       // Also poll idle-phase goals that missed the idle event entirely.
       if ((runtime.phase === "running" || runtime.phase === "idle") && goal.workerSessionID) {
+        if (runtime.phase === "idle" && runtime.activeRunID) {
+          await mutateState(directory, `maintenance.clear-stale-run:${goal.id}`, async (s) => {
+            const rt = s.runtimes.find((r) => r.goalID === goal.id)
+            if (rt?.phase === "idle" && rt.activeRunID) {
+              Object.assign(rt, releaseLease(rt))
+              rt.activeRunID = undefined
+              rt.lastWorkerStatus = "idle"
+            }
+            return s
+          })
+          await logServerEvent(directory, "maintenance.stale-run-cleared", { goalID: goal.id })
+        }
+
         const status = await host.sessionStatus(goal.workerSessionID)
+        if (status === "unknown") {
+          let shouldNotify = false
+          const unknownState = await mutateState(directory, `maintenance.unknown-status:${goal.id}`, async (s) => {
+            const rt = s.runtimes.find((r) => r.goalID === goal.id)
+            if (!rt) return s
+            rt.unknownStatusCount = Math.min(
+              unknownStatusThreshold,
+              (rt.unknownStatusCount ?? 0) + 1,
+            )
+            rt.lastUnknownStatusAt = new Date().toISOString()
+            if (rt.unknownStatusCount >= unknownStatusThreshold && !rt.workerUnreachableNotifiedAt) {
+              rt.workerUnreachableNotifiedAt = new Date().toISOString()
+              shouldNotify = true
+            }
+            rt.updatedAt = new Date().toISOString()
+            return s
+          })
+          const unknownRuntime = unknownState.runtimes.find((r) => r.goalID === goal.id)
+          if (shouldNotify) {
+            await logServerEvent(directory, "maintenance.worker-unreachable", {
+              goalID: goal.id,
+              workerSessionID: goal.workerSessionID,
+              count: unknownRuntime?.unknownStatusCount,
+            })
+            await host.notifyOwner(
+              goal.ownerSessionID,
+              `Loop goal "${goal.name}" worker is unreachable after ${unknownRuntime?.unknownStatusCount ?? unknownStatusThreshold} status checks. The goal remains active; use inspect_background_goal, nudge_goal, pause_goal, or resume_goal to recover it.`,
+            )
+          }
+          continue
+        }
+
+        if ((runtime.unknownStatusCount ?? 0) > 0 || runtime.workerUnreachableNotifiedAt) {
+          await mutateState(directory, `maintenance.status-recovered:${goal.id}`, async (s) => {
+            const rt = s.runtimes.find((r) => r.goalID === goal.id)
+            if (rt) {
+              rt.unknownStatusCount = 0
+              rt.lastUnknownStatusAt = undefined
+              rt.workerUnreachableNotifiedAt = undefined
+              rt.updatedAt = new Date().toISOString()
+            }
+            return s
+          })
+          await logServerEvent(directory, "maintenance.worker-recovered", { goalID: goal.id })
+        }
+
         if (status === "idle") {
-          await handleSessionIdle(state, goal)
+          if (runtime.phase === "idle") {
+            await continueGoal(goal.id)
+          } else {
+            await handleSessionIdle(state, goal)
+          }
           continue
         }
       }

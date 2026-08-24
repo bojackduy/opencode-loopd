@@ -22,7 +22,7 @@ import { useKeyboard } from "@opentui/solid";
 // src/infrastructure/state-repository.ts
 import { promises as fs } from "fs";
 import path from "path";
-var CURRENT_VERSION = 4;
+var CURRENT_VERSION = 5;
 function emptyState() {
   return { version: CURRENT_VERSION, revision: 0, goals: [], runtimes: [], commandLedger: [] };
 }
@@ -101,6 +101,26 @@ function migrate(state) {
       ...rt,
       lastVerificationAttempt: rt.lastVerificationAttempt ?? undefined,
       recentVerificationAttempts: rt.recentVerificationAttempts ?? []
+    }));
+  }
+  if (result.version < 5) {
+    result.version = 5;
+    result.goals = result.goals.map((goal) => ({
+      ...goal,
+      config: {
+        ...goal.config,
+        workspaceWrite: goal.config?.workspaceWrite ?? true
+      }
+    }));
+    result.runtimes = result.runtimes.map((rt) => ({
+      ...rt,
+      activePromptObservedAt: rt.activePromptObservedAt ?? undefined,
+      activeAssistantMessageID: rt.activeAssistantMessageID ?? undefined,
+      activeAssistantCompletedAt: rt.activeAssistantCompletedAt ?? undefined,
+      idleCandidateGeneration: rt.idleCandidateGeneration ?? undefined,
+      unknownStatusCount: rt.unknownStatusCount ?? 0,
+      lastUnknownStatusAt: rt.lastUnknownStatusAt ?? undefined,
+      workerUnreachableNotifiedAt: rt.workerUnreachableNotifiedAt ?? undefined
     }));
   }
   return result;

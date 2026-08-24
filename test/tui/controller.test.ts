@@ -25,7 +25,12 @@ describe("Dashboard Controller", () => {
     await fs.mkdir(dir, { recursive: true })
     host = createFakeHost()
     client = createControlClient(dir)
-    worker = createControlWorker({ directory: dir, goalService: createGoalService(host), pollIntervalMs: 50 })
+    worker = createControlWorker({
+      directory: dir,
+      goalService: createGoalService(host),
+      pollIntervalMs: 50,
+      defaults: { defaultAgent: "smart-agent", defaultChecks: ["true"] },
+    })
     worker.start()
     ctrl = createDashboardController(client)
   })
@@ -55,8 +60,8 @@ describe("Dashboard Controller", () => {
 
     it("moves through goals", async () => {
       // Create two goals
-      await ctrl.startGoal("owner-1", "g1", "objective 1")
-      await ctrl.startGoal("owner-2", "g2", "objective 2")
+      await ctrl.startGoal("owner-1", "g1", "objective 1", { workspaceWrite: false })
+      await ctrl.startGoal("owner-2", "g2", "objective 2", { workspaceWrite: false })
 
       const state = await ctrl.refresh()
       expect(state.activeGoals).toHaveLength(2)
@@ -76,9 +81,9 @@ describe("Dashboard Controller", () => {
 
   describe("moveFirst / moveLast", () => {
     it("moves to first and last", async () => {
-      await ctrl.startGoal("owner-1", "g1", "objective 1")
-      await ctrl.startGoal("owner-2", "g2", "objective 2")
-      await ctrl.startGoal("owner-3", "g3", "objective 3")
+      await ctrl.startGoal("owner-1", "g1", "objective 1", { workspaceWrite: false })
+      await ctrl.startGoal("owner-2", "g2", "objective 2", { workspaceWrite: false })
+      await ctrl.startGoal("owner-3", "g3", "objective 3", { workspaceWrite: false })
 
       const state = await ctrl.refresh()
       const last = ctrl.moveLast(state)
@@ -93,7 +98,7 @@ describe("Dashboard Controller", () => {
 
   describe("startGoal", () => {
     it("creates a goal", async () => {
-      const result = await ctrl.startGoal("owner-1", "test", "do something")
+      const result = await ctrl.startGoal("owner-1", "test", "do something", { workspaceWrite: false })
       expect(result.statusText).toContain("test")
 
       const state = await client.getState()
@@ -104,7 +109,7 @@ describe("Dashboard Controller", () => {
 
   describe("pauseGoal / resumeGoal", () => {
     it("pauses and resumes a goal", async () => {
-      await ctrl.startGoal("owner-1", "test", "do something")
+      await ctrl.startGoal("owner-1", "test", "do something", { workspaceWrite: false })
       const state = await ctrl.refresh()
       const goal = state.activeGoals[0]!
 
@@ -120,7 +125,7 @@ describe("Dashboard Controller", () => {
 
   describe("clearGoal", () => {
     it("clears a goal", async () => {
-      await ctrl.startGoal("owner-1", "test", "do something")
+      await ctrl.startGoal("owner-1", "test", "do something", { workspaceWrite: false })
       const state = await ctrl.refresh()
       const goal = state.activeGoals[0]!
 
@@ -159,7 +164,7 @@ describe("Dashboard Controller", () => {
     })
 
     it("handles pause command", async () => {
-      await ctrl.startGoal("owner-1", "test", "do something")
+      await ctrl.startGoal("owner-1", "test", "do something", { workspaceWrite: false })
       const state = await ctrl.refresh()
       const goal = state.activeGoals[0]!
 

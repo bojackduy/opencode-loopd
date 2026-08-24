@@ -9,7 +9,7 @@ import os from "os"
 import type { Goal, GoalID } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
 
-const CURRENT_VERSION = 4
+const CURRENT_VERSION = 5
 
 export interface StoreState {
   version: number
@@ -204,6 +204,29 @@ function migrate(state: StoreState): StoreState {
       ...rt,
       lastVerificationAttempt: rt.lastVerificationAttempt ?? undefined,
       recentVerificationAttempts: rt.recentVerificationAttempts ?? [],
+    }))
+  }
+
+  if (result.version < 5) {
+    result.version = 5
+    result.goals = result.goals.map((goal: any) => ({
+      ...goal,
+      config: {
+        ...goal.config,
+        // Legacy goals did not classify workspace access. Conservatively
+        // serialize them until they complete or are recreated explicitly.
+        workspaceWrite: goal.config?.workspaceWrite ?? true,
+      },
+    }))
+    result.runtimes = result.runtimes.map((rt: any) => ({
+      ...rt,
+      activePromptObservedAt: rt.activePromptObservedAt ?? undefined,
+      activeAssistantMessageID: rt.activeAssistantMessageID ?? undefined,
+      activeAssistantCompletedAt: rt.activeAssistantCompletedAt ?? undefined,
+      idleCandidateGeneration: rt.idleCandidateGeneration ?? undefined,
+      unknownStatusCount: rt.unknownStatusCount ?? 0,
+      lastUnknownStatusAt: rt.lastUnknownStatusAt ?? undefined,
+      workerUnreachableNotifiedAt: rt.workerUnreachableNotifiedAt ?? undefined,
     }))
   }
 

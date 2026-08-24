@@ -102,6 +102,21 @@ Or for local checkout:
 }
 ```
 
+For safe code-editing defaults, configure the server plugin with an agent and
+verification commands:
+
+```json
+{
+  "plugin": [[
+    "@bojackduy/opencode-loopd",
+    {
+      "defaultAgent": "smart-agent",
+      "defaultChecks": ["bun test", "bun run typecheck"]
+    }
+  ]]
+}
+```
+
 `opencode-loopd` exposes:
 - `opencode-loopd/server` → engine plugin
 - `opencode-loopd/tui` → dashboard plugin
@@ -231,10 +246,18 @@ Goals accept:
 | `timeoutMs` | `300000` | Per-turn lease (5 min) |
 | `compactEvery` | — | Compact child every N turns |
 | `checks` | `[]` | Shell commands that must pass for `complete_goal` |
+| `checkCwd` | artifact directory | Directory where completion checks run; workspace writes default to project root |
+| `workspaceWrite` | `true` | Marks shared-workspace mutation; only one active workspace writer is allowed. Set `false` explicitly for artifact-only/read-only work |
+| `agent` | `defaultAgent` | Worker agent; goal creation fails if neither is configured nor supplied |
 | `progressFile` | `<artifactDir>/progress.md` | Transaction state file |
 | `artifactDir` | `goals/<id>/` | Auto — override only if objective names another dir |
 
 Artifacts, logs, and state live under `.opencode/loopd/` (project-local). Locks live in `/tmp/loopd-locks/<project-hash>/` to avoid snapshot noise.
+
+Workspace-writing goals must have deterministic checks and are serialized to
+prevent concurrent agents or `git stash` operations from overwriting each
+other. Artifact-only research goals may run concurrently by setting
+`workspaceWrite: false` explicitly.
 
 ## Dashboard tips
 
