@@ -1758,19 +1758,17 @@ function createGoalService(host) {
   }
   async function ensureWorkerSession(directory, goal) {
     let session = sessions.get(goal.id);
-    if (!session && goal.workerSessionID) {
-      const status = await host.sessionStatus(goal.workerSessionID);
-      if (status !== "unknown") {
-        session = {
-          goalID: goal.id,
-          workerSessionID: goal.workerSessionID,
-          startedAt: goal.createdAt
-        };
-        sessions.set(goal.id, session);
-      }
-    }
     if (session)
       return session;
+    if (goal.workerSessionID) {
+      session = {
+        goalID: goal.id,
+        workerSessionID: goal.workerSessionID,
+        startedAt: goal.createdAt
+      };
+      sessions.set(goal.id, session);
+      return session;
+    }
     session = await workers.createWorker(goal);
     sessions.set(goal.id, session);
     await mutateState(directory, `goal.set-worker:${goal.id}`, async (s) => {

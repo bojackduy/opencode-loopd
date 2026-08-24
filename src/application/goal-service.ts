@@ -156,18 +156,18 @@ export function createGoalService(host: LoopHost): GoalService {
 
   async function ensureWorkerSession(directory: string, goal: Goal): Promise<WorkerSession> {
     let session = sessions.get(goal.id)
-    if (!session && goal.workerSessionID) {
-      const status = await host.sessionStatus(goal.workerSessionID)
-      if (status !== "unknown") {
-        session = {
-          goalID: goal.id,
-          workerSessionID: goal.workerSessionID,
-          startedAt: goal.createdAt,
-        }
-        sessions.set(goal.id, session)
-      }
-    }
     if (session) return session
+    if (goal.workerSessionID) {
+      // Reuse persisted session to keep 1 goal = 1 session; avoids duplicate on retry when cache is cold
+      // Previously checked status !== "unknown" and created duplicate on unknown, causing 2 sessions per goal
+      session = {
+        goalID: goal.id,
+        workerSessionID: goal.workerSessionID,
+        startedAt: goal.createdAt,
+      }
+      sessions.set(goal.id, session)
+      return session
+    }
 
     session = await workers.createWorker(goal)
     sessions.set(goal.id, session)
