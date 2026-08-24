@@ -34,12 +34,12 @@ export function goalTools(
   return {
     loopd_create_goal: tool({
       description:
-        "Create a new background loop goal. The engine spawns a dedicated worker session " +
-        "that does the work autonomously — it never runs in this chat. " +
-        "Call this after clarifying the goal name, objective, and any config with the user. " +
-        "The goal immediately starts in the background; the user can monitor it via /loop. " +
-        "Workspace-writing goals are serialized and require completion checks. " +
-        "Specify 'agent', or configure the plugin's defaultAgent option.",
+        "Create a new background loop goal (contract: objective + checks + agent + workspaceWrite). " +
+        "The engine spawns a dedicated worker session that does the work autonomously — it never runs in this chat. " +
+        "Call this after clarifying the contract with the user. " +
+        "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " +
+        "Workspace-writing goals are serialized (only one active writer) and require checks. " +
+        "Specify 'agent' or configure plugin defaultAgent.",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
@@ -134,8 +134,7 @@ export function goalTools(
 
     get_goal: tool({
       description:
-        "Get the current goal state. Call at the start of every continuation turn " +
-        "to retrieve the objective, current state, acceptance criteria, and recent failures.",
+        "Get the current goal contract and state. Call at the start of every turn to retrieve the objective, checks, limits, and recent failures (including HOST VERDICT if the last completion was rejected). Returns structured JSON with config and runtime (phase, runGeneration, rejectionCount).",
       args: {},
       execute: async (_args, context) => {
         const state = await readState(dir)
@@ -163,8 +162,7 @@ export function goalTools(
 
     report_goal_progress: tool({
       description:
-        "Report meaningful progress on the current goal without completing it. " +
-        "Call after durable state changes (file writes, verifications).",
+        "Report meaningful progress (resets consecutiveFailures/noProgressCount). Call after durable state changes (file writes, verifications) — not after thinking. The engine uses this to avoid force-finish.",
       args: {
         summary: tool.schema.string().describe("What was accomplished."),
         next: tool.schema.string().describe("The next concrete step."),
@@ -224,9 +222,7 @@ export function goalTools(
 
     complete_goal: tool({
       description:
-        "Mark the current goal as completed. " +
-        "Use only when all acceptance criteria pass with concrete evidence. " +
-        "Runs configured completion checks before accepting.",
+        "Propose completion. Host runs checks from checkCwd (writers default to project root) — if any fail, host rejects (rejectionCount++, freeRetryPending if <3, blocked after 3 with HOST VERDICT). Only call when every requirement is proved with evidence; the host decides, not the model.",
       args: {
         summary: tool.schema.string().describe("What was completed."),
         evidence: tool.schema.string().describe("Concrete evidence of completion."),
@@ -409,8 +405,7 @@ export function goalTools(
 
     block_goal: tool({
       description:
-        "Mark the current goal as blocked. " +
-        "Use only for a real external blocker requiring user intervention.",
+        "Mark blocked for a real external blocker (missing creds, contradictory objective vs checks). Use only when you cannot proceed — the engine will not auto-continue blocked goals until resume/retry.",
       args: {
         reason: tool.schema.string().describe("Why the goal is blocked."),
         needed: tool.schema.string().describe("What is needed to unblock."),

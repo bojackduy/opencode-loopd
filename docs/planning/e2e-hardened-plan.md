@@ -1,16 +1,10 @@
 # E2E Plan — Hardened Lifecycle (1da88dc)
 
-**Goal:** Prove `1da88dc` hardening survives a real model loop, with no overlapping runs, correct maintenance recovery, and single-writer serialization.
-
-## What Just Landed
-
-- `activePromptMessageID` pre-generated → correlated `message.updated/part.updated`, idle fenced by `runGeneration` + `latestUserPrompt && (candidateCompleted || transcriptCompleted)` before lease release.
-- `maintenance` auto-repairs `phase=idle+activeRunID`, bounds `unknownStatusCount` (threshold 3) → one `notifyOwner`.
-- `workspaceWrite=true` safe-default, `defaultAgent/defaultChecks` via `goal-policy.ts`, per-goal mutex `withGoalOperation`, exclusive `turn.acquire` re-check.
+**Goal:** Prove hardening survives a real model loop, with no overlapping runs, correct maintenance recovery, and single-writer serialization.
 
 ## Live E2E Matrix (run sequentially, respects single writer)
 
-### E2E-1 — Conflict Trap (NO path) — PRIMARY
+### E2E-1 — Conflict Trap (the NO-path) — PRIMARY
 
 **Purpose:** Re-prove evaluator rejection → free retry → complete (the only live proof we have was `eval-no-path-e2e` on old code, version 3).
 

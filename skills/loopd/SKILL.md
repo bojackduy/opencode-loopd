@@ -31,29 +31,58 @@ Do not use loopd when:
 ```
 created → active → complete
                   → blocked (needs user intervention)
+                  → budget_limited / usage_limited (engine limits)
          paused (user-initiated, can resume)
+         retry (blocked → active, clears failures)
 ```
+
+Only `active` goals own live worker runs. `blocked`/`paused`/`budget_limited` wait for an explicit owner transition (`resume`/`retry`/`nudge`). The loop is engine-driven, not parent-driven.
+
+## Contract & Evaluation Semantics
+
+Every goal has an **immutable contract** at creation — the source of truth for completion:
+
+* **Objective** — semantic requirements (free text, self-contained). The worker derives concrete requirements from it.
+* **Checks** — deterministic shell commands that **must pass** for `complete_goal` to be accepted. For `workspaceWrite:true` goals they are **mandatory** (explicit `checks` or plugin `defaultChecks`), and they run from `checkCwd` (writers default to project root; artifact-only jobs run from their `artifactDir`).
+* **Agent** — which subagent model runs the worker (`sloppy-agent`, `smart-agent`, …). Required unless `defaultAgent` is configured in `opencode.jsonc` plugin options.
+* **WorkspaceWrite** — `true` (default) = may touch the shared repo; **only one active writer at a time** is allowed (enforced on `start`/`resume`/`retry` with rollback). Set `false` explicitly for artifact-only/read-only work to allow concurrency.
+* **Limits** — `maxTurns` (default 50), `maxNoProgress`, `maxFailures`, `timeoutMs`, `compactEvery`, `progressFile`.
+
+**Who decides completion:**
+* **Host is the acceptance authority** — it runs `checks` deterministically. If any check fails, `complete_goal` is **rejected** (`ok:false`, `rejectionCount++`, `freeRetryPending=true` for <3 rejections, `blocked` after 3). The worker gets the exact failure in the next steering.
+* **Model is the proposer** — it must self-audit via `## COMPLETION REVIEW` (derive requirements → locate evidence → judge `proves|contradicts|incomplete|missing`) and only call `complete_goal` when every requirement is proved. If objective and checks conflict, it must `block_goal`, not silently violate either.
+
+**Hardened loop guarantees (1da88dc):**
+* **Prompt correlation** — each turn’s prompt gets a `msg-` UUID (`activePromptMessageID`); the engine correlates `message.updated`/`message.part.updated` by that ID and by `runGeneration`. Stale events never release a newer lease.
+* **Generation fencing** — `idleCandidateAt` is tied to `idleCandidateGeneration`; a new prompt clears the candidate. Finalization also requires the transcript anchor: the latest user prompt must be the engine’s prompt **and** its assistant response must be completed.
+* **Maintenance (30s)** — auto-repairs `phase=idle + activeRunID` (stale lease), bounds `unknown` status polls (`unknownStatusCount` threshold 3 → one `notifyOwner` per episode, `workerUnreachableNotifiedAt` deduped), and recovers counters on success. `active`-only polling; `blocked`/`paused` never auto-continue.
+* **Per-goal mutex** — `withGoalOperation(goalID)` serializes `continueTurn`/`pause`/`resume`/`retry`/`clear`/`nudge` per goal, and `turn.acquire` re-checks `leaseIsValid` inside the transaction for exclusivity.
+* **Lease** — `acquireLease`/`releaseLease` + `timeoutMs` (default 5 min); prompt failures release the lease and schedule `waiting_retry` with exponential backoff.
 
 ## Creating a Goal
 
-Use `loopd_create_goal` after clarifying the objective with the user:
+Use `loopd_create_goal` **after** clarifying the objective with the user (what / where / how to verify). The tool validates the contract before spawning:
 
 ```
 loopd_create_goal({
   name: "short-name",
   objective: "Detailed description of what the goal should accomplish.",
-  agent: "smart-agent",                    // required unless defaultAgent is configured
-  checks: ["npm test"],                    // optional: shell commands for completion verification
-  workspaceWrite: true,                    // code/shared workspace edits; serialized by loopd
-  progressFile: ".opencode/loopd/progress.md", // optional: worker reads/writes this
-  maxTurns: 50,                            // optional: safety budget
-  maxNoProgress: 5,                        // optional: auto-block without progress
-  maxFailures: 3,                          // optional: auto-block on failures
-  compactEvery: 3,                         // optional: compact worker session every N turns
+  agent: "smart-agent",                    // required unless plugin defaultAgent is configured
+  checks: ["npm test"],                    // mandatory if workspaceWrite:true (or configure defaultChecks)
+  checkCwd: "/project/root",               // optional; writers default to project root, readers to artifactDir
+  workspaceWrite: true,                    // default true; set false explicitly for artifact-only/read-only
+  progressFile: ".opencode/loopd/progress.md", // optional; defaults to <artifactDir>/progress.md
+  maxTurns: 50,                            // optional; ≥50 enforces FINAL REPORT REQUIRED
+  maxNoProgress: 5,                        // optional; auto-block without progress
+  maxFailures: 3,                          // optional; auto-block on failures
+  compactEvery: 3,                         // optional; compact worker session every N turns
+  timeoutMs: 300000,                       // optional; per-turn lease
 })
 ```
 
-The goal starts immediately. The user can monitor it via `/loop` (<leader>d).
+Returns `ok:true` with `goalID`, `workerSessionID`, `artifactDir`, `agent`, `checks`, `workspaceWrite`, `defaultsApplied:{agent,checks}`. On contract violation you get `ok:false` with `errorCode: "missing_agent"` or `"missing_checks"` or `"already active"` (writer serialization).
+
+The goal starts immediately. The user can monitor it via `/loop` (<leader>d). Plugin options `defaultAgent` / `defaultChecks` in `opencode.jsonc` can supply defaults so callers don’t have to repeat them.
 
 ## Worker Tools (Running Inside the Goal)
 
@@ -113,23 +142,34 @@ block_goal({
 
 ## Owner Tools (Parent Chat)
 
-These tools are available in the parent chat that created the goal:
+All are filtered by `ownerSessionID` (only the session that created the goal sees it). They are the **only** way to recover a stuck worker — they mutate the engine state (Entity B) and, when needed, force the bridge to the real subagent session (Entity A).
 
 ### list_background_goals
 
-Lists all active goals owned by this session. Shows status and progress.
+Lists all `active` goals owned by this session (name, status, phase, turn, last progress, blocker).
 
 ### inspect_background_goal
 
-Shows detailed info: objective, config, progress, blocker, runtime state.
+Shows detailed contract + runtime: `objective`, `config{agent,checks,checkCwd,workspaceWrite,limits,artifactDir}`, `lastProgress`, `completionEvidence`, `blocker`, `runtime{phase,runCount,budgetTurnCount,runGeneration,evaluatorRejectionCount,lastActivityAt,activePromptMessageID,unknownStatusCount}`.
 
 ### read_goal_transcript
 
-Reads the last N messages from the worker session. Useful for debugging what the worker is doing.
+Reads the last N messages from the worker session (`role`, `content`, `timestamp`, `messageID`). Use to see if the worker’s steering contained `HOST VERDICT`.
 
 ### send_goal_input
 
-Sends a message to the worker's next turn. See table above.
+Appends to the goal’s inbox file; the next `continueTurn` injects it as `## USER INSTRUCTIONS`. **Does not itself re-prompt** — the engine does on next idle/maintenance.
+
+### nudge_goal
+
+Force re-prompts a stuck worker even if `sessionStatus` is not `idle`. Clears stale `activeRunID`/`idleCandidateAt`/`activePromptMessageID`/lease, sets `phase=idle`, and calls `continueTurn({force:true})`. Use when `unknownStatusCount` ≥3 or the worker is `running` with no activity. Returns `{ok, message}`.
+
+### pause_goal / resume_goal / retry / clear
+
+* `pause_goal` — `active → paused`, `releaseLease`, `abortWorker`. Frees the writer slot.
+* `resume_goal` — `paused → active`, reuses the existing worker session if `sessionStatus` is still `idle`/`busy` (preserves transcript), otherwise creates a new one. Fails with `already active` if another writer is active.
+* `retry` (via `resume` on `blocked`) — `blocked → active`, resets `consecutiveFailures`/`forceFinishRequested`.
+* `clear_goal` — aborts worker and removes `goal` + `runtime` + ledger entry (cannot be undone).
 
 ## Dashboard Commands
 
@@ -167,15 +207,16 @@ Open the dashboard with `/loop` or <leader>d.
 
 ## Safety Patterns
 
-1. **Always call `get_goal` first** — Read the objective before doing any work.
-2. **Progress after durable changes** — Call `report_goal_progress` after file writes or verifications, not after thinking.
-3. **Complete with evidence** — Never call `complete_goal` without concrete proof (test output, file checks passing).
-4. **Block for real blockers only** — Don't block for things you can figure out. Block when you genuinely need user input.
-5. **Use checks for verification** — Set `checks` on goal creation to auto-verify completion (e.g., `["npm test", "test -f README.md"]`).
-6. **Set safety budgets** — Use `maxTurns`, `maxNoProgress`, and `maxFailures` to prevent runaway goals.
-7. **Compact periodically** — Use `compactEvery` to keep the worker session's context manageable.
-8. **Serialize workspace edits** — Set `workspaceWrite: true` for code/repository changes. Loopd allows only one active workspace-writing goal, preventing stash and file conflicts.
-9. **Checks are mandatory for workspace edits** — Supply `checks`, or configure plugin `defaultChecks`. They run from the project root unless `checkCwd` is supplied.
+1. **Always call `get_goal` first** — Read the full contract (objective + checks + limits) before doing any work. The `COMPLETION REVIEW` and `HOST VERDICT` in steering are authoritative.
+2. **Progress after durable changes** — Call `report_goal_progress` after file writes or verifications (resets `consecutiveFailures`/`noProgressCount`), not after thinking.
+3. **Complete with evidence — host decides** — Never call `complete_goal` without concrete proof. The host will reject it if `checks` fail; you’ll get `Rejection #N` with exact `stderr` and a **free retry** (`budgetTurnCount` not charged for N<3). After 3 rejections the goal is `blocked`.
+4. **Block for real blockers only** — Don’t block for things you can figure out. If objective and `checks` appear contradictory, `block_goal` — don’t silently violate either.
+5. **Use checks for verification — mandatory for writers** — `workspaceWrite:true` goals **require** `checks` (explicit or `defaultChecks`). Checks run from `checkCwd` (writers → project root by default). `["npm test","bun run typecheck"]` is a good default.
+6. **Serialize workspace edits** — Keep `workspaceWrite:true` (the default) for code/repo changes. The engine allows **only one active writer**; a second `start`/`resume`/`retry` fails with `already active`. Use `workspaceWrite:false` explicitly for artifact-only research to allow concurrency.
+7. **Set safety budgets** — `maxTurns` (default 50), `maxNoProgress`, `maxFailures` prevent runaways. On `maxTurns`/`maxNoProgress` the engine injects `FINAL REPORT REQUIRED`; if ignored, it `blocked (force-finish ignored)` after the next idle.
+8. **Compact periodically** — `compactEvery` keeps the worker session’s context manageable.
+9. **Recover stuck workers explicitly** — If `inspect` shows `phase=running` with `unknownStatusCount ≥3` or `lastActivityAt` far in the past, use `nudge_goal` (force re-prompt) or `pause`/`resume`. `send_goal_input` alone does not re-prompt.
+10. **One writer, one check suite** — Don’t run concurrent `start` calls that touch the same files from parallel chats; chain them sequentially or mark the second as `workspaceWrite:false`.
 
 ## Example: Creating and Monitoring a Goal
 
@@ -183,19 +224,24 @@ Open the dashboard with `/loop` or <leader>d.
 ```
 User: Write a README for this project and create a changelog.
 
-Agent: I'll set up a background goal for this.
+Agent: I'll set up a background goal for this. What's the verification?
+
+User: Just that both files exist.
+
+Agent: Got it — creating with a contract.
 
 loopd_create_goal({
   name: "docs-write",
   objective: "Write a README.md covering: what it is, install, usage, architecture, and examples. Then create CHANGELOG.md with a v1.0.0 entry.",
   agent: "smart-agent",
   checks: ["test -f README.md", "test -f CHANGELOG.md"],
-  workspaceWrite: true,
+  checkCwd: "/Users/you/project",           // explicit for writers; defaults to project root
+  workspaceWrite: true,                     // default true — serialized
   progressFile: ".opencode/loopd/docs-progress.md",
   maxTurns: 20
 })
-
-# Goal starts. User can monitor with /loop.
+# → {ok:true, artifactDir: ".opencode/loopd/goals/<id>", defaultsApplied:{...}}
+# Goal starts. User can monitor with /loop. If checks fail, the worker gets HOST VERDICT with exact stderr and a free retry.
 ```
 
 **Worker session (automatic):**

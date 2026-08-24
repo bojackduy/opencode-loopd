@@ -20,8 +20,7 @@ export function ownerTools(options: OwnerToolsOptions) {
   return {
     list_background_goals: tool({
       description:
-        "List all background loop goals visible to this session. " +
-        "Shows name, status, progress, and whether any goal is waiting for user input.",
+        "List all active background goals owned by this session. Shows contract (name, status, phase, turn, last progress, blocker) — only goals with your ownerSessionID appear.",
       args: {},
       execute: async (_args, context) => {
         const state = await readState(directory)
@@ -70,8 +69,7 @@ export function ownerTools(options: OwnerToolsOptions) {
 
     inspect_background_goal: tool({
       description:
-        "Inspect a background goal in detail: objective, contract, progress, " +
-        "blockers, questions, runtime state, and recent events.",
+        "Inspect a goal’s full contract and runtime: objective, config{agent,checks,checkCwd,workspaceWrite,limits}, progress, blocker, and runtime{phase,runCount,budgetTurnCount,runGeneration,evaluatorRejectionCount,unknownStatusCount,lastActivityAt,activePromptMessageID}. The source for recovery decisions.",
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to inspect the first active goal."),
       },
@@ -135,8 +133,7 @@ export function ownerTools(options: OwnerToolsOptions) {
 
     read_goal_transcript: tool({
       description:
-        "Read the last N messages from a goal's worker session transcript. " +
-        "Shows what the worker has been doing: tool calls, file changes, responses.",
+        "Read the last N messages from the worker transcript (role, content, messageID). Shows HOST VERDICT, steering, and whether the worker’s last prompt was correlated. Use to debug why a completion was rejected or why a worker is stuck.",
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to read the first active goal."),
         limit: tool.schema.number().optional().describe("Max messages to return (default: 20)."),
@@ -191,9 +188,7 @@ export function ownerTools(options: OwnerToolsOptions) {
 
     send_goal_input: tool({
       description:
-        "Send a message, instruction, or answer to a background goal's worker session. " +
-        "The message will be injected into the worker's next continuation prompt. " +
-        "Use this to answer worker questions, redirect work, or refine scope.",
+        "Send an inbox message to the worker (injected as ## USER INSTRUCTIONS on next turn). Use to answer `question`, redirect, or refine scope. Does NOT itself re-prompt — the engine re-prompts on next idle/maintenance; use nudge_goal if the worker is stuck with no activity.",
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to target the first active goal."),
         message: tool.schema.string().describe("Message to send to the worker."),
@@ -228,8 +223,7 @@ export function ownerTools(options: OwnerToolsOptions) {
 
     pause_goal: tool({
       description:
-        "Pause a background goal. The worker session is aborted and the goal stops running. " +
-        "Use when you need to temporarily stop work (e.g., to investigate an issue or change priorities).",
+        "Pause an active goal: status active → paused, releaseLease, abortWorker, per-goal mutex. Frees the workspaceWrite slot. Use to investigate or to free the single-writer slot.",
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to pause the first active goal."),
       },
@@ -280,9 +274,7 @@ export function ownerTools(options: OwnerToolsOptions) {
 
     resume_goal: tool({
       description:
-        "Resume a paused or blocked background goal. " +
-        "For paused goals, creates a new worker session if needed. " +
-        "For blocked goals, resets failure count and retries.",
+        "Resume a paused (→active, reuses existing worker if sessionStatus still idle/busy) or retry a blocked (→active, resets consecutiveFailures/forceFinish). Fails with 'already active' if another workspaceWrite writer is active. Per-goal mutex.",
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to resume the first paused/blocked goal."),
       },
@@ -344,10 +336,7 @@ export function ownerTools(options: OwnerToolsOptions) {
 
     nudge_goal: tool({
       description:
-        "Force re-prompt a background goal's worker session. " +
-        "Use when a goal is stuck or idle but the engine is not continuing it " +
-        "(e.g., after pause/resume or a missed idle event). " +
-        "Clears stale run state and sends a continuation prompt to the worker.",
+        "Force re-prompt a stuck active worker (the hardened recovery). Clears stale activeRunID/idleCandidate/generation/lease (phase→idle) and calls continueTurn({force:true}) even if sessionStatus is not idle. Use when unknownStatusCount≥3, lastActivityAt is stale, or maintenance notified 'worker is unreachable'. Per-goal mutex.",
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to nudge the first active goal."),
       },
@@ -386,8 +375,7 @@ export function ownerTools(options: OwnerToolsOptions) {
 
     clear_goal: tool({
       description:
-        "Clear a background goal. Aborts the worker and removes the goal from the dashboard. " +
-        "This action cannot be undone. Use when the goal is no longer needed.",
+        "Clear a goal: aborts worker and removes goal+runtime+ledger (cannot be undone). Use when the goal is no longer needed or to free a stuck writer slot after inspection.",
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to clear the first active goal."),
       },
