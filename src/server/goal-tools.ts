@@ -39,11 +39,11 @@ export function goalTools(
         "Call this after clarifying the contract with the user. " +
         "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " +
         "Workspace-writing goals are serialized (only one active writer) and require checks. " +
-        "Specify 'agent' or configure plugin defaultAgent.",
+        "agent is REQUIRED unless plugin defaultAgent is configured in opencode.jsonc — without either, goal creation fails with missing_agent.",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
-        agent: tool.schema.string().optional().describe("Agent to run the worker as. Required unless the plugin has defaultAgent configured."),
+        agent: tool.schema.string().optional().describe("Agent to run the worker as. REQUIRED unless the plugin has defaultAgent configured in opencode.jsonc. Without either, goal creation fails with missing_agent."),
         checks: tool.schema.array(tool.schema.string()).optional().describe("Shell commands that must pass for completion to be accepted. E.g. [\"npm test\"]."),
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
         workspaceWrite: tool.schema.boolean().optional().describe("Whether this goal edits the shared project workspace. Defaults to true; explicitly set false for artifact-only/read-only work."),
@@ -53,6 +53,8 @@ export function goalTools(
         maxFailures: tool.schema.number().optional().describe("Block after N consecutive failures."),
         compactEvery: tool.schema.number().optional().describe("Compact the worker session every N turns."),
         timeoutMs: tool.schema.number().optional().describe("Per-turn timeout in ms."),
+        scheduleEveryMs: tool.schema.number().optional().describe("Interval in ms to auto-requeue the same goal after each completion. Minimum 1000. Enables repetitive dialogue reduction."),
+        scheduleMaxRuns: tool.schema.number().optional().describe("Maximum total runs including the initial run. Undefined = unlimited. Requires scheduleEveryMs."),
       },
       execute: async (args, context) => {
         const sessionID = context?.sessionID || hostSessionID
@@ -78,6 +80,28 @@ export function goalTools(
         if (args.maxFailures !== undefined) config.maxFailures = args.maxFailures
         if (args.compactEvery !== undefined) config.compactEvery = args.compactEvery
         if (args.timeoutMs !== undefined) config.timeoutMs = args.timeoutMs
+        if (args.scheduleEveryMs !== undefined) {
+          const everyMs = args.scheduleEveryMs
+          if (typeof everyMs !== "number" || !Number.isFinite(everyMs) || everyMs < 1000) {
+            return {
+              title: "Goal not created",
+              output: JSON.stringify({ ok: false, message: "scheduleEveryMs must be a number >= 1000", errorCode: "invalid_schedule" }),
+            }
+          }
+          const maxRuns = args.scheduleMaxRuns
+          if (maxRuns !== undefined && (typeof maxRuns !== "number" || !Number.isFinite(maxRuns) || maxRuns < 1 || Math.floor(maxRuns) !== maxRuns)) {
+            return {
+              title: "Goal not created",
+              output: JSON.stringify({ ok: false, message: "scheduleMaxRuns must be an integer >= 1", errorCode: "invalid_schedule" }),
+            }
+          }
+          ;(config as any).schedule = { everyMs, ...(maxRuns !== undefined ? { maxRuns } : {}) }
+        } else if (args.scheduleMaxRuns !== undefined) {
+          return {
+            title: "Goal not created",
+            output: JSON.stringify({ ok: false, message: "scheduleMaxRuns requires scheduleEveryMs", errorCode: "invalid_schedule" }),
+          }
+        }
 
         const resolution = resolveGoalCreationConfig({
           directory: dir,
@@ -353,6 +377,23 @@ export function goalTools(
           runtime.phase = "idle"
           runtime.lastError = undefined
 
+          // Schedule: interval requeue — count this completion and set nextRunAt
+          const schedule = (goal.config as any).schedule as { everyMs: number; maxRuns?: number } | undefined
+          if (schedule && typeof schedule.everyMs === "number" && schedule.everyMs >= 1000) {
+            const cur = typeof (runtime as any).scheduleRunCount === "number" ? (runtime as any).scheduleRunCount : 0
+            const nextCount = cur + 1
+            ;(runtime as any).scheduleRunCount = nextCount
+            const max = schedule.maxRuns
+            const hasMore = typeof max === "number" ? nextCount < max : true
+            if (hasMore) {
+              ;(runtime as any).nextRunAt = new Date(Date.now() + schedule.everyMs).toISOString()
+              ;(runtime as any).lastScheduleAt = new Date().toISOString()
+            } else {
+              ;(runtime as any).nextRunAt = undefined
+            }
+            runtime.updatedAt = new Date().toISOString()
+          }
+
           // Persist a passing verification attempt
           const attemptID = randomUUID()
           const cwd = goal.config.checkCwd || goal.config.artifactDir || dir
@@ -503,6 +544,7 @@ function formatGoalStructured(goal: Goal, runtime?: GoalRuntimeState): string {
       maxFailures: goal.config.maxFailures,
       compactEvery: goal.config.compactEvery,
       timeoutMs: goal.config.timeoutMs,
+      schedule: (goal.config as any).schedule,
     },
     lastProgress: goal.lastProgress,
     completionEvidence: goal.completionEvidence,
@@ -536,6 +578,9 @@ function formatGoalStructured(goal: Goal, runtime?: GoalRuntimeState): string {
       workerUnreachableNotifiedAt: runtime.workerUnreachableNotifiedAt,
       lastVerificationAttempt: runtime.lastVerificationAttempt,
       recentVerificationAttempts: runtime.recentVerificationAttempts,
+      scheduleRunCount: (runtime as any).scheduleRunCount,
+      nextRunAt: (runtime as any).nextRunAt,
+      lastScheduleAt: (runtime as any).lastScheduleAt,
     }
   }
 

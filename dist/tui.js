@@ -22,7 +22,7 @@ import { useKeyboard } from "@opentui/solid";
 // src/infrastructure/state-repository.ts
 import { promises as fs } from "fs";
 import path from "path";
-var CURRENT_VERSION = 5;
+var CURRENT_VERSION = 6;
 function emptyState() {
   return { version: CURRENT_VERSION, revision: 0, goals: [], runtimes: [], commandLedger: [] };
 }
@@ -121,6 +121,32 @@ function migrate(state) {
       unknownStatusCount: rt.unknownStatusCount ?? 0,
       lastUnknownStatusAt: rt.lastUnknownStatusAt ?? undefined,
       workerUnreachableNotifiedAt: rt.workerUnreachableNotifiedAt ?? undefined
+    }));
+  }
+  if (result.version < 6) {
+    result.version = 6;
+    result.goals = result.goals.map((goal) => ({
+      ...goal,
+      config: {
+        ...goal.config,
+        schedule: goal.config?.schedule ?? undefined
+      }
+    }));
+    result.goals = result.goals.map((goal) => {
+      const s = goal.config?.schedule;
+      if (s && typeof s.everyMs === "number" && s.everyMs >= 1000)
+        return goal;
+      if (s) {
+        const { schedule: _s, ...restConfig } = goal.config;
+        return { ...goal, config: restConfig };
+      }
+      return goal;
+    });
+    result.runtimes = result.runtimes.map((rt) => ({
+      ...rt,
+      scheduleRunCount: typeof rt.scheduleRunCount === "number" ? rt.scheduleRunCount : 0,
+      nextRunAt: rt.nextRunAt ?? undefined,
+      lastScheduleAt: rt.lastScheduleAt ?? undefined
     }));
   }
   return result;

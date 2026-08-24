@@ -225,7 +225,14 @@ export function createGoalService(host: LoopHost): GoalService {
     const state1 = await mutateState(directory, `goal.create:${id}`, async (state) => {
       assertWorkspaceWriteAvailable(state, goal)
       state.goals.push(goal)
-      state.runtimes.push(createRuntimeState(id))
+      const rt = createRuntimeState(id)
+      // Initialize schedule counters (v6)
+      if ((goal.config as any).schedule) {
+        ;(rt as any).scheduleRunCount = 0
+        ;(rt as any).nextRunAt = undefined
+        ;(rt as any).lastScheduleAt = undefined
+      }
+      state.runtimes.push(rt)
       const runtime = state.runtimes.find((r) => r.goalID === id)
       if (runtime) runtime.phase = "queued"
       return state

@@ -9,7 +9,7 @@ import os from "os"
 import type { Goal, GoalID } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
 
-const CURRENT_VERSION = 5
+const CURRENT_VERSION = 6
 
 export interface StoreState {
   version: number
@@ -235,6 +235,34 @@ function migrate(state: StoreState): StoreState {
       unknownStatusCount: rt.unknownStatusCount ?? 0,
       lastUnknownStatusAt: rt.lastUnknownStatusAt ?? undefined,
       workerUnreachableNotifiedAt: rt.workerUnreachableNotifiedAt ?? undefined,
+    }))
+  }
+
+  if (result.version < 6) {
+    result.version = 6
+    result.goals = result.goals.map((goal: any) => ({
+      ...goal,
+      config: {
+        ...goal.config,
+        schedule: goal.config?.schedule ?? undefined,
+      },
+    }))
+    // Validate schedule shape for legacy data
+    result.goals = result.goals.map((goal: any) => {
+      const s = goal.config?.schedule
+      if (s && typeof s.everyMs === "number" && s.everyMs >= 1000) return goal
+      if (s) {
+        const { schedule: _s, ...restConfig } = goal.config
+        void _s
+        return { ...goal, config: restConfig }
+      }
+      return goal
+    })
+    result.runtimes = result.runtimes.map((rt: any) => ({
+      ...rt,
+      scheduleRunCount: typeof rt.scheduleRunCount === "number" ? rt.scheduleRunCount : 0,
+      nextRunAt: rt.nextRunAt ?? undefined,
+      lastScheduleAt: rt.lastScheduleAt ?? undefined,
     }))
   }
 

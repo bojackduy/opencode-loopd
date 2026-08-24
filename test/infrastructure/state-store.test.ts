@@ -39,7 +39,7 @@ describe("State Repository", () => {
   describe("readState / writeState", () => {
     it("returns empty state for nonexistent directory", async () => {
       const state = await readState(path.join(dir, "nonexistent"))
-      expect(state.version).toBe(5)
+      expect(state.version).toBe(6)
       expect(state.revision).toBe(0)
       expect(state.goals).toEqual([])
       expect(state.runtimes).toEqual([])
@@ -78,7 +78,7 @@ describe("State Repository", () => {
       expect(s3.revision).toBe(2)
     })
 
-    it("migrates version 1 state to version 3", async () => {
+    it("migrates version 1 state to version 6", async () => {
       // Write version 1 state directly
       const v1State = {
         version: 1,
@@ -91,7 +91,7 @@ describe("State Repository", () => {
       await fs.writeFile(tempFile, JSON.stringify(v1State), "utf8")
 
       const loaded = await readState(dir)
-      expect(loaded.version).toBe(5)
+      expect(loaded.version).toBe(6)
       expect(loaded.commandLedger).toEqual([])
     })
 
@@ -127,7 +127,7 @@ describe("State Repository", () => {
       await fs.writeFile(tempFile, JSON.stringify(v1State), "utf8")
 
       const loaded = await readState(dir)
-      expect(loaded.version).toBe(5)
+      expect(loaded.version).toBe(6)
       expect(loaded.goals).toHaveLength(1)
       expect(loaded.goals[0].name).toBe("test")
       expect(loaded.goals[0].config.workspaceWrite).toBe(true)

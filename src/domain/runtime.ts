@@ -112,6 +112,11 @@ export interface GoalRuntimeState {
   lastParentNotifiedAt?: string
   lastParentNotifiedFor?: "complete" | "blocked" | "failed" | "stopped"
 
+  /** Schedule — interval requeue (v6). */
+  scheduleRunCount?: number
+  nextRunAt?: string
+  lastScheduleAt?: string
+
   /** Timestamps. */
   lastRunAt?: string
   lastProgressAt?: string

@@ -102,6 +102,16 @@ export interface GoalConfig {
 
   /** Agent that runs the worker session. Defaults to primary. */
   agent?: string
+
+  /** Optional interval schedule — requeue the same goal periodically. */
+  schedule?: ScheduleConfig
+}
+
+export interface ScheduleConfig {
+  /** Interval between runs in milliseconds. Minimum 1000. */
+  everyMs: number
+  /** Maximum total runs (including the initial run). Undefined = unlimited. */
+  maxRuns?: number
 }
 
 // ─── Transition Rules ────────────────────────────────────────────────────────

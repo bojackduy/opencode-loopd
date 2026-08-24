@@ -147,7 +147,7 @@ import { randomUUID } from "crypto";
 import { promises as fs } from "fs";
 import path from "path";
 import os from "os";
-var CURRENT_VERSION = 5;
+var CURRENT_VERSION = 6;
 function emptyState() {
   return { version: CURRENT_VERSION, revision: 0, goals: [], runtimes: [], commandLedger: [] };
 }
@@ -308,6 +308,32 @@ function migrate(state) {
       unknownStatusCount: rt.unknownStatusCount ?? 0,
       lastUnknownStatusAt: rt.lastUnknownStatusAt ?? undefined,
       workerUnreachableNotifiedAt: rt.workerUnreachableNotifiedAt ?? undefined
+    }));
+  }
+  if (result.version < 6) {
+    result.version = 6;
+    result.goals = result.goals.map((goal) => ({
+      ...goal,
+      config: {
+        ...goal.config,
+        schedule: goal.config?.schedule ?? undefined
+      }
+    }));
+    result.goals = result.goals.map((goal) => {
+      const s = goal.config?.schedule;
+      if (s && typeof s.everyMs === "number" && s.everyMs >= 1000)
+        return goal;
+      if (s) {
+        const { schedule: _s, ...restConfig } = goal.config;
+        return { ...goal, config: restConfig };
+      }
+      return goal;
+    });
+    result.runtimes = result.runtimes.map((rt) => ({
+      ...rt,
+      scheduleRunCount: typeof rt.scheduleRunCount === "number" ? rt.scheduleRunCount : 0,
+      nextRunAt: rt.nextRunAt ?? undefined,
+      lastScheduleAt: rt.lastScheduleAt ?? undefined
     }));
   }
   return result;
@@ -1799,7 +1825,13 @@ function createGoalService(host) {
     const state1 = await mutateState(directory, `goal.create:${id}`, async (state) => {
       assertWorkspaceWriteAvailable(state, goal);
       state.goals.push(goal);
-      state.runtimes.push(createRuntimeState(id));
+      const rt = createRuntimeState(id);
+      if (goal.config.schedule) {
+        rt.scheduleRunCount = 0;
+        rt.nextRunAt = undefined;
+        rt.lastScheduleAt = undefined;
+      }
+      state.runtimes.push(rt);
       const runtime2 = state.runtimes.find((r) => r.goalID === id);
       if (runtime2)
         runtime2.phase = "queued";
@@ -2281,6 +2313,119 @@ function createGoalService(host) {
   return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile };
 }
 
+// src/application/schedule-worker.ts
+import { randomUUID as randomUUID4 } from "crypto";
+function createScheduleWorker(options) {
+  const { directory, goalService } = options;
+  const intervalMs = options.intervalMs ?? 5000;
+  let running = false;
+  let timer;
+  function start() {
+    if (running)
+      return;
+    running = true;
+    timer = setInterval(() => {
+      tick().catch(() => {});
+    }, intervalMs);
+  }
+  function stop() {
+    running = false;
+    if (timer)
+      clearInterval(timer);
+    timer = undefined;
+  }
+  function isRunning() {
+    return running;
+  }
+  async function tick() {
+    const state = await readState(directory);
+    let resurrected = 0;
+    for (const goal of state.goals) {
+      const schedule = goal.config.schedule;
+      if (!schedule || typeof schedule.everyMs !== "number" || schedule.everyMs < 1000)
+        continue;
+      const runtime = state.runtimes.find((r) => r.goalID === goal.id);
+      if (!runtime)
+        continue;
+      if (goal.status !== "complete")
+        continue;
+      const count = runtime.scheduleRunCount ?? 0;
+      const max = schedule.maxRuns;
+      if (typeof max === "number" && count >= max)
+        continue;
+      const nextAt = runtime.nextRunAt;
+      if (!nextAt)
+        continue;
+      if (Date.now() < Date.parse(nextAt))
+        continue;
+      const activeWriter = state.goals.find((g) => g.id !== goal.id && g.status === "active" && g.config.workspaceWrite);
+      if (goal.config.workspaceWrite && activeWriter) {
+        await logServerEvent(directory, "schedule.skipped-writer-active", {
+          goalID: goal.id,
+          activeWriter: activeWriter.id
+        });
+        continue;
+      }
+      if (runtime.phase === "running" || runtime.phase === "queued" || runtime.phase === "compacting")
+        continue;
+      if (leaseIsValid(runtime))
+        continue;
+      const didResurrect = await mutateState(directory, `schedule.tick:${goal.id}`, async (s) => {
+        const g = s.goals.find((x) => x.id === goal.id);
+        const rt = s.runtimes.find((x) => x.goalID === goal.id);
+        if (!g || !rt)
+          return s;
+        if (g.status !== "complete")
+          return s;
+        const curCount = rt.scheduleRunCount ?? 0;
+        if (typeof max === "number" && curCount >= max)
+          return s;
+        const curNext = rt.nextRunAt;
+        if (!curNext || Date.now() < Date.parse(curNext))
+          return s;
+        g.status = "active";
+        g.updatedAt = new Date().toISOString();
+        g.blocker = undefined;
+        rt.phase = "idle";
+        rt.consecutiveFailures = 0;
+        rt.noProgressCount = 0;
+        rt.progressDuringTurn = false;
+        rt.forceFinishRequested = undefined;
+        rt.lastError = undefined;
+        rt.lastScheduleAt = new Date().toISOString();
+        rt.updatedAt = new Date().toISOString();
+        return s;
+      });
+      const after = didResurrect.goals.find((g) => g.id === goal.id);
+      if (!after || after.status !== "active")
+        continue;
+      await appendEvent(directory, {
+        version: 1,
+        eventID: randomUUID4(),
+        goalID: goal.id,
+        type: "schedule.tick",
+        scheduleRunCount: count,
+        nextRunAt: nextAt,
+        timestamp: new Date().toISOString(),
+        revision: didResurrect.revision
+      });
+      await logServerEvent(directory, "schedule.resurrected", {
+        goalID: goal.id,
+        scheduleRunCount: count,
+        nextRunAt: nextAt
+      });
+      const maxLabel = typeof max === "number" ? `/${max}` : "";
+      await appendGoalInbox(directory, goal.id, "user", `Scheduled tick ${count + 1}${maxLabel} \u2014 re-execute the objective now. Previous completion: ${runtime.scheduleRunCount ?? 0} runs. Ensure artifact checks pass for this tick (e.g., append timestamp to tick.txt).`);
+      try {
+        await goalService.continueTurn(directory, goal.id);
+        resurrected++;
+      } catch {}
+    }
+    return resurrected;
+  }
+  return { start, stop, isRunning, tick };
+}
+
 // src/server/host-adapter.ts
 var recentParentNotifies = new Map;
 function shouldDedupParentNotify(ownerSessionID, message) {
@@ -2431,7 +2576,7 @@ async function withTimeout(promise, timeoutMs, operation) {
 }
 
 // src/server/goal-tools.ts
-import { randomUUID as randomUUID4 } from "crypto";
+import { randomUUID as randomUUID5 } from "crypto";
 import { tool } from "@opencode-ai/plugin/tool";
 // src/domain/verification.ts
 var MAX_RECENT_ATTEMPTS = 10;
@@ -2450,11 +2595,11 @@ var execAsync = promisify(execChild);
 function goalTools(dir, goalService, hostSessionID, defaults = {}) {
   return {
     loopd_create_goal: tool({
-      description: "Create a new background loop goal (contract: objective + checks + agent + workspaceWrite). " + "The engine spawns a dedicated worker session that does the work autonomously \u2014 it never runs in this chat. " + "Call this after clarifying the contract with the user. " + "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " + "Workspace-writing goals are serialized (only one active writer) and require checks. " + "Specify 'agent' or configure plugin defaultAgent.",
+      description: "Create a new background loop goal (contract: objective + checks + agent + workspaceWrite). " + "The engine spawns a dedicated worker session that does the work autonomously \u2014 it never runs in this chat. " + "Call this after clarifying the contract with the user. " + "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " + "Workspace-writing goals are serialized (only one active writer) and require checks. " + "agent is REQUIRED unless plugin defaultAgent is configured in opencode.jsonc \u2014 without either, goal creation fails with missing_agent.",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
-        agent: tool.schema.string().optional().describe("Agent to run the worker as. Required unless the plugin has defaultAgent configured."),
+        agent: tool.schema.string().optional().describe("Agent to run the worker as. REQUIRED unless the plugin has defaultAgent configured in opencode.jsonc. Without either, goal creation fails with missing_agent."),
         checks: tool.schema.array(tool.schema.string()).optional().describe('Shell commands that must pass for completion to be accepted. E.g. ["npm test"].'),
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
         workspaceWrite: tool.schema.boolean().optional().describe("Whether this goal edits the shared project workspace. Defaults to true; explicitly set false for artifact-only/read-only work."),
@@ -2463,7 +2608,9 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}) {
         maxNoProgress: tool.schema.number().optional().describe("Block after N turns without progress."),
         maxFailures: tool.schema.number().optional().describe("Block after N consecutive failures."),
         compactEvery: tool.schema.number().optional().describe("Compact the worker session every N turns."),
-        timeoutMs: tool.schema.number().optional().describe("Per-turn timeout in ms.")
+        timeoutMs: tool.schema.number().optional().describe("Per-turn timeout in ms."),
+        scheduleEveryMs: tool.schema.number().optional().describe("Interval in ms to auto-requeue the same goal after each completion. Minimum 1000. Enables repetitive dialogue reduction."),
+        scheduleMaxRuns: tool.schema.number().optional().describe("Maximum total runs including the initial run. Undefined = unlimited. Requires scheduleEveryMs.")
       },
       execute: async (args, context) => {
         const sessionID = context?.sessionID || hostSessionID;
@@ -2499,6 +2646,28 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}) {
           config.compactEvery = args.compactEvery;
         if (args.timeoutMs !== undefined)
           config.timeoutMs = args.timeoutMs;
+        if (args.scheduleEveryMs !== undefined) {
+          const everyMs = args.scheduleEveryMs;
+          if (typeof everyMs !== "number" || !Number.isFinite(everyMs) || everyMs < 1000) {
+            return {
+              title: "Goal not created",
+              output: JSON.stringify({ ok: false, message: "scheduleEveryMs must be a number >= 1000", errorCode: "invalid_schedule" })
+            };
+          }
+          const maxRuns = args.scheduleMaxRuns;
+          if (maxRuns !== undefined && (typeof maxRuns !== "number" || !Number.isFinite(maxRuns) || maxRuns < 1 || Math.floor(maxRuns) !== maxRuns)) {
+            return {
+              title: "Goal not created",
+              output: JSON.stringify({ ok: false, message: "scheduleMaxRuns must be an integer >= 1", errorCode: "invalid_schedule" })
+            };
+          }
+          config.schedule = { everyMs, ...maxRuns !== undefined ? { maxRuns } : {} };
+        } else if (args.scheduleMaxRuns !== undefined) {
+          return {
+            title: "Goal not created",
+            output: JSON.stringify({ ok: false, message: "scheduleMaxRuns requires scheduleEveryMs", errorCode: "invalid_schedule" })
+          };
+        }
         const resolution = resolveGoalCreationConfig({
           directory: dir,
           objective: args.objective,
@@ -2604,7 +2773,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}) {
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID4(),
+          eventID: randomUUID5(),
           goalID: goal.id,
           type: "goal.progress",
           summary: args.summary,
@@ -2662,7 +2831,7 @@ Exit code: ${f.exitCode}${stdoutSnippet}${stderrSnippet}`;
 Working directory: ${cwd}
 
 ${failureDetails}`;
-              const attemptID = randomUUID4();
+              const attemptID = randomUUID5();
               const verificationAttempt = {
                 id: attemptID,
                 sequence: runtime2.evaluatorRejectionCount,
@@ -2684,7 +2853,7 @@ ${failureDetails}`;
               runtime2.recentVerificationAttempts = appendVerificationAttempt(runtime2.recentVerificationAttempts || [], verificationAttempt);
               const rejectEvent = {
                 version: 1,
-                eventID: randomUUID4(),
+                eventID: randomUUID5(),
                 goalID: goal.id,
                 type: "goal.completion_rejected",
                 attemptID,
@@ -2708,7 +2877,7 @@ ${failureDetails.slice(0, 500)}`,
                 runtime2.forceFinishRequested = undefined;
                 await appendEvent(dir, {
                   version: 1,
-                  eventID: randomUUID4(),
+                  eventID: randomUUID5(),
                   goalID: goal.id,
                   type: "goal.blocked",
                   reason: goal.blocker.reason,
@@ -2746,7 +2915,22 @@ ${failureDetails.slice(0, 500)}`,
         if (runtime) {
           runtime.phase = "idle";
           runtime.lastError = undefined;
-          const attemptID = randomUUID4();
+          const schedule = goal.config.schedule;
+          if (schedule && typeof schedule.everyMs === "number" && schedule.everyMs >= 1000) {
+            const cur = typeof runtime.scheduleRunCount === "number" ? runtime.scheduleRunCount : 0;
+            const nextCount = cur + 1;
+            runtime.scheduleRunCount = nextCount;
+            const max = schedule.maxRuns;
+            const hasMore = typeof max === "number" ? nextCount < max : true;
+            if (hasMore) {
+              runtime.nextRunAt = new Date(Date.now() + schedule.everyMs).toISOString();
+              runtime.lastScheduleAt = new Date().toISOString();
+            } else {
+              runtime.nextRunAt = undefined;
+            }
+            runtime.updatedAt = new Date().toISOString();
+          }
+          const attemptID = randomUUID5();
           const cwd = goal.config.checkCwd || goal.config.artifactDir || dir;
           const checks = (goal.config.checks || []).map((cmd) => ({
             command: cmd,
@@ -2770,7 +2954,7 @@ ${failureDetails.slice(0, 500)}`,
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID4(),
+          eventID: randomUUID5(),
           goalID: goal.id,
           type: "goal.completed",
           summary: args.summary,
@@ -2822,7 +3006,7 @@ ${failureDetails.slice(0, 500)}`,
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID4(),
+          eventID: randomUUID5(),
           goalID: goal.id,
           type: "goal.blocked",
           reason: args.reason,
@@ -2870,7 +3054,8 @@ function formatGoalStructured(goal, runtime) {
       maxNoProgress: goal.config.maxNoProgress,
       maxFailures: goal.config.maxFailures,
       compactEvery: goal.config.compactEvery,
-      timeoutMs: goal.config.timeoutMs
+      timeoutMs: goal.config.timeoutMs,
+      schedule: goal.config.schedule
     },
     lastProgress: goal.lastProgress,
     completionEvidence: goal.completionEvidence,
@@ -2902,7 +3087,10 @@ function formatGoalStructured(goal, runtime) {
       lastUnknownStatusAt: runtime.lastUnknownStatusAt,
       workerUnreachableNotifiedAt: runtime.workerUnreachableNotifiedAt,
       lastVerificationAttempt: runtime.lastVerificationAttempt,
-      recentVerificationAttempts: runtime.recentVerificationAttempts
+      recentVerificationAttempts: runtime.recentVerificationAttempts,
+      scheduleRunCount: runtime.scheduleRunCount,
+      nextRunAt: runtime.nextRunAt,
+      lastScheduleAt: runtime.lastScheduleAt
     };
   }
   return JSON.stringify(output, null, 2);
@@ -3008,7 +3196,8 @@ function ownerTools(options) {
               checks: goal.config.checks,
               checkCwd: goal.config.checkCwd,
               workspaceWrite: goal.config.workspaceWrite,
-              agent: goal.config.agent
+              agent: goal.config.agent,
+              schedule: goal.config.schedule
             },
             lastProgress: goal.lastProgress,
             completionEvidence: goal.completionEvidence,
@@ -3025,7 +3214,10 @@ function ownerTools(options) {
               consecutiveFailures: runtime.consecutiveFailures,
               lastError: runtime.lastError,
               lastProgressAt: runtime.lastProgressAt,
-              lastRunAt: runtime.lastRunAt
+              lastRunAt: runtime.lastRunAt,
+              scheduleRunCount: runtime.scheduleRunCount,
+              nextRunAt: runtime.nextRunAt,
+              lastScheduleAt: runtime.lastScheduleAt
             } : undefined
           }, null, 2)
         };
@@ -3294,6 +3486,11 @@ var server = async ({ client, directory }, pluginOptions) => {
     goalService,
     pollIntervalMs: 30000
   });
+  const scheduleWorker = createScheduleWorker({
+    directory,
+    goalService,
+    intervalMs: 5000
+  });
   let started = false;
   let reconciliationStarted = false;
   function ensureStarted() {
@@ -3302,6 +3499,7 @@ var server = async ({ client, directory }, pluginOptions) => {
     started = true;
     engine.start();
     worker.start();
+    scheduleWorker.start();
   }
   function reconcileInBackground() {
     if (reconciliationStarted)
@@ -3400,6 +3598,7 @@ var server = async ({ client, directory }, pluginOptions) => {
     dispose: async () => {
       engine.stop();
       await worker.stop();
+      scheduleWorker.stop();
     }
   };
 };

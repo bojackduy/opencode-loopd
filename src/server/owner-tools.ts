@@ -108,6 +108,7 @@ export function ownerTools(options: OwnerToolsOptions) {
               checkCwd: goal.config.checkCwd,
               workspaceWrite: goal.config.workspaceWrite,
               agent: goal.config.agent,
+              schedule: (goal.config as any).schedule,
             },
             lastProgress: goal.lastProgress,
             completionEvidence: goal.completionEvidence,
@@ -125,6 +126,9 @@ export function ownerTools(options: OwnerToolsOptions) {
               lastError: runtime.lastError,
               lastProgressAt: runtime.lastProgressAt,
               lastRunAt: runtime.lastRunAt,
+              scheduleRunCount: (runtime as any).scheduleRunCount,
+              nextRunAt: (runtime as any).nextRunAt,
+              lastScheduleAt: (runtime as any).lastScheduleAt,
             } : undefined,
           }, null, 2),
         }

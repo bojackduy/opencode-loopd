@@ -6,6 +6,7 @@ import type { Plugin, PluginModule } from "@opencode-ai/plugin"
 import { createControlWorker } from "../application/control-worker"
 import { createLoopEngine } from "../application/loop-engine"
 import { createGoalService } from "../application/goal-service"
+import { createScheduleWorker } from "../application/schedule-worker"
 import { createRealHost } from "./host-adapter"
 import { goalTools } from "./goal-tools"
 import { ownerTools } from "./owner-tools"
@@ -35,6 +36,12 @@ const server: Plugin = async ({ client, directory }, pluginOptions) => {
     pollIntervalMs: 30_000,
   })
 
+  const scheduleWorker = createScheduleWorker({
+    directory,
+    goalService,
+    intervalMs: 5_000,
+  })
+
   // Start lazily: only when first event arrives or goal is created
   let started = false
   let reconciliationStarted = false
@@ -43,6 +50,7 @@ const server: Plugin = async ({ client, directory }, pluginOptions) => {
     started = true
     engine.start()
     worker.start()
+    scheduleWorker.start()
   }
 
   function reconcileInBackground() {
@@ -148,6 +156,7 @@ const server: Plugin = async ({ client, directory }, pluginOptions) => {
     dispose: async () => {
       engine.stop()
       await worker.stop()
+      scheduleWorker.stop()
     },
   }
 }
