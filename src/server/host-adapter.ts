@@ -89,7 +89,11 @@ export function createRealHost(client: any, directory: string): LoopHost {
       const body: any = {
         parts: [{ type: "text", text: prompt }],
       }
-      if (messageID) body.messageID = messageID.startsWith("msg") ? messageID : `msg-${messageID}`
+      if (messageID) {
+        // Normalize: ensure single "msg-" prefix, collapse duplicates from legacy persisted IDs
+        const collapsed = messageID.replace(/^(msg-)+/, "msg-")
+        body.messageID = collapsed.startsWith("msg-") ? collapsed : `msg-${messageID}`
+      }
       if (model) body.model = model
       if (agent) body.agent = agent
       const result = await withTimeout<any>(
@@ -239,7 +243,8 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
       return id
     },
     async promptWorker({ sessionID, prompt, messageID }) {
-      const resolvedMessageID = messageID || `msg-${crypto.randomUUID().slice(0, 8)}`
+      const rawID = messageID || `msg-${crypto.randomUUID().slice(0, 8)}`
+      const resolvedMessageID = rawID.replace(/^(msg-)+/, "msg-")
       const msgs = sessions.get(sessionID) || []
       msgs.push(prompt)
       sessions.set(sessionID, msgs)

@@ -94,6 +94,9 @@ export interface GoalConfig {
   /** Timeout per turn (ms). */
   timeoutMs?: number
 
+  /** Max evaluator rejections before the goal is blocked. Defaults to 3. */
+  maxEvaluatorRejections?: number
+
   /** Per-goal artifact directory. Computed at creation; not user-supplied. */
   artifactDir?: string
 

@@ -15,6 +15,7 @@ export interface VerificationAttempt {
     command: string
     exitCode: number
     stderr?: string
+    stdout?: string
   }>
 }
 

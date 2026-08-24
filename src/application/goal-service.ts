@@ -61,6 +61,10 @@ export function createGoalService(host: LoopHost): GoalService {
   const sessions = new Map<GoalID, WorkerSession>()
   const goalOperations = new Map<GoalID, Promise<void>>()
 
+  // Serializes all operations for a single goal. `gate` never rejects so the
+  // chain cannot stall on a thrown error; `current === gate` deletion check
+  // ensures a newer waiter does not delete the successor's gate if `fn()`
+  // throws synchronously before `release()` is assigned.
   async function withGoalOperation<T>(goalID: GoalID, fn: () => Promise<T>): Promise<T> {
     const previous = goalOperations.get(goalID) || Promise.resolve()
     let release!: () => void
@@ -99,6 +103,7 @@ export function createGoalService(host: LoopHost): GoalService {
     let runID: string = "unknown"
     let failureCount = 0
     let blocked = false
+    let blockerNeeded = "Retry after the OpenCode worker/session API is available."
     const state = await mutateState(directory, `turn.prompt-failed:${goalID}`, async (s) => {
       const goal = s.goals.find((item) => item.id === goalID)
       const rt = s.runtimes.find((item) => item.goalID === goalID)
@@ -113,10 +118,13 @@ export function createGoalService(host: LoopHost): GoalService {
 
       blocked = blockImmediately || failureCount >= (goal.config.maxFailures || 5)
       if (blocked) {
+        blockerNeeded = blockImmediately
+          ? "Retry after the OpenCode worker/session API is available."
+          : "Fix the underlying error and use retry_goal to attempt again."
         goal.status = "blocked"
         goal.blocker = {
           reason: `Worker prompt delivery failed: ${detail}`,
-          needed: "Retry after the OpenCode worker/session API is available.",
+          needed: blockerNeeded,
           at: new Date().toISOString(),
         }
       } else {
@@ -147,7 +155,7 @@ export function createGoalService(host: LoopHost): GoalService {
         goalID,
         type: "goal.blocked",
         reason: `Worker prompt delivery failed: ${detail}`,
-        needed: "Retry after the OpenCode worker/session API is available.",
+        needed: blockerNeeded,
         timestamp: new Date().toISOString(),
         revision: state.revision,
       } satisfies LoopEvent)

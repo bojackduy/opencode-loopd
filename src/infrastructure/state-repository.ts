@@ -115,9 +115,17 @@ async function releaseLock(directory: string, key: string): Promise<void> {
     const meta: LockMeta = JSON.parse(raw)
     // Only release if we own the lock (same PID) or it's stale
     const age = Date.now() - Date.parse(meta.acquiredAt)
-    if (meta.pid === process.pid || age > LOCK_STALE_MS) {
-      await fs.rm(lockPath, { force: true })
+    const shouldRelease = meta.pid === process.pid || age > LOCK_STALE_MS
+    if (!shouldRelease) return
+    // Re-verify before delete to avoid racing with a fresh acquirer
+    try {
+      const raw2 = await fs.readFile(lockPath, "utf8")
+      const meta2: LockMeta = JSON.parse(raw2)
+      if (meta2.acquiredAt !== meta.acquiredAt || meta2.pid !== meta.pid) return
+    } catch {
+      return
     }
+    await fs.rm(lockPath, { force: true })
   } catch {
     // Lock file doesn't exist or is unreadable — nothing to release
   }
@@ -180,19 +188,19 @@ function migrate(state: StoreState): StoreState {
     // Migrate turnCount -> budgetTurnCount + runGeneration
     result.runtimes = result.runtimes.map((rt: any) => {
       const oldTurnCount = rt.turnCount ?? 0
+      const { turnCount: _deprecatedTurnCount, ...rest } = rt
+      void _deprecatedTurnCount
       return {
-        ...rt,
-        budgetTurnCount: rt.budgetTurnCount ?? oldTurnCount,
-        runCount: rt.runCount ?? oldTurnCount,
-        runGeneration: rt.runGeneration ?? 0,
-        freeRetryPending: rt.freeRetryPending ?? false,
-        lastRejectionDetails: rt.lastRejectionDetails ?? undefined,
-        activePromptMessageID: rt.activePromptMessageID ?? undefined,
-        lastActivityAt: rt.lastActivityAt ?? undefined,
-        idleCandidateAt: rt.idleCandidateAt ?? undefined,
-        activeToolCallIDs: rt.activeToolCallIDs ?? [],
-        // Remove deprecated turnCount field
-        turnCount: undefined,
+        ...rest,
+        budgetTurnCount: (rest as any).budgetTurnCount ?? oldTurnCount,
+        runCount: (rest as any).runCount ?? oldTurnCount,
+        runGeneration: (rest as any).runGeneration ?? 0,
+        freeRetryPending: (rest as any).freeRetryPending ?? false,
+        lastRejectionDetails: (rest as any).lastRejectionDetails ?? undefined,
+        activePromptMessageID: (rest as any).activePromptMessageID ?? undefined,
+        lastActivityAt: (rest as any).lastActivityAt ?? undefined,
+        idleCandidateAt: (rest as any).idleCandidateAt ?? undefined,
+        activeToolCallIDs: (rest as any).activeToolCallIDs ?? [],
       }
     })
   }

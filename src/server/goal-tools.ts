@@ -249,9 +249,11 @@ export function goalTools(
             const runtime = state.runtimes.find((r) => r.goalID === goal.id)
             if (runtime) {
               runtime.evaluatorRejectionCount = (runtime.evaluatorRejectionCount || 0) + 1
-              // Build detailed rejection message
+              // Build detailed rejection message — include stdout+stderr for diagnostics
               const failureDetails = checkResults.failures.map((f) => {
-                return `Command: ${f.command}\nExit code: ${f.exitCode}\nStderr: ${f.stderr.slice(0, 500)}`
+                const stdoutSnippet = f.stdout ? `\nStdout: ${f.stdout.slice(0, 500)}` : ""
+                const stderrSnippet = f.stderr ? `\nStderr: ${f.stderr.slice(0, 500)}` : ""
+                return `Command: ${f.command}\nExit code: ${f.exitCode}${stdoutSnippet}${stderrSnippet}`
               }).join("\n\n")
               runtime.lastRejectionDetails = `Rejection #${runtime.evaluatorRejectionCount} at ${new Date().toISOString()}\n\nWorking directory: ${cwd}\n\n${failureDetails}`
 
@@ -271,6 +273,7 @@ export function goalTools(
                   command: f.command,
                   exitCode: f.exitCode,
                   stderr: f.stderr,
+                  stdout: f.stdout,
                 })),
               }
               runtime.lastVerificationAttempt = verificationAttempt
@@ -541,7 +544,7 @@ function formatGoalStructured(goal: Goal, runtime?: GoalRuntimeState): string {
 
 interface CheckResult {
   passed: boolean
-  failures: Array<{ command: string; exitCode: number; stderr: string }>
+  failures: Array<{ command: string; exitCode: number; stderr: string; stdout: string }>
 }
 
 async function runCompletionChecks(checks: string[], cwd?: string): Promise<CheckResult> {
@@ -549,12 +552,15 @@ async function runCompletionChecks(checks: string[], cwd?: string): Promise<Chec
 
   for (const cmd of checks) {
     try {
-      await execAsync(cmd, { timeout: 30_000, cwd })
+      const { stdout, stderr } = await execAsync(cmd, { timeout: 30_000, cwd }) as any
+      // Success — nothing to record; stdout/stderr ignored for passing checks
+      void stdout; void stderr
     } catch (error: any) {
       failures.push({
         command: cmd,
-        exitCode: error.code || 1,
-        stderr: (error.stderr || error.message || "unknown error").slice(0, 1000),
+        exitCode: error.code ?? 1,
+        stderr: String(error.stderr || error.message || "unknown error").slice(0, 1000),
+        stdout: String(error.stdout || "").slice(0, 1000),
       })
     }
   }

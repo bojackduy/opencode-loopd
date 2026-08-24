@@ -80,24 +80,19 @@ function migrate(state) {
     result.version = 3;
     result.runtimes = result.runtimes.map((rt) => {
       const oldTurnCount = rt.turnCount ?? 0;
-      let normalizedPromptID = rt.activePromptMessageID;
-      if (typeof normalizedPromptID === "string" && normalizedPromptID && !normalizedPromptID.startsWith("msg-")) {
-        normalizedPromptID = `msg-${normalizedPromptID.replace(/^msg-?/, "")}`;
-      }
-      const migrated = {
-        ...rt,
-        budgetTurnCount: rt.budgetTurnCount ?? oldTurnCount,
-        runCount: rt.runCount ?? oldTurnCount,
-        runGeneration: rt.runGeneration ?? 0,
-        freeRetryPending: rt.freeRetryPending ?? false,
-        lastRejectionDetails: rt.lastRejectionDetails ?? undefined,
-        activePromptMessageID: normalizedPromptID ?? undefined,
-        lastActivityAt: rt.lastActivityAt ?? undefined,
-        idleCandidateAt: rt.idleCandidateAt ?? undefined,
-        activeToolCallIDs: rt.activeToolCallIDs ?? []
+      const { turnCount: _deprecatedTurnCount, ...rest } = rt;
+      return {
+        ...rest,
+        budgetTurnCount: rest.budgetTurnCount ?? oldTurnCount,
+        runCount: rest.runCount ?? oldTurnCount,
+        runGeneration: rest.runGeneration ?? 0,
+        freeRetryPending: rest.freeRetryPending ?? false,
+        lastRejectionDetails: rest.lastRejectionDetails ?? undefined,
+        activePromptMessageID: rest.activePromptMessageID ?? undefined,
+        lastActivityAt: rest.lastActivityAt ?? undefined,
+        idleCandidateAt: rest.idleCandidateAt ?? undefined,
+        activeToolCallIDs: rest.activeToolCallIDs ?? []
       };
-      delete migrated.turnCount;
-      return migrated;
     });
   }
   if (result.version < 4) {

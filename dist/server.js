@@ -208,9 +208,18 @@ async function releaseLock(directory, key) {
     const raw = await fs.readFile(lockPath, "utf8");
     const meta = JSON.parse(raw);
     const age = Date.now() - Date.parse(meta.acquiredAt);
-    if (meta.pid === process.pid || age > LOCK_STALE_MS) {
-      await fs.rm(lockPath, { force: true });
+    const shouldRelease = meta.pid === process.pid || age > LOCK_STALE_MS;
+    if (!shouldRelease)
+      return;
+    try {
+      const raw2 = await fs.readFile(lockPath, "utf8");
+      const meta2 = JSON.parse(raw2);
+      if (meta2.acquiredAt !== meta.acquiredAt || meta2.pid !== meta.pid)
+        return;
+    } catch {
+      return;
     }
+    await fs.rm(lockPath, { force: true });
   } catch {}
 }
 async function readState(directory) {
@@ -258,24 +267,19 @@ function migrate(state) {
     result.version = 3;
     result.runtimes = result.runtimes.map((rt) => {
       const oldTurnCount = rt.turnCount ?? 0;
-      let normalizedPromptID = rt.activePromptMessageID;
-      if (typeof normalizedPromptID === "string" && normalizedPromptID && !normalizedPromptID.startsWith("msg-")) {
-        normalizedPromptID = `msg-${normalizedPromptID.replace(/^msg-?/, "")}`;
-      }
-      const migrated = {
-        ...rt,
-        budgetTurnCount: rt.budgetTurnCount ?? oldTurnCount,
-        runCount: rt.runCount ?? oldTurnCount,
-        runGeneration: rt.runGeneration ?? 0,
-        freeRetryPending: rt.freeRetryPending ?? false,
-        lastRejectionDetails: rt.lastRejectionDetails ?? undefined,
-        activePromptMessageID: normalizedPromptID ?? undefined,
-        lastActivityAt: rt.lastActivityAt ?? undefined,
-        idleCandidateAt: rt.idleCandidateAt ?? undefined,
-        activeToolCallIDs: rt.activeToolCallIDs ?? []
+      const { turnCount: _deprecatedTurnCount, ...rest } = rt;
+      return {
+        ...rest,
+        budgetTurnCount: rest.budgetTurnCount ?? oldTurnCount,
+        runCount: rest.runCount ?? oldTurnCount,
+        runGeneration: rest.runGeneration ?? 0,
+        freeRetryPending: rest.freeRetryPending ?? false,
+        lastRejectionDetails: rest.lastRejectionDetails ?? undefined,
+        activePromptMessageID: rest.activePromptMessageID ?? undefined,
+        lastActivityAt: rest.lastActivityAt ?? undefined,
+        idleCandidateAt: rest.idleCandidateAt ?? undefined,
+        activeToolCallIDs: rest.activeToolCallIDs ?? []
       };
-      delete migrated.turnCount;
-      return migrated;
     });
   }
   if (result.version < 4) {
@@ -1693,6 +1697,7 @@ function createGoalService(host) {
     let runID = "unknown";
     let failureCount = 0;
     let blocked = false;
+    let blockerNeeded = "Retry after the OpenCode worker/session API is available.";
     const state = await mutateState(directory, `turn.prompt-failed:${goalID}`, async (s) => {
       const goal = s.goals.find((item) => item.id === goalID);
       const rt = s.runtimes.find((item) => item.goalID === goalID);
@@ -1706,10 +1711,11 @@ function createGoalService(host) {
       rt.lastError = detail;
       blocked = blockImmediately || failureCount >= (goal.config.maxFailures || 5);
       if (blocked) {
+        blockerNeeded = blockImmediately ? "Retry after the OpenCode worker/session API is available." : "Fix the underlying error and use retry_goal to attempt again.";
         goal.status = "blocked";
         goal.blocker = {
           reason: `Worker prompt delivery failed: ${detail}`,
-          needed: detail.includes("session.create") || detail.includes("session.promptAsync") ? "Retry after the OpenCode worker/session API is available. If the worker session is missing, retry or recreate the goal." : "Fix the prompt delivery error and retry the goal (or recreate it if the worker session is gone).",
+          needed: blockerNeeded,
           at: new Date().toISOString()
         };
       } else {
@@ -1721,11 +1727,6 @@ function createGoalService(host) {
       rt.updatedAt = new Date().toISOString();
       return s;
     });
-    const persistedNeeded = (() => {
-      const g = state.goals.find((item) => item.id === goalID);
-      return g?.blocker?.needed;
-    })();
-    const neededText = persistedNeeded || (detail.includes("session.create") || detail.includes("session.promptAsync") ? "Retry after the OpenCode worker/session API is available. If the worker session is missing, retry or recreate the goal." : "Fix the prompt delivery error and retry the goal (or recreate it if the worker session is gone).");
     await appendEvent(directory, {
       version: 1,
       eventID: randomUUID3(),
@@ -1744,7 +1745,7 @@ function createGoalService(host) {
         goalID,
         type: "goal.blocked",
         reason: `Worker prompt delivery failed: ${detail}`,
-        needed: neededText,
+        needed: blockerNeeded,
         timestamp: new Date().toISOString(),
         revision: state.revision
       });
@@ -2324,8 +2325,10 @@ function createRealHost(client, directory) {
       const body = {
         parts: [{ type: "text", text: prompt }]
       };
-      if (messageID)
-        body.messageID = messageID.startsWith("msg-") ? messageID : `msg-${messageID.replace(/^msg-?/, "")}`;
+      if (messageID) {
+        const collapsed = messageID.replace(/^(msg-)+/, "msg-");
+        body.messageID = collapsed.startsWith("msg-") ? collapsed : `msg-${messageID}`;
+      }
       if (model)
         body.model = model;
       if (agent)
@@ -2645,12 +2648,12 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}) {
             if (runtime2) {
               runtime2.evaluatorRejectionCount = (runtime2.evaluatorRejectionCount || 0) + 1;
               const failureDetails = checkResults.failures.map((f) => {
-                const out = f.stdout ? `
+                const stdoutSnippet = f.stdout ? `
 Stdout: ${f.stdout.slice(0, 500)}` : "";
-                const err = f.stderr ? `
+                const stderrSnippet = f.stderr ? `
 Stderr: ${f.stderr.slice(0, 500)}` : "";
                 return `Command: ${f.command}
-Exit code: ${f.exitCode}${out}${err}`;
+Exit code: ${f.exitCode}${stdoutSnippet}${stderrSnippet}`;
               }).join(`
 
 `);
@@ -2673,8 +2676,8 @@ ${failureDetails}`;
                 checks: checkResults.failures.map((f) => ({
                   command: f.command,
                   exitCode: f.exitCode,
-                  stdout: f.stdout,
-                  stderr: f.stderr
+                  stderr: f.stderr,
+                  stdout: f.stdout
                 }))
               };
               runtime2.lastVerificationAttempt = verificationAttempt;
@@ -2908,13 +2911,13 @@ async function runCompletionChecks(checks, cwd) {
   const failures = [];
   for (const cmd of checks) {
     try {
-      await execAsync(cmd, { timeout: 30000, cwd });
+      const { stdout, stderr } = await execAsync(cmd, { timeout: 30000, cwd });
     } catch (error) {
       failures.push({
         command: cmd,
-        exitCode: error.code || 1,
-        stdout: String(error.stdout || "").slice(0, 1000),
-        stderr: String(error.stderr || error.message || "unknown error").slice(0, 1000)
+        exitCode: error.code ?? 1,
+        stderr: String(error.stderr || error.message || "unknown error").slice(0, 1000),
+        stdout: String(error.stdout || "").slice(0, 1000)
       });
     }
   }

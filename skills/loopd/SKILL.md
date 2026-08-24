@@ -46,7 +46,7 @@ Every goal has an **immutable contract** at creation — the source of truth for
 * **Checks** — deterministic shell commands that **must pass** for `complete_goal` to be accepted. For `workspaceWrite:true` goals they are **mandatory** (explicit `checks` or plugin `defaultChecks`), and they run from `checkCwd` (writers default to project root; artifact-only jobs run from their `artifactDir`).
 * **Agent** — which subagent model runs the worker (`sloppy-agent`, `smart-agent`, …). Required unless `defaultAgent` is configured in `opencode.jsonc` plugin options.
 * **WorkspaceWrite** — `true` (default) = may touch the shared repo; **only one active writer at a time** is allowed (enforced on `start`/`resume`/`retry` with rollback). Set `false` explicitly for artifact-only/read-only work to allow concurrency.
-* **Limits** — `maxTurns` (default 50), `maxNoProgress`, `maxFailures`, `timeoutMs`, `compactEvery`, `progressFile`.
+ * **Limits** — `maxTurns` (default 50), `maxNoProgress`, `maxFailures`, `maxEvaluatorRejections` (default 3), `timeoutMs`, `compactEvery`, `progressFile`.
 
 **Who decides completion:**
 * **Host is the acceptance authority** — it runs `checks` deterministically. If any check fails, `complete_goal` is **rejected** (`ok:false`, `rejectionCount++`, `freeRetryPending=true` for <3 rejections, `blocked` after 3). The worker gets the exact failure in the next steering.
@@ -75,6 +75,7 @@ loopd_create_goal({
   maxTurns: 50,                            // optional; ≥50 enforces FINAL REPORT REQUIRED
   maxNoProgress: 5,                        // optional; auto-block without progress
   maxFailures: 3,                          // optional; auto-block on failures
+  maxEvaluatorRejections: 3,               // optional; block after N check failures (default 3)
   compactEvery: 3,                         // optional; compact worker session every N turns
   timeoutMs: 300000,                       // optional; per-turn lease
 })

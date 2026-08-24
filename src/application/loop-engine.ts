@@ -212,34 +212,6 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     return matched
   }
 
-  // ─── Two-stage idle check ─────────────────────────────────────────────────
-  // Returns true if the run is confirmed idle and should be finalized.
-  // Returns false if we're still waiting (first idle signal or debounce).
-  function checkTwoStageIdle(runtime: GoalRuntimeState): boolean {
-    const now = Date.now()
-
-    if (!runtime.idleCandidateAt) {
-      // First idle signal — record timestamp and wait
-      runtime.idleCandidateAt = new Date(now).toISOString()
-      return false
-    }
-
-    // Check if debounce has elapsed
-    const elapsed = now - Date.parse(runtime.idleCandidateAt)
-    if (elapsed < confirmIdleMs) return false
-
-    // Check if any activity occurred AFTER the idle candidate was recorded
-    if (runtime.lastActivityAt && runtime.lastActivityAt > runtime.idleCandidateAt) {
-      // Activity occurred after idle candidate — stale idle, reset
-      runtime.idleCandidateAt = undefined
-      return false
-    }
-
-    // Confirmed idle — clear candidate and finalize
-    runtime.idleCandidateAt = undefined
-    return true
-  }
-
   // ─── Idle Handler ─────────────────────────────────────────────────────────
 
   async function handleSessionIdle(state: StoreState, goal: any): Promise<boolean> {
