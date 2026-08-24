@@ -14,7 +14,8 @@ docs/
 │   ├── future-work.md           # Future workflows & event-driven ideas
 │   └── remaining-work.md        # Deferred work — phases 1-2 & 4
 │
-├── reports/                     # Investigation reports
+├── reports/                     # Investigation reports & results
+│   ├── e2e-results.md           # Hardened lifecycle E2E results (2026-08-24)
 │   ├── final-report.md          # Final fix status + dual-entity desync (2026-08-23)
 │   └── investigation-report.md  # Engine & subagent desync deep dive (2026-08-23)
 │
@@ -37,6 +38,7 @@ docs/
   - [Future Work](./planning/future-work.md)
   - [Remaining Work](./planning/remaining-work.md)
 - **Reports**
+  - [E2E Results](./reports/e2e-results.md)
   - [Final Report](./reports/final-report.md)
   - [Investigation Report](./reports/investigation-report.md)
 - **Bugs**
