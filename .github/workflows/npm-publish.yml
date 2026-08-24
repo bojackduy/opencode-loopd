@@ -59,6 +59,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Extract the CHANGELOG section for this version (between this ## and the next ##)
+          version="${{ steps.package.outputs.version }}"
+          # Grab lines from "## <version>" until the next "## " or end of file
+          notes=$(awk -v ver="$version" '
+            /^## / {
+              if (found) exit
+              if (index($0, "## " ver " ") == 1 || index($0, "## " ver "(") == 1) found=1
+              next
+            }
+            found { print }
+          ' CHANGELOG.md)
+
+          if [ -z "$notes" ]; then
+            notes="Published ${{ steps.package.outputs.name }}@${{ steps.package.outputs.version }}"
+          fi
+
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            --notes "Published ${{ steps.package.outputs.name }}@${{ steps.package.outputs.version }}"
+            --notes "$notes"
