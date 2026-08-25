@@ -51,15 +51,18 @@ describe("Goal Tools", () => {
       expect(goal.ownerSessionID).toBe("owner-1")
     })
 
-    it("requires an explicit or configured default agent", async () => {
+    it("allows creating a goal without agent (SDK uses parent session)", async () => {
       const create = goalTools(dir, goalService, "owner-1").loopd_create_goal
       const result = await create.execute({
-        name: "missing-agent",
+        name: "no-agent",
         objective: "Analyze the existing implementation without changing files.",
+        workspaceWrite: false,
       }, { sessionID: "owner-1" })
 
-      expect(JSON.parse(result.output).ok).toBe(false)
-      expect((await readState(dir)).goals).toHaveLength(0)
+      const output = JSON.parse(result.output)
+      expect(output.ok).toBe(true)
+      expect(output.agent).toBeUndefined()
+      expect((await readState(dir)).goals).toHaveLength(1)
     })
 
     it("applies configured agent and checks to a workspace-writing goal", async () => {

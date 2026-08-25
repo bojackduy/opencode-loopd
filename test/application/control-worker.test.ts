@@ -54,7 +54,7 @@ describe("Control Bus", () => {
     expect(state.goals[0].name).toBe("bus-test")
   })
 
-  it("rejects start when neither command nor server defaults specify an agent", async () => {
+  it("rejects start when no checks are provided for a workspace-writing goal", async () => {
     await worker.stop()
     worker = createControlWorker({
       directory: dir,
@@ -68,11 +68,11 @@ describe("Control Bus", () => {
       requestID: crypto.randomUUID(),
       requestedAt: new Date().toISOString(),
       command: "start",
-      args: { name: "missing-agent", objective: "analyze only", config: {}, ownerSessionID: "owner-1" },
+      args: { name: "missing-checks", objective: "analyze only", config: {}, ownerSessionID: "owner-1" },
     })
 
     expect(result.ok).toBe(false)
-    expect(result.errorCode).toBe("missing_agent")
+    expect(result.errorCode).toBe("missing_checks")
     expect((await client.getState()).goals).toHaveLength(0)
   })
 

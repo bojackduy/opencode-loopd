@@ -11,7 +11,7 @@ export type GoalConfigResolution =
       config: GoalConfig
       defaultsApplied: { agent: boolean; checks: boolean }
     }
-  | { ok: false; message: string; errorCode: "missing_agent" | "missing_checks" }
+  | { ok: false; message: string; errorCode: "missing_checks" }
 
 export function resolveGoalCreationConfig(input: {
   directory: string
@@ -23,14 +23,8 @@ export function resolveGoalCreationConfig(input: {
   const defaults = input.defaults || {}
   const explicitAgent = cleanText(requested.agent)
   const defaultAgent = cleanText(defaults.defaultAgent)
-  const agent = explicitAgent || defaultAgent
-  if (!agent) {
-    return {
-      ok: false,
-      errorCode: "missing_agent",
-      message: "An agent is required. Pass agent explicitly or configure plugin option defaultAgent.",
-    }
-  }
+  // agent is optional — SDK falls back to parent session's agent when neither explicit nor default
+  const agent = explicitAgent || defaultAgent || undefined
 
   // Safe default: any unclassified goal may touch the shared repository.
   // Artifact-only/read-only work must opt out explicitly.

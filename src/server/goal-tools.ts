@@ -39,11 +39,11 @@ export function goalTools(
         "Call this after clarifying the contract with the user. " +
         "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " +
         "Workspace-writing goals are serialized (only one active writer) and require checks. " +
-        "agent is REQUIRED unless plugin defaultAgent is configured in opencode.jsonc — without either, goal creation fails with missing_agent.",
+        "agent is optional — uses the parent session's agent if omitted, or configure plugin defaultAgent in opencode.jsonc.",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
-        agent: tool.schema.string().optional().describe("Agent to run the worker as. REQUIRED unless the plugin has defaultAgent configured in opencode.jsonc. Without either, goal creation fails with missing_agent."),
+        agent: tool.schema.string().optional().describe("Agent to run the worker as. Optional — uses parent session's agent if omitted, or configure plugin defaultAgent in opencode.jsonc."),
         checks: tool.schema.array(tool.schema.string()).optional().describe("Shell commands that must pass for completion to be accepted. E.g. [\"npm test\"]."),
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
         workspaceWrite: tool.schema.boolean().optional().describe("Whether this goal edits the shared project workspace. Defaults to true; explicitly set false for artifact-only/read-only work."),
