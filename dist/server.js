@@ -2907,6 +2907,16 @@ ${failureDetails.slice(0, 500)}`,
         const runtime = state.runtimes.find((r) => r.goalID === goal.id);
         if (runtime) {
           runtime.phase = "idle";
+          runtime.leaseExpiresAt = undefined;
+          runtime.turnStartedAt = undefined;
+          runtime.activeRunID = undefined;
+          runtime.activePromptMessageID = undefined;
+          runtime.activePromptObservedAt = undefined;
+          runtime.activeAssistantMessageID = undefined;
+          runtime.activeAssistantCompletedAt = undefined;
+          runtime.idleCandidateAt = undefined;
+          runtime.idleCandidateGeneration = undefined;
+          runtime.activeToolCallIDs = [];
           runtime.lastError = undefined;
           const schedule = goal.config.schedule;
           if (schedule && typeof schedule.everyMs === "number" && schedule.everyMs >= 1000) {
