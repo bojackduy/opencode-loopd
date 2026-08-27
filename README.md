@@ -19,13 +19,14 @@
 - **Codex-style engine-driven loop** — idle detection → continuation steering with accumulated context (progress history, transcript tail, inbox). No prompt spam in the parent.
 - **Parent ↔ child visibility** — `list/inspect/read_transcript/send_input` give the parent full observability. Bidirectional inbox lets you steer mid-run.
 - **Safe by default** — per-goal artifact isolation (`.opencode/loopd/goals/<id>/`), `maxTurns`/`maxFailures`/`maxNoProgress`, force-finish → semantic `complete_goal` summary → parent notification via wake-up injection.
+- **Scheduled intervals** — `scheduleEveryMs`/`scheduleMaxRuns` auto-requeues the same goal every N ms (e.g., `10s` monitor, `1h` report) without manual `/goal` spam — `5s` poll, `skip-if-running`, `workspaceWrite` serialization, inbox `Scheduled tick N/M`.
 - **Modal TUI dashboard** — `<leader>d` or `/loop` opens a focused dialog (no leak to chat prompt). Vim-style navigation, live running indicator, per-status borders.
 
 Keywords: `opencode` `opencode-plugin` `background-agent` `autonomous` `subagent` `loop` `goal` `tui` `codex` `claude-code` `worker`
 
 ## What it is
 
-opencode-loopd is an **OpenCode plugin** (server + TUI) that adds **background goals** to OpenCode. Each goal owns a **worker (child) subagent** that loops autonomously; the **loop engine** drives continuations; the **dashboard** and **owner tools** keep the parent in control. Think *Codex goals* or *Claude Code loop*, but native to OpenCode's session model.
+opencode-loopd is an **OpenCode plugin** (server + TUI) that adds **background goals** to OpenCode. Each goal owns a **worker (child) subagent** that loops autonomously; the **loop engine** drives continuations; the **schedule worker** requeues the same goal on an interval (`scheduleEveryMs`); the **dashboard** and **owner tools** keep the parent in control. Think *Codex goals* or *Claude Code loop*, but native to OpenCode's session model — with scheduled intervals for repetitive dialogues.
 
 ## Install
 
@@ -211,6 +212,7 @@ Completion is semantic: the child writes the summary; the plugin forwards it to 
 ```
 
 - **Engine-driven loop** (like Codex): `session.idle` → lease + retry + polling → re-prompt child. Not a parent-driven re-prompt machine.
+- **Scheduled requeue** (1.7): `createScheduleWorker` `5s` scans `complete` goals with `scheduleEveryMs`/`maxRuns`; `complete→active` resurrect with `Scheduled tick N/M` inbox, `skip-if-running` and `workspaceWrite` gate.
 - **Accumulated context**: each continuation includes progress history, transcript tail, inbox messages, and artifact dir (unless objective names another dir).
 - **Parent wake-up**: when the child calls `complete_goal`/`block_goal`, `tool.execute.after` injects the child's semantic summary into the owner's session — you see "Loop goal … completed: …" without polling.
 
@@ -245,6 +247,8 @@ Goals accept:
 | `maxNoProgress` | `3` | Turns without progress before force-finish |
 | `timeoutMs` | `300000` | Per-turn lease (5 min) |
 | `compactEvery` | — | Compact child every N turns |
+| `scheduleEveryMs` | — | Interval in ms to auto-requeue the same goal after each completion. Minimum 1000. Enables repetitive dialogue reduction without manual re-prompt |
+| `scheduleMaxRuns` | — | Maximum total runs including the initial run. Undefined = unlimited. Requires `scheduleEveryMs` |
 | `checks` | `[]` | Shell commands that must pass for `complete_goal` |
 | `checkCwd` | artifact directory | Directory where completion checks run; workspace writes default to project root |
 | `workspaceWrite` | `true` | Marks shared-workspace mutation; only one active workspace writer is allowed. Set `false` explicitly for artifact-only/read-only work |
@@ -258,6 +262,29 @@ Workspace-writing goals must have deterministic checks and are serialized to
 prevent concurrent agents or `git stash` operations from overwriting each
 other. Artifact-only research goals may run concurrently by setting
 `workspaceWrite: false` explicitly.
+
+## Scheduled goals — repetitive dialogues without manual re-prompt
+
+One `/goal` can now loop on an interval — the engine requeues the **same goal** after each `complete`:
+
+```
+loopd_create_goal({
+  name: "hourly-report",
+  objective: "Append date -u to tick.txt each run",
+  agent: "smart-agent",
+  checks: ["test -f tick.txt"],
+  scheduleEveryMs: 3600000, // 1h, min 1000
+  scheduleMaxRuns: 24,      // total incl initial, omit for unlimited
+  workspaceWrite: false
+})
+```
+
+- **Poll:** `5s` `createScheduleWorker` scans `complete` scheduled goals; `skip-if-running` (lease/`phase`/`workspaceWrite` gate).
+- **Resurrect:** `complete → active` `phase=idle`, injects inbox `Scheduled tick N/M — re-execute objective`, then `continueTurn`.
+- **State:** `scheduleRunCount`/`nextRunAt`/`lastScheduleAt` (`v6` `state.json`), `schedule.tick` events, `schedule.resurrected` server log.
+- **Live proof:** `sched-live-verify` `09cb837c` `10s` `maxRuns 3` → `tick.txt` `3` lines `02:00:56` `02:03:43` `02:05:47` with `runCount 3`.
+
+Without schedule you’d send `/goal` 3× manually; with schedule one creation covers `monitor deploy`, `periodic tests`, `keep going until done`.
 
 ## Dashboard tips
 

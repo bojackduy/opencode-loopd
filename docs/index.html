@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>opencode-loopd — Autonomous Background Agents for OpenCode | Codex Loop Engine</title>
-    <meta name="description" content="OpenCode plugin for autonomous background agents. Run long tasks as child subagents with engine-driven loop, continuation steering, and TUI dashboard — like Claude Code loop & Codex goals for OpenCode." />
-    <meta name="keywords" content="opencode, opencode plugin, opencode tui, background agent, autonomous agent, subagent, loop engine, goal, worker, codex, claude code, terminal, cli, automation" />
+    <meta name="description" content="OpenCode plugin for autonomous background agents with scheduled intervals. Run long tasks as child subagents with engine-driven loop, scheduled requeue, and TUI dashboard — like Claude Code loop & Codex goals for OpenCode." />
+    <meta name="keywords" content="opencode, opencode plugin, opencode tui, background agent, autonomous agent, subagent, loop engine, goal, worker, schedule, interval, codex, claude code, terminal, cli, automation" />
     <meta name="author" content="Duy Trinh" />
     <link rel="canonical" href="https://bojackduy.github.io/opencode-loopd/" />
     <meta name="robots" content="index, follow" />
@@ -26,13 +26,13 @@
       "@context": "https://schema.org",
       "@type": "SoftwareApplication",
       "name": "opencode-loopd",
-      "description": "Codex-inspired background goal engine for OpenCode — autonomous child sessions, engine-driven loop, and modal TUI dashboard.",
+      "description": "Codex-inspired background goal engine for OpenCode — autonomous child sessions, engine-driven loop, scheduled intervals, and modal TUI dashboard.",
       "applicationCategory": "DeveloperApplication",
       "operatingSystem": "macOS, Linux, Windows",
       "author": {"@type": "Person", "name": "Duy Trinh"},
       "license": "https://www.gnu.org/licenses/agpl-3.0.html",
       "codeRepository": "https://github.com/bojackduy/opencode-loopd",
-      "keywords": "opencode, opencode-plugin, background-agent, autonomous, subagent, loop, TUI, codex, claude-code"
+      "keywords": "opencode, opencode-plugin, background-agent, autonomous, subagent, loop, schedule, interval, TUI, codex, claude-code"
     }
     </script>
     <style>
@@ -114,7 +114,7 @@
       .window-title { margin-left:.6rem; color:var(--muted2); font-size:.8rem; font-family: ui-monospace, monospace; }
       .window img { display:block; width:100%; height:auto; }
       .caption { color:var(--muted); font-size:.88rem; margin:.9rem 0 .2rem; text-align:center; }
-      .grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1rem; margin-top:2rem; }
+      .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(16rem,1fr)); gap:1rem; margin-top:2rem; }
       .feature { position:relative; overflow:hidden; }
       .feature::before { content:""; position:absolute; top:0; left:0; right:0; height:1px; background: linear-gradient(90deg, transparent, var(--accent), transparent); opacity:.6; }
       .feature h3 { margin:0 0 .4rem; font-size:1.05rem; display:flex; align-items:center; gap:.5rem; }
@@ -149,11 +149,11 @@
         <div>
           <div class="eyebrow">OpenCode plugin • Server + TUI</div>
           <h1>Background <em>goals</em> that loop.</h1>
-          <p class="lead">
-            <strong>opencode-loopd</strong> is a <strong>Codex-inspired</strong> goal engine for <strong>OpenCode</strong>.
-            Create a goal with <code>/goal</code>, watch an <strong>autonomous child session</strong> loop in the background,
-            and monitor everything from a modal <strong>TUI dashboard</strong> — without blocking the parent chat.
-          </p>
+           <p class="lead">
+             <strong>opencode-loopd</strong> is a <strong>Codex-inspired</strong> goal engine for <strong>OpenCode</strong>.
+             Create a goal with <code>/goal</code>, watch an <strong>autonomous child session</strong> loop in the background,
+             <strong>schedule it</strong> to requeue on an interval without manual re-prompt, and monitor everything from a modal <strong>TUI dashboard</strong> — without blocking the parent chat.
+           </p>
           <div class="actions">
             <a class="button primary" href="https://www.npmjs.com/package/@bojackduy/opencode-loopd">Install on npm →</a>
             <a class="button" href="https://github.com/bojackduy/opencode-loopd">View on GitHub</a>
@@ -187,11 +187,12 @@
         <p class="caption">Modal dashboard (<code>/loop</code> / <code>&lt;leader&gt;d</code>): vivid per-status coloring, running spinner, <code>NORMAL</code> vs <code>INSERT</code> — keys trapped, no chat leak.</p>
       </section>
 
-      <section class="grid" aria-label="Features">
-        <div class="card feature"><h3><span class="icon">⚡</span> Engine-driven</h3><p>Idle + lease + 30s polling re-prompts the child with <em>accumulated steering</em> (progress + transcript tail + inbox). Not a parent re-prompt machine.</p></div>
-        <div class="card feature"><h3><span class="icon">👁️</span> Parent ↔ child</h3><p>Owner tools <code>inspect</code>/<code>steer</code>; inbox injects into next turn. Wake-up on <code>complete</code>/<code>block</code> without polling.</p></div>
-        <div class="card feature"><h3><span class="icon">🛡️</span> Safe</h3><p>Per-goal artifact isolation <code>.opencode/loopd/goals/&lt;id&gt;/</code>, <code>maxTurns</code> force-finish → semantic summary → parent.</p></div>
-      </section>
+       <section class="grid" aria-label="Features">
+         <div class="card feature"><h3><span class="icon">⚡</span> Engine-driven</h3><p>Idle + lease + 30s polling re-prompts the child with <em>accumulated steering</em> (progress + transcript tail + inbox). Not a parent re-prompt machine.</p></div>
+         <div class="card feature"><h3><span class="icon">⏱️</span> Scheduled</h3><p><code>scheduleEveryMs</code> auto-requeues the same goal on an interval (1.7) — <code>5s</code> poll, <code>skip-if-running</code>, <code>workspaceWrite</code> gate, inbox <code>Scheduled tick N/M</code>.</p></div>
+         <div class="card feature"><h3><span class="icon">👁️</span> Parent ↔ child</h3><p>Owner tools <code>inspect</code>/<code>steer</code>; inbox injects into next turn. Wake-up on <code>complete</code>/<code>block</code> without polling.</p></div>
+         <div class="card feature"><h3><span class="icon">🛡️</span> Safe</h3><p>Per-goal artifact isolation <code>.opencode/loopd/goals/&lt;id&gt;/</code>, <code>maxTurns</code> force-finish → semantic summary → parent.</p></div>
+       </section>
 
       <section style="margin-top:2.2rem">
         <h2>Architecture — how the loop runs</h2>
@@ -220,26 +221,34 @@
                  │                         .opencode/loopd/goals/&lt;id&gt;/
                  │                           progress.md / artifacts
                  └─────────────────────────────────┘</code></pre>
-        <p>Each goal is a <code>GoalID</code> — the loop identity. The dashboard is a modal dialog that pushes <code>loopd.dashboard</code> onto the keymap so the chat prompt never sees your keys. Artifacts are namespaced per-goal; if your objective says <code>save to ./reports/</code>, that wins.</p>
+         <p>Each goal is a <code>GoalID</code> — the loop identity. The dashboard is a modal dialog that pushes <code>loopd.dashboard</code> onto the keymap so the chat prompt never sees your keys. Artifacts are namespaced per-goal; if your objective says <code>save to ./reports/</code>, that wins. <strong>1.7</strong> adds a <code>5s</code> schedule worker that requeues <code>complete</code> scheduled goals on interval with <code>skip-if-running</code>.</p>
       </section>
 
-      <section style="margin-top:2rem">
-        <h2>Quick start — background goals in OpenCode</h2>
-        <pre><code>/goal fetch the latest AI news and save 10 items to ai-news.md
+       <section style="margin-top:2rem">
+         <h2>Quick start — background goals in OpenCode</h2>
+         <pre><code>/goal fetch the latest AI news and save 10 items to ai-news.md
 # agent clarifies → loopd_create_goal → child loops every ~30s
 /loop                          # or &lt;leader&gt;d  (Ctrl+X → d)
 j/k  move   o open child   :send hello   :force done   ? help   q close
-Shift+B  → prefilled GitHub bug report (like lazyjira / lazyconfluence)</code></pre>
-        <p>Prefer the TUI? <code>Ctrl+L</code> also works if your terminal passes it; <code>&lt;leader&gt;d</code> is the reliable leader binding.</p>
-      </section>
+Shift+B  → prefilled GitHub bug report (like lazyjira / lazyconfluence)
+
+# Scheduled — one goal, auto-requeues on interval (1.7)
+loopd_create_goal({
+  name: "hourly-report",
+  objective: "Append date -u to tick.txt each run",
+  scheduleEveryMs: 3600000, // 1h
+  scheduleMaxRuns: 24
+})</code></pre>
+         <p>Prefer the TUI? <code>Ctrl+L</code> also works if your terminal passes it; <code>&lt;leader&gt;d</code> is the reliable leader binding. Scheduled goals show <code>scheduleRunCount/nextRunAt</code> in <code>inspect</code>.</p>
+       </section>
 
       <section style="margin-top:2rem">
         <h2>Why loopd vs. plain loop?</h2>
         <p>Plain <code>/loop</code> injects prompts into the <em>main</em> session — it pollutes the transcript. Codex goals keep history per-thread and steer via internal context. Loopd does the same for OpenCode: one child session per goal, continuation steering with progress history + transcript tail, and an explicit artifact namespace. The parent stays clean.</p>
         <div class="grid">
-          <div class="card"><h3>opencode-loopd</h3><p>Child session per goal, no transcript pollution, artifact isolation, parent wake-up injection.</p></div>
-          <div class="card"><h3>Plain /loop</h3><p>Single session, prompt injected into main chat, manual polling to see progress.</p></div>
-          <div class="card"><h3>Codex / Claude Code</h3><p>Inspiration: Codex goals keep per-thread history and steer via internal context — same model for OpenCode.</p></div>
+           <div class="card"><h3>opencode-loopd</h3><p>Child session per goal, no transcript pollution, artifact isolation, scheduled requeue, parent wake-up injection.</p></div>
+           <div class="card"><h3>Plain /loop</h3><p>Single session, prompt injected into main chat, manual polling to see progress, no interval.</p></div>
+           <div class="card"><h3>Codex / Claude Code</h3><p>Inspiration: Codex goals keep per-thread history and steer via internal context — loopd adds scheduled intervals for repetitive dialogues.</p></div>
         </div>
       </section>
 
@@ -248,8 +257,9 @@ Shift+B  → prefilled GitHub bug report (like lazyjira / lazyconfluence)</code>
         <div class="faq">
           <details><summary>How to run background agents in OpenCode?</summary><p>Install <code>@bojackduy/opencode-loopd</code> as a plugin (both <code>opencode.jsonc</code> and <code>tui.json</code>), restart, then <code>/goal</code> in any session. The engine spawns a child worker that loops autonomously; you monitor with <code>/loop</code>.</p></details>
           <details><summary>Is this like Claude Code's loop or Codex goals?</summary><p>Yes — same mental model: engine-driven idle → continuation steering with accumulated context → child calls <code>complete_goal</code>/<code>block_goal</code> → parent wake-up. Like Codex, but native to OpenCode's session model.</p></details>
-          <details><summary>Where do loop outputs go?</summary><p>Per-goal: <code>.opencode/loopd/goals/&lt;id&gt;/</code> (e.g. <code>progress.md</code>). If your objective names <code>./reports/</code>, that wins.</p></details>
-          <details><summary>How to report a bug?</summary><p>In the dashboard press <code>Shift+B</code> or <code>:bug</code> — opens <code>github.com/bojackduy/opencode-loopd/issues/new</code> prefilled with environment (version, OS, goal context).</p></details>
+           <details><summary>Where do loop outputs go?</summary><p>Per-goal: <code>.opencode/loopd/goals/&lt;id&gt;/</code> (e.g. <code>progress.md</code>). If your objective names <code>./reports/</code>, that wins.</p></details>
+           <details><summary>How to schedule repetitive tasks?</summary><p>Use <code>scheduleEveryMs</code> (1.7) — e.g. <code>scheduleEveryMs: 60000</code> for 1m interval, <code>scheduleMaxRuns: 10</code> for 10 total. The <code>5s</code> schedule worker resurrects <code>complete → active</code> with <code>Scheduled tick N/M</code> inbox; `workspaceWrite:true` defers if another writer is active.</p></details>
+           <details><summary>How to report a bug?</summary><p>In the dashboard press <code>Shift+B</code> or <code>:bug</code> — opens <code>github.com/bojackduy/opencode-loopd/issues/new</code> prefilled with environment (version, OS, goal context).</p></details>
         </div>
       </section>
 

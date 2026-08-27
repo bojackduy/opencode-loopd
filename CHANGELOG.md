@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.7.0 (2026-08-25) — Scheduled Intervals
+
+> Interval requeue for repetitive dialogues — one `/goal` covers `monitor deploy` `periodic tests` `keep going` without manual re-prompt. `5s` `createScheduleWorker` resurrects `complete → active` with `Scheduled tick N/M`.
+
+### Added
+
+- **Scheduled intervals** — `GoalConfig.schedule {everyMs, maxRuns}` (`src/domain/goal.ts:100`), `scheduleEveryMs`/`scheduleMaxRuns` args on `loopd_create_goal` (`src/server/goal-tools.ts:56`), min 1000, `maxRuns` total incl initial (`src/server/goal-tools.ts:83` validation).
+- **Schedule worker** — `src/application/schedule-worker.ts:28` `createScheduleWorker` `intervalMs 5000` scans `complete` scheduled goals, `skip-if-running` (lease/`phase` `running/queued/compacting` + `workspaceWrite` single-writer gate `src/application/goal-service.ts:83`), resurrects `complete→active` `phase=idle` `lastScheduleAt`, injects inbox `Scheduled tick N/M — re-execute objective`, then `continueTurn`.
+- **State v6** — `CURRENT_VERSION 6` `src/infrastructure/state-repository.ts:12`, `scheduleRunCount`/`nextRunAt`/`lastScheduleAt` on `GoalRuntimeState` (`src/domain/runtime.ts:115`), `v5→v6` migration with validation, `createRuntimeState` init `scheduleRunCount 0` (`src/application/goal-service.ts:225`), `complete_goal` counts `scheduleRunCount` and sets `nextRunAt=now+everyMs` while `count < maxRuns` and clears stale lease `leaseExpiresAt`/`activeRunID` (`src/server/goal-tools.ts:377` fix).
+- **Plugin wiring** — `createScheduleWorker` started lazily with `engine`+`worker` in `src/server/plugin.ts:31`, `dispose` stops it.
+- **Owner visibility** — `inspect_background_goal` exposes `config.schedule` + `runtime scheduleRunCount/nextRunAt/lastScheduleAt` (`src/server/owner-tools.ts:105`, `src/server/goal-tools.ts:540`).
+- **Tests** — `test/application/schedule-worker.test.ts:1` 6 tests (resurrect due, skip-if-running, maxRuns, writer serialization, concurrent `workspaceWrite:false`, future `nextRunAt`); `test/infrastructure/state-store.test.ts:42` updated to `version 6`; total `165` pass.
+
+### Fixed
+
+- **Stale lease blocked schedule** — `complete_goal` now clears `leaseExpiresAt`/`turnStartedAt`/`activeRunID`/`activePromptMessageID` on `complete`; previous left `5m` lease valid while `phase idle`, so `schedule.tick` saw `leaseIsValid` and skipped until expiry.
+
+### Live proof
+
+- `sched-live-verify` `09cb837c` `10s` `maxRuns 3` `workspaceWrite:false` → `tick.txt` `3` lines `02:00:56` `02:03:43` `02:05:47` `runCount 3` `scheduleRunCount 3` `nextRunAt None` `165` tests still pass; `schedule.tick` events `02:01:29` `02:04:29`.
+
 ## 1.6.0 (2026-08-24) — Hardened Lifecycle
 
 > Merge `feat/goal-evaluation` (43 files, +5516 / -1001 since `1.5.3` `5461e0d`). Hardens prompt correlation, maintenance recovery, workspace serialization, and evaluator verification.
