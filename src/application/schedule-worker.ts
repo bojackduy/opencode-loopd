@@ -8,7 +8,7 @@
 import { randomUUID } from "crypto"
 import { readState, mutateState, appendEvent, appendGoalInbox } from "../infrastructure/state-repository"
 import type { GoalID } from "../domain/goal"
-import { leaseIsValid } from "../domain/runtime"
+import { leaseIsValid, releaseLease } from "../domain/runtime"
 import type { GoalService } from "./goal-service"
 import { logServerEvent } from "../infrastructure/server-log"
 
@@ -105,7 +105,8 @@ export function createScheduleWorker(options: ScheduleWorkerOptions): ScheduleWo
         // Keep completionEvidence as history; new run will overwrite on next complete
         g.blocker = undefined
 
-        rt.phase = "idle"
+        Object.assign(rt, releaseLease(rt))
+        rt.activeRunID = undefined
         rt.consecutiveFailures = 0
         rt.noProgressCount = 0
         rt.progressDuringTurn = false

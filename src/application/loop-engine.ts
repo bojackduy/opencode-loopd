@@ -671,6 +671,29 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     if (knownWorkerSessions.size === 0) return
 
     const state = await readState(directory)
+
+    // Repair leaks for terminal/paused goals that still carry activeRunID/lease (P2)
+    for (const goal of state.goals) {
+      if (goal.status === "active") continue
+      const rt = state.runtimes.find((r) => r.goalID === goal.id)
+      if (!rt) continue
+      if (rt.phase === "idle" && (rt.activeRunID || rt.leaseExpiresAt || rt.activePromptMessageID)) {
+        await mutateState(directory, `maintenance.clear-terminal-leak:${goal.id}`, async (s) => {
+          const r = s.runtimes.find((x) => x.goalID === goal.id)
+          if (r && r.phase === "idle" && (r.activeRunID || r.leaseExpiresAt || r.activePromptMessageID)) {
+            Object.assign(r, releaseLease(r))
+            r.activeRunID = undefined
+            r.unknownStatusCount = 0
+            r.lastUnknownStatusAt = undefined
+            r.workerUnreachableNotifiedAt = undefined
+            r.updatedAt = new Date().toISOString()
+          }
+          return s
+        })
+        await logServerEvent(directory, "maintenance.terminal-leak-cleared", { goalID: goal.id, status: goal.status })
+      }
+    }
+
     // FAST PATH: skip if no active goals
     const hasActiveGoals = state.goals.some((g) => g.status === "active")
     if (!hasActiveGoals) return
@@ -711,6 +734,24 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
             return s
           })
           await logServerEvent(directory, "maintenance.stale-run-cleared", { goalID: goal.id })
+        }
+
+        // P4: Tool-call deadlock TTL — clear stuck activeToolCallIDs after 30s without activity
+        if ((runtime.activeToolCallIDs?.length ?? 0) > 0 && runtime.lastActivityAt) {
+          const age = Date.now() - Date.parse(runtime.lastActivityAt)
+          if (age > 30000) {
+            await mutateState(directory, `maintenance.toolcall-ttl:${goal.id}`, async (s) => {
+              const rt = s.runtimes.find((r) => r.goalID === goal.id)
+              if (rt && (rt.activeToolCallIDs?.length ?? 0) > 0) {
+                rt.activeToolCallIDs = []
+                rt.idleCandidateAt = undefined
+                rt.idleCandidateGeneration = undefined
+                rt.updatedAt = new Date().toISOString()
+              }
+              return s
+            })
+            await logServerEvent(directory, "maintenance.toolcall-ttl-cleared", { goalID: goal.id, age })
+          }
         }
 
         const status = await host.sessionStatus(goal.workerSessionID)

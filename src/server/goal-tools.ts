@@ -8,7 +8,7 @@ import { readState, writeState, appendEvent, appendGoalInbox } from "../infrastr
 import type { Goal, GoalID, GoalConfig } from "../domain/goal"
 import { canTransition } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
-import { markProgress } from "../domain/runtime"
+import { markProgress, releaseLease } from "../domain/runtime"
 import type { LoopEvent } from "../domain/events"
 import type { VerificationAttempt } from "../domain/verification"
 import { appendVerificationAttempt } from "../domain/verification"
@@ -374,18 +374,10 @@ export function goalTools(
 
         const runtime = state.runtimes.find((r) => r.goalID === goal.id)
         if (runtime) {
-          runtime.phase = "idle"
-          runtime.leaseExpiresAt = undefined
-          runtime.turnStartedAt = undefined
+          Object.assign(runtime, releaseLease(runtime))
           runtime.activeRunID = undefined
-          runtime.activePromptMessageID = undefined
-          runtime.activePromptObservedAt = undefined
-          runtime.activeAssistantMessageID = undefined
-          runtime.activeAssistantCompletedAt = undefined
-          runtime.idleCandidateAt = undefined
-          runtime.idleCandidateGeneration = undefined
-          runtime.activeToolCallIDs = []
           runtime.lastError = undefined
+          runtime.updatedAt = new Date().toISOString()
 
           // Schedule: interval requeue — count this completion and set nextRunAt
           const schedule = (goal.config as any).schedule as { everyMs: number; maxRuns?: number } | undefined
@@ -486,8 +478,10 @@ export function goalTools(
 
         const runtime = state.runtimes.find((r) => r.goalID === goal.id)
         if (runtime) {
-          runtime.phase = "idle"
+          Object.assign(runtime, releaseLease(runtime))
+          runtime.activeRunID = undefined
           runtime.lastError = undefined
+          runtime.updatedAt = new Date().toISOString()
         }
 
         await writeState(dir, state)

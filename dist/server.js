@@ -499,7 +499,7 @@ function resolveGoalCreationConfig(input) {
   const agent = explicitAgent || defaultAgent || undefined;
   const workspaceWrite = requested.workspaceWrite ?? true;
   const explicitChecks = cleanList(requested.checks);
-  const defaultChecks = workspaceWrite ? cleanList(defaults.defaultChecks) : [];
+  const defaultChecks = workspaceWrite ? cleanList(defaults.defaultChecks || ["bun test"]) : [];
   const checks = explicitChecks.length > 0 ? explicitChecks : defaultChecks;
   if (workspaceWrite && checks.length === 0) {
     return {
@@ -791,7 +791,8 @@ function createControlWorker(options) {
         };
         const runtime = state2.runtimes.find((r) => r.goalID === goal.id);
         if (runtime) {
-          runtime.phase = "idle";
+          Object.assign(runtime, releaseLease(runtime));
+          runtime.activeRunID = undefined;
           runtime.lastError = undefined;
           runtime.updatedAt = new Date().toISOString();
         }
@@ -831,7 +832,8 @@ function createControlWorker(options) {
         };
         const runtime = state2.runtimes.find((r) => r.goalID === goal.id);
         if (runtime) {
-          runtime.phase = "idle";
+          Object.assign(runtime, releaseLease(runtime));
+          runtime.activeRunID = undefined;
           runtime.lastError = undefined;
           runtime.updatedAt = new Date().toISOString();
         }
@@ -1461,6 +1463,28 @@ function createLoopEngine(options) {
     if (knownWorkerSessions.size === 0)
       return;
     const state = await readState(directory);
+    for (const goal of state.goals) {
+      if (goal.status === "active")
+        continue;
+      const rt = state.runtimes.find((r) => r.goalID === goal.id);
+      if (!rt)
+        continue;
+      if (rt.phase === "idle" && (rt.activeRunID || rt.leaseExpiresAt || rt.activePromptMessageID)) {
+        await mutateState(directory, `maintenance.clear-terminal-leak:${goal.id}`, async (s) => {
+          const r = s.runtimes.find((x) => x.goalID === goal.id);
+          if (r && r.phase === "idle" && (r.activeRunID || r.leaseExpiresAt || r.activePromptMessageID)) {
+            Object.assign(r, releaseLease(r));
+            r.activeRunID = undefined;
+            r.unknownStatusCount = 0;
+            r.lastUnknownStatusAt = undefined;
+            r.workerUnreachableNotifiedAt = undefined;
+            r.updatedAt = new Date().toISOString();
+          }
+          return s;
+        });
+        await logServerEvent(directory, "maintenance.terminal-leak-cleared", { goalID: goal.id, status: goal.status });
+      }
+    }
     const hasActiveGoals = state.goals.some((g) => g.status === "active");
     if (!hasActiveGoals)
       return;
@@ -1495,6 +1519,22 @@ function createLoopEngine(options) {
             return s;
           });
           await logServerEvent(directory, "maintenance.stale-run-cleared", { goalID: goal.id });
+        }
+        if ((runtime.activeToolCallIDs?.length ?? 0) > 0 && runtime.lastActivityAt) {
+          const age = Date.now() - Date.parse(runtime.lastActivityAt);
+          if (age > 30000) {
+            await mutateState(directory, `maintenance.toolcall-ttl:${goal.id}`, async (s) => {
+              const rt = s.runtimes.find((r) => r.goalID === goal.id);
+              if (rt && (rt.activeToolCallIDs?.length ?? 0) > 0) {
+                rt.activeToolCallIDs = [];
+                rt.idleCandidateAt = undefined;
+                rt.idleCandidateGeneration = undefined;
+                rt.updatedAt = new Date().toISOString();
+              }
+              return s;
+            });
+            await logServerEvent(directory, "maintenance.toolcall-ttl-cleared", { goalID: goal.id, age });
+          }
         }
         const status = await host.sessionStatus(goal.workerSessionID);
         if (status === "unknown") {
@@ -2379,7 +2419,8 @@ function createScheduleWorker(options) {
         g.status = "active";
         g.updatedAt = new Date().toISOString();
         g.blocker = undefined;
-        rt.phase = "idle";
+        Object.assign(rt, releaseLease(rt));
+        rt.activeRunID = undefined;
         rt.consecutiveFailures = 0;
         rt.noProgressCount = 0;
         rt.progressDuringTurn = false;
@@ -2906,18 +2947,10 @@ ${failureDetails.slice(0, 500)}`,
         };
         const runtime = state.runtimes.find((r) => r.goalID === goal.id);
         if (runtime) {
-          runtime.phase = "idle";
-          runtime.leaseExpiresAt = undefined;
-          runtime.turnStartedAt = undefined;
+          Object.assign(runtime, releaseLease(runtime));
           runtime.activeRunID = undefined;
-          runtime.activePromptMessageID = undefined;
-          runtime.activePromptObservedAt = undefined;
-          runtime.activeAssistantMessageID = undefined;
-          runtime.activeAssistantCompletedAt = undefined;
-          runtime.idleCandidateAt = undefined;
-          runtime.idleCandidateGeneration = undefined;
-          runtime.activeToolCallIDs = [];
           runtime.lastError = undefined;
+          runtime.updatedAt = new Date().toISOString();
           const schedule = goal.config.schedule;
           if (schedule && typeof schedule.everyMs === "number" && schedule.everyMs >= 1000) {
             const cur = typeof runtime.scheduleRunCount === "number" ? runtime.scheduleRunCount : 0;
@@ -3003,8 +3036,10 @@ ${failureDetails.slice(0, 500)}`,
         };
         const runtime = state.runtimes.find((r) => r.goalID === goal.id);
         if (runtime) {
-          runtime.phase = "idle";
+          Object.assign(runtime, releaseLease(runtime));
+          runtime.activeRunID = undefined;
           runtime.lastError = undefined;
+          runtime.updatedAt = new Date().toISOString();
         }
         await writeState(dir, state);
         const event = {
@@ -3154,9 +3189,19 @@ function ownerTools(options) {
             status: g.status,
             phase: runtime?.phase ?? "unknown",
             turn: runtime?.runCount ?? 0,
+            budgetTurnCount: runtime?.budgetTurnCount ?? 0,
+            maxTurns: g.config.maxTurns,
             lastProgress: g.lastProgress?.summary?.slice(0, 120),
             lastProgressAt: g.lastProgress?.at,
-            blocker: g.blocker?.reason?.slice(0, 120)
+            blocker: g.blocker?.reason?.slice(0, 120),
+            evaluatorRejectionCount: runtime?.evaluatorRejectionCount ?? 0,
+            unknownStatusCount: runtime?.unknownStatusCount ?? 0,
+            lastActivityAt: runtime?.lastActivityAt,
+            retryAfter: runtime?.retryAfter,
+            nextRunAt: runtime?.nextRunAt,
+            scheduleRunCount: runtime?.scheduleRunCount,
+            consecutiveFailures: runtime?.consecutiveFailures ?? 0,
+            noProgressCount: runtime?.noProgressCount ?? 0
           };
         });
         return {
@@ -3214,13 +3259,29 @@ function ownerTools(options) {
               runGeneration: runtime.runGeneration,
               evaluatorRejectionCount: runtime.evaluatorRejectionCount,
               freeRetryPending: runtime.freeRetryPending,
+              lastRejectionDetails: runtime.lastRejectionDetails?.slice(0, 800),
               consecutiveFailures: runtime.consecutiveFailures,
+              noProgressCount: runtime.noProgressCount,
               lastError: runtime.lastError,
               lastProgressAt: runtime.lastProgressAt,
               lastRunAt: runtime.lastRunAt,
+              lastActivityAt: runtime.lastActivityAt,
+              lastCompactAt: runtime.lastCompactAt,
+              activePromptMessageID: runtime.activePromptMessageID,
+              activeAssistantMessageID: runtime.activeAssistantMessageID,
+              activeAssistantCompletedAt: runtime.activeAssistantCompletedAt,
+              idleCandidateAt: runtime.idleCandidateAt,
+              idleCandidateGeneration: runtime.idleCandidateGeneration,
+              unknownStatusCount: runtime.unknownStatusCount,
+              lastUnknownStatusAt: runtime.lastUnknownStatusAt,
+              workerUnreachableNotifiedAt: runtime.workerUnreachableNotifiedAt,
+              retryAfter: runtime.retryAfter,
+              forceFinishRequested: runtime.forceFinishRequested,
               scheduleRunCount: runtime.scheduleRunCount,
               nextRunAt: runtime.nextRunAt,
-              lastScheduleAt: runtime.lastScheduleAt
+              lastScheduleAt: runtime.lastScheduleAt,
+              lastVerificationAttempt: runtime.lastVerificationAttempt,
+              recentVerificationAttempts: runtime.recentVerificationAttempts?.slice(-2)
             } : undefined
           }, null, 2)
         };

@@ -532,6 +532,17 @@ function ageLabel(timestamp, now) {
     return `${minutes}m ago`;
   return `${Math.floor(minutes / 60)}h ago`;
 }
+function countdownLabel(targetIso, now) {
+  if (!targetIso)
+    return;
+  const diff = Math.max(0, Math.floor((Date.parse(targetIso) - now) / 1000));
+  if (diff < 60)
+    return `${diff}s`;
+  const minutes = Math.floor(diff / 60);
+  if (minutes < 60)
+    return `${minutes}m ${diff % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
 function LoopDashboard(props) {
   const theme = () => props.api.theme.current;
   const [mode, setMode] = createSignal("normal");
@@ -938,21 +949,21 @@ function LoopDashboard(props) {
   }
   createEffect(() => setSelectedGoal(activeGoals()[selected()] || null));
   return (() => {
-    var _el$ = _$createElement("box"), _el$2 = _$createElement("box"), _el$3 = _$createElement("box"), _el$4 = _$createElement("text"), _el$5 = _$createElement("span"), _el$7 = _$createElement("span"), _el$9 = _$createElement("span"), _el$0 = _$createTextNode(` `), _el$1 = _$createTextNode(` `), _el$10 = _$createElement("span"), _el$12 = _$createElement("span"), _el$13 = _$createElement("span"), _el$15 = _$createElement("span"), _el$17 = _$createElement("span"), _el$18 = _$createTextNode(` `), _el$19 = _$createTextNode(` RUNNING`), _el$20 = _$createElement("span"), _el$22 = _$createElement("span"), _el$23 = _$createElement("span"), _el$25 = _$createElement("box"), _el$26 = _$createElement("text"), _el$27 = _$createElement("span"), _el$29 = _$createElement("box"), _el$34 = _$createElement("box"), _el$41 = _$createElement("box"), _el$42 = _$createElement("text"), _el$43 = _$createElement("span"), _el$44 = _$createElement("input");
+    var _el$ = _$createElement("box"), _el$2 = _$createElement("box"), _el$3 = _$createElement("box"), _el$4 = _$createElement("text"), _el$5 = _$createElement("span"), _el$7 = _$createElement("span"), _el$9 = _$createElement("span"), _el$0 = _$createTextNode(` `), _el$1 = _$createTextNode(` `), _el$10 = _$createElement("span"), _el$12 = _$createElement("span"), _el$13 = _$createElement("span"), _el$15 = _$createElement("span"), _el$17 = _$createElement("span"), _el$18 = _$createTextNode(` `), _el$19 = _$createTextNode(` running`), _el$20 = _$createElement("span"), _el$22 = _$createElement("span"), _el$24 = _$createElement("span"), _el$25 = _$createElement("span"), _el$27 = _$createElement("box"), _el$28 = _$createElement("text"), _el$29 = _$createElement("span"), _el$31 = _$createElement("box"), _el$36 = _$createElement("box"), _el$43 = _$createElement("box"), _el$44 = _$createElement("text"), _el$45 = _$createElement("span"), _el$46 = _$createElement("input");
     _$insertNode(_el$, _el$2);
     _$setProp(_el$, "flexDirection", "column");
     _$setProp(_el$, "width", "100%");
     _$setProp(_el$, "alignItems", "center");
     _$setProp(_el$, "padding", 1);
     _$insertNode(_el$2, _el$3);
-    _$insertNode(_el$2, _el$29);
-    _$insertNode(_el$2, _el$41);
+    _$insertNode(_el$2, _el$31);
+    _$insertNode(_el$2, _el$43);
     _$setProp(_el$2, "flexDirection", "column");
     _$setProp(_el$2, "width", "90%");
     _$setProp(_el$2, "border", true);
     _$setProp(_el$2, "padding", 1);
     _$insertNode(_el$3, _el$4);
-    _$insertNode(_el$3, _el$25);
+    _$insertNode(_el$3, _el$27);
     _$setProp(_el$3, "flexDirection", "row");
     _$setProp(_el$3, "justifyContent", "space-between");
     _$setProp(_el$3, "alignItems", "center");
@@ -969,7 +980,8 @@ function LoopDashboard(props) {
     _$insertNode(_el$4, _el$17);
     _$insertNode(_el$4, _el$20);
     _$insertNode(_el$4, _el$22);
-    _$insertNode(_el$4, _el$23);
+    _$insertNode(_el$4, _el$24);
+    _$insertNode(_el$4, _el$25);
     _$insertNode(_el$5, _$createTextNode(`\u2B22 Loop Dashboard`));
     _$insertNode(_el$7, _$createTextNode(` \u2502 `));
     _$insertNode(_el$9, _el$0);
@@ -977,7 +989,7 @@ function LoopDashboard(props) {
     _$insert(_el$9, () => mode().toUpperCase(), _el$1);
     _$insertNode(_el$10, _$createTextNode(` \u2502 `));
     _$insert(_el$12, () => activeGoals().length);
-    _$insertNode(_el$13, _$createTextNode(` goals`));
+    _$insertNode(_el$13, _$createTextNode(` active`));
     _$insertNode(_el$15, _$createTextNode(` \u2502 `));
     _$insertNode(_el$17, _el$18);
     _$insertNode(_el$17, _el$19);
@@ -986,54 +998,55 @@ function LoopDashboard(props) {
       return () => _c$() ? runningFrame() : "\u25CB";
     })(), _el$18);
     _$insert(_el$17, runningCount, _el$19);
-    _$insertNode(_el$20, _$createTextNode(` \u2502 `));
-    _$insert(_el$22, () => state()?.goals.filter((g) => g.status === "complete").length || 0);
-    _$insertNode(_el$23, _$createTextNode(` done`));
-    _$insertNode(_el$25, _el$26);
-    _$setProp(_el$25, "flexDirection", "row");
-    _$setProp(_el$25, "alignItems", "center");
-    _$setProp(_el$25, "paddingLeft", 1);
-    _$setProp(_el$25, "paddingRight", 1);
-    _$setProp(_el$25, "flexShrink", 0);
-    _$spread(_el$25, _$mergeProps({
+    _$insertNode(_el$20, _$createTextNode(` (phase)`));
+    _$insertNode(_el$22, _$createTextNode(` \u2502 `));
+    _$insert(_el$24, () => state()?.goals.filter((g) => g.status === "complete").length || 0);
+    _$insertNode(_el$25, _$createTextNode(` done`));
+    _$insertNode(_el$27, _el$28);
+    _$setProp(_el$27, "flexDirection", "row");
+    _$setProp(_el$27, "alignItems", "center");
+    _$setProp(_el$27, "paddingLeft", 1);
+    _$setProp(_el$27, "paddingRight", 1);
+    _$setProp(_el$27, "flexShrink", 0);
+    _$spread(_el$27, _$mergeProps({
       get backgroundColor() {
         return theme().error;
       }
     }, {
       onMouseDown: handleBugReport
     }), true);
-    _$insertNode(_el$26, _el$27);
-    _$insertNode(_el$27, _$createTextNode(`Bug Report`));
-    _$setProp(_el$27, "style", {
+    _$insertNode(_el$28, _el$29);
+    _$insertNode(_el$29, _$createTextNode(`Bug Report`));
+    _$setProp(_el$29, "style", {
       fg: "white",
       bold: true
     });
-    _$insertNode(_el$29, _el$34);
-    _$setProp(_el$29, "flexDirection", "column");
-    _$setProp(_el$29, "flexGrow", 1);
-    _$setProp(_el$29, "minHeight", 0);
-    _$setProp(_el$29, "overflow", "hidden");
-    _$insert(_el$29, _$createComponent(Show, {
+    _$insertNode(_el$31, _el$36);
+    _$setProp(_el$31, "flexDirection", "column");
+    _$setProp(_el$31, "flexGrow", 1);
+    _$setProp(_el$31, "minHeight", 0);
+    _$setProp(_el$31, "overflow", "hidden");
+    _$insert(_el$31, _$createComponent(Show, {
       get when() {
         return showHelp();
       },
       get children() {
-        var _el$30 = _$createElement("box"), _el$31 = _$createElement("text"), _el$32 = _$createElement("span");
-        _$insertNode(_el$30, _el$31);
-        _$setProp(_el$30, "flexDirection", "column");
-        _$setProp(_el$30, "padding", 1);
-        _$setProp(_el$30, "border", true);
-        _$setProp(_el$30, "borderColor", "yellow");
-        _$setProp(_el$30, "flexShrink", 0);
-        _$setProp(_el$30, "maxHeight", 14);
-        _$setProp(_el$30, "overflow", "hidden");
-        _$insertNode(_el$31, _el$32);
-        _$insertNode(_el$32, _$createTextNode(`\u2501\u2501\u2501 Keys: ? toggle help c toggle done : insert Ctrl+N normal o open Bug report q close \u2501\u2501\u2501`));
-        _$setProp(_el$32, "style", {
+        var _el$32 = _$createElement("box"), _el$33 = _$createElement("text"), _el$34 = _$createElement("span");
+        _$insertNode(_el$32, _el$33);
+        _$setProp(_el$32, "flexDirection", "column");
+        _$setProp(_el$32, "padding", 1);
+        _$setProp(_el$32, "border", true);
+        _$setProp(_el$32, "borderColor", "yellow");
+        _$setProp(_el$32, "flexShrink", 0);
+        _$setProp(_el$32, "maxHeight", 14);
+        _$setProp(_el$32, "overflow", "hidden");
+        _$insertNode(_el$33, _el$34);
+        _$insertNode(_el$34, _$createTextNode(`\u2501\u2501\u2501 Keys: ? toggle help c toggle done : insert Ctrl+N normal o open Bug report q close \u2501\u2501\u2501`));
+        _$setProp(_el$34, "style", {
           fg: "yellow",
           bold: true
         });
-        _$insert(_el$31, _$createComponent(For, {
+        _$insert(_el$33, _$createComponent(For, {
           get each() {
             return commandHelp().split(`
 `);
@@ -1045,20 +1058,20 @@ function LoopDashboard(props) {
               const segments = rest.split(" | ");
               return [`
 `, (() => {
-                var _el$45 = _$createElement("span");
-                _$insert(_el$45, label);
-                _$effect((_$p) => _$setProp(_el$45, "style", {
+                var _el$47 = _$createElement("span");
+                _$insert(_el$47, label);
+                _$effect((_$p) => _$setProp(_el$47, "style", {
                   fg: theme().primary,
                   bold: true
                 }, _$p));
-                return _el$45;
+                return _el$47;
               })(), (() => {
-                var _el$46 = _$createElement("span");
-                _$insertNode(_el$46, _$createTextNode(` `));
-                _$effect((_$p) => _$setProp(_el$46, "style", {
+                var _el$48 = _$createElement("span");
+                _$insertNode(_el$48, _$createTextNode(` `));
+                _$effect((_$p) => _$setProp(_el$48, "style", {
                   fg: theme().textMuted
                 }, _$p));
-                return _el$46;
+                return _el$48;
               })(), _$createComponent(For, {
                 each: segments,
                 children: (seg, idx) => {
@@ -1066,62 +1079,62 @@ function LoopDashboard(props) {
                   if (hasArrow) {
                     const [k2, d2] = seg.split("\u2192").map((s) => s.trim());
                     return [_$memo(() => _$memo(() => idx() > 0)() && (() => {
-                      var _el$52 = _$createElement("span");
-                      _$insertNode(_el$52, _$createTextNode(` | `));
-                      _$effect((_$p) => _$setProp(_el$52, "style", {
+                      var _el$54 = _$createElement("span");
+                      _$insertNode(_el$54, _$createTextNode(` | `));
+                      _$effect((_$p) => _$setProp(_el$54, "style", {
                         fg: theme().textMuted
                       }, _$p));
-                      return _el$52;
+                      return _el$54;
                     })()), (() => {
-                      var _el$48 = _$createElement("span");
-                      _$insert(_el$48, k2);
-                      _$effect((_$p) => _$setProp(_el$48, "style", {
+                      var _el$50 = _$createElement("span");
+                      _$insert(_el$50, k2);
+                      _$effect((_$p) => _$setProp(_el$50, "style", {
                         fg: theme().warning,
                         bold: true
                       }, _$p));
-                      return _el$48;
-                    })(), (() => {
-                      var _el$49 = _$createElement("span");
-                      _$insertNode(_el$49, _$createTextNode(` \u2192 `));
-                      _$effect((_$p) => _$setProp(_el$49, "style", {
-                        fg: theme().textMuted
-                      }, _$p));
-                      return _el$49;
+                      return _el$50;
                     })(), (() => {
                       var _el$51 = _$createElement("span");
-                      _$insert(_el$51, d2);
+                      _$insertNode(_el$51, _$createTextNode(` \u2192 `));
                       _$effect((_$p) => _$setProp(_el$51, "style", {
-                        fg: theme().text
+                        fg: theme().textMuted
                       }, _$p));
                       return _el$51;
+                    })(), (() => {
+                      var _el$53 = _$createElement("span");
+                      _$insert(_el$53, d2);
+                      _$effect((_$p) => _$setProp(_el$53, "style", {
+                        fg: theme().text
+                      }, _$p));
+                      return _el$53;
                     })()];
                   }
                   const sp = seg.indexOf(" ");
                   const k = sp > 0 ? seg.slice(0, sp) : seg;
                   const d = sp > 0 ? seg.slice(sp + 1) : "";
                   return [_$memo(() => _$memo(() => idx() > 0)() && (() => {
-                    var _el$55 = _$createElement("span");
-                    _$insertNode(_el$55, _$createTextNode(` | `));
-                    _$effect((_$p) => _$setProp(_el$55, "style", {
+                    var _el$57 = _$createElement("span");
+                    _$insertNode(_el$57, _$createTextNode(` | `));
+                    _$effect((_$p) => _$setProp(_el$57, "style", {
                       fg: theme().textMuted
                     }, _$p));
-                    return _el$55;
+                    return _el$57;
                   })()), (() => {
-                    var _el$54 = _$createElement("span");
-                    _$insert(_el$54, k);
-                    _$effect((_$p) => _$setProp(_el$54, "style", {
+                    var _el$56 = _$createElement("span");
+                    _$insert(_el$56, k);
+                    _$effect((_$p) => _$setProp(_el$56, "style", {
                       fg: theme().warning,
                       bold: true
                     }, _$p));
-                    return _el$54;
+                    return _el$56;
                   })(), d && (() => {
-                    var _el$57 = _$createElement("span"), _el$58 = _$createTextNode(` `);
-                    _$insertNode(_el$57, _el$58);
-                    _$insert(_el$57, d, null);
-                    _$effect((_$p) => _$setProp(_el$57, "style", {
+                    var _el$59 = _$createElement("span"), _el$60 = _$createTextNode(` `);
+                    _$insertNode(_el$59, _el$60);
+                    _$insert(_el$59, d, null);
+                    _$effect((_$p) => _$setProp(_el$59, "style", {
                       fg: theme().text
                     }, _$p));
-                    return _el$57;
+                    return _el$59;
                   })()];
                 }
               })];
@@ -1133,121 +1146,121 @@ function LoopDashboard(props) {
               const desc = m?.[3] ?? line.split(/\s{2,}/)[1] ?? "";
               return [`
 `, (() => {
-                var _el$59 = _$createElement("span");
-                _$insert(_el$59, indent);
-                _$effect((_$p) => _$setProp(_el$59, "style", {
-                  fg: theme().textMuted
-                }, _$p));
-                return _el$59;
-              })(), (() => {
-                var _el$60 = _$createElement("span");
-                _$insert(_el$60, key);
-                _$effect((_$p) => _$setProp(_el$60, "style", {
-                  fg: theme().warning,
-                  bold: true
-                }, _$p));
-                return _el$60;
-              })(), desc && [(() => {
                 var _el$61 = _$createElement("span");
-                _$insertNode(_el$61, _$createTextNode(` `));
+                _$insert(_el$61, indent);
                 _$effect((_$p) => _$setProp(_el$61, "style", {
                   fg: theme().textMuted
                 }, _$p));
                 return _el$61;
               })(), (() => {
+                var _el$62 = _$createElement("span");
+                _$insert(_el$62, key);
+                _$effect((_$p) => _$setProp(_el$62, "style", {
+                  fg: theme().warning,
+                  bold: true
+                }, _$p));
+                return _el$62;
+              })(), desc && [(() => {
                 var _el$63 = _$createElement("span");
-                _$insert(_el$63, desc);
+                _$insertNode(_el$63, _$createTextNode(` `));
                 _$effect((_$p) => _$setProp(_el$63, "style", {
                   fg: theme().textMuted
                 }, _$p));
                 return _el$63;
+              })(), (() => {
+                var _el$65 = _$createElement("span");
+                _$insert(_el$65, desc);
+                _$effect((_$p) => _$setProp(_el$65, "style", {
+                  fg: theme().textMuted
+                }, _$p));
+                return _el$65;
               })()]];
             }
             const isHeader = line.startsWith("Commands");
             return [`
 `, (() => {
-              var _el$64 = _$createElement("span");
-              _$insert(_el$64, line);
-              _$effect((_$p) => _$setProp(_el$64, "style", {
+              var _el$66 = _$createElement("span");
+              _$insert(_el$66, line);
+              _$effect((_$p) => _$setProp(_el$66, "style", {
                 fg: isHeader ? theme().primary : theme().textMuted,
                 bold: isHeader
               }, _$p));
-              return _el$64;
+              return _el$66;
             })()];
           }
         }), null);
-        _$effect((_$p) => _$setProp(_el$30, "backgroundColor", theme().background, _$p));
-        return _el$30;
+        _$effect((_$p) => _$setProp(_el$32, "backgroundColor", theme().background, _$p));
+        return _el$32;
       }
-    }), _el$34);
-    _$setProp(_el$34, "flexDirection", "column");
-    _$setProp(_el$34, "flexGrow", 1);
-    _$setProp(_el$34, "padding", 1);
-    _$setProp(_el$34, "minHeight", 0);
-    _$setProp(_el$34, "overflow", "hidden");
-    _$insert(_el$34, _$createComponent(Show, {
+    }), _el$36);
+    _$setProp(_el$36, "flexDirection", "column");
+    _$setProp(_el$36, "flexGrow", 1);
+    _$setProp(_el$36, "padding", 1);
+    _$setProp(_el$36, "minHeight", 0);
+    _$setProp(_el$36, "overflow", "hidden");
+    _$insert(_el$36, _$createComponent(Show, {
       get when() {
         return activeGoals().length > 0;
       },
       get fallback() {
         return (() => {
-          var _el$65 = _$createElement("box"), _el$66 = _$createElement("text"), _el$67 = _$createElement("span"), _el$69 = _$createElement("span"), _el$71 = _$createElement("span"), _el$73 = _$createElement("text"), _el$74 = _$createElement("span"), _el$76 = _$createElement("span"), _el$78 = _$createElement("span"), _el$80 = _$createElement("span"), _el$82 = _$createElement("span"), _el$84 = _$createElement("span"), _el$86 = _$createElement("span");
-          _$insertNode(_el$65, _el$66);
-          _$insertNode(_el$65, _el$73);
-          _$setProp(_el$65, "flexDirection", "column");
-          _$setProp(_el$65, "gap", 1);
-          _$insertNode(_el$66, _el$67);
-          _$insertNode(_el$66, _el$69);
-          _$insertNode(_el$66, _el$71);
-          _$insertNode(_el$67, _$createTextNode(`No active goals.`));
-          _$insertNode(_el$69, _$createTextNode(` /goal`));
-          _$insertNode(_el$71, _$createTextNode(` in parent chat to create one.`));
-          _$insertNode(_el$73, _el$74);
-          _$insertNode(_el$73, _el$76);
-          _$insertNode(_el$73, _el$78);
-          _$insertNode(_el$73, _el$80);
-          _$insertNode(_el$73, _el$82);
-          _$insertNode(_el$73, _el$84);
-          _$insertNode(_el$73, _el$86);
-          _$insertNode(_el$74, _$createTextNode(`Tip: `));
-          _$insertNode(_el$76, _$createTextNode(`:send`));
-          _$insertNode(_el$78, _$createTextNode(` to steer the worker \xB7 `));
-          _$insertNode(_el$80, _$createTextNode(`o`));
-          _$insertNode(_el$82, _$createTextNode(` to open child \xB7 `));
-          _$insertNode(_el$84, _$createTextNode(`:force`));
-          _$insertNode(_el$86, _$createTextNode(` to complete manually.`));
+          var _el$67 = _$createElement("box"), _el$68 = _$createElement("text"), _el$69 = _$createElement("span"), _el$71 = _$createElement("span"), _el$73 = _$createElement("span"), _el$75 = _$createElement("text"), _el$76 = _$createElement("span"), _el$78 = _$createElement("span"), _el$80 = _$createElement("span"), _el$82 = _$createElement("span"), _el$84 = _$createElement("span"), _el$86 = _$createElement("span"), _el$88 = _$createElement("span");
+          _$insertNode(_el$67, _el$68);
+          _$insertNode(_el$67, _el$75);
+          _$setProp(_el$67, "flexDirection", "column");
+          _$setProp(_el$67, "gap", 1);
+          _$insertNode(_el$68, _el$69);
+          _$insertNode(_el$68, _el$71);
+          _$insertNode(_el$68, _el$73);
+          _$insertNode(_el$69, _$createTextNode(`No active goals.`));
+          _$insertNode(_el$71, _$createTextNode(` /goal`));
+          _$insertNode(_el$73, _$createTextNode(` in parent chat to create one.`));
+          _$insertNode(_el$75, _el$76);
+          _$insertNode(_el$75, _el$78);
+          _$insertNode(_el$75, _el$80);
+          _$insertNode(_el$75, _el$82);
+          _$insertNode(_el$75, _el$84);
+          _$insertNode(_el$75, _el$86);
+          _$insertNode(_el$75, _el$88);
+          _$insertNode(_el$76, _$createTextNode(`Tip: `));
+          _$insertNode(_el$78, _$createTextNode(`:send`));
+          _$insertNode(_el$80, _$createTextNode(` to steer the worker \xB7 `));
+          _$insertNode(_el$82, _$createTextNode(`o`));
+          _$insertNode(_el$84, _$createTextNode(` to open child \xB7 `));
+          _$insertNode(_el$86, _$createTextNode(`:force`));
+          _$insertNode(_el$88, _$createTextNode(` to complete manually.`));
           _$effect((_p$) => {
-            var _v$21 = {
+            var _v$22 = {
               fg: theme().textMuted
-            }, _v$22 = {
-              fg: theme().accent
             }, _v$23 = {
-              fg: theme().textMuted
+              fg: theme().accent
             }, _v$24 = {
               fg: theme().textMuted
             }, _v$25 = {
-              fg: theme().warning
+              fg: theme().textMuted
             }, _v$26 = {
-              fg: theme().textMuted
+              fg: theme().warning
             }, _v$27 = {
-              fg: theme().warning
-            }, _v$28 = {
               fg: theme().textMuted
-            }, _v$29 = {
+            }, _v$28 = {
               fg: theme().warning
+            }, _v$29 = {
+              fg: theme().textMuted
             }, _v$30 = {
+              fg: theme().warning
+            }, _v$31 = {
               fg: theme().textMuted
             };
-            _v$21 !== _p$.e && (_p$.e = _$setProp(_el$67, "style", _v$21, _p$.e));
-            _v$22 !== _p$.t && (_p$.t = _$setProp(_el$69, "style", _v$22, _p$.t));
-            _v$23 !== _p$.a && (_p$.a = _$setProp(_el$71, "style", _v$23, _p$.a));
-            _v$24 !== _p$.o && (_p$.o = _$setProp(_el$74, "style", _v$24, _p$.o));
-            _v$25 !== _p$.i && (_p$.i = _$setProp(_el$76, "style", _v$25, _p$.i));
-            _v$26 !== _p$.n && (_p$.n = _$setProp(_el$78, "style", _v$26, _p$.n));
-            _v$27 !== _p$.s && (_p$.s = _$setProp(_el$80, "style", _v$27, _p$.s));
-            _v$28 !== _p$.h && (_p$.h = _$setProp(_el$82, "style", _v$28, _p$.h));
-            _v$29 !== _p$.r && (_p$.r = _$setProp(_el$84, "style", _v$29, _p$.r));
-            _v$30 !== _p$.d && (_p$.d = _$setProp(_el$86, "style", _v$30, _p$.d));
+            _v$22 !== _p$.e && (_p$.e = _$setProp(_el$69, "style", _v$22, _p$.e));
+            _v$23 !== _p$.t && (_p$.t = _$setProp(_el$71, "style", _v$23, _p$.t));
+            _v$24 !== _p$.a && (_p$.a = _$setProp(_el$73, "style", _v$24, _p$.a));
+            _v$25 !== _p$.o && (_p$.o = _$setProp(_el$76, "style", _v$25, _p$.o));
+            _v$26 !== _p$.i && (_p$.i = _$setProp(_el$78, "style", _v$26, _p$.i));
+            _v$27 !== _p$.n && (_p$.n = _$setProp(_el$80, "style", _v$27, _p$.n));
+            _v$28 !== _p$.s && (_p$.s = _$setProp(_el$82, "style", _v$28, _p$.s));
+            _v$29 !== _p$.h && (_p$.h = _$setProp(_el$84, "style", _v$29, _p$.h));
+            _v$30 !== _p$.r && (_p$.r = _$setProp(_el$86, "style", _v$30, _p$.r));
+            _v$31 !== _p$.d && (_p$.d = _$setProp(_el$88, "style", _v$31, _p$.d));
             return _p$;
           }, {
             e: undefined,
@@ -1261,7 +1274,7 @@ function LoopDashboard(props) {
             r: undefined,
             d: undefined
           });
-          return _el$65;
+          return _el$67;
         })();
       },
       get children() {
@@ -1284,102 +1297,164 @@ function LoopDashboard(props) {
               return phaseColor(runtime().phase || "idle", theme());
             };
             return (() => {
-              var _el$88 = _$createElement("box"), _el$89 = _$createElement("text"), _el$90 = _$createElement("span"), _el$91 = _$createElement("span"), _el$93 = _$createElement("span");
-              _$insertNode(_el$88, _el$89);
-              _$setProp(_el$88, "flexDirection", "row");
-              _$setProp(_el$88, "paddingLeft", 1);
-              _$setProp(_el$88, "paddingRight", 1);
-              _$insertNode(_el$89, _el$90);
-              _$insertNode(_el$89, _el$91);
-              _$insertNode(_el$89, _el$93);
-              _$insert(_el$90, (() => {
+              var _el$90 = _$createElement("box"), _el$91 = _$createElement("text"), _el$92 = _$createElement("span"), _el$93 = _$createElement("span"), _el$95 = _$createElement("span");
+              _$insertNode(_el$90, _el$91);
+              _$setProp(_el$90, "flexDirection", "row");
+              _$setProp(_el$90, "paddingLeft", 1);
+              _$setProp(_el$90, "paddingRight", 1);
+              _$insertNode(_el$91, _el$92);
+              _$insertNode(_el$91, _el$93);
+              _$insertNode(_el$91, _el$95);
+              _$insert(_el$92, (() => {
                 var _c$2 = _$memo(() => !!isActive());
                 return () => _c$2() ? `\u25B6 ${statusIcon(goal.status)} ${goal.name}` : `  ${statusIcon(goal.status)} ${goal.name}`;
               })());
-              _$insertNode(_el$91, _$createTextNode(` \u2502 `));
-              _$insert(_el$93, () => goal.status.toUpperCase());
-              _$insert(_el$89, (() => {
+              _$insertNode(_el$93, _$createTextNode(` \u2502 `));
+              _$insert(_el$95, () => goal.status.toUpperCase());
+              _$insert(_el$91, (() => {
                 var _c$3 = _$memo(() => !!runtime());
                 return () => _c$3() && [(() => {
-                  var _el$94 = _$createElement("span");
-                  _$insertNode(_el$94, _$createTextNode(` \u2502 `));
-                  _$effect((_$p) => _$setProp(_el$94, "style", {
-                    fg: theme().textMuted
-                  }, _$p));
-                  return _el$94;
-                })(), (() => {
-                  var _el$96 = _$createElement("span"), _el$97 = _$createTextNode(` `);
-                  _$insertNode(_el$96, _el$97);
-                  _$insert(_el$96, (() => {
-                    var _c$6 = _$memo(() => runtime().phase === "running");
-                    return () => _c$6() ? runningFrame() : phaseIcon(runtime().phase);
-                  })(), _el$97);
-                  _$insert(_el$96, () => runtime().phase.toUpperCase(), null);
+                  var _el$96 = _$createElement("span");
+                  _$insertNode(_el$96, _$createTextNode(` \u2502 `));
                   _$effect((_$p) => _$setProp(_el$96, "style", {
-                    fg: turnColor(),
-                    bold: runtime().phase === "running"
+                    fg: theme().textMuted
                   }, _$p));
                   return _el$96;
                 })(), (() => {
                   var _el$98 = _$createElement("span"), _el$99 = _$createTextNode(` `);
                   _$insertNode(_el$98, _el$99);
-                  _$insert(_el$98, () => runtime().budgetTurnCount, null);
-                  _$insert(_el$98, maxTurns ? `/${maxTurns}` : "", null);
+                  _$insert(_el$98, (() => {
+                    var _c$1 = _$memo(() => runtime().phase === "running");
+                    return () => _c$1() ? runningFrame() : phaseIcon(runtime().phase);
+                  })(), _el$99);
+                  _$insert(_el$98, () => runtime().phase.toUpperCase(), null);
                   _$effect((_$p) => _$setProp(_el$98, "style", {
-                    fg: turnColor()
+                    fg: turnColor(),
+                    bold: runtime().phase === "running"
                   }, _$p));
                   return _el$98;
                 })(), (() => {
                   var _el$100 = _$createElement("span"), _el$101 = _$createTextNode(` `);
                   _$insertNode(_el$100, _el$101);
-                  _$insert(_el$100, () => ageLabel(runtime().lastProgressAt || runtime().lastRunAt, clock()), null);
+                  _$insert(_el$100, () => runtime().budgetTurnCount, null);
+                  _$insert(_el$100, maxTurns ? `/${maxTurns}` : "", null);
                   _$effect((_$p) => _$setProp(_el$100, "style", {
-                    fg: theme().textMuted
+                    fg: turnColor()
                   }, _$p));
                   return _el$100;
+                })(), (() => {
+                  var _el$102 = _$createElement("span"), _el$103 = _$createTextNode(` `);
+                  _$insertNode(_el$102, _el$103);
+                  _$insert(_el$102, () => ageLabel(runtime().lastProgressAt || runtime().lastRunAt, clock()), null);
+                  _$effect((_$p) => _$setProp(_el$102, "style", {
+                    fg: theme().textMuted
+                  }, _$p));
+                  return _el$102;
                 })()];
               })(), null);
-              _$insert(_el$89, (() => {
+              _$insert(_el$91, (() => {
                 var _c$4 = _$memo(() => !!(runtime() && runtime().consecutiveFailures > 0));
                 return () => _c$4() && (() => {
-                  var _el$102 = _$createElement("span"), _el$103 = _$createTextNode(` \u2502 \u26A0 `), _el$104 = _$createTextNode(` fail`);
-                  _$insertNode(_el$102, _el$103);
-                  _$insertNode(_el$102, _el$104);
-                  _$insert(_el$102, () => runtime().consecutiveFailures, _el$104);
-                  _$effect((_$p) => _$setProp(_el$102, "style", {
+                  var _el$104 = _$createElement("span"), _el$105 = _$createTextNode(` \u2502 \u26A0 `), _el$106 = _$createTextNode(` fail`);
+                  _$insertNode(_el$104, _el$105);
+                  _$insertNode(_el$104, _el$106);
+                  _$insert(_el$104, () => runtime().consecutiveFailures, _el$106);
+                  _$effect((_$p) => _$setProp(_el$104, "style", {
                     fg: theme().error,
                     bold: true
                   }, _$p));
-                  return _el$102;
+                  return _el$104;
                 })();
               })(), null);
-              _$insert(_el$89, (() => {
+              _$insert(_el$91, (() => {
                 var _c$5 = _$memo(() => !!(runtime() && (runtime().noProgressCount || 0) > 0));
                 return () => _c$5() && (() => {
-                  var _el$105 = _$createElement("span"), _el$106 = _$createTextNode(` \u2502 `), _el$107 = _$createTextNode(` no-progress`);
-                  _$insertNode(_el$105, _el$106);
-                  _$insertNode(_el$105, _el$107);
-                  _$insert(_el$105, () => runtime().noProgressCount, _el$107);
-                  _$effect((_$p) => _$setProp(_el$105, "style", {
+                  var _el$107 = _$createElement("span"), _el$108 = _$createTextNode(` \u2502 `), _el$109 = _$createTextNode(` no-progress`);
+                  _$insertNode(_el$107, _el$108);
+                  _$insertNode(_el$107, _el$109);
+                  _$insert(_el$107, () => runtime().noProgressCount, _el$109);
+                  _$effect((_$p) => _$setProp(_el$107, "style", {
                     fg: theme().warning
                   }, _$p));
-                  return _el$105;
+                  return _el$107;
+                })();
+              })(), null);
+              _$insert(_el$91, (() => {
+                var _c$6 = _$memo(() => !!(runtime() && runtime().evaluatorRejectionCount > 0));
+                return () => _c$6() && (() => {
+                  var _el$110 = _$createElement("span"), _el$111 = _$createTextNode(` \u2502 \u26A0 `), _el$112 = _$createTextNode(` rejected`);
+                  _$insertNode(_el$110, _el$111);
+                  _$insertNode(_el$110, _el$112);
+                  _$insert(_el$110, () => String(runtime().evaluatorRejectionCount), _el$112);
+                  _$effect((_$p) => _$setProp(_el$110, "style", {
+                    fg: theme().warning,
+                    bold: true
+                  }, _$p));
+                  return _el$110;
+                })();
+              })(), null);
+              _$insert(_el$91, (() => {
+                var _c$7 = _$memo(() => !!(runtime() && runtime().unknownStatusCount >= 3));
+                return () => _c$7() && (() => {
+                  var _el$113 = _$createElement("span");
+                  _$insertNode(_el$113, _$createTextNode(` \u2502 \u26A0\uFE0F UNREACHABLE`));
+                  _$effect((_$p) => _$setProp(_el$113, "style", {
+                    fg: theme().error,
+                    bold: true
+                  }, _$p));
+                  return _el$113;
+                })();
+              })(), null);
+              _$insert(_el$91, (() => {
+                var _c$8 = _$memo(() => !!(runtime() && runtime().phase === "idle" && runtime().activeRunID));
+                return () => _c$8() && (() => {
+                  var _el$115 = _$createElement("span");
+                  _$insertNode(_el$115, _$createTextNode(` \u2502 \u26A0\uFE0F STALE LEASE`));
+                  _$effect((_$p) => _$setProp(_el$115, "style", {
+                    fg: theme().error,
+                    bold: true
+                  }, _$p));
+                  return _el$115;
+                })();
+              })(), null);
+              _$insert(_el$91, (() => {
+                var _c$9 = _$memo(() => !!(runtime() && runtime().retryAfter));
+                return () => _c$9() && (() => {
+                  var _el$117 = _$createElement("span"), _el$118 = _$createTextNode(` \u2502 \u21BB `);
+                  _$insertNode(_el$117, _el$118);
+                  _$insert(_el$117, () => countdownLabel(runtime().retryAfter, clock()), null);
+                  _$effect((_$p) => _$setProp(_el$117, "style", {
+                    fg: theme().accent
+                  }, _$p));
+                  return _el$117;
+                })();
+              })(), null);
+              _$insert(_el$91, (() => {
+                var _c$0 = _$memo(() => !!(runtime() && runtime().nextRunAt));
+                return () => _c$0() && (() => {
+                  var _el$119 = _$createElement("span"), _el$120 = _$createTextNode(` \u2502 \u23F0 `);
+                  _$insertNode(_el$119, _el$120);
+                  _$insert(_el$119, () => countdownLabel(runtime().nextRunAt, clock()), null);
+                  _$effect((_$p) => _$setProp(_el$119, "style", {
+                    fg: theme().accent
+                  }, _$p));
+                  return _el$119;
                 })();
               })(), null);
               _$effect((_p$) => {
-                var _v$31 = isActive() ? theme().backgroundElement : undefined, _v$32 = {
+                var _v$32 = isActive() ? theme().backgroundElement : undefined, _v$33 = {
                   fg: statusColor(goal.status, theme()),
                   bold: isActive()
-                }, _v$33 = {
-                  fg: theme().textMuted
                 }, _v$34 = {
+                  fg: theme().textMuted
+                }, _v$35 = {
                   fg: statusColor(goal.status, theme()),
                   bold: true
                 };
-                _v$31 !== _p$.e && (_p$.e = _$setProp(_el$88, "backgroundColor", _v$31, _p$.e));
-                _v$32 !== _p$.t && (_p$.t = _$setProp(_el$90, "style", _v$32, _p$.t));
-                _v$33 !== _p$.a && (_p$.a = _$setProp(_el$91, "style", _v$33, _p$.a));
-                _v$34 !== _p$.o && (_p$.o = _$setProp(_el$93, "style", _v$34, _p$.o));
+                _v$32 !== _p$.e && (_p$.e = _$setProp(_el$90, "backgroundColor", _v$32, _p$.e));
+                _v$33 !== _p$.t && (_p$.t = _$setProp(_el$92, "style", _v$33, _p$.t));
+                _v$34 !== _p$.a && (_p$.a = _$setProp(_el$93, "style", _v$34, _p$.a));
+                _v$35 !== _p$.o && (_p$.o = _$setProp(_el$95, "style", _v$35, _p$.o));
                 return _p$;
               }, {
                 e: undefined,
@@ -1387,13 +1462,13 @@ function LoopDashboard(props) {
                 a: undefined,
                 o: undefined
               });
-              return _el$88;
+              return _el$90;
             })();
           }
         });
       }
     }));
-    _$insert(_el$29, _$createComponent(Show, {
+    _$insert(_el$31, _$createComponent(Show, {
       get when() {
         return selectedGoal();
       },
@@ -1402,181 +1477,276 @@ function LoopDashboard(props) {
         const lp = () => goal().lastProgress;
         const blk = () => goal().blocker;
         return (() => {
-          var _el$108 = _$createElement("box"), _el$109 = _$createElement("text"), _el$110 = _$createElement("span"), _el$111 = _$createTextNode(` `), _el$112 = _$createElement("span"), _el$113 = _$createTextNode(` `), _el$114 = _$createTextNode(`
-`), _el$115 = _$createElement("span");
-          _$insertNode(_el$108, _el$109);
-          _$setProp(_el$108, "flexDirection", "column");
-          _$setProp(_el$108, "border", true);
-          _$setProp(_el$108, "padding", 1);
-          _$setProp(_el$108, "flexShrink", 0);
-          _$setProp(_el$108, "maxHeight", 10);
-          _$insertNode(_el$109, _el$110);
-          _$insertNode(_el$109, _el$112);
-          _$insertNode(_el$109, _el$114);
-          _$insertNode(_el$109, _el$115);
-          _$insertNode(_el$110, _el$111);
-          _$insert(_el$110, () => statusIcon(goal().status), _el$111);
-          _$insert(_el$110, () => goal().name, null);
-          _$insertNode(_el$112, _el$113);
-          _$insert(_el$112, () => goal().status.toUpperCase(), null);
-          _$insert(_el$109, (() => {
-            var _c$7 = _$memo(() => !!rt());
-            return () => _c$7() && [(() => {
-              var _el$116 = _$createElement("span");
-              _$insertNode(_el$116, _$createTextNode(` \u2502 `));
-              _$effect((_$p) => _$setProp(_el$116, "style", {
+          var _el$121 = _$createElement("box"), _el$122 = _$createElement("text"), _el$123 = _$createElement("span"), _el$124 = _$createTextNode(` `), _el$125 = _$createElement("span"), _el$126 = _$createTextNode(` `), _el$127 = _$createTextNode(`
+`), _el$128 = _$createElement("span");
+          _$insertNode(_el$121, _el$122);
+          _$setProp(_el$121, "flexDirection", "column");
+          _$setProp(_el$121, "border", true);
+          _$setProp(_el$121, "padding", 1);
+          _$setProp(_el$121, "flexShrink", 0);
+          _$setProp(_el$121, "maxHeight", 10);
+          _$insertNode(_el$122, _el$123);
+          _$insertNode(_el$122, _el$125);
+          _$insertNode(_el$122, _el$127);
+          _$insertNode(_el$122, _el$128);
+          _$insertNode(_el$123, _el$124);
+          _$insert(_el$123, () => statusIcon(goal().status), _el$124);
+          _$insert(_el$123, () => goal().name, null);
+          _$insertNode(_el$125, _el$126);
+          _$insert(_el$125, () => goal().status.toUpperCase(), null);
+          _$insert(_el$122, (() => {
+            var _c$10 = _$memo(() => !!rt());
+            return () => _c$10() && [(() => {
+              var _el$129 = _$createElement("span");
+              _$insertNode(_el$129, _$createTextNode(` \u2502 `));
+              _$effect((_$p) => _$setProp(_el$129, "style", {
                 fg: theme().textMuted
               }, _$p));
-              return _el$116;
+              return _el$129;
             })(), (() => {
-              var _el$118 = _$createElement("span"), _el$119 = _$createTextNode(` `);
-              _$insertNode(_el$118, _el$119);
-              _$insert(_el$118, () => phaseIcon(rt().phase), _el$119);
-              _$insert(_el$118, () => rt().phase, null);
-              _$effect((_$p) => _$setProp(_el$118, "style", {
+              var _el$131 = _$createElement("span"), _el$132 = _$createTextNode(` `);
+              _$insertNode(_el$131, _el$132);
+              _$insert(_el$131, () => phaseIcon(rt().phase), _el$132);
+              _$insert(_el$131, () => rt().phase, null);
+              _$effect((_$p) => _$setProp(_el$131, "style", {
                 fg: phaseColor(rt().phase, theme()),
                 bold: true
               }, _$p));
-              return _el$118;
+              return _el$131;
             })(), (() => {
-              var _el$120 = _$createElement("span"), _el$121 = _$createTextNode(` run `), _el$122 = _$createTextNode(` (budget `), _el$123 = _$createTextNode(`)`);
-              _$insertNode(_el$120, _el$121);
-              _$insertNode(_el$120, _el$122);
-              _$insertNode(_el$120, _el$123);
-              _$insert(_el$120, () => rt().runCount, _el$122);
-              _$insert(_el$120, () => rt().budgetTurnCount, _el$123);
-              _$effect((_$p) => _$setProp(_el$120, "style", {
-                fg: theme().textMuted
-              }, _$p));
-              return _el$120;
-            })()];
-          })(), _el$114);
-          _$insert(_el$115, () => goal().objective.slice(0, 160));
-          _$insert(_el$109, (() => {
-            var _c$8 = _$memo(() => !!lp());
-            return () => _c$8() && [(() => {
-              var _el$124 = _$createElement("span"), _el$125 = _$createTextNode(`
-\u2714 `);
-              _$insertNode(_el$124, _el$125);
-              _$effect((_$p) => _$setProp(_el$124, "style", {
-                fg: theme().success
-              }, _$p));
-              return _el$124;
-            })(), (() => {
-              var _el$127 = _$createElement("span");
-              _$insert(_el$127, () => lp().summary.slice(0, 100));
-              _$effect((_$p) => _$setProp(_el$127, "style", {
-                fg: theme().text
-              }, _$p));
-              return _el$127;
-            })(), (() => {
-              var _el$128 = _$createElement("span"), _el$129 = _$createTextNode(` \u2192 `);
-              _$insertNode(_el$128, _el$129);
-              _$insert(_el$128, () => lp().next?.slice(0, 60) || "", null);
-              _$effect((_$p) => _$setProp(_el$128, "style", {
-                fg: theme().textMuted
-              }, _$p));
-              return _el$128;
-            })()];
-          })(), null);
-          _$insert(_el$109, (() => {
-            var _c$9 = _$memo(() => !!blk());
-            return () => _c$9() && [(() => {
-              var _el$130 = _$createElement("span"), _el$131 = _$createTextNode(`
-\u2716 blocked: `);
-              _$insertNode(_el$130, _el$131);
-              _$effect((_$p) => _$setProp(_el$130, "style", {
-                fg: theme().error,
-                bold: true
-              }, _$p));
-              return _el$130;
-            })(), (() => {
-              var _el$133 = _$createElement("span");
-              _$insert(_el$133, () => blk().reason.slice(0, 140));
+              var _el$133 = _$createElement("span"), _el$134 = _$createTextNode(` run `), _el$135 = _$createTextNode(` (budget `), _el$136 = _$createTextNode(`)`);
+              _$insertNode(_el$133, _el$134);
+              _$insertNode(_el$133, _el$135);
+              _$insertNode(_el$133, _el$136);
+              _$insert(_el$133, () => rt().runCount, _el$135);
+              _$insert(_el$133, () => rt().budgetTurnCount, _el$136);
               _$effect((_$p) => _$setProp(_el$133, "style", {
-                fg: theme().error
+                fg: theme().textMuted
               }, _$p));
               return _el$133;
-            })(), (() => {
-              var _el$134 = _$createElement("span"), _el$135 = _$createTextNode(` \u2014 `);
-              _$insertNode(_el$134, _el$135);
-              _$insert(_el$134, () => blk().needed.slice(0, 60), null);
-              _$effect((_$p) => _$setProp(_el$134, "style", {
-                fg: theme().textMuted
-              }, _$p));
-              return _el$134;
             })()];
-          })(), null);
-          _$insert(_el$109, (() => {
-            var _c$0 = _$memo(() => !!goal().config.artifactDir);
-            return () => _c$0() && [(() => {
-              var _el$136 = _$createElement("span"), _el$137 = _$createTextNode(`
-\uD83D\uDCC1 `);
-              _$insertNode(_el$136, _el$137);
-              _$effect((_$p) => _$setProp(_el$136, "style", {
-                fg: theme().accent
+          })(), _el$127);
+          _$insert(_el$128, () => goal().objective.slice(0, 160));
+          _$insert(_el$122, (() => {
+            var _c$11 = _$memo(() => !!lp());
+            return () => _c$11() && [(() => {
+              var _el$137 = _$createElement("span"), _el$138 = _$createTextNode(`
+\u2714 `);
+              _$insertNode(_el$137, _el$138);
+              _$effect((_$p) => _$setProp(_el$137, "style", {
+                fg: theme().success
               }, _$p));
-              return _el$136;
+              return _el$137;
             })(), (() => {
-              var _el$139 = _$createElement("span");
-              _$insert(_el$139, () => String(goal().config.artifactDir).replace(String(props.directory), "."));
-              _$effect((_$p) => _$setProp(_el$139, "style", {
-                fg: theme().textMuted
-              }, _$p));
-              return _el$139;
-            })()];
-          })(), null);
-          _$insert(_el$109, (() => {
-            var _c$1 = _$memo(() => (goal().config.checks?.length ?? 0) > 0);
-            return () => _c$1() ? [(() => {
-              var _el$140 = _$createElement("span"), _el$141 = _$createTextNode(`
-\u25A3 checks: `);
-              _$insertNode(_el$140, _el$141);
+              var _el$140 = _$createElement("span");
+              _$insert(_el$140, () => lp().summary.slice(0, 100));
               _$effect((_$p) => _$setProp(_el$140, "style", {
-                fg: theme().warning
+                fg: theme().text
               }, _$p));
               return _el$140;
             })(), (() => {
-              var _el$143 = _$createElement("span");
-              _$insert(_el$143, () => goal().config.checks.join(", ").slice(0, 100));
-              _$effect((_$p) => _$setProp(_el$143, "style", {
+              var _el$141 = _$createElement("span"), _el$142 = _$createTextNode(` \u2192 `);
+              _$insertNode(_el$141, _el$142);
+              _$insert(_el$141, () => lp().next?.slice(0, 60) || "", null);
+              _$effect((_$p) => _$setProp(_el$141, "style", {
                 fg: theme().textMuted
               }, _$p));
-              return _el$143;
-            })()] : null;
+              return _el$141;
+            })()];
           })(), null);
-          _$insert(_el$109, (() => {
-            var _c$10 = _$memo(() => !!rt()?.lastError);
-            return () => _c$10() && [(() => {
-              var _el$144 = _$createElement("span"), _el$145 = _$createTextNode(`
-\u26A0 `);
-              _$insertNode(_el$144, _el$145);
-              _$effect((_$p) => _$setProp(_el$144, "style", {
+          _$insert(_el$122, (() => {
+            var _c$12 = _$memo(() => !!blk());
+            return () => _c$12() && [(() => {
+              var _el$143 = _$createElement("span"), _el$144 = _$createTextNode(`
+\u2716 blocked: `);
+              _$insertNode(_el$143, _el$144);
+              _$effect((_$p) => _$setProp(_el$143, "style", {
+                fg: theme().error,
+                bold: true
+              }, _$p));
+              return _el$143;
+            })(), (() => {
+              var _el$146 = _$createElement("span");
+              _$insert(_el$146, () => blk().reason.slice(0, 140));
+              _$effect((_$p) => _$setProp(_el$146, "style", {
                 fg: theme().error
               }, _$p));
-              return _el$144;
+              return _el$146;
             })(), (() => {
-              var _el$147 = _$createElement("span");
-              _$insert(_el$147, () => rt().lastError.slice(0, 120));
+              var _el$147 = _$createElement("span"), _el$148 = _$createTextNode(` \u2014 `);
+              _$insertNode(_el$147, _el$148);
+              _$insert(_el$147, () => blk().needed.slice(0, 60), null);
               _$effect((_$p) => _$setProp(_el$147, "style", {
-                fg: theme().error
+                fg: theme().textMuted
               }, _$p));
               return _el$147;
             })()];
           })(), null);
+          _$insert(_el$122, (() => {
+            var _c$13 = _$memo(() => !!goal().config.artifactDir);
+            return () => _c$13() && [(() => {
+              var _el$149 = _$createElement("span"), _el$150 = _$createTextNode(`
+\uD83D\uDCC1 `);
+              _$insertNode(_el$149, _el$150);
+              _$effect((_$p) => _$setProp(_el$149, "style", {
+                fg: theme().accent
+              }, _$p));
+              return _el$149;
+            })(), (() => {
+              var _el$152 = _$createElement("span");
+              _$insert(_el$152, () => String(goal().config.artifactDir).replace(String(props.directory), "."));
+              _$effect((_$p) => _$setProp(_el$152, "style", {
+                fg: theme().textMuted
+              }, _$p));
+              return _el$152;
+            })()];
+          })(), null);
+          _$insert(_el$122, (() => {
+            var _c$14 = _$memo(() => (goal().config.checks?.length ?? 0) > 0);
+            return () => _c$14() ? [(() => {
+              var _el$153 = _$createElement("span"), _el$154 = _$createTextNode(`
+\u25A3 checks: `);
+              _$insertNode(_el$153, _el$154);
+              _$effect((_$p) => _$setProp(_el$153, "style", {
+                fg: theme().warning
+              }, _$p));
+              return _el$153;
+            })(), (() => {
+              var _el$156 = _$createElement("span");
+              _$insert(_el$156, () => goal().config.checks.join(", ").slice(0, 100));
+              _$effect((_$p) => _$setProp(_el$156, "style", {
+                fg: theme().textMuted
+              }, _$p));
+              return _el$156;
+            })()] : null;
+          })(), null);
+          _$insert(_el$122, (() => {
+            var _c$15 = _$memo(() => rt()?.evaluatorRejectionCount > 0);
+            return () => _c$15() && [(() => {
+              var _el$157 = _$createElement("span"), _el$158 = _$createTextNode(`
+\u26A0 rejections: `);
+              _$insertNode(_el$157, _el$158);
+              _$effect((_$p) => _$setProp(_el$157, "style", {
+                fg: theme().warning
+              }, _$p));
+              return _el$157;
+            })(), (() => {
+              var _el$160 = _$createElement("span"), _el$161 = _$createTextNode(` \u2014 `);
+              _$insertNode(_el$160, _el$161);
+              _$insert(_el$160, () => String(rt().evaluatorRejectionCount), _el$161);
+              _$insert(_el$160, () => String(rt().lastRejectionDetails || "").slice(0, 80), null);
+              _$effect((_$p) => _$setProp(_el$160, "style", {
+                fg: theme().warning
+              }, _$p));
+              return _el$160;
+            })()];
+          })(), null);
+          _$insert(_el$122, (() => {
+            var _c$16 = _$memo(() => rt()?.unknownStatusCount > 0);
+            return () => _c$16() && [(() => {
+              var _el$162 = _$createElement("span"), _el$163 = _$createTextNode(`
+\u26A0\uFE0F unreachable: `);
+              _$insertNode(_el$162, _el$163);
+              _$effect((_$p) => _$setProp(_el$162, "style", {
+                fg: theme().error
+              }, _$p));
+              return _el$162;
+            })(), (() => {
+              var _el$165 = _$createElement("span"), _el$166 = _$createTextNode(`/3`);
+              _$insertNode(_el$165, _el$166);
+              _$insert(_el$165, () => String(rt().unknownStatusCount), _el$166);
+              _$effect((_$p) => _$setProp(_el$165, "style", {
+                fg: theme().error
+              }, _$p));
+              return _el$165;
+            })(), (() => {
+              var _el$167 = _$createElement("span");
+              _$insertNode(_el$167, _$createTextNode(` \u2014 nudge to recover`));
+              _$effect((_$p) => _$setProp(_el$167, "style", {
+                fg: theme().textMuted
+              }, _$p));
+              return _el$167;
+            })()];
+          })(), null);
+          _$insert(_el$122, (() => {
+            var _c$17 = _$memo(() => !!rt()?.retryAfter);
+            return () => _c$17() && [(() => {
+              var _el$169 = _$createElement("span"), _el$170 = _$createTextNode(`
+\u21BB retry in: `);
+              _$insertNode(_el$169, _el$170);
+              _$effect((_$p) => _$setProp(_el$169, "style", {
+                fg: theme().accent
+              }, _$p));
+              return _el$169;
+            })(), (() => {
+              var _el$172 = _$createElement("span");
+              _$insert(_el$172, () => countdownLabel(rt().retryAfter, clock()));
+              _$effect((_$p) => _$setProp(_el$172, "style", {
+                fg: theme().accent
+              }, _$p));
+              return _el$172;
+            })()];
+          })(), null);
+          _$insert(_el$122, (() => {
+            var _c$18 = _$memo(() => !!rt()?.nextRunAt);
+            return () => _c$18() && [(() => {
+              var _el$173 = _$createElement("span"), _el$174 = _$createTextNode(`
+\u23F0 next run: `);
+              _$insertNode(_el$173, _el$174);
+              _$effect((_$p) => _$setProp(_el$173, "style", {
+                fg: theme().accent
+              }, _$p));
+              return _el$173;
+            })(), (() => {
+              var _el$176 = _$createElement("span");
+              _$insert(_el$176, () => countdownLabel(rt().nextRunAt, clock()));
+              _$effect((_$p) => _$setProp(_el$176, "style", {
+                fg: theme().accent
+              }, _$p));
+              return _el$176;
+            })(), (() => {
+              var _el$177 = _$createElement("span"), _el$178 = _$createTextNode(` (`), _el$179 = _$createTextNode(` runs)`);
+              _$insertNode(_el$177, _el$178);
+              _$insertNode(_el$177, _el$179);
+              _$insert(_el$177, () => String(rt().scheduleRunCount || 0), _el$179);
+              _$effect((_$p) => _$setProp(_el$177, "style", {
+                fg: theme().textMuted
+              }, _$p));
+              return _el$177;
+            })()];
+          })(), null);
+          _$insert(_el$122, (() => {
+            var _c$19 = _$memo(() => !!rt()?.lastError);
+            return () => _c$19() && [(() => {
+              var _el$180 = _$createElement("span"), _el$181 = _$createTextNode(`
+\u26A0 `);
+              _$insertNode(_el$180, _el$181);
+              _$effect((_$p) => _$setProp(_el$180, "style", {
+                fg: theme().error
+              }, _$p));
+              return _el$180;
+            })(), (() => {
+              var _el$183 = _$createElement("span");
+              _$insert(_el$183, () => rt().lastError.slice(0, 120));
+              _$effect((_$p) => _$setProp(_el$183, "style", {
+                fg: theme().error
+              }, _$p));
+              return _el$183;
+            })()];
+          })(), null);
           _$effect((_p$) => {
-            var _v$35 = borderColorForStatus(goal().status, theme()), _v$36 = {
+            var _v$36 = borderColorForStatus(goal().status, theme()), _v$37 = {
               fg: statusColor(goal().status, theme()),
               bold: true
-            }, _v$37 = {
-              fg: statusColor(goal().status, theme())
             }, _v$38 = {
+              fg: statusColor(goal().status, theme())
+            }, _v$39 = {
               fg: theme().text
             };
-            _v$35 !== _p$.e && (_p$.e = _$setProp(_el$108, "borderColor", _v$35, _p$.e));
-            _v$36 !== _p$.t && (_p$.t = _$setProp(_el$110, "style", _v$36, _p$.t));
-            _v$37 !== _p$.a && (_p$.a = _$setProp(_el$112, "style", _v$37, _p$.a));
-            _v$38 !== _p$.o && (_p$.o = _$setProp(_el$115, "style", _v$38, _p$.o));
+            _v$36 !== _p$.e && (_p$.e = _$setProp(_el$121, "borderColor", _v$36, _p$.e));
+            _v$37 !== _p$.t && (_p$.t = _$setProp(_el$123, "style", _v$37, _p$.t));
+            _v$38 !== _p$.a && (_p$.a = _$setProp(_el$125, "style", _v$38, _p$.a));
+            _v$39 !== _p$.o && (_p$.o = _$setProp(_el$128, "style", _v$39, _p$.o));
             return _p$;
           }, {
             e: undefined,
@@ -1584,56 +1754,56 @@ function LoopDashboard(props) {
             a: undefined,
             o: undefined
           });
-          return _el$108;
+          return _el$121;
         })();
       }
     }), null);
-    _$insert(_el$29, _$createComponent(Show, {
+    _$insert(_el$31, _$createComponent(Show, {
       get when() {
         return _$memo(() => !!showLogs())() && events().length > 0;
       },
       get children() {
-        var _el$35 = _$createElement("box"), _el$36 = _$createElement("text"), _el$37 = _$createElement("span"), _el$39 = _$createElement("span");
-        _$insertNode(_el$35, _el$36);
-        _$setProp(_el$35, "flexDirection", "column");
-        _$setProp(_el$35, "border", true);
-        _$setProp(_el$35, "padding", 1);
-        _$setProp(_el$35, "maxHeight", 7);
-        _$setProp(_el$35, "flexShrink", 0);
-        _$setProp(_el$35, "overflow", "hidden");
-        _$insertNode(_el$36, _el$37);
-        _$insertNode(_el$36, _el$39);
-        _$insertNode(_el$37, _$createTextNode(`\u25C8 Recent Events`));
-        _$insertNode(_el$39, _$createTextNode(` \u2014 :logs to hide`));
-        _$insert(_el$36, _$createComponent(For, {
+        var _el$37 = _$createElement("box"), _el$38 = _$createElement("text"), _el$39 = _$createElement("span"), _el$41 = _$createElement("span");
+        _$insertNode(_el$37, _el$38);
+        _$setProp(_el$37, "flexDirection", "column");
+        _$setProp(_el$37, "border", true);
+        _$setProp(_el$37, "padding", 1);
+        _$setProp(_el$37, "maxHeight", 7);
+        _$setProp(_el$37, "flexShrink", 0);
+        _$setProp(_el$37, "overflow", "hidden");
+        _$insertNode(_el$38, _el$39);
+        _$insertNode(_el$38, _el$41);
+        _$insertNode(_el$39, _$createTextNode(`\u25C8 Recent Events`));
+        _$insertNode(_el$41, _$createTextNode(` \u2014 :logs to hide`));
+        _$insert(_el$38, _$createComponent(For, {
           get each() {
             return events().slice(-10);
           },
           children: (ev) => [`
 `, (() => {
-            var _el$148 = _$createElement("span");
-            _$insert(_el$148, () => String(ev.type));
-            _$effect((_$p) => _$setProp(_el$148, "style", {
+            var _el$184 = _$createElement("span");
+            _$insert(_el$184, () => String(ev.type));
+            _$effect((_$p) => _$setProp(_el$184, "style", {
               fg: eventColor(String(ev.type), theme()),
               bold: true
             }, _$p));
-            return _el$148;
+            return _el$184;
           })(), (() => {
-            var _el$149 = _$createElement("span"), _el$150 = _$createTextNode(` `);
-            _$insertNode(_el$149, _el$150);
-            _$insert(_el$149, () => ev.goalID?.slice(0, 8), null);
-            _$effect((_$p) => _$setProp(_el$149, "style", {
+            var _el$185 = _$createElement("span"), _el$186 = _$createTextNode(` `);
+            _$insertNode(_el$185, _el$186);
+            _$insert(_el$185, () => ev.goalID?.slice(0, 8), null);
+            _$effect((_$p) => _$setProp(_el$185, "style", {
               fg: theme().textMuted
             }, _$p));
-            return _el$149;
+            return _el$185;
           })(), _$memo(() => _$memo(() => !!ev.summary)() && (() => {
-            var _el$151 = _$createElement("span"), _el$152 = _$createTextNode(` \u2014 `);
-            _$insertNode(_el$151, _el$152);
-            _$insert(_el$151, () => String(ev.summary).slice(0, 60), null);
-            _$effect((_$p) => _$setProp(_el$151, "style", {
+            var _el$187 = _$createElement("span"), _el$188 = _$createTextNode(` \u2014 `);
+            _$insertNode(_el$187, _el$188);
+            _$insert(_el$187, () => String(ev.summary).slice(0, 60), null);
+            _$effect((_$p) => _$setProp(_el$187, "style", {
               fg: theme().text
             }, _$p));
-            return _el$151;
+            return _el$187;
           })())]
         }), null);
         _$effect((_p$) => {
@@ -1643,42 +1813,42 @@ function LoopDashboard(props) {
           }, _v$3 = {
             fg: theme().textMuted
           };
-          _v$ !== _p$.e && (_p$.e = _$setProp(_el$35, "borderColor", _v$, _p$.e));
-          _v$2 !== _p$.t && (_p$.t = _$setProp(_el$37, "style", _v$2, _p$.t));
-          _v$3 !== _p$.a && (_p$.a = _$setProp(_el$39, "style", _v$3, _p$.a));
+          _v$ !== _p$.e && (_p$.e = _$setProp(_el$37, "borderColor", _v$, _p$.e));
+          _v$2 !== _p$.t && (_p$.t = _$setProp(_el$39, "style", _v$2, _p$.t));
+          _v$3 !== _p$.a && (_p$.a = _$setProp(_el$41, "style", _v$3, _p$.a));
           return _p$;
         }, {
           e: undefined,
           t: undefined,
           a: undefined
         });
-        return _el$35;
+        return _el$37;
       }
     }), null);
-    _$insertNode(_el$41, _el$42);
-    _$insertNode(_el$41, _el$44);
-    _$setProp(_el$41, "flexDirection", "row");
-    _$setProp(_el$41, "border", true);
-    _$setProp(_el$41, "paddingLeft", 1);
-    _$setProp(_el$41, "paddingRight", 1);
-    _$setProp(_el$41, "flexShrink", 0);
-    _$setProp(_el$41, "height", 3);
-    _$setProp(_el$41, "gap", 1);
-    _$insertNode(_el$42, _el$43);
-    _$insert(_el$43, () => mode() === "insert" ? " INSERT \uE0B1" : " NORMAL ");
+    _$insertNode(_el$43, _el$44);
+    _$insertNode(_el$43, _el$46);
+    _$setProp(_el$43, "flexDirection", "row");
+    _$setProp(_el$43, "border", true);
+    _$setProp(_el$43, "paddingLeft", 1);
+    _$setProp(_el$43, "paddingRight", 1);
+    _$setProp(_el$43, "flexShrink", 0);
+    _$setProp(_el$43, "height", 3);
+    _$setProp(_el$43, "gap", 1);
+    _$insertNode(_el$44, _el$45);
+    _$insert(_el$45, () => mode() === "insert" ? " INSERT \uE0B1" : " NORMAL ");
     _$use((el) => {
       inputEl = el;
       focusInput();
-    }, _el$44);
-    _$setProp(_el$44, "flexGrow", 1);
-    _$setProp(_el$44, "onInput", (v) => {
+    }, _el$46);
+    _$setProp(_el$46, "flexGrow", 1);
+    _$setProp(_el$46, "onInput", (v) => {
       debugLog("onInput", JSON.stringify(v), "mode", mode());
       if (mode() === "insert")
         setCommandInput(v);
       else if (inputEl?.value)
         inputEl.value = "";
     });
-    _$setProp(_el$44, "onKeyDown", (evt) => {
+    _$setProp(_el$46, "onKeyDown", (evt) => {
       const name = evt.name || "";
       const seq = evt.sequence || "";
       debugLog("input onKeyDown", `name=${name} seq=${JSON.stringify(seq)} mode=${mode()} value=${JSON.stringify(commandInput())}`);
@@ -1725,15 +1895,17 @@ function LoopDashboard(props) {
       }, _v$11 = {
         fg: theme().textMuted
       }, _v$12 = {
+        fg: theme().textMuted
+      }, _v$13 = {
         fg: theme().info,
         bold: true
-      }, _v$13 = {
+      }, _v$14 = {
         fg: theme().textMuted
-      }, _v$14 = mode() === "insert" ? theme().warning : theme().border, _v$15 = {
+      }, _v$15 = mode() === "insert" ? theme().warning : theme().border, _v$16 = {
         fg: mode() === "insert" ? theme().warning : theme().success,
         bold: true,
         bg: mode() === "insert" ? theme().backgroundElement : undefined
-      }, _v$16 = mode() === "insert" ? ":send hello  or  :force done --evidence proof  or  :open  (Ctrl+N: normal)" : statusText() || "Press : to send/command  \xB7  ? help  \xB7  o open child  \xB7  q close", _v$17 = theme().textMuted, _v$18 = theme().primary, _v$19 = theme().text, _v$20 = theme().background;
+      }, _v$17 = mode() === "insert" ? ":send hello  or  :force done --evidence proof  or  :open  (Ctrl+N: normal)" : statusText() || "Press : to send/command  \xB7  ? help  \xB7  o open child  \xB7  q close", _v$18 = theme().textMuted, _v$19 = theme().primary, _v$20 = theme().text, _v$21 = theme().background;
       _v$4 !== _p$.e && (_p$.e = _$setProp(_el$2, "borderColor", _v$4, _p$.e));
       _v$5 !== _p$.t && (_p$.t = _$setProp(_el$5, "style", _v$5, _p$.t));
       _v$6 !== _p$.a && (_p$.a = _$setProp(_el$7, "style", _v$6, _p$.a));
@@ -1745,14 +1917,15 @@ function LoopDashboard(props) {
       _v$10 !== _p$.r && (_p$.r = _$setProp(_el$17, "style", _v$10, _p$.r));
       _v$11 !== _p$.d && (_p$.d = _$setProp(_el$20, "style", _v$11, _p$.d));
       _v$12 !== _p$.l && (_p$.l = _$setProp(_el$22, "style", _v$12, _p$.l));
-      _v$13 !== _p$.u && (_p$.u = _$setProp(_el$23, "style", _v$13, _p$.u));
-      _v$14 !== _p$.c && (_p$.c = _$setProp(_el$41, "borderColor", _v$14, _p$.c));
-      _v$15 !== _p$.w && (_p$.w = _$setProp(_el$43, "style", _v$15, _p$.w));
-      _v$16 !== _p$.m && (_p$.m = _$setProp(_el$44, "placeholder", _v$16, _p$.m));
-      _v$17 !== _p$.f && (_p$.f = _$setProp(_el$44, "placeholderColor", _v$17, _p$.f));
-      _v$18 !== _p$.y && (_p$.y = _$setProp(_el$44, "cursorColor", _v$18, _p$.y));
-      _v$19 !== _p$.g && (_p$.g = _$setProp(_el$44, "focusedTextColor", _v$19, _p$.g));
-      _v$20 !== _p$.p && (_p$.p = _$setProp(_el$44, "focusedBackgroundColor", _v$20, _p$.p));
+      _v$13 !== _p$.u && (_p$.u = _$setProp(_el$24, "style", _v$13, _p$.u));
+      _v$14 !== _p$.c && (_p$.c = _$setProp(_el$25, "style", _v$14, _p$.c));
+      _v$15 !== _p$.w && (_p$.w = _$setProp(_el$43, "borderColor", _v$15, _p$.w));
+      _v$16 !== _p$.m && (_p$.m = _$setProp(_el$45, "style", _v$16, _p$.m));
+      _v$17 !== _p$.f && (_p$.f = _$setProp(_el$46, "placeholder", _v$17, _p$.f));
+      _v$18 !== _p$.y && (_p$.y = _$setProp(_el$46, "placeholderColor", _v$18, _p$.y));
+      _v$19 !== _p$.g && (_p$.g = _$setProp(_el$46, "cursorColor", _v$19, _p$.g));
+      _v$20 !== _p$.p && (_p$.p = _$setProp(_el$46, "focusedTextColor", _v$20, _p$.p));
+      _v$21 !== _p$.b && (_p$.b = _$setProp(_el$46, "focusedBackgroundColor", _v$21, _p$.b));
       return _p$;
     }, {
       e: undefined,
@@ -1773,7 +1946,8 @@ function LoopDashboard(props) {
       f: undefined,
       y: undefined,
       g: undefined,
-      p: undefined
+      p: undefined,
+      b: undefined
     });
     return _el$;
   })();

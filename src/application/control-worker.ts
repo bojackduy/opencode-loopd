@@ -6,6 +6,7 @@
 import { promises as fs } from "fs"
 import path from "path"
 import { randomUUID } from "crypto"
+import { releaseLease } from "../domain/runtime"
 import {
   listPendingRequests,
   claimControlRequest,
@@ -277,7 +278,12 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
           at: new Date().toISOString(),
         }
         const runtime = state.runtimes.find((r) => r.goalID === goal.id)
-        if (runtime) { runtime.phase = "idle"; runtime.lastError = undefined; runtime.updatedAt = new Date().toISOString() }
+        if (runtime) {
+          Object.assign(runtime, releaseLease(runtime))
+          runtime.activeRunID = undefined
+          runtime.lastError = undefined
+          runtime.updatedAt = new Date().toISOString()
+        }
         await writeState(directory, state)
         await appendEvent(directory, {
           version: 1,
@@ -314,7 +320,12 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
           at: new Date().toISOString(),
         }
         const runtime = state.runtimes.find((r) => r.goalID === goal.id)
-        if (runtime) { runtime.phase = "idle"; runtime.lastError = undefined; runtime.updatedAt = new Date().toISOString() }
+        if (runtime) {
+          Object.assign(runtime, releaseLease(runtime))
+          runtime.activeRunID = undefined
+          runtime.lastError = undefined
+          runtime.updatedAt = new Date().toISOString()
+        }
         await writeState(directory, state)
         await appendEvent(directory, {
           version: 1,

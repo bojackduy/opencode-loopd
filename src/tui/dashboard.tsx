@@ -105,6 +105,15 @@ function ageLabel(timestamp: string | undefined, now: number): string {
   return `${Math.floor(minutes / 60)}h ago`
 }
 
+function countdownLabel(targetIso: string | undefined, now: number): string | undefined {
+  if (!targetIso) return undefined
+  const diff = Math.max(0, Math.floor((Date.parse(targetIso) - now) / 1000))
+  if (diff < 60) return `${diff}s`
+  const minutes = Math.floor(diff / 60)
+  if (minutes < 60) return `${minutes}m ${diff % 60}s`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+}
+
 export function LoopDashboard(props: Props) {
   const theme = () => props.api.theme.current
   const [mode, setMode] = createSignal<Mode>("normal")
@@ -320,9 +329,10 @@ export function LoopDashboard(props: Props) {
             <span style={{ fg: mode() === "normal" ? theme().success : theme().warning, bold: true, bg: mode() === "insert" ? (theme().backgroundElement as unknown as string) : undefined }}> {mode().toUpperCase()} </span>
             <span style={{ fg: theme().textMuted }}> │ </span>
             <span style={{ fg: theme().accent, bold: true }}>{activeGoals().length}</span>
-            <span style={{ fg: theme().textMuted }}> goals</span>
+            <span style={{ fg: theme().textMuted }}> active</span>
             <span style={{ fg: theme().textMuted }}> │ </span>
-            <span style={{ fg: runningCount() > 0 ? theme().success : theme().textMuted, bold: runningCount() > 0 }}>{runningCount() > 0 ? runningFrame() : "○"} {runningCount()} RUNNING</span>
+            <span style={{ fg: runningCount() > 0 ? theme().success : theme().textMuted, bold: runningCount() > 0 }}>{runningCount() > 0 ? runningFrame() : "○"} {runningCount()} running</span>
+            <span style={{ fg: theme().textMuted }}> (phase)</span>
             <span style={{ fg: theme().textMuted }}> │ </span>
             <span style={{ fg: theme().info, bold: true }}>{state()?.goals.filter((g) => g.status === "complete").length || 0}</span>
             <span style={{ fg: theme().textMuted }}> done</span>
@@ -446,6 +456,11 @@ export function LoopDashboard(props: Props) {
                         </>}
                         {runtime() && runtime()!.consecutiveFailures > 0 && <span style={{ fg: theme().error, bold: true }}> │ ⚠ {runtime()!.consecutiveFailures} fail</span>}
                         {runtime() && (runtime()!.noProgressCount || 0) > 0 && <span style={{ fg: theme().warning }}> │ {runtime()!.noProgressCount} no-progress</span>}
+                        {runtime() && (runtime() as any).evaluatorRejectionCount > 0 && <span style={{ fg: theme().warning, bold: true }}> │ ⚠ {String((runtime() as any).evaluatorRejectionCount)} rejected</span>}
+                        {runtime() && (runtime() as any).unknownStatusCount >= 3 && <span style={{ fg: theme().error, bold: true }}> │ ⚠️ UNREACHABLE</span>}
+                        {runtime() && runtime()!.phase === "idle" && (runtime() as any).activeRunID && <span style={{ fg: theme().error, bold: true }}> │ ⚠️ STALE LEASE</span>}
+                        {runtime() && (runtime() as any).retryAfter && <span style={{ fg: theme().accent }}> │ ↻ {countdownLabel((runtime() as any).retryAfter, clock())}</span>}
+                        {runtime() && (runtime() as any).nextRunAt && <span style={{ fg: theme().accent }}> │ ⏰ {countdownLabel((runtime() as any).nextRunAt, clock())}</span>}
                       </text>
                     </box>
                   )
@@ -472,6 +487,10 @@ export function LoopDashboard(props: Props) {
                     {blk() && <><span style={{ fg: theme().error, bold: true }}>{"\n"}✖ blocked: </span><span style={{ fg: theme().error }}>{blk()!.reason.slice(0, 140)}</span><span style={{ fg: theme().textMuted }}> — {blk()!.needed.slice(0, 60)}</span></>}
                     {goal().config.artifactDir && <><span style={{ fg: theme().accent }}>{"\n"}📁 </span><span style={{ fg: theme().textMuted }}>{String(goal().config.artifactDir).replace(String(props.directory), ".")}</span></>}
                     {(goal().config.checks?.length ?? 0) > 0 ? <><span style={{ fg: theme().warning }}>{"\n"}▣ checks: </span><span style={{ fg: theme().textMuted }}>{(goal().config.checks as string[]).join(", ").slice(0, 100)}</span></> : null}
+                    {(rt() as any)?.evaluatorRejectionCount > 0 && <><span style={{ fg: theme().warning }}>{"\n"}⚠ rejections: </span><span style={{ fg: theme().warning }}>{String((rt() as any).evaluatorRejectionCount)} — {String((rt() as any).lastRejectionDetails || "").slice(0, 80)}</span></>}
+                    {(rt() as any)?.unknownStatusCount > 0 && <><span style={{ fg: theme().error }}>{"\n"}⚠️ unreachable: </span><span style={{ fg: theme().error }}>{String((rt() as any).unknownStatusCount)}/3</span><span style={{ fg: theme().textMuted }}> — nudge to recover</span></>}
+                    {(rt() as any)?.retryAfter && <><span style={{ fg: theme().accent }}>{"\n"}↻ retry in: </span><span style={{ fg: theme().accent }}>{countdownLabel((rt() as any).retryAfter, clock())}</span></>}
+                    {(rt() as any)?.nextRunAt && <><span style={{ fg: theme().accent }}>{"\n"}⏰ next run: </span><span style={{ fg: theme().accent }}>{countdownLabel((rt() as any).nextRunAt, clock())}</span><span style={{ fg: theme().textMuted }}> ({String((rt() as any).scheduleRunCount || 0)} runs)</span></>}
                     {rt()?.lastError && <><span style={{ fg: theme().error }}>{"\n"}⚠ </span><span style={{ fg: theme().error }}>{rt()!.lastError!.slice(0, 120)}</span></>}
                   </text>
                 </box>

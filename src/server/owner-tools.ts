@@ -47,16 +47,26 @@ export function ownerTools(options: OwnerToolsOptions) {
         }
 
         const summaries = goals.map((g) => {
-          const runtime = state.runtimes.find((r) => r.goalID === g.id)
+          const runtime = state.runtimes.find((r) => r.goalID === g.id) as any
           return {
             id: g.id,
             name: g.name,
             status: g.status,
             phase: runtime?.phase ?? "unknown",
             turn: runtime?.runCount ?? 0,
+            budgetTurnCount: runtime?.budgetTurnCount ?? 0,
+            maxTurns: (g.config as any).maxTurns,
             lastProgress: g.lastProgress?.summary?.slice(0, 120),
             lastProgressAt: g.lastProgress?.at,
             blocker: g.blocker?.reason?.slice(0, 120),
+            evaluatorRejectionCount: runtime?.evaluatorRejectionCount ?? 0,
+            unknownStatusCount: runtime?.unknownStatusCount ?? 0,
+            lastActivityAt: runtime?.lastActivityAt,
+            retryAfter: runtime?.retryAfter,
+            nextRunAt: runtime?.nextRunAt,
+            scheduleRunCount: runtime?.scheduleRunCount,
+            consecutiveFailures: runtime?.consecutiveFailures ?? 0,
+            noProgressCount: runtime?.noProgressCount ?? 0,
           }
         })
 
@@ -122,13 +132,29 @@ export function ownerTools(options: OwnerToolsOptions) {
               runGeneration: runtime.runGeneration,
               evaluatorRejectionCount: runtime.evaluatorRejectionCount,
               freeRetryPending: runtime.freeRetryPending,
+              lastRejectionDetails: (runtime as any).lastRejectionDetails?.slice(0, 800),
               consecutiveFailures: runtime.consecutiveFailures,
+              noProgressCount: (runtime as any).noProgressCount,
               lastError: runtime.lastError,
               lastProgressAt: runtime.lastProgressAt,
               lastRunAt: runtime.lastRunAt,
+              lastActivityAt: (runtime as any).lastActivityAt,
+              lastCompactAt: (runtime as any).lastCompactAt,
+              activePromptMessageID: (runtime as any).activePromptMessageID,
+              activeAssistantMessageID: (runtime as any).activeAssistantMessageID,
+              activeAssistantCompletedAt: (runtime as any).activeAssistantCompletedAt,
+              idleCandidateAt: (runtime as any).idleCandidateAt,
+              idleCandidateGeneration: (runtime as any).idleCandidateGeneration,
+              unknownStatusCount: (runtime as any).unknownStatusCount,
+              lastUnknownStatusAt: (runtime as any).lastUnknownStatusAt,
+              workerUnreachableNotifiedAt: (runtime as any).workerUnreachableNotifiedAt,
+              retryAfter: (runtime as any).retryAfter,
+              forceFinishRequested: (runtime as any).forceFinishRequested,
               scheduleRunCount: (runtime as any).scheduleRunCount,
               nextRunAt: (runtime as any).nextRunAt,
               lastScheduleAt: (runtime as any).lastScheduleAt,
+              lastVerificationAttempt: (runtime as any).lastVerificationAttempt,
+              recentVerificationAttempts: (runtime as any).recentVerificationAttempts?.slice(-2),
             } : undefined,
           }, null, 2),
         }
