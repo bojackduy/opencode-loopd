@@ -68,12 +68,11 @@ describe("Control Bus", () => {
       requestID: crypto.randomUUID(),
       requestedAt: new Date().toISOString(),
       command: "start",
-      args: { name: "missing-checks", objective: "analyze only", config: {}, ownerSessionID: "owner-1" },
+      args: { name: "auto-checks", objective: "analyze only", config: {}, ownerSessionID: "owner-1" },
     })
 
-    expect(result.ok).toBe(false)
-    expect(result.errorCode).toBe("missing_checks")
-    expect((await client.getState()).goals).toHaveLength(0)
+    expect(result.ok).toBe(true)
+    expect((await client.getState()).goals).toHaveLength(1)
   })
 
   it("rejects a start command without a real owner session", async () => {

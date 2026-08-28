@@ -85,16 +85,17 @@ describe("Goal Tools", () => {
       expect(goal.config.workspaceWrite).toBe(true)
     })
 
-    it("rejects workspace-writing goals without deterministic checks", async () => {
+    it("applies hardcoded bun test default when no checks provided", async () => {
       const create = goalTools(dir, goalService, "owner-1").loopd_create_goal
       const result = await create.execute({
-        name: "unchecked-code-change",
-        objective: "Refactor the project source files.",
+        name: "with-hardcoded-default",
+        objective: "Fix a typo",
         agent: "smart-agent",
       }, { sessionID: "owner-1" })
 
-      expect(JSON.parse(result.output).ok).toBe(false)
-      expect((await readState(dir)).goals).toHaveLength(0)
+      expect(JSON.parse(result.output).ok).toBe(true)
+      const goal = (await readState(dir)).goals[0]
+      expect(goal.config.checks).toEqual(["bun test"])
     })
 
     it("does not apply project default checks to artifact-only goals", async () => {

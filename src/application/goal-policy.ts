@@ -30,7 +30,7 @@ export function resolveGoalCreationConfig(input: {
   // Artifact-only/read-only work must opt out explicitly.
   const workspaceWrite = requested.workspaceWrite ?? true
   const explicitChecks = cleanList(requested.checks)
-  const defaultChecks = workspaceWrite ? cleanList(defaults.defaultChecks) : []
+  const defaultChecks = workspaceWrite ? cleanList(defaults.defaultChecks || ["bun test"]) : []
   const checks = explicitChecks.length > 0 ? explicitChecks : defaultChecks
   if (workspaceWrite && checks.length === 0) {
     return {
