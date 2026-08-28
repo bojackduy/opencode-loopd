@@ -486,6 +486,20 @@ async function drainGoalInbox(directory, goalID) {
     return [];
   }
 }
+async function peekGoalInbox(directory, goalID) {
+  const file = inboxFile(directory, goalID);
+  try {
+    const raw = await fs.readFile(file, "utf8");
+    const lines = raw.trim().split(`
+`).filter(Boolean);
+    if (lines.length === 0)
+      return [];
+    const messages = lines.map((l) => JSON.parse(l));
+    return messages.map((m) => `[${m.from}] ${m.text}`);
+  } catch {
+    return [];
+  }
+}
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -3155,6 +3169,13 @@ async function runCompletionChecks(checks, cwd) {
 
 // src/server/owner-tools.ts
 import { tool as tool2 } from "@opencode-ai/plugin/tool";
+import { promises as fs3 } from "fs";
+function withTimeout2(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms))
+  ]);
+}
 function ownerTools(options) {
   const { directory, host, goalService } = options;
   return {
@@ -3211,9 +3232,11 @@ function ownerTools(options) {
       }
     }),
     inspect_background_goal: tool2({
-      description: "Inspect a goal\u2019s full contract and runtime: objective, config{agent,checks,checkCwd,workspaceWrite,limits}, progress, blocker, and runtime{phase,runCount,budgetTurnCount,runGeneration,evaluatorRejectionCount,unknownStatusCount,lastActivityAt,activePromptMessageID}. The source for recovery decisions.",
+      description: "Inspect a goal\u2019s full contract, runtime, and live execution state: objective, config{agent,checks,checkCwd,workspaceWrite,limits}, progress, blocker, runtime{phase,runCount,budgetTurnCount,runGeneration,evaluatorRejectionCount,unknownStatusCount,lastActivityAt,activePromptMessageID}, plus live transcriptTail, activeToolCallIDs, progressHistory, artifactSummary, pendingInbox. Single-call follow-up for parent to see what child is actually doing.",
       args: {
-        goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to inspect the first active goal.")
+        goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to inspect the first active goal."),
+        includeTranscript: tool2.schema.boolean().optional().describe("Include live transcript tail (adds ~100ms). Default true. Set false for fast metadata-only."),
+        transcriptLimit: tool2.schema.number().optional().describe("Number of transcript messages to include (1-10). Default 3.")
       },
       execute: async (args, context) => {
         const state = await readState(directory);
@@ -3226,6 +3249,25 @@ function ownerTools(options) {
           };
         }
         const runtime = state.runtimes.find((r) => r.goalID === goal.id);
+        const includeTranscript = args.includeTranscript !== false;
+        const tLimit = Math.min(10, Math.max(1, args.transcriptLimit ?? 3));
+        const [transcriptTail, progressHistory, artifactSummary, pendingInbox] = await Promise.all([
+          includeTranscript && goal.workerSessionID ? withTimeout2(host.readMessages(goal.workerSessionID, tLimit), 900).catch(() => null) : Promise.resolve(null),
+          readEvents(directory, 60).then((evs) => evs.filter((e) => e.goalID === goal.id && e.type === "goal.progress").slice(-5).map((e) => ({ summary: String(e.summary || "").slice(0, 120), next: e.next ? String(e.next).slice(0, 80) : undefined, at: String(e.timestamp || "") }))).catch(() => []),
+          (async () => {
+            const dir = goal.config.artifactDir;
+            if (!dir)
+              return;
+            try {
+              const files = await fs3.readdir(dir);
+              return files.length ? `${files.length} file(s): ${files.slice(0, 8).join(", ")}` : "no artifacts yet";
+            } catch {
+              return "no artifacts yet";
+            }
+          })(),
+          peekGoalInbox(directory, goal.id).then((msgs) => msgs.slice(-3)).catch(() => [])
+        ]);
+        const activeToolCallIDs = runtime?.activeToolCallIDs ?? [];
         return {
           title: `Goal: ${goal.name}`,
           output: JSON.stringify({
@@ -3252,6 +3294,15 @@ function ownerTools(options) {
             blocker: goal.blocker,
             tokensUsed: goal.tokensUsed,
             timeUsedSeconds: goal.timeUsedSeconds,
+            progressHistory,
+            pendingInbox,
+            live: {
+              artifactSummary,
+              transcriptTail: transcriptTail ? transcriptTail.map((m) => ({ role: m.role, content: String(m.content || "").slice(0, 400), timestamp: m.timestamp, messageID: m.messageID, parentMessageID: m.parentMessageID })) : undefined,
+              activeToolCallIDs,
+              pendingToolCalls: activeToolCallIDs.length,
+              lastActivityAge: runtime?.lastActivityAt ? `${Math.floor((Date.now() - Date.parse(runtime.lastActivityAt)) / 1000)}s ago` : undefined
+            },
             runtime: runtime ? {
               phase: runtime.phase,
               runCount: runtime.runCount,

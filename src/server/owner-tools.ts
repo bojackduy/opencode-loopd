@@ -3,15 +3,24 @@
 // Matched by ownerSessionID (the session that created the goal).
 
 import { tool } from "@opencode-ai/plugin/tool"
-import { readState, appendGoalInbox } from "../infrastructure/state-repository"
+import { readState, appendGoalInbox, readEvents, peekGoalInbox } from "../infrastructure/state-repository"
 import type { GoalID } from "../domain/goal"
 import type { LoopHost } from "./host-adapter"
 import type { GoalService } from "../application/goal-service"
+import { promises as fs } from "fs"
+import path from "path"
 
 export interface OwnerToolsOptions {
   directory: string
   host: LoopHost
   goalService: GoalService
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), ms)),
+  ])
 }
 
 export function ownerTools(options: OwnerToolsOptions) {
@@ -79,9 +88,11 @@ export function ownerTools(options: OwnerToolsOptions) {
 
     inspect_background_goal: tool({
       description:
-        "Inspect a goal’s full contract and runtime: objective, config{agent,checks,checkCwd,workspaceWrite,limits}, progress, blocker, and runtime{phase,runCount,budgetTurnCount,runGeneration,evaluatorRejectionCount,unknownStatusCount,lastActivityAt,activePromptMessageID}. The source for recovery decisions.",
+        "Inspect a goal’s full contract, runtime, and live execution state: objective, config{agent,checks,checkCwd,workspaceWrite,limits}, progress, blocker, runtime{phase,runCount,budgetTurnCount,runGeneration,evaluatorRejectionCount,unknownStatusCount,lastActivityAt,activePromptMessageID}, plus live transcriptTail, activeToolCallIDs, progressHistory, artifactSummary, pendingInbox. Single-call follow-up for parent to see what child is actually doing.",
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to inspect the first active goal."),
+        includeTranscript: tool.schema.boolean().optional().describe("Include live transcript tail (adds ~100ms). Default true. Set false for fast metadata-only."),
+        transcriptLimit: tool.schema.number().optional().describe("Number of transcript messages to include (1-10). Default 3."),
       },
       execute: async (args, context) => {
         const state = await readState(directory)
@@ -97,7 +108,32 @@ export function ownerTools(options: OwnerToolsOptions) {
           }
         }
 
-        const runtime = state.runtimes.find((r) => r.goalID === goal.id)
+        const runtime = state.runtimes.find((r) => r.goalID === goal.id) as any
+
+        // Enriched live fields — parallel with timeouts, additive
+        const includeTranscript = args.includeTranscript !== false
+        const tLimit = Math.min(10, Math.max(1, args.transcriptLimit ?? 3))
+
+        const [transcriptTail, progressHistory, artifactSummary, pendingInbox] = await Promise.all([
+          includeTranscript && goal.workerSessionID
+            ? withTimeout(host.readMessages(goal.workerSessionID, tLimit), 900).catch(() => null)
+            : Promise.resolve(null),
+          readEvents(directory, 60).then((evs) =>
+            evs.filter((e) => (e as any).goalID === goal.id && (e as any).type === "goal.progress")
+               .slice(-5).map((e: any) => ({ summary: String(e.summary || "").slice(0, 120), next: e.next ? String(e.next).slice(0, 80) : undefined, at: String(e.timestamp || "") }))
+          ).catch(() => []),
+          (async () => {
+            const dir = (goal.config as any).artifactDir as string | undefined
+            if (!dir) return undefined
+            try {
+              const files = await fs.readdir(dir)
+              return files.length ? `${files.length} file(s): ${files.slice(0, 8).join(", ")}` : "no artifacts yet"
+            } catch { return "no artifacts yet" }
+          })(),
+          peekGoalInbox(directory, goal.id).then((msgs) => msgs.slice(-3)).catch(() => []),
+        ] as const)
+
+        const activeToolCallIDs = runtime?.activeToolCallIDs ?? []
 
         return {
           title: `Goal: ${goal.name}`,
@@ -125,6 +161,15 @@ export function ownerTools(options: OwnerToolsOptions) {
             blocker: goal.blocker,
             tokensUsed: goal.tokensUsed,
             timeUsedSeconds: goal.timeUsedSeconds,
+            progressHistory: progressHistory as any,
+            pendingInbox: pendingInbox as any,
+            live: {
+              artifactSummary: artifactSummary as any,
+              transcriptTail: transcriptTail ? (transcriptTail as any[]).map((m: any) => ({ role: m.role, content: String(m.content || "").slice(0, 400), timestamp: m.timestamp, messageID: m.messageID, parentMessageID: m.parentMessageID })) : undefined,
+              activeToolCallIDs: activeToolCallIDs as any,
+              pendingToolCalls: activeToolCallIDs.length,
+              lastActivityAge: runtime?.lastActivityAt ? `${Math.floor((Date.now() - Date.parse(runtime.lastActivityAt)) / 1000)}s ago` : undefined,
+            },
             runtime: runtime ? {
               phase: runtime.phase,
               runCount: runtime.runCount,

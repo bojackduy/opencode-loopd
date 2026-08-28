@@ -544,6 +544,22 @@ export async function drainGoalInbox(
   }
 }
 
+export async function peekGoalInbox(
+  directory: string,
+  goalID: string,
+): Promise<string[]> {
+  const file = inboxFile(directory, goalID)
+  try {
+    const raw = await fs.readFile(file, "utf8")
+    const lines = raw.trim().split("\n").filter(Boolean)
+    if (lines.length === 0) return []
+    const messages = lines.map((l) => JSON.parse(l) as GoalInboxMessage)
+    return messages.map((m) => `[${m.from}] ${m.text}`)
+  } catch {
+    return []
+  }
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function delay(ms: number): Promise<void> {
