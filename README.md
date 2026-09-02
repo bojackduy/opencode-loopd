@@ -5,7 +5,7 @@
 > Run long-running tasks as **autonomous child sessions** (subagents) while the main chat stays interactive. Create a goal with `/goal`, watch it loop in the background, and monitor everything from a keyboard-driven TUI — without blocking the parent conversation.
 
 [![npm version](https://img.shields.io/npm/v/@bojackduy/opencode-loopd?style=flat-square&color=blue)](https://www.npmjs.com/package/@bojackduy/opencode-loopd)
-[![license](https://img.shields.io/badge/license-AGPL--3.0--only-blue?style=flat-square)](LICENSE)
+[![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue?style=flat-square)](LICENSE)
 [![opencode plugin](https://img.shields.io/badge/opencode-plugin-9cf?style=flat-square)](https://opencode.ai)
 [![TUI](https://img.shields.io/badge/TUI-OpenTUI-purple?style=flat-square)](https://github.com/anomalyco/opentui)
 
@@ -298,4 +298,4 @@ OpenCode plugin for **background agents**, **autonomous subagents**, **loop**, *
 
 ## License
 
-AGPL-3.0-only — see [LICENSE](./LICENSE).
+AGPL-3.0-or-later — see [LICENSE](./LICENSE).
