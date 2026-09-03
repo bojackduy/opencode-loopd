@@ -2,6 +2,10 @@
 
 Architectural improvements and feature ideas for the loop engine.
 
+> **Roadmap note (2026-09-03):** These ideas remain candidates, but their old
+> priority labels are superseded by the launch gates in
+> [Trust-First Product Spec](./trust-first-product-spec.md).
+
 ---
 
 ## 1. Custom Loop Workflows

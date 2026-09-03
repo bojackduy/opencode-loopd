@@ -3,6 +3,10 @@
 > **Status:** Infrastructure changes completed (turn accounting, rejection enforcement,
 > worker instructions, get_goal observability). All 135 tests pass, typecheck clean,
 > build passes. These items are deferred for separate focused implementation.
+>
+> **Roadmap note (2026-09-03):** These items are retained as implementation
+> history. [Trust-First Product Spec](./trust-first-product-spec.md) governs
+> current priority where the documents differ.
 
 ---
 

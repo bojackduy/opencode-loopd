@@ -2,6 +2,12 @@
 
 **Goal:** Prove hardening survives a real model loop, with no overlapping runs, correct maintenance recovery, and single-writer serialization.
 
+> **Historical plan:** This captures expectations for commit `1da88dc`. The
+> current roadmap and sparse session-status semantics are defined in
+> [Trust-First Product Spec](./trust-first-product-spec.md). In particular, a
+> missing session status is no longer expected to produce `unknown` or a
+> worker-unreachable notification.
+
 ## Live E2E Matrix (run sequentially, respects single writer)
 
 ### E2E-1 — Conflict Trap (the NO-path) — PRIMARY
