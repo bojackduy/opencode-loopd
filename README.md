@@ -11,7 +11,7 @@
 
 ![Loop Dashboard — modal TUI with goals, running indicator, and insert mode](assets/demo.png)
 
-*Modal dashboard (`/loop` / `<leader>d`): zero chat pollution — keys are trapped inside the dialog, NORMAL vs INSERT modes, vivid per-status coloring.*
+*Modal dashboard (`/loop` / `<leader>o`): zero chat pollution — keys are trapped inside the dialog, NORMAL vs INSERT modes, vivid per-status coloring.*
 
 ## Why opencode-loopd
 
@@ -20,7 +20,7 @@
 - **Parent ↔ child visibility** — `list/inspect/read_transcript/send_input` give the parent full observability. Bidirectional inbox lets you steer mid-run.
 - **Safe by default** — per-goal artifact isolation (`.opencode/loopd/goals/<id>/`), `maxTurns`/`maxFailures`/`maxNoProgress`, force-finish → semantic `complete_goal` summary → parent notification via wake-up injection.
 - **Scheduled intervals** — `scheduleEveryMs`/`scheduleMaxRuns` auto-requeues the same goal every N ms (e.g., `10s` monitor, `1h` report) without manual `/goal` spam — `5s` poll, `skip-if-running`, `workspaceWrite` serialization, inbox `Scheduled tick N/M`.
-- **Modal TUI dashboard** — `<leader>d` or `/loop` opens a focused dialog (no leak to chat prompt). Vim-style navigation, live running indicator, per-status borders.
+- **Modal TUI dashboard** — `<leader>o` or `/loop` opens a focused dialog (no leak to chat prompt). Vim-style navigation, live running indicator, per-status borders.
 
 Keywords: `opencode` `opencode-plugin` `background-agent` `autonomous` `subagent` `loop` `goal` `tui` `codex` `claude-code` `worker`
 
@@ -50,7 +50,7 @@ Add the package to **both** configs.
 }
 ```
 
-Then restart OpenCode. Verify with `/loop` (palette → Loop Dashboard) or `<leader>d`.
+Then restart OpenCode. Verify with `/loop` (palette → Loop Dashboard) or `<leader>o`.
 
 For a local checkout:
 
@@ -142,7 +142,7 @@ The agent will clarify (what/where/how to verify) and then call `loopd_create_go
 
 ### 2. Monitor with dashboard — `/loop`
 
-Press **`<leader>d`** or open the command palette → **"Loop Dashboard"** (also `/loop`).
+Press **`<leader>o`** or open the command palette → **"Loop Dashboard"** (also `/loop`).
 
 Dashboard (NORMAL / INSERT `:`):
 

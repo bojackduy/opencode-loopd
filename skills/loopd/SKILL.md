@@ -83,7 +83,7 @@ loopd_create_goal({
 
 Returns `ok:true` with `goalID`, `workerSessionID`, `artifactDir`, `agent`, `checks`, `workspaceWrite`, `defaultsApplied:{agent,checks}`. On contract violation you get `ok:false` with `errorCode: "missing_agent"` or `"missing_checks"` or `"already active"` (writer serialization).
 
-The goal starts immediately. The user can monitor it via `/loop` (<leader>d). Plugin options `defaultAgent` / `defaultChecks` in `opencode.jsonc` can supply defaults so callers don’t have to repeat them.
+The goal starts immediately. The user can monitor it via `/loop` (<leader>o). Plugin options `defaultAgent` / `defaultChecks` in `opencode.jsonc` can supply defaults so callers don’t have to repeat them.
 
 ## Worker Tools (Running Inside the Goal)
 
@@ -174,7 +174,7 @@ Force re-prompts a stuck worker even if `sessionStatus` is not `idle`. Clears st
 
 ## Dashboard Commands
 
-Open the dashboard with `/loop` or <leader>d.
+Open the dashboard with `/loop` or <leader>o.
 
 ### Keyboard Shortcuts (Normal Mode)
 

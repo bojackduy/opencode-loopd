@@ -175,7 +175,7 @@
 { "plugin": ["@bojackduy/opencode-loopd"] }</code></pre>
           <p>Or one-line installer (adds <code>/goal</code> + skill):</p>
           <pre><code>npx -y @bojackduy/opencode-loopd@latest</code></pre>
-          <p>Dashboard: <code>/loop</code> or <code>&lt;leader&gt;d</code> (Ctrl+X → d) • <code>Shift+B</code> bug report</p>
+          <p>Dashboard: <code>/loop</code> or <code>&lt;leader&gt;o</code> • <code>Shift+B</code> bug report</p>
         </div>
       </section>
 
@@ -184,7 +184,7 @@
           <div class="window-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="window-title">opencode — Loop Dashboard • NORMAL • 0 goals • ○ 0 RUNNING • 7 done</span></div>
           <img src="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/demo.png" alt="Loop Dashboard modal TUI inside OpenCode terminal — showing NORMAL mode, goal list, and vivid status colors" width="1200" height="675" loading="eager" fetchpriority="high" />
         </div>
-        <p class="caption">Modal dashboard (<code>/loop</code> / <code>&lt;leader&gt;d</code>): vivid per-status coloring, running spinner, <code>NORMAL</code> vs <code>INSERT</code> — keys trapped, no chat leak.</p>
+        <p class="caption">Modal dashboard (<code>/loop</code> / <code>&lt;leader&gt;o</code>): vivid per-status coloring, running spinner, <code>NORMAL</code> vs <code>INSERT</code> — keys trapped, no chat leak.</p>
       </section>
 
        <section class="grid" aria-label="Features">
@@ -228,7 +228,7 @@
          <h2>Quick start — background goals in OpenCode</h2>
          <pre><code>/goal fetch the latest AI news and save 10 items to ai-news.md
 # agent clarifies → loopd_create_goal → child loops every ~30s
-/loop                          # or &lt;leader&gt;d  (Ctrl+X → d)
+/loop                          # or &lt;leader&gt;o
 j/k  move   o open child   :send hello   :force done   ? help   q close
 Shift+B  → prefilled GitHub bug report (like lazyjira / lazyconfluence)
 
@@ -239,7 +239,7 @@ loopd_create_goal({
   scheduleEveryMs: 3600000, // 1h
   scheduleMaxRuns: 24
 })</code></pre>
-         <p>Prefer the TUI? <code>Ctrl+L</code> also works if your terminal passes it; <code>&lt;leader&gt;d</code> is the reliable leader binding. Scheduled goals show <code>scheduleRunCount/nextRunAt</code> in <code>inspect</code>.</p>
+         <p>The dashboard keybinding is <code>&lt;leader&gt;o</code> (also registered in the command palette as "Loop Dashboard" / <code>/loop</code>). Scheduled goals show <code>scheduleRunCount/nextRunAt</code> in <code>inspect</code>.</p>
        </section>
 
       <section style="margin-top:2rem">
