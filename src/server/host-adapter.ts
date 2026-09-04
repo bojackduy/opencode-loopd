@@ -117,13 +117,19 @@ export function createRealHost(client: any, directory: string): LoopHost {
     async sessionStatus(sessionID) {
       try {
         const result = await client.session.status({})
+        if (result?.error) return "unknown"
         const data = result?.data
-        if (!data || typeof data !== "object") return "unknown"
-        const status = data[sessionID]
-        if (!status || typeof status !== "object") return "unknown"
-        const type = status.type as string
+        if (!data || typeof data !== "object" || Array.isArray(data)) return "unknown"
+        const status = (data as Record<string, unknown>)[sessionID]
+        // Sparse map: OpenCode omits idle sessions, so a missing entry means
+        // the worker is not active (idle), not unreachable. Reserve "unknown"
+        // for request failures or malformed payloads.
+        if (status === undefined || status === null) return "idle"
+        if (typeof status !== "object" || Array.isArray(status)) return "unknown"
+        const type = (status as { type?: unknown }).type
         if (type === "busy" || type === "retry") return type
-        return "idle"
+        if (type === "idle") return "idle"
+        return "unknown"
       } catch {
         return "unknown"
       }

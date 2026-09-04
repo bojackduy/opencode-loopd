@@ -384,6 +384,36 @@ describe("Loop Engine", () => {
       expect((host.sessions as any).notifications).toHaveLength(1)
     })
 
+    it("treats a sparse-map absent worker as idle without unreachable alert", async () => {
+      engine.stop()
+      // Mimics the real host sparse map: missing entry resolves to idle.
+      host = createFakeHost({ sessionStatus: async () => "idle" as const })
+      goalService = createGoalService(host)
+      engine = createLoopEngine({
+        directory: dir,
+        host,
+        goalService,
+        pollIntervalMs: 10,
+        confirmIdleMs: 0,
+        unknownStatusThreshold: 2,
+      })
+      engine.start()
+
+      await goalService.start(dir, {
+        name: "sparse-idle-worker",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+      })
+
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      const runtime = (await readState(dir)).runtimes[0]
+      expect(runtime.unknownStatusCount ?? 0).toBe(0)
+      expect(runtime.workerUnreachableNotifiedAt).toBeFalsy()
+      expect((host.sessions as any).notifications ?? []).toHaveLength(0)
+      // Idle maintenance should keep driving the goal forward.
+      expect(host.prompts.length).toBeGreaterThan(1)
+    })
+
     it("clears a stale active run from an idle runtime", async () => {
       engine.stop()
       host = createFakeHost({ sessionStatus: "busy" })
