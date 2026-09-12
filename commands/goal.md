@@ -4,7 +4,7 @@ description: Create a new background loop goal. Asks clarifying questions, then 
 
 Create a new background loop goal using the `loopd_create_goal` tool.
 
-A goal is a **contract**: `objective` (semantic requirements) + `checks` (deterministic host acceptance) + `agent`/`workspaceWrite`/`checkCwd`/`limits`. The host is the acceptance authority; the worker proposes completion and the host rejects it if `checks` fail (free retry <3, `blocked` after 3).
+A goal is a **contract**: `objective` (semantic requirements) + `checks` (deterministic host acceptance) + `agent`/`model`/`workspaceWrite`/`checkCwd`/`limits`. The host is the acceptance authority; the worker proposes completion and the host rejects it if `checks` fail (free retry <3, `blocked` after 3).
 
 First, gather what you need to craft a good contract:
 - If the user gave a vague objective, ask 1–3 short clarifying questions (what to accomplish, where, and how they'll verify it — i.e., what `checks` should be).
@@ -14,7 +14,8 @@ When you have enough to write a concrete contract:
 1. Call `loopd_create_goal` with:
     - `name` — a short slug (e.g. "pdf-notes")
     - `objective` — a precise, self-contained statement including verification criteria
-    - `agent` — required unless the plugin has `defaultAgent` configured; determines which model runs the worker
+    - `agent` — any OpenCode agent name: built-in (`general`, `explore`), `~/.config/opencode/agents/*.md`, or `opencode.jsonc` `agent.*`. Discover with `opencode agent list`. Prefer `subagent`-mode agents for workers; `primary`-mode agents work but may expect user interaction. Optional unless no `defaultAgent` is configured.
+    - `model` — any model as `"providerID/modelID"` (e.g. `openai/gpt-5.6-sol`, `ollama/qwen3.8:27b`). Discover with `opencode models [provider]`. Sent on every worker prompt; omit to use the agent/session default, or configure `defaultModel` in `opencode.jsonc`.
     - `checks` — shell commands that must pass before `complete_goal` is accepted; **mandatory when `workspaceWrite:true`** (the default) — or configure `defaultChecks` in `opencode.jsonc`
     - `workspaceWrite` — default `true` (safe — may touch the shared repo; only one active writer allowed — second `start`/`resume` fails with `already active`); set `false` explicitly for artifact-only/read-only work to allow concurrency
     - `checkCwd` — optional directory where `checks` run; writers default to project root, artifact-only jobs default to their `artifactDir`

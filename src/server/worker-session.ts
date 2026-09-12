@@ -7,6 +7,7 @@ import type { GoalID, Goal } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
 import { acquireLease, releaseLease } from "../domain/runtime"
 import type { LoopHost, SessionMessage } from "./host-adapter"
+import { parseModelRef } from "./host-adapter"
 
 export interface WorkerSession {
   goalID: GoalID
@@ -58,6 +59,7 @@ export function createWorkerManager(host: LoopHost): WorkerManager {
         parentID: goal.ownerSessionID,
         title: `loopd: ${goal.name}`,
         agent: goal.config.agent,
+        model: parseModelRef(goal.config.model),
       })
 
       return {
@@ -74,6 +76,7 @@ export function createWorkerManager(host: LoopHost): WorkerManager {
         prompt,
         messageID: runtime.activePromptMessageID,
         agent: goal.config.agent,
+        model: parseModelRef(goal.config.model),
       })
       return result
     },

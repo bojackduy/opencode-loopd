@@ -103,6 +103,13 @@ export interface GoalConfig {
   /** Agent that runs the worker session. Defaults to primary. */
   agent?: string
 
+  /**
+   * Model that runs the worker session, as "providerID/modelID"
+   * (e.g. "openai/gpt-5.6-sol", "ollama/qwen3.8:27b").
+   * Optional — omits the field and OpenCode uses the agent/session default.
+   */
+  model?: string
+
   /** Optional interval schedule — requeue the same goal periodically. */
   schedule?: ScheduleConfig
 }

@@ -77,7 +77,7 @@ describe("Goal Tools", () => {
 
       const output = JSON.parse(result.output)
       expect(output.ok).toBe(true)
-      expect(output.defaultsApplied).toEqual({ agent: true, checks: true })
+      expect(output.defaultsApplied).toEqual({ agent: true, model: false, checks: true })
       const goal = (await readState(dir)).goals[0]
       expect(goal.config.agent).toBe("smart-agent")
       expect(goal.config.checks).toEqual(["bun test", "bun run typecheck"])
@@ -114,6 +114,40 @@ describe("Goal Tools", () => {
       expect(goal.config.workspaceWrite).toBe(false)
       expect(goal.config.checks).toBeUndefined()
       expect(goal.config.checkCwd).toBeUndefined()
+    })
+
+    it("passes explicit agent and model through to the worker config", async () => {
+      const create = goalTools(dir, goalService, "owner-1").loopd_create_goal
+      const result = await create.execute({
+        name: "custom-worker",
+        objective: "Analyze behavior and save a report in the goal artifact directory.",
+        workspaceWrite: false,
+        agent: "researcher",
+        model: "ollama/qwen3.8:27b",
+      }, { sessionID: "owner-1" })
+
+      const output = JSON.parse(result.output)
+      expect(output.ok).toBe(true)
+      expect(output.agent).toBe("researcher")
+      expect(output.model).toBe("ollama/qwen3.8:27b")
+      const goal = (await readState(dir)).goals[0]
+      expect(goal.config.agent).toBe("researcher")
+      expect(goal.config.model).toBe("ollama/qwen3.8:27b")
+    })
+
+    it("rejects malformed model strings", async () => {
+      const create = goalTools(dir, goalService, "owner-1").loopd_create_goal
+      const result = await create.execute({
+        name: "bad-model",
+        objective: "Analyze behavior.",
+        workspaceWrite: false,
+        model: "gpt-5",
+      }, { sessionID: "owner-1" })
+
+      const output = JSON.parse(result.output)
+      expect(output.ok).toBe(false)
+      expect(output.errorCode).toBe("invalid_model")
+      expect((await readState(dir)).goals).toHaveLength(0)
     })
   })
 

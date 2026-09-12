@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { createRealHost } from "../../src/server/host-adapter"
+import { createRealHost, parseModelRef } from "../../src/server/host-adapter"
 
 describe("Real Host Adapter", () => {
   it("returns the created worker session ID", async () => {
@@ -85,5 +85,49 @@ describe("Real Host Adapter", () => {
     await expect(errorHost.sessionStatus("worker-1")).resolves.toBe("unknown")
     await expect(malformedHost.sessionStatus("worker-1")).resolves.toBe("unknown")
     await expect(badEntryHost.sessionStatus("worker-1")).resolves.toBe("unknown")
+  })
+
+  it("parses provider/model strings into SDK model refs", async () => {
+    expect(parseModelRef("openai/gpt-5.6-sol")).toEqual({ providerID: "openai", modelID: "gpt-5.6-sol" })
+    expect(parseModelRef("ollama/qwen3.8:27b")).toEqual({ providerID: "ollama", modelID: "qwen3.8:27b" })
+    expect(parseModelRef(undefined)).toBeUndefined()
+    expect(parseModelRef("  ")).toBeUndefined()
+    expect(() => parseModelRef("no-slash")).toThrow('Invalid model "no-slash"')
+    expect(() => parseModelRef("openai/")).toThrow("Invalid model")
+  })
+
+  it("forwards agent and model on worker create and prompt", async () => {
+    const calls: any[] = []
+    const prompts: any[] = []
+    const host = createRealHost({
+      session: {
+        create: async ({ body }: any) => {
+          calls.push(body)
+          return { data: { id: "worker-9" } }
+        },
+        promptAsync: async ({ body }: any) => {
+          prompts.push(body)
+          return { data: {} }
+        },
+      },
+    }, "/tmp/loopd-host-test")
+
+    await host.createWorker({
+      parentID: "owner-1",
+      title: "loopd: test",
+      agent: "researcher",
+      model: { providerID: "ollama", modelID: "qwen3.8:27b" },
+    })
+    expect(calls[0].agent).toBe("researcher")
+    expect(calls[0].model).toEqual({ id: "qwen3.8:27b", providerID: "ollama" })
+
+    await host.promptWorker({
+      sessionID: "worker-9",
+      prompt: "hello",
+      agent: "researcher",
+      model: { providerID: "ollama", modelID: "qwen3.8:27b" },
+    })
+    expect(prompts[0].agent).toBe("researcher")
+    expect(prompts[0].model).toEqual({ providerID: "ollama", modelID: "qwen3.8:27b" })
   })
 })

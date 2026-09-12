@@ -26,8 +26,28 @@ export interface SessionUsage {
 
 export type SessionStatusType = "idle" | "busy" | "retry" | "unknown"
 
+/**
+ * Parse a user-facing "providerID/modelID" model string into the SDK shape.
+ * Returns undefined for missing/blank input; throws for malformed input.
+ */
+export function parseModelRef(value?: string): ModelRef | undefined {
+  if (value === undefined) return undefined
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  const slash = trimmed.indexOf("/")
+  if (slash <= 0 || slash >= trimmed.length - 1) {
+    throw new Error(`Invalid model "${value}". Use "providerID/modelID" (e.g. "openai/gpt-5.6-sol").`)
+  }
+  const providerID = trimmed.slice(0, slash).trim()
+  const modelID = trimmed.slice(slash + 1).trim()
+  if (!providerID || !modelID || /\s/.test(providerID) || /\s/.test(modelID)) {
+    throw new Error(`Invalid model "${value}". Use "providerID/modelID" (e.g. "openai/gpt-5.6-sol").`)
+  }
+  return { providerID, modelID }
+}
+
 export interface LoopHost {
-  createWorker(input: { parentID: string; title: string; agent?: string }): Promise<string>
+  createWorker(input: { parentID: string; title: string; agent?: string; model?: ModelRef }): Promise<string>
   promptWorker(input: {
     sessionID: string
     prompt: string
@@ -60,10 +80,15 @@ function shouldDedupParentNotify(ownerSessionID: string, message: string): boole
 
 export function createRealHost(client: any, directory: string): LoopHost {
   return {
-    async createWorker({ parentID, title, agent }) {
+    async createWorker({ parentID, title, agent, model }) {
       try {
         const body: any = { parentID, title }
         if (agent) body.agent = agent
+        // session.create accepts agent and a v2-style model ref {id, providerID}.
+        // The prompt shape {providerID, modelID} is rejected here with 400
+        // (probed live on 1.18.29), so map it. Per-prompt model below stays
+        // in prompt_async shape.
+        if (model) body.model = { id: model.modelID, providerID: model.providerID }
         const result = await withTimeout<any>(
           client.session.create({ body }),
           10_000,
@@ -231,16 +256,19 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
   sessions: Map<string, string[]>
   messages: Map<string, SessionMessage[]>
   prompts: string[]
+  promptCalls: Array<{ sessionID: string; agent?: string; model?: ModelRef }>
 } {
   const sessions = new Map<string, string[]>()
   const messages = new Map<string, SessionMessage[]>()
   const prompts: string[] = []
+  const promptCalls: Array<{ sessionID: string; agent?: string; model?: ModelRef }> = []
   const recentNotifies = new Map<string, number>()
 
   return {
     sessions,
     messages,
     prompts,
+    promptCalls,
     async createWorker({ parentID, title, agent }) {
       const id = `worker-${crypto.randomUUID().slice(0, 8)}`
       sessions.set(id, [])
@@ -248,7 +276,7 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
       if (agent) (sessions as any).agents = { ...((sessions as any).agents || {}), [id]: agent }
       return id
     },
-    async promptWorker({ sessionID, prompt, messageID }) {
+    async promptWorker({ sessionID, prompt, messageID, model, agent }) {
       const rawID = messageID || `msg-${crypto.randomUUID().slice(0, 8)}`
       const resolvedMessageID = rawID.replace(/^(msg-)+/, "msg-")
       const msgs = sessions.get(sessionID) || []
@@ -274,6 +302,7 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
       }
       messages.set(sessionID, transcript)
       prompts.push(prompt)
+      promptCalls.push({ sessionID, agent, model })
       if (options.workerDelay) {
         await new Promise((r) => setTimeout(r, options.workerDelay))
       }

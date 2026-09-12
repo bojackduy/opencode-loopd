@@ -59,6 +59,23 @@ describe("Goal Service", () => {
       expect(msgs[0]).toContain("block_goal")
     })
 
+    it("sends the goal agent and model on every worker prompt", async () => {
+      const { goal } = await svc.start(dir, {
+        name: "custom-worker",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false, agent: "researcher", model: "ollama/qwen3.8:27b" },
+      })
+
+      expect(host.promptCalls.length).toBeGreaterThan(0)
+      for (const call of host.promptCalls) {
+        expect(call.agent).toBe("researcher")
+        expect(call.model).toEqual({ providerID: "ollama", modelID: "qwen3.8:27b" })
+      }
+      const state = await readState(dir)
+      expect(state.goals.find((g) => g.id === goal.id)?.config.model).toBe("ollama/qwen3.8:27b")
+    })
+
     it("records owner session ID", async () => {
       await svc.start(dir, {
         name: "test",

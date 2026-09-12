@@ -34,16 +34,19 @@ export function goalTools(
   return {
     loopd_create_goal: tool({
       description:
-        "Create a new background loop goal (contract: objective + checks + agent + workspaceWrite). " +
+        "Create a new background loop goal (contract: objective + checks + agent/model + workspaceWrite). " +
         "The engine spawns a dedicated worker session that does the work autonomously — it never runs in this chat. " +
         "Call this after clarifying the contract with the user. " +
+        "Worker identity is free-form: agent is any OpenCode agent name (built-in, ~/.config/opencode/agents/*.md, or opencode.jsonc agent.* — discover with `opencode agent list`), " +
+        "model is any \"providerID/modelID\" (discover with `opencode models [provider]`). Both are sent on every worker prompt. " +
         "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " +
         "Workspace-writing goals are serialized (only one active writer) and require checks. " +
-        "agent is optional — uses the parent session's agent if omitted, or configure plugin defaultAgent in opencode.jsonc.",
+        "agent/model are optional — fall back to the parent session's agent/model, or plugin defaultAgent/defaultModel in opencode.jsonc.",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
-        agent: tool.schema.string().optional().describe("Agent to run the worker as. Optional — uses parent session's agent if omitted, or configure plugin defaultAgent in opencode.jsonc."),
+        agent: tool.schema.string().optional().describe("Agent to run the worker as (e.g. \"researcher\", \"smart-agent\"). Optional — uses parent session's agent if omitted, or plugin defaultAgent."),
+        model: tool.schema.string().optional().describe("Model to run the worker as, as \"providerID/modelID\" (e.g. \"openai/gpt-5.6-sol\", \"ollama/qwen3.8:27b\"). Optional — uses parent session's model if omitted, or plugin defaultModel."),
         checks: tool.schema.array(tool.schema.string()).optional().describe("Shell commands that must pass for completion to be accepted. E.g. [\"npm test\"]."),
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
         workspaceWrite: tool.schema.boolean().optional().describe("Whether this goal edits the shared project workspace. Defaults to true; explicitly set false for artifact-only/read-only work."),
@@ -71,6 +74,7 @@ export function goalTools(
           maxTurns: 50,
         }
         if (args.agent) config.agent = args.agent
+        if (args.model) config.model = args.model
         if (args.checks) config.checks = args.checks
         if (args.checkCwd) config.checkCwd = args.checkCwd
         if (args.workspaceWrite !== undefined) config.workspaceWrite = args.workspaceWrite
@@ -135,6 +139,7 @@ export function goalTools(
               workerSessionID: worker.workerSessionID,
               artifactDir: goal.config.artifactDir,
               agent: resolution.config.agent,
+              model: resolution.config.model,
               checks: resolution.config.checks || [],
               workspaceWrite: resolution.config.workspaceWrite,
               defaultsApplied: resolution.defaultsApplied,
@@ -543,6 +548,7 @@ function formatGoalStructured(goal: Goal, runtime?: GoalRuntimeState): string {
       checkCwd: goal.config.checkCwd,
       workspaceWrite: goal.config.workspaceWrite,
       agent: goal.config.agent,
+      model: goal.config.model,
       maxTurns: goal.config.maxTurns,
       maxNoProgress: goal.config.maxNoProgress,
       maxFailures: goal.config.maxFailures,

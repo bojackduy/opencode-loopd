@@ -511,6 +511,16 @@ function resolveGoalCreationConfig(input) {
   const explicitAgent = cleanText(requested.agent);
   const defaultAgent = cleanText(defaults.defaultAgent);
   const agent = explicitAgent || defaultAgent || undefined;
+  const explicitModel = cleanText(requested.model);
+  const defaultModel = cleanText(defaults.defaultModel);
+  const model = explicitModel || defaultModel || undefined;
+  if (model && !isValidModelRef(model)) {
+    return {
+      ok: false,
+      errorCode: "invalid_model",
+      message: `Invalid model "${model}". Use "providerID/modelID" (e.g. "openai/gpt-5.6-sol", "ollama/qwen3.8:27b"). Discover with \`opencode models\`.`
+    };
+  }
   const workspaceWrite = requested.workspaceWrite ?? true;
   const explicitChecks = cleanList(requested.checks);
   const defaultChecks = workspaceWrite ? cleanList(defaults.defaultChecks || ["bun test"]) : [];
@@ -527,15 +537,29 @@ function resolveGoalCreationConfig(input) {
     config: {
       ...requested,
       agent,
+      model,
       workspaceWrite,
       checks: checks.length > 0 ? checks : undefined,
       checkCwd: requested.checkCwd || (workspaceWrite ? input.directory : undefined)
     },
     defaultsApplied: {
       agent: !explicitAgent && Boolean(defaultAgent),
+      model: !explicitModel && Boolean(defaultModel),
       checks: explicitChecks.length === 0 && defaultChecks.length > 0
     }
   };
+}
+function isValidModelRef(value) {
+  const slash = value.indexOf("/");
+  if (slash <= 0 || slash >= value.length - 1)
+    return false;
+  const providerID = value.slice(0, slash).trim();
+  const modelID = value.slice(slash + 1).trim();
+  if (!providerID || !modelID)
+    return false;
+  if (/\s/.test(providerID) || /\s/.test(modelID))
+    return false;
+  return true;
 }
 function cleanText(value) {
   if (typeof value !== "string")
@@ -1609,6 +1633,180 @@ import { randomUUID as randomUUID3 } from "crypto";
 import * as path2 from "path";
 import { promises as fs2 } from "fs";
 
+// src/server/host-adapter.ts
+function parseModelRef(value) {
+  if (value === undefined)
+    return;
+  const trimmed = value.trim();
+  if (!trimmed)
+    return;
+  const slash = trimmed.indexOf("/");
+  if (slash <= 0 || slash >= trimmed.length - 1) {
+    throw new Error(`Invalid model "${value}". Use "providerID/modelID" (e.g. "openai/gpt-5.6-sol").`);
+  }
+  const providerID = trimmed.slice(0, slash).trim();
+  const modelID = trimmed.slice(slash + 1).trim();
+  if (!providerID || !modelID || /\s/.test(providerID) || /\s/.test(modelID)) {
+    throw new Error(`Invalid model "${value}". Use "providerID/modelID" (e.g. "openai/gpt-5.6-sol").`);
+  }
+  return { providerID, modelID };
+}
+var recentParentNotifies = new Map;
+function shouldDedupParentNotify(ownerSessionID, message) {
+  const key = `${ownerSessionID}:${message.slice(0, 200)}`;
+  const now = Date.now();
+  const last = recentParentNotifies.get(key);
+  if (last !== undefined && now - last < 60000)
+    return true;
+  recentParentNotifies.set(key, now);
+  if (recentParentNotifies.size > 200) {
+    for (const [k, t] of recentParentNotifies.entries())
+      if (now - t > 60000)
+        recentParentNotifies.delete(k);
+  }
+  return false;
+}
+function createRealHost(client, directory) {
+  return {
+    async createWorker({ parentID, title, agent, model }) {
+      try {
+        const body = { parentID, title };
+        if (agent)
+          body.agent = agent;
+        if (model)
+          body.model = { id: model.modelID, providerID: model.providerID };
+        const result = await withTimeout(client.session.create({ body }), 1e4, "OpenCode session.create");
+        const data = result?.data;
+        if (result?.error || !data?.id) {
+          const detail = describeError(result?.error || "response contained no session ID");
+          await logServerEvent(directory, "worker.create.failed", { parentID, title, detail });
+          throw new Error(`OpenCode session.create failed for parent "${parentID}": ${detail}`);
+        }
+        await logServerEvent(directory, "worker.created", { parentID, workerSessionID: data.id, title });
+        return data.id;
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("OpenCode session.create failed"))
+          throw error;
+        const detail = describeError(error);
+        await logServerEvent(directory, "worker.create.failed", { parentID, title, detail });
+        throw new Error(`OpenCode session.create failed for parent "${parentID}": ${detail}`);
+      }
+    },
+    async promptWorker({ sessionID, prompt, messageID, model, agent }) {
+      const body = {
+        parts: [{ type: "text", text: prompt }]
+      };
+      if (messageID) {
+        const collapsed = messageID.replace(/^(msg-)+/, "msg-");
+        body.messageID = collapsed.startsWith("msg-") ? collapsed : `msg-${messageID}`;
+      }
+      if (model)
+        body.model = model;
+      if (agent)
+        body.agent = agent;
+      const result = await withTimeout(client.session.promptAsync({
+        path: { id: sessionID },
+        body
+      }), 1e4, "OpenCode session.promptAsync");
+      if (result?.error) {
+        const detail = describeError(result.error);
+        await logServerEvent(directory, "worker.prompt.failed", { sessionID, detail });
+        throw new Error(`OpenCode session.promptAsync failed for worker "${sessionID}": ${detail}`);
+      }
+      await logServerEvent(directory, "worker.prompted", { sessionID });
+      return { messageID: result?.data?.messageID };
+    },
+    async sessionStatus(sessionID) {
+      try {
+        const result = await client.session.status({});
+        if (result?.error)
+          return "unknown";
+        const data = result?.data;
+        if (!data || typeof data !== "object" || Array.isArray(data))
+          return "unknown";
+        const status = data[sessionID];
+        if (status === undefined || status === null)
+          return "idle";
+        if (typeof status !== "object" || Array.isArray(status))
+          return "unknown";
+        const type = status.type;
+        if (type === "busy" || type === "retry")
+          return type;
+        if (type === "idle")
+          return "idle";
+        return "unknown";
+      } catch {
+        return "unknown";
+      }
+    },
+    async abortSession(sessionID) {
+      try {
+        await client.session.abort({ path: { id: sessionID } });
+      } catch {}
+    },
+    async readMessages(sessionID, limit = 10) {
+      try {
+        const result = await client.session.messages({
+          path: { id: sessionID },
+          query: { limit }
+        });
+        const data = result?.data;
+        if (!Array.isArray(data))
+          return [];
+        return data.map((m) => ({
+          role: m.info?.role || "assistant",
+          content: m.parts?.filter((p) => p.type === "text").map((p) => p.text).join(`
+`) || "",
+          timestamp: m.info?.time?.completed || m.info?.time?.created ? new Date(m.info.time.completed || m.info.time.created).toISOString() : undefined,
+          messageID: m.info?.id || m.id,
+          parentMessageID: m.info?.parentID,
+          completedAt: m.info?.time?.completed ? new Date(m.info.time.completed).toISOString() : undefined
+        }));
+      } catch {
+        return [];
+      }
+    },
+    async compactSession(sessionID) {
+      try {
+        await client.session.compact({ sessionID });
+      } catch {}
+    },
+    async notifyOwner(ownerSessionID, message) {
+      if (shouldDedupParentNotify(ownerSessionID, message)) {
+        await logServerEvent(directory, "parent.notify.deduped", { ownerSessionID, preview: message.slice(0, 160) });
+        return;
+      }
+      try {
+        const result = await withTimeout(client.session.promptAsync({
+          path: { id: ownerSessionID },
+          body: { parts: [{ type: "text", text: message }] }
+        }), 1e4, "OpenCode parent notify");
+        if (result?.error) {
+          await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(result.error) });
+        } else {
+          await logServerEvent(directory, "parent.notified", { ownerSessionID, preview: message.slice(0, 160) });
+        }
+      } catch (error) {
+        await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(error) });
+      }
+    }
+  };
+}
+async function withTimeout(promise, timeoutMs, operation) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${operation} timed out after ${timeoutMs}ms`)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer)
+      clearTimeout(timer);
+  }
+}
+
 // src/server/worker-session.ts
 function createWorkerManager(host) {
   return {
@@ -1616,7 +1814,8 @@ function createWorkerManager(host) {
       const workerSessionID = await host.createWorker({
         parentID: goal.ownerSessionID,
         title: `loopd: ${goal.name}`,
-        agent: goal.config.agent
+        agent: goal.config.agent,
+        model: parseModelRef(goal.config.model)
       });
       return {
         goalID: goal.id,
@@ -1630,7 +1829,8 @@ function createWorkerManager(host) {
         sessionID: worker.workerSessionID,
         prompt,
         messageID: runtime.activePromptMessageID,
-        agent: goal.config.agent
+        agent: goal.config.agent,
+        model: parseModelRef(goal.config.model)
       });
       return result;
     },
@@ -2474,155 +2674,6 @@ function createScheduleWorker(options) {
   return { start, stop, isRunning, tick };
 }
 
-// src/server/host-adapter.ts
-var recentParentNotifies = new Map;
-function shouldDedupParentNotify(ownerSessionID, message) {
-  const key = `${ownerSessionID}:${message.slice(0, 200)}`;
-  const now = Date.now();
-  const last = recentParentNotifies.get(key);
-  if (last !== undefined && now - last < 60000)
-    return true;
-  recentParentNotifies.set(key, now);
-  if (recentParentNotifies.size > 200) {
-    for (const [k, t] of recentParentNotifies.entries())
-      if (now - t > 60000)
-        recentParentNotifies.delete(k);
-  }
-  return false;
-}
-function createRealHost(client, directory) {
-  return {
-    async createWorker({ parentID, title, agent }) {
-      try {
-        const body = { parentID, title };
-        if (agent)
-          body.agent = agent;
-        const result = await withTimeout(client.session.create({ body }), 1e4, "OpenCode session.create");
-        const data = result?.data;
-        if (result?.error || !data?.id) {
-          const detail = describeError(result?.error || "response contained no session ID");
-          await logServerEvent(directory, "worker.create.failed", { parentID, title, detail });
-          throw new Error(`OpenCode session.create failed for parent "${parentID}": ${detail}`);
-        }
-        await logServerEvent(directory, "worker.created", { parentID, workerSessionID: data.id, title });
-        return data.id;
-      } catch (error) {
-        if (error instanceof Error && error.message.startsWith("OpenCode session.create failed"))
-          throw error;
-        const detail = describeError(error);
-        await logServerEvent(directory, "worker.create.failed", { parentID, title, detail });
-        throw new Error(`OpenCode session.create failed for parent "${parentID}": ${detail}`);
-      }
-    },
-    async promptWorker({ sessionID, prompt, messageID, model, agent }) {
-      const body = {
-        parts: [{ type: "text", text: prompt }]
-      };
-      if (messageID) {
-        const collapsed = messageID.replace(/^(msg-)+/, "msg-");
-        body.messageID = collapsed.startsWith("msg-") ? collapsed : `msg-${messageID}`;
-      }
-      if (model)
-        body.model = model;
-      if (agent)
-        body.agent = agent;
-      const result = await withTimeout(client.session.promptAsync({
-        path: { id: sessionID },
-        body
-      }), 1e4, "OpenCode session.promptAsync");
-      if (result?.error) {
-        const detail = describeError(result.error);
-        await logServerEvent(directory, "worker.prompt.failed", { sessionID, detail });
-        throw new Error(`OpenCode session.promptAsync failed for worker "${sessionID}": ${detail}`);
-      }
-      await logServerEvent(directory, "worker.prompted", { sessionID });
-      return { messageID: result?.data?.messageID };
-    },
-    async sessionStatus(sessionID) {
-      try {
-        const result = await client.session.status({});
-        const data = result?.data;
-        if (!data || typeof data !== "object")
-          return "unknown";
-        const status = data[sessionID];
-        if (!status || typeof status !== "object")
-          return "unknown";
-        const type = status.type;
-        if (type === "busy" || type === "retry")
-          return type;
-        return "idle";
-      } catch {
-        return "unknown";
-      }
-    },
-    async abortSession(sessionID) {
-      try {
-        await client.session.abort({ path: { id: sessionID } });
-      } catch {}
-    },
-    async readMessages(sessionID, limit = 10) {
-      try {
-        const result = await client.session.messages({
-          path: { id: sessionID },
-          query: { limit }
-        });
-        const data = result?.data;
-        if (!Array.isArray(data))
-          return [];
-        return data.map((m) => ({
-          role: m.info?.role || "assistant",
-          content: m.parts?.filter((p) => p.type === "text").map((p) => p.text).join(`
-`) || "",
-          timestamp: m.info?.time?.completed || m.info?.time?.created ? new Date(m.info.time.completed || m.info.time.created).toISOString() : undefined,
-          messageID: m.info?.id || m.id,
-          parentMessageID: m.info?.parentID,
-          completedAt: m.info?.time?.completed ? new Date(m.info.time.completed).toISOString() : undefined
-        }));
-      } catch {
-        return [];
-      }
-    },
-    async compactSession(sessionID) {
-      try {
-        await client.session.compact({ sessionID });
-      } catch {}
-    },
-    async notifyOwner(ownerSessionID, message) {
-      if (shouldDedupParentNotify(ownerSessionID, message)) {
-        await logServerEvent(directory, "parent.notify.deduped", { ownerSessionID, preview: message.slice(0, 160) });
-        return;
-      }
-      try {
-        const result = await withTimeout(client.session.promptAsync({
-          path: { id: ownerSessionID },
-          body: { parts: [{ type: "text", text: message }] }
-        }), 1e4, "OpenCode parent notify");
-        if (result?.error) {
-          await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(result.error) });
-        } else {
-          await logServerEvent(directory, "parent.notified", { ownerSessionID, preview: message.slice(0, 160) });
-        }
-      } catch (error) {
-        await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(error) });
-      }
-    }
-  };
-}
-async function withTimeout(promise, timeoutMs, operation) {
-  let timer;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${operation} timed out after ${timeoutMs}ms`)), timeoutMs);
-      })
-    ]);
-  } finally {
-    if (timer)
-      clearTimeout(timer);
-  }
-}
-
 // src/server/goal-tools.ts
 import { randomUUID as randomUUID5 } from "crypto";
 import { tool } from "@opencode-ai/plugin/tool";
@@ -2643,11 +2694,12 @@ var execAsync = promisify(execChild);
 function goalTools(dir, goalService, hostSessionID, defaults = {}) {
   return {
     loopd_create_goal: tool({
-      description: "Create a new background loop goal (contract: objective + checks + agent + workspaceWrite). " + "The engine spawns a dedicated worker session that does the work autonomously \u2014 it never runs in this chat. " + "Call this after clarifying the contract with the user. " + "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " + "Workspace-writing goals are serialized (only one active writer) and require checks. " + "agent is optional \u2014 uses the parent session's agent if omitted, or configure plugin defaultAgent in opencode.jsonc.",
+      description: "Create a new background loop goal (contract: objective + checks + agent/model + workspaceWrite). " + "The engine spawns a dedicated worker session that does the work autonomously \u2014 it never runs in this chat. " + "Call this after clarifying the contract with the user. " + "Worker identity is free-form: agent is any OpenCode agent name (built-in, ~/.config/opencode/agents/*.md, or opencode.jsonc agent.* \u2014 discover with `opencode agent list`), " + 'model is any "providerID/modelID" (discover with `opencode models [provider]`). Both are sent on every worker prompt. ' + "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " + "Workspace-writing goals are serialized (only one active writer) and require checks. " + "agent/model are optional \u2014 fall back to the parent session's agent/model, or plugin defaultAgent/defaultModel in opencode.jsonc.",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
-        agent: tool.schema.string().optional().describe("Agent to run the worker as. Optional \u2014 uses parent session's agent if omitted, or configure plugin defaultAgent in opencode.jsonc."),
+        agent: tool.schema.string().optional().describe(`Agent to run the worker as (e.g. "researcher", "smart-agent"). Optional \u2014 uses parent session's agent if omitted, or plugin defaultAgent.`),
+        model: tool.schema.string().optional().describe(`Model to run the worker as, as "providerID/modelID" (e.g. "openai/gpt-5.6-sol", "ollama/qwen3.8:27b"). Optional \u2014 uses parent session's model if omitted, or plugin defaultModel.`),
         checks: tool.schema.array(tool.schema.string()).optional().describe('Shell commands that must pass for completion to be accepted. E.g. ["npm test"].'),
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
         workspaceWrite: tool.schema.boolean().optional().describe("Whether this goal edits the shared project workspace. Defaults to true; explicitly set false for artifact-only/read-only work."),
@@ -2676,6 +2728,8 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}) {
         };
         if (args.agent)
           config.agent = args.agent;
+        if (args.model)
+          config.model = args.model;
         if (args.checks)
           config.checks = args.checks;
         if (args.checkCwd)
@@ -2747,6 +2801,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}) {
               workerSessionID: worker.workerSessionID,
               artifactDir: goal.config.artifactDir,
               agent: resolution.config.agent,
+              model: resolution.config.model,
               checks: resolution.config.checks || [],
               workspaceWrite: resolution.config.workspaceWrite,
               defaultsApplied: resolution.defaultsApplied,
@@ -3102,6 +3157,7 @@ function formatGoalStructured(goal, runtime) {
       checkCwd: goal.config.checkCwd,
       workspaceWrite: goal.config.workspaceWrite,
       agent: goal.config.agent,
+      model: goal.config.model,
       maxTurns: goal.config.maxTurns,
       maxNoProgress: goal.config.maxNoProgress,
       maxFailures: goal.config.maxFailures,
@@ -3212,6 +3268,8 @@ function ownerTools(options) {
             turn: runtime?.runCount ?? 0,
             budgetTurnCount: runtime?.budgetTurnCount ?? 0,
             maxTurns: g.config.maxTurns,
+            agent: g.config.agent,
+            model: g.config.model,
             lastProgress: g.lastProgress?.summary?.slice(0, 120),
             lastProgressAt: g.lastProgress?.at,
             blocker: g.blocker?.reason?.slice(0, 120),
@@ -3232,7 +3290,7 @@ function ownerTools(options) {
       }
     }),
     inspect_background_goal: tool2({
-      description: "Inspect a goal\u2019s full contract, runtime, and live execution state: objective, config{agent,checks,checkCwd,workspaceWrite,limits}, progress, blocker, runtime{phase,runCount,budgetTurnCount,runGeneration,evaluatorRejectionCount,unknownStatusCount,lastActivityAt,activePromptMessageID}, plus live transcriptTail, activeToolCallIDs, progressHistory, artifactSummary, pendingInbox. Single-call follow-up for parent to see what child is actually doing.",
+      description: "Inspect a goal\u2019s full contract, runtime, and live execution state: objective, config{agent,model,checks,checkCwd,workspaceWrite,limits}, progress, blocker, runtime{phase,runCount,budgetTurnCount,runGeneration,evaluatorRejectionCount,unknownStatusCount,lastActivityAt,activePromptMessageID}, plus live transcriptTail, activeToolCallIDs, progressHistory, artifactSummary, pendingInbox. Single-call follow-up for parent to see what child is actually doing.",
       args: {
         goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to inspect the first active goal."),
         includeTranscript: tool2.schema.boolean().optional().describe("Include live transcript tail (adds ~100ms). Default true. Set false for fast metadata-only."),
@@ -3287,6 +3345,7 @@ function ownerTools(options) {
               checkCwd: goal.config.checkCwd,
               workspaceWrite: goal.config.workspaceWrite,
               agent: goal.config.agent,
+              model: goal.config.model,
               schedule: goal.config.schedule
             },
             lastProgress: goal.lastProgress,
@@ -3719,9 +3778,11 @@ var server = async ({ client, directory }, pluginOptions) => {
 };
 function parsePluginDefaults(options) {
   const agent = typeof options?.defaultAgent === "string" ? options.defaultAgent.trim() : "";
+  const model = typeof options?.defaultModel === "string" ? options.defaultModel.trim() : "";
   const checks = Array.isArray(options?.defaultChecks) ? options.defaultChecks.filter((item) => typeof item === "string").map((item) => item.trim()).filter(Boolean) : [];
   return {
     defaultAgent: agent || undefined,
+    defaultModel: model || undefined,
     defaultChecks: checks.length > 0 ? checks : undefined
   };
 }

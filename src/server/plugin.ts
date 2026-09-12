@@ -163,6 +163,7 @@ const server: Plugin = async ({ client, directory }, pluginOptions) => {
 
 function parsePluginDefaults(options: Record<string, unknown> | undefined): GoalToolDefaults {
   const agent = typeof options?.defaultAgent === "string" ? options.defaultAgent.trim() : ""
+  const model = typeof options?.defaultModel === "string" ? options.defaultModel.trim() : ""
   const checks = Array.isArray(options?.defaultChecks)
     ? options.defaultChecks
       .filter((item): item is string => typeof item === "string")
@@ -171,6 +172,7 @@ function parsePluginDefaults(options: Record<string, unknown> | undefined): Goal
     : []
   return {
     defaultAgent: agent || undefined,
+    defaultModel: model || undefined,
     defaultChecks: checks.length > 0 ? checks : undefined,
   }
 }

@@ -65,6 +65,8 @@ export function ownerTools(options: OwnerToolsOptions) {
             turn: runtime?.runCount ?? 0,
             budgetTurnCount: runtime?.budgetTurnCount ?? 0,
             maxTurns: (g.config as any).maxTurns,
+            agent: g.config.agent,
+            model: g.config.model,
             lastProgress: g.lastProgress?.summary?.slice(0, 120),
             lastProgressAt: g.lastProgress?.at,
             blocker: g.blocker?.reason?.slice(0, 120),
@@ -88,7 +90,7 @@ export function ownerTools(options: OwnerToolsOptions) {
 
     inspect_background_goal: tool({
       description:
-        "Inspect a goal’s full contract, runtime, and live execution state: objective, config{agent,checks,checkCwd,workspaceWrite,limits}, progress, blocker, runtime{phase,runCount,budgetTurnCount,runGeneration,evaluatorRejectionCount,unknownStatusCount,lastActivityAt,activePromptMessageID}, plus live transcriptTail, activeToolCallIDs, progressHistory, artifactSummary, pendingInbox. Single-call follow-up for parent to see what child is actually doing.",
+        "Inspect a goal’s full contract, runtime, and live execution state: objective, config{agent,model,checks,checkCwd,workspaceWrite,limits}, progress, blocker, runtime{phase,runCount,budgetTurnCount,runGeneration,evaluatorRejectionCount,unknownStatusCount,lastActivityAt,activePromptMessageID}, plus live transcriptTail, activeToolCallIDs, progressHistory, artifactSummary, pendingInbox. Single-call follow-up for parent to see what child is actually doing.",
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to inspect the first active goal."),
         includeTranscript: tool.schema.boolean().optional().describe("Include live transcript tail (adds ~100ms). Default true. Set false for fast metadata-only."),
@@ -154,6 +156,7 @@ export function ownerTools(options: OwnerToolsOptions) {
               checkCwd: goal.config.checkCwd,
               workspaceWrite: goal.config.workspaceWrite,
               agent: goal.config.agent,
+              model: goal.config.model,
               schedule: (goal.config as any).schedule,
             },
             lastProgress: goal.lastProgress,

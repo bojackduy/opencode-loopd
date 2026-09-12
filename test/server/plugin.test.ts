@@ -81,7 +81,7 @@ describe("Server Plugin Startup", () => {
     const output = JSON.parse(result.output)
 
     expect(output.ok).toBe(true)
-    expect(output.defaultsApplied).toEqual({ agent: true, checks: true })
+    expect(output.defaultsApplied).toEqual({ agent: true, model: false, checks: true })
     expect(createdAgent).toBe("smart-agent")
     await hooks.dispose?.()
   })
