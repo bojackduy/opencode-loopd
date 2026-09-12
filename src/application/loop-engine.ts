@@ -39,6 +39,8 @@ export interface LoopEngineOptions {
   pollIntervalMs?: number
   confirmIdleMs?: number
   unknownStatusThreshold?: number
+  /** Quiet time before a lease-expired running turn is reported stuck. Default 10 min. */
+  stuckRunningMs?: number
 }
 
 export interface LoopEngine {
@@ -56,6 +58,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
   const maintenanceMs = options.pollIntervalMs ?? 30_000
   const confirmIdleMs = options.confirmIdleMs ?? CONFIRM_IDLE_DURATION_MS
   const unknownStatusThreshold = Math.max(1, options.unknownStatusThreshold ?? 3)
+  const stuckRunningMs = options.stuckRunningMs ?? 10 * 60_000
 
   let running = false
   let maintenanceTimer: ReturnType<typeof setInterval> | undefined
@@ -249,7 +252,15 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       }
       const elapsed = now - Date.parse(rt.idleCandidateAt)
       if (elapsed < confirmIdleMs) return s
-      if (rt.lastActivityAt && rt.lastActivityAt > rt.idleCandidateAt) {
+      // Veto only on activity AFTER the last known completion: a completion
+      // event arriving after the candidate staged is terminal, not work.
+      // activeAssistantCompletedAt is cleared on every new lease, so when set
+      // it always belongs to the current generation.
+      const anchoredHere = Boolean(rt.activeAssistantCompletedAt)
+      const quietSince = anchoredHere && rt.activeAssistantCompletedAt
+        ? rt.activeAssistantCompletedAt
+        : rt.idleCandidateAt
+      if (rt.lastActivityAt && rt.lastActivityAt > rt.idleCandidateAt && rt.lastActivityAt > quietSince) {
         rt.idleCandidateAt = undefined
         rt.idleCandidateGeneration = undefined
         return s
@@ -274,8 +285,39 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
 
     if (confirmation) {
       const candidate = confirmation
+      // Event anchor: the live event stream already observed this turn's
+      // completion (stamp is cleared on every new lease, so it is always
+      // current-generation). The transcript scan below is a fallback for
+      // completions whose events were missed — never the sole authority,
+      // since a fixed tail window cannot see prompts of long turns.
+      const stagedRt = afterIdle.runtimes.find((r) => r.goalID === goalID)
+      const eventAnchored = stagedRt?.runGeneration === candidate.generation
+        && Boolean(stagedRt?.activeAssistantCompletedAt)
       const transcript = await inspectPromptTurn(goal.workerSessionID, candidate.promptMessageID)
-      if (!transcript.latestUserPrompt || (!candidate.assistantCompleted && !transcript.assistantCompleted)) {
+      if (!transcript.latestUserPrompt && !eventAnchored) {
+        await appendEvent(directory, {
+          version: 1,
+          eventID: randomUUID(),
+          goalID,
+          type: "idle.confirm-failed",
+          reason: "prompt-outside-window",
+          runGeneration: candidate.generation,
+          timestamp: new Date().toISOString(),
+          revision: afterIdle.revision,
+        } satisfies LoopEvent)
+        return true
+      }
+      if (!eventAnchored && !candidate.assistantCompleted && !transcript.assistantCompleted) {
+        await appendEvent(directory, {
+          version: 1,
+          eventID: randomUUID(),
+          goalID,
+          type: "idle.confirm-failed",
+          reason: "assistant-incomplete",
+          runGeneration: candidate.generation,
+          timestamp: new Date().toISOString(),
+          revision: afterIdle.revision,
+        } satisfies LoopEvent)
         return true
       }
 
@@ -288,7 +330,12 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
         if (rt.activePromptMessageID !== candidate.promptMessageID) return s
         if (rt.idleCandidateGeneration !== candidate.generation) return s
         if (rt.idleCandidateAt !== candidate.candidateAt) return s
-        if (rt.lastActivityAt && rt.lastActivityAt > candidate.candidateAt) return s
+        if (rt.lastActivityAt && rt.lastActivityAt > candidate.candidateAt) {
+          const quiet = rt.runGeneration === candidate.generation && rt.activeAssistantCompletedAt
+            ? rt.activeAssistantCompletedAt
+            : candidate.candidateAt
+          if (rt.lastActivityAt > quiet) return s
+        }
         if ((rt.activeToolCallIDs?.length ?? 0) > 0) return s
 
         completedRunID = rt.activeRunID
@@ -419,7 +466,11 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     if (!workerSessionID) return noMatch
     let messages
     try {
-      messages = await host.readMessages(workerSessionID, 50)
+      // Window must cover long productive turns: a turn emitting more messages
+      // than this window pushes its prompt out of view, which used to wedge
+      // the goal in phase=running with zero diagnostics. The event-anchored
+      // completion path means this scan is a fallback, not the authority.
+      messages = await host.readMessages(workerSessionID, 200)
     } catch {
       return noMatch
     }
@@ -621,6 +672,18 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       }
     }
 
+    // Cost budget — direct status change (no semantic summary needed)
+    if (typeof goal.costBudget === "number" && (goal.costUsed ?? 0) >= goal.costBudget) {
+      goal.status = "budget_limited"
+      goal.updatedAt = new Date().toISOString()
+      return {
+        stop: "budget",
+        blocked: true,
+        event: "goal.status_changed",
+        reason: `Cost budget exhausted ($${(goal.costUsed ?? 0).toFixed(4)}/$${goal.costBudget})`,
+      }
+    }
+
     return noResult
   }
 
@@ -812,6 +875,46 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
             await handleSessionIdle(state, goal)
           }
           continue
+        }
+
+        // Stuck-running watchdog: a busy/retry worker with an expired lease and
+        // no activity for a long time is wedged (or hung) — the idle path will
+        // never fire for it. Notify once per run; never force re-prompt, which
+        // would overlap prompts on a worker that might still be alive.
+        if ((status === "busy" || status === "retry")
+          && runtime.phase === "running" && runtime.activeRunID
+          && runtime.stuckNotifiedRunID !== runtime.activeRunID) {
+          const leaseExpired = !runtime.leaseExpiresAt || Date.now() >= Date.parse(runtime.leaseExpiresAt)
+          const lastActive = runtime.lastActivityAt ? Date.parse(runtime.lastActivityAt) : 0
+          if (leaseExpired && Date.now() - lastActive > stuckRunningMs) {
+            const stuckSeconds = Math.floor((Date.now() - lastActive) / 1000)
+            const stuckState = await mutateState(directory, `maintenance.run-stuck:${goal.id}`, async (s) => {
+              const rt = s.runtimes.find((r) => r.goalID === goal.id)
+              if (!rt || rt.activeRunID !== runtime.activeRunID) return s
+              rt.stuckNotifiedRunID = rt.activeRunID
+              rt.updatedAt = new Date().toISOString()
+              return s
+            })
+            await appendEvent(directory, {
+              version: 1,
+              eventID: randomUUID(),
+              goalID: goal.id,
+              type: "run.stuck",
+              runID: runtime.activeRunID,
+              stuckSeconds,
+              timestamp: new Date().toISOString(),
+              revision: stuckState.revision,
+            } satisfies LoopEvent)
+            await logServerEvent(directory, "maintenance.run-stuck", {
+              goalID: goal.id,
+              runID: runtime.activeRunID,
+              stuckSeconds,
+            })
+            await host.notifyOwner(
+              goal.ownerSessionID,
+              `Loop goal "${goal.name}" worker may be stuck: no activity for ${Math.floor(stuckSeconds / 60)}m while reporting ${status}, lease expired. The goal remains active; use inspect_background_goal to look, nudge_goal to re-prompt, or pause_goal to stop it.`,
+            )
+          }
         }
       }
     }

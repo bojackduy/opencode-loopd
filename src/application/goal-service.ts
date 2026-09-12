@@ -24,6 +24,7 @@ export interface GoalService {
     objective: string
     ownerSessionID: string
     config?: Goal["config"]
+    costBudget?: number
   }): Promise<{ goal: Goal; worker: WorkerSession }>
 
   /** Drive one continuation turn for a goal. */
@@ -198,6 +199,7 @@ export function createGoalService(host: LoopHost): GoalService {
     objective: string
     ownerSessionID: string
     config?: Goal["config"]
+    costBudget?: number
   }) {
     const id = randomUUID() as GoalID
     return withGoalOperation(id, () => startUnlocked(directory, input, id))
@@ -208,6 +210,7 @@ export function createGoalService(host: LoopHost): GoalService {
     objective: string
     ownerSessionID: string
     config?: Goal["config"]
+    costBudget?: number
   }, id: GoalID) {
     // Create goal and artifact directory (external I/O before lock)
     const goal = createGoal({
@@ -222,6 +225,7 @@ export function createGoalService(host: LoopHost): GoalService {
         ...input.config,
       },
     })
+    if (typeof input.costBudget === "number") goal.costBudget = input.costBudget
     const artifactDir = goalArtifactDir(directory, id)
     goal.config.artifactDir = artifactDir
     if (!goal.config.progressFile) goal.config.progressFile = path.join(artifactDir, "progress.md")

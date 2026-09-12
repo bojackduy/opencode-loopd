@@ -26,6 +26,9 @@ export interface Goal {
   /** Token budget. undefined = unlimited. */
   tokenBudget?: number
 
+  /** Cost budget in the same currency OpenCode reports. undefined = unlimited. */
+  costBudget?: number
+
   /** Tokens consumed so far. */
   tokensUsed: number
 

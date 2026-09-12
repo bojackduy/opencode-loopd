@@ -47,6 +47,7 @@ export function goalTools(
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
         agent: tool.schema.string().optional().describe("Agent to run the worker as (e.g. \"researcher\", \"smart-agent\"). Optional — uses parent session's agent if omitted, or plugin defaultAgent."),
         model: tool.schema.string().optional().describe("Model to run the worker as, as \"providerID/modelID\" (e.g. \"openai/gpt-5.6-sol\", \"ollama/qwen3.8:27b\"). Optional — uses parent session's model if omitted, or plugin defaultModel."),
+        costBudget: tool.schema.number().optional().describe("Max provider cost in dollars before the engine stops the goal as budget_limited (e.g. 0.5). Optional — unlimited if omitted."),
         checks: tool.schema.array(tool.schema.string()).optional().describe("Shell commands that must pass for completion to be accepted. E.g. [\"npm test\"]."),
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
         workspaceWrite: tool.schema.boolean().optional().describe("Whether this goal edits the shared project workspace. Defaults to true; explicitly set false for artifact-only/read-only work."),
@@ -107,6 +108,17 @@ export function goalTools(
           }
         }
 
+        let costBudget: number | undefined
+        if (args.costBudget !== undefined) {
+          if (typeof args.costBudget !== "number" || !Number.isFinite(args.costBudget) || args.costBudget <= 0) {
+            return {
+              title: "Goal not created",
+              output: JSON.stringify({ ok: false, message: "costBudget must be a positive number of dollars", errorCode: "invalid_cost_budget" }),
+            }
+          }
+          costBudget = args.costBudget
+        }
+
         const resolution = resolveGoalCreationConfig({
           directory: dir,
           objective: args.objective,
@@ -130,6 +142,7 @@ export function goalTools(
             objective: args.objective,
             ownerSessionID: sessionID,
             config: resolution.config,
+            costBudget,
           })
           return {
             title: "Goal created",
@@ -140,6 +153,7 @@ export function goalTools(
               artifactDir: goal.config.artifactDir,
               agent: resolution.config.agent,
               model: resolution.config.model,
+              costBudget: goal.costBudget,
               checks: resolution.config.checks || [],
               workspaceWrite: resolution.config.workspaceWrite,
               defaultsApplied: resolution.defaultsApplied,
@@ -577,7 +591,9 @@ function formatGoalStructured(goal: Goal, runtime?: GoalRuntimeState): string {
     completionEvidence: goal.completionEvidence,
     blocker: goal.blocker,
     tokensUsed: goal.tokensUsed,
+    tokenBudget: goal.tokenBudget,
     costUsed: goal.costUsed ?? 0,
+    costBudget: goal.costBudget,
     timeUsedSeconds: goal.timeUsedSeconds,
   }
 

@@ -149,6 +149,39 @@ describe("Goal Tools", () => {
       expect(output.errorCode).toBe("invalid_model")
       expect((await readState(dir)).goals).toHaveLength(0)
     })
+
+    it("persists an explicit cost budget on the goal", async () => {
+      const create = goalTools(dir, goalService, "owner-1").loopd_create_goal
+      const result = await create.execute({
+        name: "capped-spend",
+        objective: "Analyze behavior and save a report in the goal artifact directory.",
+        workspaceWrite: false,
+        model: "opencode-go/glm-5.2",
+        costBudget: 0.5,
+      }, { sessionID: "owner-1" })
+
+      const output = JSON.parse(result.output)
+      expect(output.ok).toBe(true)
+      expect(output.costBudget).toBe(0.5)
+      const goal = (await readState(dir)).goals[0]
+      expect(goal.costBudget).toBe(0.5)
+    })
+
+    it("rejects non-positive cost budgets", async () => {
+      const create = goalTools(dir, goalService, "owner-1").loopd_create_goal
+      for (const costBudget of [0, -1, Number.NaN]) {
+        const result = await create.execute({
+          name: "bad-budget",
+          objective: "Analyze behavior.",
+          workspaceWrite: false,
+          costBudget,
+        }, { sessionID: "owner-1" })
+        const output = JSON.parse(result.output)
+        expect(output.ok).toBe(false)
+        expect(output.errorCode).toBe("invalid_cost_budget")
+      }
+      expect((await readState(dir)).goals).toHaveLength(0)
+    })
   })
 
   describe("goal transitions", () => {
