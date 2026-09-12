@@ -12,7 +12,7 @@ import { readState, mutateState, appendEvent, drainGoalInbox, readEvents, goalAr
 import * as path from "path"
 import { promises as fs } from "fs"
 import type { StoreState } from "../infrastructure/state-repository"
-import type { LoopHost } from "../server/host-adapter"
+import type { LoopHost, SessionMessage } from "../server/host-adapter"
 import { createWorkerManager, type WorkerManager, type WorkerSession, type ContinuationContext } from "../server/worker-session"
 import type { LoopEvent } from "../domain/events"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
@@ -31,6 +31,12 @@ export interface GoalService {
 
   /** Force re-prompt a stuck worker even if the session reports non-idle. */
   nudge(directory: string, goalID: GoalID): Promise<{ ok: boolean; message: string }>
+
+  /**
+   * Fold newly completed worker messages into goal usage totals. Idempotent via
+   * the accountedMessageIDs watermark. Returns the deltas that were applied.
+   */
+  accountUsage(directory: string, goalID: GoalID): Promise<{ tokenDelta: number; costDelta: number; timeDeltaSeconds: number; counted: string[] }>
 
   /** Pause a goal and abort its worker. */
   pause(directory: string, goalID: GoalID): Promise<void>
@@ -333,6 +339,66 @@ export function createGoalService(host: LoopHost): GoalService {
     return { goal, worker }
   }
 
+  async function accountTailUsage(
+    directory: string,
+    goalID: GoalID,
+    runtime: GoalRuntimeState,
+    tail: SessionMessage[],
+  ): Promise<{ tokenDelta: number; costDelta: number; timeDeltaSeconds: number; counted: string[] }> {
+    const seenIDs = new Set(runtime.accountedMessageIDs ?? [])
+    let tokenDelta = 0
+    let costDelta = 0
+    let timeDeltaSeconds = 0
+    const counted: string[] = []
+    for (const m of tail) {
+      if (m.role !== "assistant" || !m.messageID || !m.completedAt) continue
+      if (seenIDs.has(m.messageID)) continue
+      seenIDs.add(m.messageID)
+      counted.push(m.messageID)
+      if (m.tokens) {
+        tokenDelta += (m.tokens.input || 0) + (m.tokens.output || 0) + (m.tokens.reasoning || 0)
+          + (m.tokens.cacheRead || 0) + (m.tokens.cacheWrite || 0)
+      }
+      if (typeof m.cost === "number") costDelta += m.cost
+      if (typeof m.durationMs === "number") timeDeltaSeconds += m.durationMs / 1000
+    }
+    if (counted.length === 0) return { tokenDelta: 0, costDelta: 0, timeDeltaSeconds: 0, counted }
+    const mergedWatermark = [...(runtime.accountedMessageIDs ?? []), ...counted].slice(-200)
+    await mutateState(directory, `turn.account-usage:${goalID}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goalID)
+      if (g) {
+        g.tokensUsed += tokenDelta
+        g.costUsed = (g.costUsed ?? 0) + costDelta
+        g.timeUsedSeconds += timeDeltaSeconds
+        g.updatedAt = new Date().toISOString()
+      }
+      const rt = s.runtimes.find((item) => item.goalID === goalID)
+      if (rt) {
+        rt.turnTokensUsed = (rt.turnTokensUsed ?? 0) + tokenDelta
+        rt.accountedMessageIDs = mergedWatermark
+        rt.updatedAt = new Date().toISOString()
+      }
+      return s
+    })
+    return { tokenDelta, costDelta, timeDeltaSeconds, counted }
+  }
+
+  async function accountUsageUnlocked(directory: string, goalID: GoalID) {
+    const preState = await readState(directory)
+    const goal = preState.goals.find((g) => g.id === goalID)
+    const runtime = preState.runtimes.find((r) => r.goalID === goalID)
+    if (!goal?.workerSessionID || !runtime) {
+      return { tokenDelta: 0, costDelta: 0, timeDeltaSeconds: 0, counted: [] as string[] }
+    }
+    let tail: SessionMessage[] = []
+    try {
+      tail = await host.readMessages(goal.workerSessionID, 10)
+    } catch {
+      return { tokenDelta: 0, costDelta: 0, timeDeltaSeconds: 0, counted: [] as string[] }
+    }
+    return accountTailUsage(directory, goalID, runtime, tail)
+  }
+
   async function continueTurnUnlocked(directory: string, goalID: GoalID, opts?: { forceFinish?: boolean; force?: boolean }) {
     // Read state for pre-checks (lease validity, worker idle)
     const preState = await readState(directory)
@@ -424,42 +490,7 @@ export function createGoalService(host: LoopHost): GoalService {
     // it would undercount by orders of magnitude. The watermark keeps overlapping
     // transcript tails from double counting; turn-level attribution is approximate,
     // lifetime totals are exact.
-    const seenIDs = new Set(freshRuntime.accountedMessageIDs ?? [])
-    let tokenDelta = 0
-    let costDelta = 0
-    let timeDeltaSeconds = 0
-    const newlyAccounted: string[] = []
-    for (const m of transcriptTail ?? []) {
-      if (m.role !== "assistant" || !m.messageID || !m.completedAt) continue
-      if (seenIDs.has(m.messageID)) continue
-      seenIDs.add(m.messageID)
-      newlyAccounted.push(m.messageID)
-      if (m.tokens) {
-        tokenDelta += (m.tokens.input || 0) + (m.tokens.output || 0) + (m.tokens.reasoning || 0)
-          + (m.tokens.cacheRead || 0) + (m.tokens.cacheWrite || 0)
-      }
-      if (typeof m.cost === "number") costDelta += m.cost
-      if (typeof m.durationMs === "number") timeDeltaSeconds += m.durationMs / 1000
-    }
-    if (newlyAccounted.length > 0) {
-      const mergedWatermark = [...(freshRuntime.accountedMessageIDs ?? []), ...newlyAccounted].slice(-200)
-      await mutateState(directory, `turn.account-usage:${goalID}`, async (s) => {
-        const g = s.goals.find((item) => item.id === goalID)
-        if (g) {
-          g.tokensUsed += tokenDelta
-          g.costUsed = (g.costUsed ?? 0) + costDelta
-          g.timeUsedSeconds += timeDeltaSeconds
-          g.updatedAt = new Date().toISOString()
-        }
-        const rt = s.runtimes.find((item) => item.goalID === goalID)
-        if (rt) {
-          rt.turnTokensUsed = (rt.turnTokensUsed ?? 0) + tokenDelta
-          rt.accountedMessageIDs = mergedWatermark
-          rt.updatedAt = new Date().toISOString()
-        }
-        return s
-      })
-    }
+    await accountTailUsage(directory, goalID, freshRuntime, transcriptTail ?? [])
 
     // Deterministic verification pre-screen (cheap, no shell)
     let verification: ContinuationContext["verification"]
@@ -805,5 +836,9 @@ export function createGoalService(host: LoopHost): GoalService {
     return withGoalOperation(goalID, () => nudgeUnlocked(directory, goalID))
   }
 
-  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile }
+  function accountUsage(directory: string, goalID: GoalID) {
+    return withGoalOperation(goalID, () => accountUsageUnlocked(directory, goalID))
+  }
+
+  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage }
 }

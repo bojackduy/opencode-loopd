@@ -114,6 +114,59 @@ function countdownLabel(targetIso: string | undefined, now: number): string | un
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
 }
 
+export function formatTokens(n: number | undefined): string {
+  if (!n) return "0"
+  if (n < 1000) return String(Math.round(n))
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`
+  return `${(n / 1_000_000).toFixed(2)}M`
+}
+
+export function formatCost(c: number | undefined): string {
+  if (!c) return "$0.00"
+  if (c < 0.01) return `$${c.toFixed(4)}`
+  return `$${c.toFixed(2)}`
+}
+
+export function formatDuration(seconds: number | undefined): string {
+  if (!seconds || seconds <= 0) return "0s"
+  if (seconds < 60) return `${Math.round(seconds)}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m`
+  return `${(seconds / 3600).toFixed(1)}h`
+}
+
+/** Agent color from OpenCode metadata: theme name → theme value, hex → as-is. */
+export function agentColor(color: string | undefined, theme: TuiThemeCurrent): string {
+  if (!color) return theme.text as unknown as string
+  const named: Record<string, unknown> = {
+    primary: theme.primary,
+    secondary: (theme as any).secondary,
+    accent: theme.accent,
+    success: theme.success,
+    warning: theme.warning,
+    error: theme.error,
+    info: theme.info,
+  }
+  if (named[color]) return named[color] as string
+  if (/^#[0-9a-fA-F]{3,8}$/.test(color)) return color
+  return theme.text as unknown as string
+}
+
+export interface AgentMeta {
+  color?: string
+  mode?: string
+}
+
+export function indexAgents(list: Array<{ name: string; color?: string; mode?: string }>): Record<string, AgentMeta> {
+  const map: Record<string, AgentMeta> = {}
+  for (const a of list) {
+    if (!a?.name) continue
+    map[a.name] = { color: a.color, mode: a.mode }
+    map[a.name.toLowerCase()] = { color: a.color, mode: a.mode }
+  }
+  return map
+}
+
 export function LoopDashboard(props: Props) {
   const theme = () => props.api.theme.current
   const [mode, setMode] = createSignal<Mode>("normal")
@@ -127,6 +180,7 @@ export function LoopDashboard(props: Props) {
   const [showHelp, setShowHelp] = createSignal(false)
   const [showCompleted, setShowCompleted] = createSignal(false)
   const [clock, setClock] = createSignal(Date.now())
+  const [agentIndex, setAgentIndex] = createSignal<Record<string, AgentMeta>>({})
   let inputEl: InputRenderable | undefined
   let focusTimer: ReturnType<typeof setTimeout> | undefined
   const client = createControlClient(props.directory)
@@ -154,6 +208,14 @@ export function LoopDashboard(props: Props) {
     }
   }
   refresh()
+  async function refreshAgents() {
+    try {
+      const res = await (props.api.client as any)?.app?.agents?.()
+      const list = (res as any)?.data ?? res ?? []
+      if (Array.isArray(list)) setAgentIndex(indexAgents(list))
+    } catch { /* agent colors are decorative — dashboard works without them */ }
+  }
+  refreshAgents()
   const unsubs = [
     props.api.event.on("session.idle", () => refresh()),
     props.api.event.on("session.status", () => refresh()),
@@ -476,11 +538,33 @@ export function LoopDashboard(props: Props) {
               const lp = () => goal().lastProgress
               const blk = () => goal().blocker
               return (
-                <box flexDirection="column" border={true} borderColor={borderColorForStatus(goal().status, theme())} padding={1} flexShrink={0} maxHeight={10}>
+                <box flexDirection="column" border={true} borderColor={borderColorForStatus(goal().status, theme())} padding={1} flexShrink={0} maxHeight={13}>
                   <text>
                     <span style={{ fg: statusColor(goal().status, theme()), bold: true }}>{statusIcon(goal().status)} {goal().name}</span>
                     <span style={{ fg: statusColor(goal().status, theme()) }}> {goal().status.toUpperCase()}</span>
                     {rt() && <><span style={{ fg: theme().textMuted }}> │ </span><span style={{ fg: phaseColor(rt()!.phase, theme()), bold: true }}>{phaseIcon(rt()!.phase)} {rt()!.phase}</span><span style={{ fg: theme().textMuted }}> run {rt()!.runCount} (budget {rt()!.budgetTurnCount})</span></>}
+                    {(() => {
+                      const agentName = goal().config.agent
+                      const meta = agentName ? (agentIndex()[agentName] ?? agentIndex()[agentName.toLowerCase()]) : undefined
+                      const model = goal().config.model
+                      const slash = model?.indexOf("/") ?? -1
+                      return (<>
+                        {"\n"}
+                        <span style={{ fg: theme().textMuted }}>🤖 </span>
+                        {agentName
+                          ? <><span style={{ fg: agentColor(meta?.color, theme()) as any, bold: true }}>{agentName}</span>{meta?.mode && <span style={{ fg: theme().textMuted }}> ({meta.mode})</span>}</>
+                          : <span style={{ fg: theme().textMuted }}>parent default</span>}
+                        <span style={{ fg: theme().textMuted }}> │ 🧠 </span>
+                        {model && slash > 0
+                          ? <><span style={{ fg: theme().textMuted }}>{model.slice(0, slash)}/</span><span style={{ fg: theme().info, bold: true }}>{model.slice(slash + 1)}</span></>
+                          : <span style={{ fg: theme().textMuted }}>session default</span>}
+                        <span style={{ fg: theme().textMuted }}> │ 💰 </span>
+                        <span style={{ fg: theme().warning, bold: true }}>{formatTokens(goal().tokensUsed)}</span>
+                        <span style={{ fg: theme().textMuted }}> tokens · </span>
+                        <span style={{ fg: theme().success, bold: true }}>{formatCost((goal() as any).costUsed)}</span>
+                        <span style={{ fg: theme().textMuted }}> · {formatDuration(goal().timeUsedSeconds)}</span>
+                      </>)
+                    })()}
                     {"\n"}
                     <span style={{ fg: theme().text }}>{goal().objective.slice(0, 160)}</span>
                     {lp() && <><span style={{ fg: theme().success }}>{"\n"}✔ </span><span style={{ fg: theme().text }}>{lp()!.summary.slice(0, 100)}</span><span style={{ fg: theme().textMuted }}> → {lp()!.next?.slice(0, 60) || ""}</span></>}

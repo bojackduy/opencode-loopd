@@ -377,11 +377,20 @@ export function goalTools(
           at: new Date().toISOString(),
         }
 
+        // Fold final-turn usage: no later turn will read the tail to account it.
+        // Merged here so the final writeState below doesn't clobber fresh totals.
+        const finalUsage = await goalService.accountUsage(dir, goal.id)
+        goal.tokensUsed += finalUsage.tokenDelta
+        goal.costUsed = (goal.costUsed ?? 0) + finalUsage.costDelta
+        goal.timeUsedSeconds += finalUsage.timeDeltaSeconds
+
         const runtime = state.runtimes.find((r) => r.goalID === goal.id)
         if (runtime) {
           Object.assign(runtime, releaseLease(runtime))
           runtime.activeRunID = undefined
           runtime.lastError = undefined
+          runtime.turnTokensUsed = (runtime.turnTokensUsed ?? 0) + finalUsage.tokenDelta
+          runtime.accountedMessageIDs = [...(runtime.accountedMessageIDs ?? []), ...finalUsage.counted].slice(-200)
           runtime.updatedAt = new Date().toISOString()
 
           // Schedule: interval requeue — count this completion and set nextRunAt
@@ -481,11 +490,19 @@ export function goalTools(
           at: new Date().toISOString(),
         }
 
+        // Fold final-turn usage: a blocked goal gets no later accounting turn.
+        const finalUsage = await goalService.accountUsage(dir, goal.id)
+        goal.tokensUsed += finalUsage.tokenDelta
+        goal.costUsed = (goal.costUsed ?? 0) + finalUsage.costDelta
+        goal.timeUsedSeconds += finalUsage.timeDeltaSeconds
+
         const runtime = state.runtimes.find((r) => r.goalID === goal.id)
         if (runtime) {
           Object.assign(runtime, releaseLease(runtime))
           runtime.activeRunID = undefined
           runtime.lastError = undefined
+          runtime.turnTokensUsed = (runtime.turnTokensUsed ?? 0) + finalUsage.tokenDelta
+          runtime.accountedMessageIDs = [...(runtime.accountedMessageIDs ?? []), ...finalUsage.counted].slice(-200)
           runtime.updatedAt = new Date().toISOString()
         }
 

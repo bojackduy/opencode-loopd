@@ -338,6 +338,10 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       if (lastBlocked !== undefined && nowBlocked - lastBlocked < 60_000) return true
       recentForceFinishBlocked.set(blockedKey, nowBlocked)
       let shouldNotifyBlocked = false
+      // Fold final-turn usage: a blocked goal gets no later accounting turn.
+      await goalService.accountUsage(directory, goalID).catch(() => ({
+        tokenDelta: 0, costDelta: 0, timeDeltaSeconds: 0, counted: [] as string[],
+      }))
       const blockedState = await mutateState(directory, `idle.blocked:${goalID}`, async (s) => {
         const g = s.goals.find((item) => item.id === goalID)
         if (!g) return s

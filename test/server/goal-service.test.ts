@@ -129,6 +129,37 @@ describe("Goal Service", () => {
       expect(after.goals[0].timeUsedSeconds).toBe(4)
     })
 
+    it("folds final-turn usage on demand without double counting", async () => {
+      const { goal } = await svc.start(dir, {
+        name: "final-usage",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+      })
+      const workerID = goal.workerSessionID!
+      const transcript = host.messages.get(workerID) || []
+      transcript.push({
+        role: "assistant",
+        content: "last turn",
+        timestamp: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        messageID: "asst-final",
+        tokens: { input: 10, output: 5, reasoning: 0, cacheRead: 100, cacheWrite: 50 },
+        cost: 0.001,
+        durationMs: 2000,
+      })
+      host.messages.set(workerID, transcript)
+
+      const first = await svc.accountUsage(dir, goal.id)
+      expect(first.tokenDelta).toBe(165)
+      expect((await readState(dir)).goals[0].tokensUsed).toBe(165)
+      expect((await readState(dir)).goals[0].costUsed).toBe(0.001)
+
+      const second = await svc.accountUsage(dir, goal.id)
+      expect(second.tokenDelta).toBe(0)
+      expect((await readState(dir)).goals[0].tokensUsed).toBe(165)
+    })
+
     it("records owner session ID", async () => {
       await svc.start(dir, {
         name: "test",

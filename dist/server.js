@@ -1231,6 +1231,12 @@ function createLoopEngine(options) {
         return true;
       recentForceFinishBlocked.set(blockedKey, nowBlocked);
       let shouldNotifyBlocked = false;
+      await goalService.accountUsage(directory, goalID).catch(() => ({
+        tokenDelta: 0,
+        costDelta: 0,
+        timeDeltaSeconds: 0,
+        counted: []
+      }));
       const blockedState = await mutateState(directory, `idle.blocked:${goalID}`, async (s) => {
         const g = s.goals.find((item) => item.id === goalID);
         if (!g)
@@ -2187,6 +2193,63 @@ function createGoalService(host) {
     }
     return { goal, worker };
   }
+  async function accountTailUsage(directory, goalID, runtime, tail) {
+    const seenIDs = new Set(runtime.accountedMessageIDs ?? []);
+    let tokenDelta = 0;
+    let costDelta = 0;
+    let timeDeltaSeconds = 0;
+    const counted = [];
+    for (const m of tail) {
+      if (m.role !== "assistant" || !m.messageID || !m.completedAt)
+        continue;
+      if (seenIDs.has(m.messageID))
+        continue;
+      seenIDs.add(m.messageID);
+      counted.push(m.messageID);
+      if (m.tokens) {
+        tokenDelta += (m.tokens.input || 0) + (m.tokens.output || 0) + (m.tokens.reasoning || 0) + (m.tokens.cacheRead || 0) + (m.tokens.cacheWrite || 0);
+      }
+      if (typeof m.cost === "number")
+        costDelta += m.cost;
+      if (typeof m.durationMs === "number")
+        timeDeltaSeconds += m.durationMs / 1000;
+    }
+    if (counted.length === 0)
+      return { tokenDelta: 0, costDelta: 0, timeDeltaSeconds: 0, counted };
+    const mergedWatermark = [...runtime.accountedMessageIDs ?? [], ...counted].slice(-200);
+    await mutateState(directory, `turn.account-usage:${goalID}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goalID);
+      if (g) {
+        g.tokensUsed += tokenDelta;
+        g.costUsed = (g.costUsed ?? 0) + costDelta;
+        g.timeUsedSeconds += timeDeltaSeconds;
+        g.updatedAt = new Date().toISOString();
+      }
+      const rt = s.runtimes.find((item) => item.goalID === goalID);
+      if (rt) {
+        rt.turnTokensUsed = (rt.turnTokensUsed ?? 0) + tokenDelta;
+        rt.accountedMessageIDs = mergedWatermark;
+        rt.updatedAt = new Date().toISOString();
+      }
+      return s;
+    });
+    return { tokenDelta, costDelta, timeDeltaSeconds, counted };
+  }
+  async function accountUsageUnlocked(directory, goalID) {
+    const preState = await readState(directory);
+    const goal = preState.goals.find((g) => g.id === goalID);
+    const runtime = preState.runtimes.find((r) => r.goalID === goalID);
+    if (!goal?.workerSessionID || !runtime) {
+      return { tokenDelta: 0, costDelta: 0, timeDeltaSeconds: 0, counted: [] };
+    }
+    let tail = [];
+    try {
+      tail = await host.readMessages(goal.workerSessionID, 10);
+    } catch {
+      return { tokenDelta: 0, costDelta: 0, timeDeltaSeconds: 0, counted: [] };
+    }
+    return accountTailUsage(directory, goalID, runtime, tail);
+  }
   async function continueTurnUnlocked(directory, goalID, opts) {
     const preState = await readState(directory);
     const goal = preState.goals.find((g) => g.id === goalID);
@@ -2261,45 +2324,7 @@ function createGoalService(host) {
     } catch {
       transcriptTail = [];
     }
-    const seenIDs = new Set(freshRuntime.accountedMessageIDs ?? []);
-    let tokenDelta = 0;
-    let costDelta = 0;
-    let timeDeltaSeconds = 0;
-    const newlyAccounted = [];
-    for (const m of transcriptTail ?? []) {
-      if (m.role !== "assistant" || !m.messageID || !m.completedAt)
-        continue;
-      if (seenIDs.has(m.messageID))
-        continue;
-      seenIDs.add(m.messageID);
-      newlyAccounted.push(m.messageID);
-      if (m.tokens) {
-        tokenDelta += (m.tokens.input || 0) + (m.tokens.output || 0) + (m.tokens.reasoning || 0) + (m.tokens.cacheRead || 0) + (m.tokens.cacheWrite || 0);
-      }
-      if (typeof m.cost === "number")
-        costDelta += m.cost;
-      if (typeof m.durationMs === "number")
-        timeDeltaSeconds += m.durationMs / 1000;
-    }
-    if (newlyAccounted.length > 0) {
-      const mergedWatermark = [...freshRuntime.accountedMessageIDs ?? [], ...newlyAccounted].slice(-200);
-      await mutateState(directory, `turn.account-usage:${goalID}`, async (s) => {
-        const g = s.goals.find((item) => item.id === goalID);
-        if (g) {
-          g.tokensUsed += tokenDelta;
-          g.costUsed = (g.costUsed ?? 0) + costDelta;
-          g.timeUsedSeconds += timeDeltaSeconds;
-          g.updatedAt = new Date().toISOString();
-        }
-        const rt = s.runtimes.find((item) => item.goalID === goalID);
-        if (rt) {
-          rt.turnTokensUsed = (rt.turnTokensUsed ?? 0) + tokenDelta;
-          rt.accountedMessageIDs = mergedWatermark;
-          rt.updatedAt = new Date().toISOString();
-        }
-        return s;
-      });
-    }
+    await accountTailUsage(directory, goalID, freshRuntime, transcriptTail ?? []);
     let verification;
     try {
       const artifactDir = freshGoal.config.artifactDir;
@@ -2611,7 +2636,10 @@ function createGoalService(host) {
   function nudge(directory, goalID) {
     return withGoalOperation(goalID, () => nudgeUnlocked(directory, goalID));
   }
-  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile };
+  function accountUsage(directory, goalID) {
+    return withGoalOperation(goalID, () => accountUsageUnlocked(directory, goalID));
+  }
+  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage };
 }
 
 // src/application/schedule-worker.ts
@@ -3068,11 +3096,17 @@ ${failureDetails.slice(0, 500)}`,
           evidence: args.evidence,
           at: new Date().toISOString()
         };
+        const finalUsage = await goalService.accountUsage(dir, goal.id);
+        goal.tokensUsed += finalUsage.tokenDelta;
+        goal.costUsed = (goal.costUsed ?? 0) + finalUsage.costDelta;
+        goal.timeUsedSeconds += finalUsage.timeDeltaSeconds;
         const runtime = state.runtimes.find((r) => r.goalID === goal.id);
         if (runtime) {
           Object.assign(runtime, releaseLease(runtime));
           runtime.activeRunID = undefined;
           runtime.lastError = undefined;
+          runtime.turnTokensUsed = (runtime.turnTokensUsed ?? 0) + finalUsage.tokenDelta;
+          runtime.accountedMessageIDs = [...runtime.accountedMessageIDs ?? [], ...finalUsage.counted].slice(-200);
           runtime.updatedAt = new Date().toISOString();
           const schedule = goal.config.schedule;
           if (schedule && typeof schedule.everyMs === "number" && schedule.everyMs >= 1000) {
@@ -3157,11 +3191,17 @@ ${failureDetails.slice(0, 500)}`,
           needed: args.needed,
           at: new Date().toISOString()
         };
+        const finalUsage = await goalService.accountUsage(dir, goal.id);
+        goal.tokensUsed += finalUsage.tokenDelta;
+        goal.costUsed = (goal.costUsed ?? 0) + finalUsage.costDelta;
+        goal.timeUsedSeconds += finalUsage.timeDeltaSeconds;
         const runtime = state.runtimes.find((r) => r.goalID === goal.id);
         if (runtime) {
           Object.assign(runtime, releaseLease(runtime));
           runtime.activeRunID = undefined;
           runtime.lastError = undefined;
+          runtime.turnTokensUsed = (runtime.turnTokensUsed ?? 0) + finalUsage.tokenDelta;
+          runtime.accountedMessageIDs = [...runtime.accountedMessageIDs ?? [], ...finalUsage.counted].slice(-200);
           runtime.updatedAt = new Date().toISOString();
         }
         await writeState(dir, state);
