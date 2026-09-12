@@ -983,6 +983,7 @@ function createLoopEngine(options) {
   const unknownStatusThreshold = Math.max(1, options.unknownStatusThreshold ?? 3);
   const stuckRunningMs = options.stuckRunningMs ?? 10 * 60000;
   const idleUnconfirmedMs = options.idleUnconfirmedMs ?? 5 * 60000;
+  const idleRecoverMs = options.idleRecoverMs ?? 3 * 60000;
   let running = false;
   let maintenanceTimer;
   let knownWorkerSessions = new Set;
@@ -1106,6 +1107,8 @@ function createLoopEngine(options) {
       } else {
         const part = event.properties?.part;
         if (part?.messageID && part.messageID === rt.activeAssistantMessageID) {
+          if (rt.activeAssistantCompletedAt)
+            return s;
           Object.assign(rt, recordActivity(rt));
           matched = true;
         }
@@ -1735,6 +1738,56 @@ function createLoopEngine(options) {
             return s;
           });
           await logServerEvent(directory, "maintenance.worker-recovered", { goalID: goal.id });
+        }
+        if (status === "idle" && runtime.phase === "running") {
+          const lastSignal = Math.max(runtime.lastActivityAt ? Date.parse(runtime.lastActivityAt) : 0, runtime.lastRunAt ? Date.parse(runtime.lastRunAt) : 0, runtime.turnStartedAt ? Date.parse(runtime.turnStartedAt) : 0);
+          const quietMs = Date.now() - lastSignal;
+          if (lastSignal > 0 && quietMs > idleRecoverMs) {
+            const generation = runtime.runGeneration;
+            const stalledRunID = runtime.activeRunID;
+            let clearedToolCalls = 0;
+            let recovered = false;
+            const recoveredState = await mutateState(directory, `maintenance.idle-recover:${goal.id}`, async (s) => {
+              const g = s.goals.find((item) => item.id === goal.id);
+              const rt = s.runtimes.find((r) => r.goalID === goal.id);
+              if (!g || !rt || g.status !== "active")
+                return s;
+              if (rt.phase !== "running")
+                return s;
+              if (rt.runGeneration !== generation)
+                return s;
+              clearedToolCalls = rt.activeToolCallIDs?.length ?? 0;
+              Object.assign(rt, releaseLease(rt));
+              rt.activeRunID = undefined;
+              rt.lastWorkerStatus = "idle";
+              rt.idleConfirmFailedAt = undefined;
+              rt.idleConfirmFailedGeneration = undefined;
+              rt.idleStuckNotifiedGeneration = undefined;
+              recovered = true;
+              return s;
+            });
+            if (recovered) {
+              await appendEvent(directory, {
+                version: 1,
+                eventID: randomUUID2(),
+                goalID: goal.id,
+                type: "run.recovered",
+                runID: stalledRunID ?? "unknown",
+                quietSeconds: Math.floor(quietMs / 1000),
+                clearedToolCalls,
+                timestamp: new Date().toISOString(),
+                revision: recoveredState.revision
+              });
+              await logServerEvent(directory, "maintenance.idle-recovered", {
+                goalID: goal.id,
+                generation,
+                quietSeconds: Math.floor(quietMs / 1000),
+                clearedToolCalls
+              });
+              await continueGoal(goal.id);
+              continue;
+            }
+          }
         }
         if (status === "idle" && runtime.phase === "running" && runtime.idleConfirmFailedGeneration === runtime.runGeneration && runtime.idleConfirmFailedAt && runtime.idleStuckNotifiedGeneration !== runtime.runGeneration && Date.now() - Date.parse(runtime.idleConfirmFailedAt) > idleUnconfirmedMs) {
           const failedAt = runtime.idleConfirmFailedAt;

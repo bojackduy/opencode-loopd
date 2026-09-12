@@ -43,6 +43,8 @@ export interface LoopEngineOptions {
   stuckRunningMs?: number
   /** Quiet time before an unconfirmable idle turn is reported stuck. Default 5 min. */
   idleUnconfirmedMs?: number
+  /** Quiet time before a running-phase stall on an idle worker is auto-recovered. Default 3 min. */
+  idleRecoverMs?: number
 }
 
 export interface LoopEngine {
@@ -62,6 +64,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
   const unknownStatusThreshold = Math.max(1, options.unknownStatusThreshold ?? 3)
   const stuckRunningMs = options.stuckRunningMs ?? 10 * 60_000
   const idleUnconfirmedMs = options.idleUnconfirmedMs ?? 5 * 60_000
+  const idleRecoverMs = options.idleRecoverMs ?? 3 * 60_000
 
   let running = false
   let maintenanceTimer: ReturnType<typeof setInterval> | undefined
@@ -209,6 +212,10 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       } else {
         const part = event.properties?.part
         if (part?.messageID && part.messageID === rt.activeAssistantMessageID) {
+          // Parts still trickle in after a message completes (tool-result
+          // rendering, delayed part events). Treating that as work vetoed idle
+          // confirmation indefinitely — a completed message is not activity.
+          if (rt.activeAssistantCompletedAt) return s
           Object.assign(rt, recordActivity(rt))
           matched = true
         }
@@ -971,6 +978,65 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
             return s
           })
           await logServerEvent(directory, "maintenance.worker-recovered", { goalID: goal.id })
+        }
+
+        // Self-heal a running-phase stall. OpenCode reporting the session idle
+        // is authoritative evidence that nothing is streaming there, so after a
+        // long quiet the turn is over and some veto (phantom tool call, late
+        // part trickle, unconfirmable transcript) is holding the lease. Detection
+        // without recovery just moved the manual nudge onto the owner; this does
+        // the same thing the nudge did, fenced on generation so a turn that
+        // started in the meantime is never clobbered.
+        if (status === "idle" && runtime.phase === "running") {
+          const lastSignal = Math.max(
+            runtime.lastActivityAt ? Date.parse(runtime.lastActivityAt) : 0,
+            runtime.lastRunAt ? Date.parse(runtime.lastRunAt) : 0,
+            runtime.turnStartedAt ? Date.parse(runtime.turnStartedAt) : 0,
+          )
+          const quietMs = Date.now() - lastSignal
+          if (lastSignal > 0 && quietMs > idleRecoverMs) {
+            const generation = runtime.runGeneration
+            const stalledRunID = runtime.activeRunID
+            let clearedToolCalls = 0
+            let recovered = false
+            const recoveredState = await mutateState(directory, `maintenance.idle-recover:${goal.id}`, async (s) => {
+              const g = s.goals.find((item) => item.id === goal.id)
+              const rt = s.runtimes.find((r) => r.goalID === goal.id)
+              if (!g || !rt || g.status !== "active") return s
+              if (rt.phase !== "running") return s
+              if (rt.runGeneration !== generation) return s
+              clearedToolCalls = rt.activeToolCallIDs?.length ?? 0
+              Object.assign(rt, releaseLease(rt))
+              rt.activeRunID = undefined
+              rt.lastWorkerStatus = "idle"
+              rt.idleConfirmFailedAt = undefined
+              rt.idleConfirmFailedGeneration = undefined
+              rt.idleStuckNotifiedGeneration = undefined
+              recovered = true
+              return s
+            })
+            if (recovered) {
+              await appendEvent(directory, {
+                version: 1,
+                eventID: randomUUID(),
+                goalID: goal.id,
+                type: "run.recovered",
+                runID: stalledRunID ?? "unknown",
+                quietSeconds: Math.floor(quietMs / 1000),
+                clearedToolCalls,
+                timestamp: new Date().toISOString(),
+                revision: recoveredState.revision,
+              } satisfies LoopEvent)
+              await logServerEvent(directory, "maintenance.idle-recovered", {
+                goalID: goal.id,
+                generation,
+                quietSeconds: Math.floor(quietMs / 1000),
+                clearedToolCalls,
+              })
+              await continueGoal(goal.id)
+              continue
+            }
+          }
         }
 
         // Unconfirmable-idle watchdog: status reads idle but the turn cannot

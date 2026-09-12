@@ -92,6 +92,13 @@ export interface RunStuckEvent extends BaseEvent {
   stuckSeconds: number
 }
 
+export interface RunRecoveredEvent extends BaseEvent {
+  type: "run.recovered"
+  runID: string
+  quietSeconds: number
+  clearedToolCalls: number
+}
+
 export interface RuntimePhaseChangedEvent extends BaseEvent {
   type: "runtime.phase_changed"
   from: RuntimePhase
@@ -136,6 +143,7 @@ export type LoopEvent =
   | RunFailedEvent
   | IdleConfirmFailedEvent
   | RunStuckEvent
+  | RunRecoveredEvent
   | RuntimePhaseChangedEvent
   | CompactionStartedEvent
   | CompactionCompletedEvent

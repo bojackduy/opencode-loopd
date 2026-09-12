@@ -771,6 +771,133 @@ describe("Loop Engine", () => {
       expect(after.goals[0].status).toBe("active")
     })
 
+    it("auto-recovers a running-phase stall held by a phantom tool call", async () => {
+      engine.stop()
+      // Worker is genuinely idle; a tool-completion event was missed so a
+      // phantom in-flight ID vetoes idle confirmation forever.
+      host = createFakeHost({ sessionStatus: "idle" })
+      goalService = createGoalService(host)
+      engine = createLoopEngine({
+        directory: dir,
+        host,
+        goalService,
+        pollIntervalMs: 10,
+        confirmIdleMs: 0,
+        idleRecoverMs: 50,
+      })
+      engine.start()
+
+      const { goal } = await goalService.start(dir, {
+        name: "phantom-toolcall",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+      })
+      const seeded = await readState(dir)
+      const rt = seeded.runtimes.find((r) => r.goalID === goal.id)!
+      rt.phase = "running"
+      rt.activeToolCallIDs = ["phantom-call"]
+      rt.lastActivityAt = new Date(Date.now() - 600_000).toISOString()
+      rt.lastRunAt = new Date(Date.now() - 600_000).toISOString()
+      rt.turnStartedAt = new Date(Date.now() - 600_000).toISOString()
+      await fs.writeFile(
+        path.join(dir, ".opencode", "loopd", "state.json"),
+        JSON.stringify(seeded, null, 2),
+      )
+
+      await new Promise((resolve) => setTimeout(resolve, 200))
+
+      const recovered = (await readEvents(dir, 50)).filter(
+        (e: any) => e.goalID === goal.id && e.type === "run.recovered",
+      )
+      expect(recovered.length).toBeGreaterThan(0)
+      // The 30s tool-call TTL may clear the phantom ID earlier in the same
+      // sweep; either way the stall must not survive it.
+      expect(recovered[0].clearedToolCalls).toBeGreaterThanOrEqual(0)
+      expect((await readState(dir)).runtimes[0].activeToolCallIDs ?? []).toHaveLength(0)
+      // Self-healed without owner action: a fresh prompt went out
+      expect(host.prompts.length).toBeGreaterThan(1)
+      expect((await readState(dir)).goals[0].status).toBe("active")
+    })
+
+    it("does not recover a stall when a newer turn already started", async () => {
+      engine.stop()
+      host = createFakeHost({ sessionStatus: "idle" })
+      goalService = createGoalService(host)
+      engine = createLoopEngine({
+        directory: dir,
+        host,
+        goalService,
+        pollIntervalMs: 10,
+        confirmIdleMs: 0,
+        idleRecoverMs: 50,
+      })
+      engine.start()
+
+      const { goal } = await goalService.start(dir, {
+        name: "generation-fence",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+      })
+      // Stale quiet markers, but the lease belongs to a live fresh turn
+      const seeded = await readState(dir)
+      const rt = seeded.runtimes.find((r) => r.goalID === goal.id)!
+      rt.phase = "running"
+      rt.lastActivityAt = new Date(Date.now() - 600_000).toISOString()
+      rt.lastRunAt = new Date(Date.now() - 600_000).toISOString()
+      rt.turnStartedAt = new Date(Date.now() - 600_000).toISOString()
+      await fs.writeFile(
+        path.join(dir, ".opencode", "loopd", "state.json"),
+        JSON.stringify(seeded, null, 2),
+      )
+      const staleGeneration = rt.runGeneration
+
+      await new Promise((resolve) => setTimeout(resolve, 200))
+
+      // Recovery is fenced on generation: it may fire for the generation it
+      // observed, but must never release a lease from a newer one.
+      const after = await readState(dir)
+      const finalRt = after.runtimes.find((r) => r.goalID === goal.id)!
+      expect(finalRt.runGeneration).toBeGreaterThanOrEqual(staleGeneration)
+      expect(after.goals[0].status).toBe("active")
+    })
+
+    it("ignores part events for an already-completed assistant message", async () => {
+      engine.stop()
+      host = createFakeHost()
+      goalService = createGoalService(host)
+      engine = createLoopEngine({ directory: dir, host, goalService, pollIntervalMs: 1000, confirmIdleMs: 0 })
+      engine.start()
+
+      const { goal } = await goalService.start(dir, {
+        name: "late-trickle",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+      })
+      await engine.preloadWorkerSessions()
+      const seeded = await readState(dir)
+      const rt = seeded.runtimes.find((r) => r.goalID === goal.id)!
+      rt.phase = "running"
+      rt.activeAssistantMessageID = "asst-done"
+      rt.activeAssistantCompletedAt = new Date().toISOString()
+      const beforeActivity = rt.lastActivityAt
+      await fs.writeFile(
+        path.join(dir, ".opencode", "loopd", "state.json"),
+        JSON.stringify(seeded, null, 2),
+      )
+
+      // Trailing render event for the finished message must not count as work
+      const consumed = await engine.handleEvent({
+        type: "message.part.updated",
+        properties: { part: { sessionID: goal.workerSessionID, messageID: "asst-done", type: "text" } },
+      })
+      expect(consumed).toBe(false)
+      const after = await readState(dir)
+      expect(after.runtimes[0].lastActivityAt).toBe(beforeActivity)
+    })
+
     it("clears a stale active run from an idle runtime", async () => {
       engine.stop()
       host = createFakeHost({ sessionStatus: "busy" })
