@@ -144,6 +144,35 @@ describe("Control Bus", () => {
     expect(state2.goals[0].status).toBe("paused")
   })
 
+  it("aborts the worker session through the bus without changing status", async () => {
+    await client.execute({
+      version: 1,
+      requestID: crypto.randomUUID(),
+      requestedAt: new Date().toISOString(),
+      command: "start",
+      args: { name: "abort-bus", objective: "o", config: { workspaceWrite: false }, ownerSessionID: "owner-1" },
+    })
+
+    const state = await readState(dir)
+    const goalID = state.goals[0].id
+    const workerID = state.goals[0].workerSessionID!
+    expect(host.sessions.has(workerID)).toBe(true)
+
+    const result = await client.execute({
+      version: 1,
+      requestID: crypto.randomUUID(),
+      requestedAt: new Date().toISOString(),
+      command: "abort_worker",
+      goalID,
+    })
+
+    expect(result.ok).toBe(true)
+    const state2 = await client.getState()
+    expect(state2.goals[0].status).toBe("active")
+    expect(state2.goals[0].workerSessionID).toBe(workerID)
+    expect(host.sessions.has(workerID)).toBe(false)
+  })
+
   it("receives events through the bus", async () => {
     await client.execute({
       version: 1,
@@ -168,5 +197,25 @@ describe("Control Bus", () => {
 
     expect(result.ok).toBe(false)
     expect(result.errorCode).toBe("unknown_command")
+  })
+
+  it("keeps processing after an infrastructure failure", async () => {
+    // Break the state directory so polling fails outside per-request handling
+    await fs.rm(dir, { recursive: true, force: true })
+    await fs.writeFile(dir, "not a directory")
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    // Restore and prove the worker still serves commands
+    await fs.rm(dir, { force: true })
+    await fs.mkdir(dir, { recursive: true })
+    const result = await client.execute({
+      version: 1,
+      requestID: crypto.randomUUID(),
+      requestedAt: new Date().toISOString(),
+      command: "start",
+      args: { name: "after-outage", objective: "o", config: { workspaceWrite: false }, ownerSessionID: "owner-1" },
+    }, 5000)
+
+    expect(result.ok).toBe(true)
+    expect(worker.isRunning()).toBe(true)
   })
 })

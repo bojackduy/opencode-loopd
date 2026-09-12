@@ -34,6 +34,14 @@ export interface GoalService {
   nudge(directory: string, goalID: GoalID): Promise<{ ok: boolean; message: string }>
 
   /**
+   * Abort the worker session without changing goal status. Manual kill switch
+   * for sessions spinning outside engine visibility (e.g. OpenCode-internal
+   * error loops): releases the lease and forgets the session so the next turn
+   * starts fresh. Active goals continue afterwards on a new worker.
+   */
+  abortWorker(directory: string, goalID: GoalID): Promise<{ ok: boolean; message: string }>
+
+  /**
    * Fold newly completed worker messages into goal usage totals. Idempotent via
    * the accountedMessageIDs watermark. Returns the deltas that were applied.
    */
@@ -842,9 +850,55 @@ export function createGoalService(host: LoopHost): GoalService {
     return withGoalOperation(goalID, () => nudgeUnlocked(directory, goalID))
   }
 
+  async function abortWorkerUnlocked(directory: string, goalID: GoalID): Promise<{ ok: boolean; message: string }> {
+    const preState = await readState(directory)
+    const goal = preState.goals.find((g) => g.id === goalID)
+    if (!goal) return { ok: false, message: "Goal not found." }
+    const workerID = sessions.get(goalID)?.workerSessionID || goal.workerSessionID
+    if (!workerID) return { ok: false, message: `Goal "${goal.name}" has no worker session to abort.` }
+
+    try {
+      await workers.abortWorker(workerID)
+    } catch {
+      // Best-effort — state cleanup below still detaches the run.
+    }
+    sessions.delete(goalID)
+
+    // NOTE: goal.workerSessionID is deliberately kept. Abort stops the run but
+    // does not delete the OpenCode session — transcript stays browsable via
+    // the dashboard, and the next turn reuses the session. Only the live run
+    // markers are cleared.
+    await mutateState(directory, `goal.abort-worker:${goalID}`, async (s) => {
+      const rt = s.runtimes.find((r) => r.goalID === goalID)
+      if (rt) {
+        Object.assign(rt, releaseLease(rt))
+        rt.activeRunID = undefined
+        rt.activePromptMessageID = undefined
+        rt.activeToolCallIDs = []
+        rt.idleCandidateAt = undefined
+        rt.idleCandidateGeneration = undefined
+        rt.workerAbortedAt = new Date().toISOString()
+        rt.updatedAt = new Date().toISOString()
+      }
+      const g = s.goals.find((item) => item.id === goalID)
+      if (g) g.updatedAt = new Date().toISOString()
+      return s
+    })
+    await logServerEvent(directory, "worker.aborted-manual", { goalID, workerSessionID: workerID })
+    return {
+      ok: true,
+      message: `Worker run for "${goal.name}" aborted, session kept for inspection (status unchanged: ${goal.status}).` +
+        (goal.status === "active" ? " Engine continues the same session next turn." : ""),
+    }
+  }
+
+  function abortWorker(directory: string, goalID: GoalID) {
+    return withGoalOperation(goalID, () => abortWorkerUnlocked(directory, goalID))
+  }
+
   function accountUsage(directory: string, goalID: GoalID) {
     return withGoalOperation(goalID, () => accountUsageUnlocked(directory, goalID))
   }
 
-  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage }
+  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker }
 }

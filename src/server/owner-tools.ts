@@ -199,6 +199,7 @@ export function ownerTools(options: OwnerToolsOptions) {
               unknownStatusCount: (runtime as any).unknownStatusCount,
               lastUnknownStatusAt: (runtime as any).lastUnknownStatusAt,
               workerUnreachableNotifiedAt: (runtime as any).workerUnreachableNotifiedAt,
+              workerAbortedAt: (runtime as any).workerAbortedAt,
               retryAfter: (runtime as any).retryAfter,
               forceFinishRequested: (runtime as any).forceFinishRequested,
               scheduleRunCount: (runtime as any).scheduleRunCount,

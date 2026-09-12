@@ -313,6 +313,7 @@ export function LoopDashboard(props: Props) {
     if (key === "r") { prevent(evt); void executeCommand("resume"); return }
     if (key === "R") { prevent(evt); void executeCommand("retry"); return }
     if (key === "x") { prevent(evt); void executeCommand("clear"); return }
+    if (key === "A") { prevent(evt); void executeCommand("abort"); return }
     if (key === "L") { prevent(evt); setShowLogs((value) => !value); return }
     if (key === "o") {
       prevent(evt)
@@ -338,6 +339,11 @@ export function LoopDashboard(props: Props) {
     const parsed = parseCommand(cmd)
     debugLog("parsed", parsed)
     if (!parsed) { setStatusText("Empty command"); debugLog("empty command"); return }
+    // Immediate feedback: the control round-trip can take seconds (or time
+    // out at 30s), and silence until then reads as "keys do nothing".
+    if (!["help", "logs", "q", "close"].includes(parsed.command)) {
+      setStatusText(`sending ${parsed.command}…`)
+    }
     try {
       switch (parsed.command) {
         case "send": {
@@ -375,6 +381,7 @@ export function LoopDashboard(props: Props) {
         case "resume": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "resume", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
         case "retry": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "retry", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
         case "clear": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "clear", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
+        case "abort": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "abort_worker", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
         // Legacy: keep :goal start but redirect — creation belongs in parent chat
         case "goal": { setStatusText("Create goals via /goal in the parent chat (agent clarifies first). Dashboard: :send to steer the worker."); break }
         case "bug":
@@ -450,7 +457,7 @@ export function LoopDashboard(props: Props) {
           <Show when={showHelp()}>
             <box flexDirection="column" padding={1} border={true} borderColor="yellow" backgroundColor={theme().background} flexShrink={0} maxHeight={14} overflow="hidden">
               <text>
-                <span style={{ fg: "yellow", bold: true }}>━━━ Keys: ? toggle help  c toggle done  : insert  Ctrl+N normal  o open  Bug report  q close ━━━</span>
+                <span style={{ fg: "yellow", bold: true }}>━━━ Keys: ? toggle help  c toggle done  : insert  Ctrl+N normal  o open  A abort worker  q close ━━━</span>
                 <For each={commandHelp().split("\n")}>{(line) => {
                   // Modes / Nav — split into label + segments, color keys vs descs
                   if (line.startsWith("Modes:") || line.startsWith("Nav:")) {
@@ -575,6 +582,7 @@ export function LoopDashboard(props: Props) {
                     <span style={{ fg: statusColor(goal().status, theme()), bold: true }}>{statusIcon(goal().status)} {goal().name}</span>
                     <span style={{ fg: statusColor(goal().status, theme()) }}> {goal().status.toUpperCase()}</span>
                     {rt() && <><span style={{ fg: theme().textMuted }}> │ </span><span style={{ fg: phaseColor(rt()!.phase, theme()), bold: true }}>{phaseIcon(rt()!.phase)} {rt()!.phase}</span><span style={{ fg: theme().textMuted }}> run {rt()!.runCount} (budget {rt()!.budgetTurnCount})</span></>}
+                    {(rt() as any)?.workerAbortedAt && <><span style={{ fg: theme().warning, bold: true }}> │ ⚠ worker aborted </span><span style={{ fg: theme().textMuted }}>{ageLabel((rt() as any).workerAbortedAt, clock())} — session kept, next turn reuses it</span></>}
                     {(() => {
                       const agentName = goal().config.agent
                       const meta = agentName ? (agentIndex()[agentName] ?? agentIndex()[agentName.toLowerCase()]) : undefined

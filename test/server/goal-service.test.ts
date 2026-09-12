@@ -378,6 +378,50 @@ describe("Goal Service", () => {
     })
   })
 
+  describe("abortWorker", () => {
+    it("aborts the worker session and detaches it without changing status", async () => {
+      const { goal } = await svc.start(dir, {
+        name: "abort-me",
+        objective: "o",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+      })
+      const workerID = goal.workerSessionID!
+      expect(host.sessions.has(workerID)).toBe(true)
+
+      const result = await svc.abortWorker(dir, goal.id)
+      expect(result.ok).toBe(true)
+
+      expect(host.sessions.has(workerID)).toBe(false)
+      const state = await readState(dir)
+      expect(state.goals[0].status).toBe("active")
+      // Session link kept: abort stops the run, the OpenCode session and its
+      // transcript stay browsable, and the next turn reuses the session.
+      expect(state.goals[0].workerSessionID).toBe(workerID)
+      expect(state.runtimes[0].workerAbortedAt).toBeTruthy()
+      expect(state.runtimes[0].phase).toBe("idle")
+      expect(state.runtimes[0].activeRunID).toBeUndefined()
+      expect(state.runtimes[0].activePromptMessageID).toBeUndefined()
+    })
+
+    it("reports when there is no worker to abort", async () => {
+      const missing = await svc.abortWorker(dir, "nope" as GoalID)
+      expect(missing.ok).toBe(false)
+
+      const { goal } = await svc.start(dir, {
+        name: "abort-twice",
+        objective: "o",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+      })
+      expect((await svc.abortWorker(dir, goal.id)).ok).toBe(true)
+      // Aborting twice is idempotent: the session link is kept for browsing,
+      // so a repeated abort simply re-confirms instead of erroring.
+      expect((await svc.abortWorker(dir, goal.id)).ok).toBe(true)
+      expect((await readState(dir)).goals[0].workerSessionID).toBe(goal.workerSessionID)
+    })
+  })
+
   describe("prompt startup failure", () => {
     it("blocks a newly created goal when its first prompt cannot be delivered", async () => {
       host.promptWorker = async () => {

@@ -63,6 +63,9 @@ export interface GoalRuntimeState {
   /** Active run ID already reported by the stuck-running watchdog (notify once per run). */
   stuckNotifiedRunID?: string
 
+  /** When the worker run was manually aborted (TUI abort key); cleared on next lease. */
+  workerAbortedAt?: string
+
   /** When idle confirmation first failed for the current generation (unconfirmable-idle tracking). */
   idleConfirmFailedAt?: string
 
@@ -179,6 +182,7 @@ export function acquireLease(rt: GoalRuntimeState, timeoutMs: number): GoalRunti
     idleConfirmFailedAt: undefined,
     idleConfirmFailedGeneration: undefined,
     idleStuckNotifiedGeneration: undefined,
+    workerAbortedAt: undefined,
     activePromptObservedAt: undefined,
     activeAssistantMessageID: undefined,
     activeAssistantCompletedAt: undefined,

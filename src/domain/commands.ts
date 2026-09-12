@@ -56,6 +56,16 @@ export interface SendCommand extends BaseCommand {
   args: { message: string }
 }
 
+/**
+ * Abort the worker session without touching goal status. Manual kill switch
+ * for sessions spinning inside OpenCode (e.g. error→compact→retry loops the
+ * engine cannot see): aborting is the only lever that stops them. If the goal
+ * is active, the engine starts a fresh worker turn afterwards.
+ */
+export interface AbortWorkerCommand extends BaseCommand {
+  command: "abort_worker"
+}
+
 export interface ForceCompleteCommand extends BaseCommand {
   command: "force_complete"
   args: { summary: string; evidence: string }
@@ -92,6 +102,7 @@ export type LoopCommand =
   | RetryGoalCommand
   | ClearGoalCommand
   | SendCommand
+  | AbortWorkerCommand
   | ForceCompleteCommand
   | ForceBlockCommand
   | UpdateGoalCommand

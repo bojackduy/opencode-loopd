@@ -59,11 +59,23 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
     if (running) return
     running = true
     // Process immediately on start, then activate interval if needed
-    processPending()
+    processPending().catch((error) => {
+      void logServerEvent(directory, "control.worker.error", { detail: describeError(error) }).catch(() => {})
+    })
     pollTimer = setInterval(() => {
       if (running && lastProcessDone) {
         lastProcessDone = false
-        processPending().then(() => { lastProcessDone = true })
+        // The reset MUST survive rejection: without the rejection handler a
+        // single infrastructure failure (lock contention, disk hiccup) left
+        // lastProcessDone false forever and the worker silently stopped
+        // processing — every later keypress queued without effect.
+        processPending().then(
+          () => { lastProcessDone = true },
+          (error) => {
+            lastProcessDone = true
+            void logServerEvent(directory, "control.worker.error", { detail: describeError(error) }).catch(() => {})
+          },
+        )
       }
     }, pollMs)
   }
@@ -253,6 +265,22 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
         response = {
           ...base,
           message: `sent to "${goal?.name || request.goalID}"`,
+          stateRevision: state.revision,
+        }
+        break
+      }
+
+      case "abort_worker": {
+        if (!request.goalID) {
+          response = { ...base, ok: false, message: "goalID is required", errorCode: "bad_request" }
+          break
+        }
+        const result = await goalSvc.abortWorker(directory, request.goalID as any)
+        const state = await readState(directory)
+        response = {
+          ...base,
+          ok: result.ok,
+          message: result.message,
           stateRevision: state.revision,
         }
         break

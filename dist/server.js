@@ -63,6 +63,7 @@ function acquireLease(rt, timeoutMs) {
     idleConfirmFailedAt: undefined,
     idleConfirmFailedGeneration: undefined,
     idleStuckNotifiedGeneration: undefined,
+    workerAbortedAt: undefined,
     activePromptObservedAt: undefined,
     activeAssistantMessageID: undefined,
     activeAssistantCompletedAt: undefined,
@@ -627,12 +628,17 @@ function createControlWorker(options) {
     if (running)
       return;
     running = true;
-    processPending();
+    processPending().catch((error) => {
+      logServerEvent(directory, "control.worker.error", { detail: describeError(error) }).catch(() => {});
+    });
     pollTimer = setInterval(() => {
       if (running && lastProcessDone) {
         lastProcessDone = false;
         processPending().then(() => {
           lastProcessDone = true;
+        }, (error) => {
+          lastProcessDone = true;
+          logServerEvent(directory, "control.worker.error", { detail: describeError(error) }).catch(() => {});
         });
       }
     }, pollMs);
@@ -808,6 +814,21 @@ function createControlWorker(options) {
         response = {
           ...base,
           message: `sent to "${goal?.name || request.goalID}"`,
+          stateRevision: state2.revision
+        };
+        break;
+      }
+      case "abort_worker": {
+        if (!request.goalID) {
+          response = { ...base, ok: false, message: "goalID is required", errorCode: "bad_request" };
+          break;
+        }
+        const result = await goalSvc.abortWorker(directory, request.goalID);
+        const state2 = await readState(directory);
+        response = {
+          ...base,
+          ok: result.ok,
+          message: result.message,
           stateRevision: state2.revision
         };
         break;
@@ -2868,10 +2889,48 @@ function createGoalService(host) {
   function nudge(directory, goalID) {
     return withGoalOperation(goalID, () => nudgeUnlocked(directory, goalID));
   }
+  async function abortWorkerUnlocked(directory, goalID) {
+    const preState = await readState(directory);
+    const goal = preState.goals.find((g) => g.id === goalID);
+    if (!goal)
+      return { ok: false, message: "Goal not found." };
+    const workerID = sessions.get(goalID)?.workerSessionID || goal.workerSessionID;
+    if (!workerID)
+      return { ok: false, message: `Goal "${goal.name}" has no worker session to abort.` };
+    try {
+      await workers.abortWorker(workerID);
+    } catch {}
+    sessions.delete(goalID);
+    await mutateState(directory, `goal.abort-worker:${goalID}`, async (s) => {
+      const rt = s.runtimes.find((r) => r.goalID === goalID);
+      if (rt) {
+        Object.assign(rt, releaseLease(rt));
+        rt.activeRunID = undefined;
+        rt.activePromptMessageID = undefined;
+        rt.activeToolCallIDs = [];
+        rt.idleCandidateAt = undefined;
+        rt.idleCandidateGeneration = undefined;
+        rt.workerAbortedAt = new Date().toISOString();
+        rt.updatedAt = new Date().toISOString();
+      }
+      const g = s.goals.find((item) => item.id === goalID);
+      if (g)
+        g.updatedAt = new Date().toISOString();
+      return s;
+    });
+    await logServerEvent(directory, "worker.aborted-manual", { goalID, workerSessionID: workerID });
+    return {
+      ok: true,
+      message: `Worker run for "${goal.name}" aborted, session kept for inspection (status unchanged: ${goal.status}).` + (goal.status === "active" ? " Engine continues the same session next turn." : "")
+    };
+  }
+  function abortWorker(directory, goalID) {
+    return withGoalOperation(goalID, () => abortWorkerUnlocked(directory, goalID));
+  }
   function accountUsage(directory, goalID) {
     return withGoalOperation(goalID, () => accountUsageUnlocked(directory, goalID));
   }
-  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage };
+  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker };
 }
 
 // src/application/schedule-worker.ts
@@ -3730,6 +3789,7 @@ function ownerTools(options) {
               unknownStatusCount: runtime.unknownStatusCount,
               lastUnknownStatusAt: runtime.lastUnknownStatusAt,
               workerUnreachableNotifiedAt: runtime.workerUnreachableNotifiedAt,
+              workerAbortedAt: runtime.workerAbortedAt,
               retryAfter: runtime.retryAfter,
               forceFinishRequested: runtime.forceFinishRequested,
               scheduleRunCount: runtime.scheduleRunCount,
