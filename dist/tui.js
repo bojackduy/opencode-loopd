@@ -427,6 +427,29 @@ function prevent(evt) {
   e.preventDefault?.();
   e.stopPropagation?.();
 }
+function keyName(evt) {
+  return (evt.name || "").toLowerCase();
+}
+function keySeq(evt) {
+  const e = evt;
+  return e.sequence || e.raw || "";
+}
+function isEnterKey(evt) {
+  const name = keyName(evt);
+  if (name === "return" || name === "enter" || name === "kp_enter")
+    return true;
+  const seq = keySeq(evt);
+  return seq === "\r" || seq === `
+`;
+}
+function isEscapeKey(evt) {
+  if (keyName(evt) === "escape" || keyName(evt) === "esc")
+    return true;
+  return keySeq(evt) === "\x1B";
+}
+function isCtrlN(evt) {
+  return Boolean(evt.ctrl) && keyName(evt) === "n";
+}
 function statusColor(status, theme) {
   switch (status) {
     case "active":
@@ -665,9 +688,9 @@ function LoopDashboard(props) {
   onMount(() => {
     try {
       const {
-        writeFileSync
+        appendFileSync
       } = __require("fs");
-      writeFileSync(LOG_FILE, `[${new Date().toISOString()}] dashboard mounted dir=${props.directory} mode=${mode()} dialogOpen=${props.api.ui.dialog.open}
+      appendFileSync(LOG_FILE, `[${new Date().toISOString()}] dashboard mounted dir=${props.directory} mode=${mode()} dialogOpen=${props.api.ui.dialog.open}
 `);
     } catch {}
     debugLog("mounted", "dialogOpen", props.api.ui.dialog.open, "directory", props.directory);
@@ -703,10 +726,17 @@ function LoopDashboard(props) {
     const isQuestion = name === "?" || seq === "?" || raw === "?" || seq.includes("?") || raw.includes("?");
     debugLog("isColon", isColon, "isQuestion", isQuestion, "modeBefore", mode());
     if (mode() === "insert") {
-      if (evt.ctrl && name.toLowerCase() === "n") {
+      if (isEnterKey(evt)) {
+        prevent(evt);
+        debugLog("insert enter -> execute");
+        executeCommand(commandInput());
+        return;
+      }
+      if (isEscapeKey(evt) || isCtrlN(evt)) {
         prevent(evt);
         returnToNormalMode();
-        debugLog("insert -> normal via ctrl+n");
+        debugLog("insert -> normal via esc/ctrl+n");
+        return;
       }
       return;
     }
@@ -2032,18 +2062,6 @@ function LoopDashboard(props) {
       if (mode() !== "insert") {
         if ((evt.name || "").length === 1)
           prevent(evt);
-        return;
-      }
-      if (name === "return" || name === "enter") {
-        prevent(evt);
-        debugLog("input enter -> execute");
-        executeCommand(commandInput());
-        return;
-      }
-      if (evt.ctrl && name.toLowerCase() === "n") {
-        prevent(evt);
-        debugLog("input ctrl+n -> normal");
-        returnToNormalMode();
         return;
       }
     });

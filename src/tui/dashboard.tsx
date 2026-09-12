@@ -29,6 +29,31 @@ function prevent(evt: ParsedKey) {
   e.stopPropagation?.()
 }
 
+/** Key names arriving from different terminals/protocols for the same physical key. */
+function keyName(evt: ParsedKey): string {
+  return ((evt as unknown as { name?: string }).name || "").toLowerCase()
+}
+function keySeq(evt: ParsedKey): string {
+  const e = evt as unknown as { sequence?: string; raw?: string }
+  return e.sequence || e.raw || ""
+}
+
+export function isEnterKey(evt: ParsedKey): boolean {
+  const name = keyName(evt)
+  if (name === "return" || name === "enter" || name === "kp_enter") return true
+  const seq = keySeq(evt)
+  return seq === "\r" || seq === "\n"
+}
+
+export function isEscapeKey(evt: ParsedKey): boolean {
+  if (keyName(evt) === "escape" || keyName(evt) === "esc") return true
+  return keySeq(evt) === "\x1b"
+}
+
+export function isCtrlN(evt: ParsedKey): boolean {
+  return Boolean(evt.ctrl) && keyName(evt) === "n"
+}
+
 type Mode = "normal" | "insert"
 
 interface Props {
@@ -231,7 +256,7 @@ export function LoopDashboard(props: Props) {
   })
 
   onMount(() => {
-    try { const { writeFileSync } = require("node:fs") as typeof import("node:fs"); writeFileSync(LOG_FILE, `[${new Date().toISOString()}] dashboard mounted dir=${props.directory} mode=${mode()} dialogOpen=${props.api.ui.dialog.open}\n`) } catch { }
+    try { const { appendFileSync } = require("node:fs") as typeof import("node:fs"); appendFileSync(LOG_FILE, `[${new Date().toISOString()}] dashboard mounted dir=${props.directory} mode=${mode()} dialogOpen=${props.api.ui.dialog.open}\n`) } catch { }
     debugLog("mounted", "dialogOpen", props.api.ui.dialog.open, "directory", props.directory)
     focusInput()
   })
@@ -260,11 +285,18 @@ export function LoopDashboard(props: Props) {
     const isColon = name === ":" || seq === ":" || raw === ":" || seq.includes(":") || raw.includes(":") || name === ";" || name === "colon"
     const isQuestion = name === "?" || seq === "?" || raw === "?" || seq.includes("?") || raw.includes("?")
     debugLog("isColon", isColon, "isQuestion", isQuestion, "modeBefore", mode())
+    // Insert mode: the ONLY keys that act here are Enter (send), Escape and
+    // Ctrl+N (back to normal). Everything else must reach the input as text.
+    // Enter is handled here — not in the input's onKeyDown — because the
+    // focused InputRenderable consumes Enter internally and our prop handler
+    // never reliably fires for it (typing worked, sending never did).
     if (mode() === "insert") {
-      if (evt.ctrl && name.toLowerCase() === "n") {
+      if (isEnterKey(evt)) { prevent(evt); debugLog("insert enter -> execute"); void executeCommand(commandInput()); return }
+      if (isEscapeKey(evt) || isCtrlN(evt)) {
         prevent(evt)
         returnToNormalMode()
-        debugLog("insert -> normal via ctrl+n")
+        debugLog("insert -> normal via esc/ctrl+n")
+        return
       }
       return
     }
@@ -622,9 +654,10 @@ export function LoopDashboard(props: Props) {
               const name = evt.name || ""
               const seq = (evt as unknown as { sequence?: string }).sequence || ""
               debugLog("input onKeyDown", `name=${name} seq=${JSON.stringify(seq)} mode=${mode()} value=${JSON.stringify(commandInput())}`)
+              // Single source of truth for Enter/Escape/Ctrl+N is the global
+              // useKeyboard handler above; this prop only stops normal-mode
+              // keystrokes from landing in the box as text.
               if (mode() !== "insert") { if ((evt.name || "").length === 1) prevent(evt); return }
-              if (name === "return" || name === "enter") { prevent(evt); debugLog("input enter -> execute"); void executeCommand(commandInput()); return }
-              if (evt.ctrl && name.toLowerCase() === "n") { prevent(evt); debugLog("input ctrl+n -> normal"); returnToNormalMode(); return }
             }}
           />
         </box>

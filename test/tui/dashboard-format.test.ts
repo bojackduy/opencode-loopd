@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { agentColor, formatCost, formatDuration, formatTokens, indexAgents } from "../../src/tui/dashboard"
+import { agentColor, formatCost, formatDuration, formatTokens, indexAgents, isCtrlN, isEnterKey, isEscapeKey } from "../../src/tui/dashboard"
 
 describe("Dashboard formatting", () => {
   it("compacts token counts", () => {
@@ -44,5 +44,24 @@ describe("Dashboard formatting", () => {
     expect(agentColor("#FFFFFF", theme)).toBe("#FFFFFF")
     expect(agentColor(undefined, theme)).toBe("t")
     expect(agentColor("nope", theme)).toBe("t")
+  })
+
+  it("recognizes Enter across terminal key namings", () => {
+    expect(isEnterKey({ name: "return", sequence: "", raw: "" } as any)).toBe(true)
+    expect(isEnterKey({ name: "enter", sequence: "", raw: "" } as any)).toBe(true)
+    expect(isEnterKey({ name: "Return", sequence: "", raw: "" } as any)).toBe(true)
+    expect(isEnterKey({ name: "", sequence: "\r", raw: "" } as any)).toBe(true)
+    expect(isEnterKey({ name: "x", sequence: "x", raw: "x" } as any)).toBe(false)
+    expect(isEnterKey({ name: "space", sequence: " ", raw: " " } as any)).toBe(false)
+  })
+
+  it("recognizes Escape and Ctrl+N", () => {
+    expect(isEscapeKey({ name: "escape", sequence: "", raw: "" } as any)).toBe(true)
+    expect(isEscapeKey({ name: "Escape", sequence: "", raw: "" } as any)).toBe(true)
+    expect(isEscapeKey({ name: "", sequence: "\x1b", raw: "" } as any)).toBe(true)
+    expect(isEscapeKey({ name: "x", sequence: "x", raw: "x" } as any)).toBe(false)
+    expect(isCtrlN({ name: "n", ctrl: true } as any)).toBe(true)
+    expect(isCtrlN({ name: "N", ctrl: true } as any)).toBe(true)
+    expect(isCtrlN({ name: "n", ctrl: false } as any)).toBe(false)
   })
 })
