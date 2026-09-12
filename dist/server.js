@@ -60,6 +60,9 @@ function acquireLease(rt, timeoutMs) {
     lastActivityAt: new Date(now).toISOString(),
     idleCandidateAt: undefined,
     idleCandidateGeneration: undefined,
+    idleConfirmFailedAt: undefined,
+    idleConfirmFailedGeneration: undefined,
+    idleStuckNotifiedGeneration: undefined,
     activePromptObservedAt: undefined,
     activeAssistantMessageID: undefined,
     activeAssistantCompletedAt: undefined,
@@ -979,6 +982,7 @@ function createLoopEngine(options) {
   const confirmIdleMs = options.confirmIdleMs ?? CONFIRM_IDLE_DURATION_MS;
   const unknownStatusThreshold = Math.max(1, options.unknownStatusThreshold ?? 3);
   const stuckRunningMs = options.stuckRunningMs ?? 10 * 60000;
+  const idleUnconfirmedMs = options.idleUnconfirmedMs ?? 5 * 60000;
   let running = false;
   let maintenanceTimer;
   let knownWorkerSessions = new Set;
@@ -1168,30 +1172,32 @@ function createLoopEngine(options) {
       const stagedRt = afterIdle.runtimes.find((r) => r.goalID === goalID);
       const eventAnchored = stagedRt?.runGeneration === candidate.generation && Boolean(stagedRt?.activeAssistantCompletedAt);
       const transcript = await inspectPromptTurn(goal.workerSessionID, candidate.promptMessageID);
-      if (!transcript.latestUserPrompt && !eventAnchored) {
-        await appendEvent(directory, {
-          version: 1,
-          eventID: randomUUID2(),
-          goalID,
-          type: "idle.confirm-failed",
-          reason: "prompt-outside-window",
-          runGeneration: candidate.generation,
-          timestamp: new Date().toISOString(),
-          revision: afterIdle.revision
+      const failureReason = !transcript.latestUserPrompt && !eventAnchored ? "prompt-outside-window" : !eventAnchored && !candidate.assistantCompleted && !transcript.assistantCompleted ? "assistant-incomplete" : undefined;
+      if (failureReason) {
+        let newlyStamped = false;
+        await mutateState(directory, `idle.confirm-stamp:${goalID}`, async (s) => {
+          const rt = s.runtimes.find((r) => r.goalID === goalID);
+          if (!rt || rt.runGeneration !== candidate.generation)
+            return s;
+          if (rt.idleConfirmFailedGeneration !== candidate.generation) {
+            rt.idleConfirmFailedAt = new Date().toISOString();
+            rt.idleConfirmFailedGeneration = candidate.generation;
+            newlyStamped = true;
+          }
+          return s;
         });
-        return true;
-      }
-      if (!eventAnchored && !candidate.assistantCompleted && !transcript.assistantCompleted) {
-        await appendEvent(directory, {
-          version: 1,
-          eventID: randomUUID2(),
-          goalID,
-          type: "idle.confirm-failed",
-          reason: "assistant-incomplete",
-          runGeneration: candidate.generation,
-          timestamp: new Date().toISOString(),
-          revision: afterIdle.revision
-        });
+        if (newlyStamped) {
+          await appendEvent(directory, {
+            version: 1,
+            eventID: randomUUID2(),
+            goalID,
+            type: "idle.confirm-failed",
+            reason: failureReason,
+            runGeneration: candidate.generation,
+            timestamp: new Date().toISOString(),
+            revision: afterIdle.revision
+          });
+        }
         return true;
       }
       afterIdle = await mutateState(directory, `idle.confirm:${goalID}`, async (s) => {
@@ -1220,6 +1226,8 @@ function createLoopEngine(options) {
         Object.assign(rt, releaseLease(rt));
         rt.activeRunID = undefined;
         rt.lastWorkerStatus = "idle";
+        rt.idleConfirmFailedAt = undefined;
+        rt.idleConfirmFailedGeneration = undefined;
         return s;
       });
     }
@@ -1661,6 +1669,37 @@ function createLoopEngine(options) {
             return s;
           });
           await logServerEvent(directory, "maintenance.worker-recovered", { goalID: goal.id });
+        }
+        if (status === "idle" && runtime.phase === "running" && runtime.idleConfirmFailedGeneration === runtime.runGeneration && runtime.idleConfirmFailedAt && runtime.idleStuckNotifiedGeneration !== runtime.runGeneration && Date.now() - Date.parse(runtime.idleConfirmFailedAt) > idleUnconfirmedMs) {
+          const failedAt = runtime.idleConfirmFailedAt;
+          const generation = runtime.runGeneration;
+          const stuckState = await mutateState(directory, `maintenance.idle-stuck:${goal.id}`, async (s) => {
+            const rt = s.runtimes.find((r) => r.goalID === goal.id);
+            if (!rt || rt.runGeneration !== generation || rt.phase !== "running")
+              return s;
+            rt.idleStuckNotifiedGeneration = generation;
+            rt.updatedAt = new Date().toISOString();
+            return s;
+          });
+          const stuckSeconds = Math.floor((Date.now() - Date.parse(failedAt)) / 1000);
+          await appendEvent(directory, {
+            version: 1,
+            eventID: randomUUID2(),
+            goalID: goal.id,
+            type: "run.stuck",
+            runID: runtime.activeRunID ?? "unknown",
+            stuckSeconds,
+            timestamp: new Date().toISOString(),
+            revision: stuckState.revision
+          });
+          await logServerEvent(directory, "maintenance.idle-stuck", {
+            goalID: goal.id,
+            generation,
+            stuckSeconds
+          });
+          const quietMinutes = Math.max(1, Math.floor(stuckSeconds / 60));
+          await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" worker is idle but its turn will not confirm (unconfirmed for ${quietMinutes}m, no activity). The goal remains active; use inspect_background_goal to look, nudge_goal to re-prompt, or pause_goal to stop it.`);
+          continue;
         }
         if (status === "idle") {
           if (runtime.phase === "idle") {

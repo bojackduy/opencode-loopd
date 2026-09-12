@@ -609,6 +609,89 @@ describe("Loop Engine", () => {
       expect((host.sessions as any).notifications).toHaveLength(1)
     })
 
+    it("escalates an idle turn that will not confirm, once, without prompting", async () => {
+      engine.stop()
+      host = createFakeHost({ autoCompletePrompts: false })
+      goalService = createGoalService(host)
+      engine = createLoopEngine({
+        directory: dir,
+        host,
+        goalService,
+        pollIntervalMs: 10,
+        confirmIdleMs: 0,
+        idleUnconfirmedMs: 50,
+      })
+      engine.start()
+
+      const { goal } = await goalService.start(dir, {
+        name: "unconfirmed-idle",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+      })
+      await engine.preloadWorkerSessions()
+
+      await engine.handleEvent({ type: "session.idle", properties: { sessionID: goal.workerSessionID } })
+      await engine.handleEvent({ type: "session.idle", properties: { sessionID: goal.workerSessionID } })
+      await engine.handleEvent({ type: "session.idle", properties: { sessionID: goal.workerSessionID } })
+
+      // Stamped once — repeated polls stay silent in the ledger
+      const failed = (await readEvents(dir, 50)).filter(
+        (e: any) => e.goalID === goal.id && e.type === "idle.confirm-failed",
+      )
+      expect(failed).toHaveLength(1)
+      expect(failed[0].reason).toBe("assistant-incomplete")
+
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      const stuck = (await readEvents(dir, 50)).filter(
+        (e: any) => e.goalID === goal.id && e.type === "run.stuck",
+      )
+      expect(stuck.length).toBeGreaterThan(0)
+      expect((host.sessions as any).notifications).toHaveLength(1)
+      // Never auto re-prompts a possibly-live worker: only the initial prompt
+      expect(host.prompts.length).toBe(1)
+      expect((await readState(dir)).goals[0].status).toBe("active")
+
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect((host.sessions as any).notifications).toHaveLength(1)
+      const failedAgain = (await readEvents(dir, 100)).filter(
+        (e: any) => e.goalID === goal.id && e.type === "idle.confirm-failed",
+      )
+      expect(failedAgain).toHaveLength(1)
+    })
+
+    it("never flags a healthy confirming turn as stuck", async () => {
+      engine.stop()
+      host = createFakeHost()
+      goalService = createGoalService(host)
+      engine = createLoopEngine({
+        directory: dir,
+        host,
+        goalService,
+        pollIntervalMs: 10,
+        confirmIdleMs: 0,
+        idleUnconfirmedMs: 50,
+        stuckRunningMs: 50,
+      })
+      engine.start()
+
+      const { goal } = await goalService.start(dir, {
+        name: "healthy-turn",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+      })
+      await engine.preloadWorkerSessions()
+      await engine.handleEvent({ type: "session.idle", properties: { sessionID: goal.workerSessionID } })
+      await engine.handleEvent({ type: "session.idle", properties: { sessionID: goal.workerSessionID } })
+
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      const evs = await readEvents(dir, 100)
+      expect(evs.filter((e: any) => e.goalID === goal.id && e.type === "run.stuck")).toHaveLength(0)
+      expect(evs.filter((e: any) => e.goalID === goal.id && e.type === "idle.confirm-failed")).toHaveLength(0)
+      expect((host.sessions as any).notifications ?? []).toHaveLength(0)
+    })
+
     it("clears a stale active run from an idle runtime", async () => {
       engine.stop()
       host = createFakeHost({ sessionStatus: "busy" })

@@ -63,6 +63,15 @@ export interface GoalRuntimeState {
   /** Active run ID already reported by the stuck-running watchdog (notify once per run). */
   stuckNotifiedRunID?: string
 
+  /** When idle confirmation first failed for the current generation (unconfirmable-idle tracking). */
+  idleConfirmFailedAt?: string
+
+  /** Run generation the confirm-failure stamp belongs to. */
+  idleConfirmFailedGeneration?: number
+
+  /** Generation already notified for unconfirmable-idle (notify once per generation). */
+  idleStuckNotifiedGeneration?: number
+
   /** Number of tokens consumed during current turn. */
   turnTokensUsed?: number
 
@@ -167,6 +176,9 @@ export function acquireLease(rt: GoalRuntimeState, timeoutMs: number): GoalRunti
     lastActivityAt: new Date(now).toISOString(),
     idleCandidateAt: undefined,
     idleCandidateGeneration: undefined,
+    idleConfirmFailedAt: undefined,
+    idleConfirmFailedGeneration: undefined,
+    idleStuckNotifiedGeneration: undefined,
     activePromptObservedAt: undefined,
     activeAssistantMessageID: undefined,
     activeAssistantCompletedAt: undefined,
