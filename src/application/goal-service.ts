@@ -418,6 +418,41 @@ export function createGoalService(host: LoopHost): GoalService {
       transcriptTail = []
     }
 
+    // Usage accounting: fold newly completed assistant messages into goal totals.
+    // tokensUsed counts model work (input+output+reasoning). The watermark keeps
+    // overlapping transcript tails from double counting; turn-level attribution
+    // is approximate, lifetime totals are exact.
+    const seenIDs = new Set(freshRuntime.accountedMessageIDs ?? [])
+    let tokenDelta = 0
+    let timeDeltaSeconds = 0
+    const newlyAccounted: string[] = []
+    for (const m of transcriptTail ?? []) {
+      if (m.role !== "assistant" || !m.messageID || !m.completedAt) continue
+      if (seenIDs.has(m.messageID)) continue
+      seenIDs.add(m.messageID)
+      newlyAccounted.push(m.messageID)
+      if (m.tokens) tokenDelta += (m.tokens.input || 0) + (m.tokens.output || 0) + (m.tokens.reasoning || 0)
+      if (typeof m.durationMs === "number") timeDeltaSeconds += m.durationMs / 1000
+    }
+    if (newlyAccounted.length > 0) {
+      const mergedWatermark = [...(freshRuntime.accountedMessageIDs ?? []), ...newlyAccounted].slice(-200)
+      await mutateState(directory, `turn.account-usage:${goalID}`, async (s) => {
+        const g = s.goals.find((item) => item.id === goalID)
+        if (g) {
+          g.tokensUsed += tokenDelta
+          g.timeUsedSeconds += timeDeltaSeconds
+          g.updatedAt = new Date().toISOString()
+        }
+        const rt = s.runtimes.find((item) => item.goalID === goalID)
+        if (rt) {
+          rt.turnTokensUsed = (rt.turnTokensUsed ?? 0) + tokenDelta
+          rt.accountedMessageIDs = mergedWatermark
+          rt.updatedAt = new Date().toISOString()
+        }
+        return s
+      })
+    }
+
     // Deterministic verification pre-screen (cheap, no shell)
     let verification: ContinuationContext["verification"]
     try {

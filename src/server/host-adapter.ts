@@ -16,6 +16,18 @@ export interface SessionMessage {
   messageID?: string
   parentMessageID?: string
   completedAt?: string
+  /** Token usage for completed assistant messages (absent for user messages). */
+  tokens?: {
+    input: number
+    output: number
+    reasoning: number
+    cacheRead: number
+    cacheWrite: number
+  }
+  /** Provider cost for a completed assistant message, when reported. */
+  cost?: number
+  /** Active model time in ms (completed - created), when both are reported. */
+  durationMs?: number
 }
 
 export interface SessionUsage {
@@ -176,21 +188,39 @@ export function createRealHost(client: any, directory: string): LoopHost {
         })
         const data = result?.data
         if (!Array.isArray(data)) return []
-        return data.map((m: any) => ({
-          role: m.info?.role || "assistant",
-          content: m.parts
-            ?.filter((p: any) => p.type === "text")
-            .map((p: any) => p.text)
-            .join("\n") || "",
-          timestamp: m.info?.time?.completed || m.info?.time?.created
-            ? new Date(m.info.time.completed || m.info.time.created).toISOString()
-            : undefined,
-          messageID: m.info?.id || m.id,
-          parentMessageID: m.info?.parentID,
-          completedAt: m.info?.time?.completed
-            ? new Date(m.info.time.completed).toISOString()
-            : undefined,
-        }))
+        return data.map((m: any) => {
+          const createdMs = m.info?.time?.created
+          const completedMs = m.info?.time?.completed
+          const tokens = m.info?.tokens
+          return {
+            role: m.info?.role || "assistant",
+            content: m.parts
+              ?.filter((p: any) => p.type === "text")
+              .map((p: any) => p.text)
+              .join("\n") || "",
+            timestamp: completedMs || createdMs
+              ? new Date(completedMs || createdMs).toISOString()
+              : undefined,
+            messageID: m.info?.id || m.id,
+            parentMessageID: m.info?.parentID,
+            completedAt: completedMs
+              ? new Date(completedMs).toISOString()
+              : undefined,
+            tokens: tokens && typeof tokens.input === "number"
+              ? {
+                input: tokens.input || 0,
+                output: tokens.output || 0,
+                reasoning: tokens.reasoning || 0,
+                cacheRead: tokens.cache?.read || 0,
+                cacheWrite: tokens.cache?.write || 0,
+              }
+              : undefined,
+            cost: typeof m.info?.cost === "number" ? m.info.cost : undefined,
+            durationMs: typeof createdMs === "number" && typeof completedMs === "number" && completedMs >= createdMs
+              ? completedMs - createdMs
+              : undefined,
+          }
+        })
       } catch {
         return []
       }

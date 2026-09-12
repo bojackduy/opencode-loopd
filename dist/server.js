@@ -40,6 +40,7 @@ function createRuntimeState(goalID) {
     noProgressCount: 0,
     progressDuringTurn: false,
     unknownStatusCount: 0,
+    accountedMessageIDs: [],
     runGeneration: 0,
     createdAt: now,
     updatedAt: now
@@ -1753,15 +1754,29 @@ function createRealHost(client, directory) {
         const data = result?.data;
         if (!Array.isArray(data))
           return [];
-        return data.map((m) => ({
-          role: m.info?.role || "assistant",
-          content: m.parts?.filter((p) => p.type === "text").map((p) => p.text).join(`
+        return data.map((m) => {
+          const createdMs = m.info?.time?.created;
+          const completedMs = m.info?.time?.completed;
+          const tokens = m.info?.tokens;
+          return {
+            role: m.info?.role || "assistant",
+            content: m.parts?.filter((p) => p.type === "text").map((p) => p.text).join(`
 `) || "",
-          timestamp: m.info?.time?.completed || m.info?.time?.created ? new Date(m.info.time.completed || m.info.time.created).toISOString() : undefined,
-          messageID: m.info?.id || m.id,
-          parentMessageID: m.info?.parentID,
-          completedAt: m.info?.time?.completed ? new Date(m.info.time.completed).toISOString() : undefined
-        }));
+            timestamp: completedMs || createdMs ? new Date(completedMs || createdMs).toISOString() : undefined,
+            messageID: m.info?.id || m.id,
+            parentMessageID: m.info?.parentID,
+            completedAt: completedMs ? new Date(completedMs).toISOString() : undefined,
+            tokens: tokens && typeof tokens.input === "number" ? {
+              input: tokens.input || 0,
+              output: tokens.output || 0,
+              reasoning: tokens.reasoning || 0,
+              cacheRead: tokens.cache?.read || 0,
+              cacheWrite: tokens.cache?.write || 0
+            } : undefined,
+            cost: typeof m.info?.cost === "number" ? m.info.cost : undefined,
+            durationMs: typeof createdMs === "number" && typeof completedMs === "number" && completedMs >= createdMs ? completedMs - createdMs : undefined
+          };
+        });
       } catch {
         return [];
       }
@@ -2245,6 +2260,40 @@ function createGoalService(host) {
       transcriptTail = await host.readMessages(freshGoal.workerSessionID, 5);
     } catch {
       transcriptTail = [];
+    }
+    const seenIDs = new Set(freshRuntime.accountedMessageIDs ?? []);
+    let tokenDelta = 0;
+    let timeDeltaSeconds = 0;
+    const newlyAccounted = [];
+    for (const m of transcriptTail ?? []) {
+      if (m.role !== "assistant" || !m.messageID || !m.completedAt)
+        continue;
+      if (seenIDs.has(m.messageID))
+        continue;
+      seenIDs.add(m.messageID);
+      newlyAccounted.push(m.messageID);
+      if (m.tokens)
+        tokenDelta += (m.tokens.input || 0) + (m.tokens.output || 0) + (m.tokens.reasoning || 0);
+      if (typeof m.durationMs === "number")
+        timeDeltaSeconds += m.durationMs / 1000;
+    }
+    if (newlyAccounted.length > 0) {
+      const mergedWatermark = [...freshRuntime.accountedMessageIDs ?? [], ...newlyAccounted].slice(-200);
+      await mutateState(directory, `turn.account-usage:${goalID}`, async (s) => {
+        const g = s.goals.find((item) => item.id === goalID);
+        if (g) {
+          g.tokensUsed += tokenDelta;
+          g.timeUsedSeconds += timeDeltaSeconds;
+          g.updatedAt = new Date().toISOString();
+        }
+        const rt = s.runtimes.find((item) => item.goalID === goalID);
+        if (rt) {
+          rt.turnTokensUsed = (rt.turnTokensUsed ?? 0) + tokenDelta;
+          rt.accountedMessageIDs = mergedWatermark;
+          rt.updatedAt = new Date().toISOString();
+        }
+        return s;
+      });
     }
     let verification;
     try {

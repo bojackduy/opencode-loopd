@@ -130,4 +130,34 @@ describe("Real Host Adapter", () => {
     expect(prompts[0].agent).toBe("researcher")
     expect(prompts[0].model).toEqual({ providerID: "ollama", modelID: "qwen3.8:27b" })
   })
+
+  it("maps token usage, cost, and timing from worker messages", async () => {
+    const host = createRealHost({
+      session: {
+        messages: async () => ({ data: [
+          {
+            info: {
+              role: "assistant", id: "asst-1", parentID: "msg-1",
+              time: { created: 1000, completed: 6000 },
+              tokens: { input: 100, output: 50, reasoning: 10, cache: { read: 1000, write: 200 } },
+              cost: 0.012,
+            },
+            parts: [{ type: "text", text: "done" }],
+          },
+          {
+            info: { role: "user", id: "msg-1", time: { created: 500 } },
+            parts: [{ type: "text", text: "go" }],
+          },
+        ] }),
+      },
+    }, "/tmp/loopd-host-test")
+
+    const msgs = await host.readMessages("worker-1", 10)
+    expect(msgs[0].tokens).toEqual({ input: 100, output: 50, reasoning: 10, cacheRead: 1000, cacheWrite: 200 })
+    expect(msgs[0].cost).toBe(0.012)
+    expect(msgs[0].durationMs).toBe(5000)
+    expect(msgs[0].completedAt).toBe(new Date(6000).toISOString())
+    expect(msgs[1].tokens).toBeUndefined()
+    expect(msgs[1].durationMs).toBeUndefined()
+  })
 })

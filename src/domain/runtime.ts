@@ -63,6 +63,13 @@ export interface GoalRuntimeState {
   /** Number of tokens consumed during current turn. */
   turnTokensUsed?: number
 
+  /**
+   * Assistant message IDs already folded into goal.tokensUsed/timeUsedSeconds.
+   * Capped watermark — prevents double counting across turns that re-read
+   * overlapping transcript tails.
+   */
+  accountedMessageIDs?: string[]
+
   /** Whether the engine has already asked the child to wrap up. */
   forceFinishRequested?: boolean
 
@@ -136,6 +143,7 @@ export function createRuntimeState(goalID: GoalID): GoalRuntimeState {
     noProgressCount: 0,
     progressDuringTurn: false,
     unknownStatusCount: 0,
+    accountedMessageIDs: [],
     runGeneration: 0,
     createdAt: now,
     updatedAt: now,

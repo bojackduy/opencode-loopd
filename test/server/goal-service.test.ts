@@ -76,6 +76,56 @@ describe("Goal Service", () => {
       expect(state.goals.find((g) => g.id === goal.id)?.config.model).toBe("ollama/qwen3.8:27b")
     })
 
+    it("accumulates worker token usage into goal totals without double counting", async () => {
+      const { goal } = await svc.start(dir, {
+        name: "usage",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+      })
+      expect((await readState(dir)).goals[0].tokensUsed).toBe(0)
+
+      // Seed a token-bearing completed assistant message in the worker transcript
+      const workerID = goal.workerSessionID!
+      const transcript = host.messages.get(workerID) || []
+      transcript.push({
+        role: "assistant",
+        content: "billed work",
+        timestamp: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        messageID: "asst-billed",
+        tokens: { input: 100, output: 50, reasoning: 10, cacheRead: 999, cacheWrite: 999 },
+        durationMs: 4000,
+      })
+      host.messages.set(workerID, transcript)
+
+      async function forceIdleTurn() {
+        const st = await readState(dir)
+        st.runtimes[0].phase = "idle"
+        st.runtimes[0].activeRunID = undefined
+        st.runtimes[0].leaseExpiresAt = undefined
+        st.runtimes[0].activePromptMessageID = undefined
+        await fs.writeFile(
+          path.join(dir, ".opencode", "loopd", "state.json"),
+          JSON.stringify(st, null, 2),
+        )
+        await svc.continueTurn(dir, goal.id)
+      }
+
+      await forceIdleTurn()
+      let after = await readState(dir)
+      // input+output+reasoning only; cache transport excluded from budget number
+      expect(after.goals[0].tokensUsed).toBe(160)
+      expect(after.goals[0].timeUsedSeconds).toBe(4)
+      expect(after.runtimes[0].turnTokensUsed).toBe(160)
+
+      // Overlapping transcript tail on the next turn must not double count
+      await forceIdleTurn()
+      after = await readState(dir)
+      expect(after.goals[0].tokensUsed).toBe(160)
+      expect(after.goals[0].timeUsedSeconds).toBe(4)
+    })
+
     it("records owner session ID", async () => {
       await svc.start(dir, {
         name: "test",
