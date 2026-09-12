@@ -692,6 +692,85 @@ describe("Loop Engine", () => {
       expect((host.sessions as any).notifications ?? []).toHaveLength(0)
     })
 
+    it("stops and aborts a goal that exhausts its cost budget mid-turn", async () => {
+      engine.stop()
+      // Worker stays busy: one long turn that never reaches a turn boundary,
+      // which is exactly how a $0.50 budget overran to $1.25 in practice.
+      host = createFakeHost({ sessionStatus: "busy", autoCompletePrompts: false })
+      goalService = createGoalService(host)
+      engine = createLoopEngine({ directory: dir, host, goalService, pollIntervalMs: 10, confirmIdleMs: 0 })
+      engine.start()
+
+      const { goal } = await goalService.start(dir, {
+        name: "mid-turn-budget",
+        objective: "burn",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+        costBudget: 0.5,
+      })
+      // Live spend inside the still-running turn
+      const transcript = host.messages.get(goal.workerSessionID!) || []
+      transcript.push({
+        role: "assistant",
+        content: "expensive",
+        timestamp: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        messageID: "asst-expensive",
+        tokens: { input: 1000, output: 500, reasoning: 0, cacheRead: 2000, cacheWrite: 0 },
+        cost: 1.25,
+        durationMs: 1000,
+      })
+      host.messages.set(goal.workerSessionID!, transcript)
+
+      await new Promise((resolve) => setTimeout(resolve, 200))
+
+      const after = await readState(dir)
+      expect(after.goals[0].status).toBe("budget_limited")
+      // Usage was measured mid-turn, not left at zero
+      expect(after.goals[0].costUsed).toBeCloseTo(1.25, 5)
+      expect(after.goals[0].tokensUsed).toBe(3500)
+      // Worker aborted so it cannot keep spending
+      expect(host.sessions.has(goal.workerSessionID!)).toBe(false)
+      expect((host.sessions as any).notifications).toHaveLength(1)
+      // No further prompts after the stop
+      expect(host.prompts.length).toBe(1)
+    })
+
+    it("counts live usage during a long turn that never reaches a boundary", async () => {
+      engine.stop()
+      host = createFakeHost({ sessionStatus: "busy", autoCompletePrompts: false })
+      goalService = createGoalService(host)
+      engine = createLoopEngine({ directory: dir, host, goalService, pollIntervalMs: 10, confirmIdleMs: 0 })
+      engine.start()
+
+      const { goal } = await goalService.start(dir, {
+        name: "live-usage",
+        objective: "work",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+      })
+      const transcript = host.messages.get(goal.workerSessionID!) || []
+      transcript.push({
+        role: "assistant",
+        content: "chunk",
+        timestamp: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        messageID: "asst-live",
+        tokens: { input: 100, output: 50, reasoning: 10, cacheRead: 1000, cacheWrite: 200 },
+        cost: 0.01,
+        durationMs: 3000,
+      })
+      host.messages.set(goal.workerSessionID!, transcript)
+
+      await new Promise((resolve) => setTimeout(resolve, 120))
+
+      const after = await readState(dir)
+      expect(after.goals[0].tokensUsed).toBe(1360)
+      expect(after.goals[0].costUsed).toBeCloseTo(0.01, 5)
+      // Still running — accounting must not disturb an unfinished turn
+      expect(after.goals[0].status).toBe("active")
+    })
+
     it("clears a stale active run from an idle runtime", async () => {
       engine.stop()
       host = createFakeHost({ sessionStatus: "busy" })

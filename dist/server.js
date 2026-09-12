@@ -1552,6 +1552,67 @@ function createLoopEngine(options) {
       return s;
     });
   }
+  async function accountAndEnforceBudget(goal) {
+    try {
+      await goalService.accountUsage(directory, goal.id);
+    } catch {}
+    const fresh = await readState(directory);
+    const g = fresh.goals.find((item) => item.id === goal.id);
+    if (!g || g.status !== "active")
+      return false;
+    const overTokens = typeof g.tokenBudget === "number" && g.tokensUsed >= g.tokenBudget;
+    const overCost = typeof g.costBudget === "number" && (g.costUsed ?? 0) >= g.costBudget;
+    if (!overTokens && !overCost)
+      return false;
+    const reason = overCost ? `Cost budget exhausted ($${(g.costUsed ?? 0).toFixed(4)}/$${g.costBudget})` : `Token budget exhausted (${g.tokensUsed}/${g.tokenBudget})`;
+    if (g.workerSessionID) {
+      try {
+        await host.abortSession(g.workerSessionID);
+      } catch {}
+    }
+    let shouldNotify = false;
+    const stoppedState = await mutateState(directory, `maintenance.budget:${goal.id}`, async (s) => {
+      const target = s.goals.find((item) => item.id === goal.id);
+      if (!target || target.status !== "active")
+        return s;
+      target.status = "budget_limited";
+      target.updatedAt = new Date().toISOString();
+      const rt = s.runtimes.find((r) => r.goalID === goal.id);
+      if (rt) {
+        Object.assign(rt, releaseLease(rt));
+        rt.activeRunID = undefined;
+        rt.updatedAt = new Date().toISOString();
+        if (shouldNotifyParent(rt, "stopped")) {
+          markParentNotified(rt, "stopped");
+          shouldNotify = true;
+        }
+      }
+      return s;
+    });
+    const stoppedGoal = stoppedState.goals.find((item) => item.id === goal.id);
+    if (stoppedGoal?.status !== "budget_limited")
+      return false;
+    await appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID2(),
+      goalID: goal.id,
+      type: "goal.status_changed",
+      from: "active",
+      to: "budget_limited",
+      timestamp: new Date().toISOString(),
+      revision: stoppedState.revision
+    });
+    await logServerEvent(directory, "maintenance.budget-exhausted", {
+      goalID: goal.id,
+      reason,
+      tokensUsed: stoppedGoal.tokensUsed,
+      costUsed: stoppedGoal.costUsed
+    });
+    if (shouldNotify) {
+      await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" stopped: ${reason}. Worker aborted, status: budget_limited. Resume with resume_goal to continue spending.`);
+    }
+    return true;
+  }
   async function maintenance() {
     syncWorkerSessionsFromService();
     if (knownWorkerSessions.size === 0)
@@ -1588,6 +1649,11 @@ function createLoopEngine(options) {
       const runtime = state.runtimes.find((r) => r.goalID === goal.id);
       if (!runtime)
         continue;
+      if (goal.workerSessionID) {
+        const stopped = await accountAndEnforceBudget(goal);
+        if (stopped)
+          continue;
+      }
       if (runtime.phase === "waiting_retry" && runtime.retryAfter) {
         if (Date.now() >= Date.parse(runtime.retryAfter)) {
           await mutateState(directory, `retry-ready:${goal.id}`, async (s) => {
@@ -2357,7 +2423,7 @@ function createGoalService(host) {
     }
     let tail = [];
     try {
-      tail = await host.readMessages(goal.workerSessionID, 10);
+      tail = await host.readMessages(goal.workerSessionID, 50);
     } catch {
       return { tokenDelta: 0, costDelta: 0, timeDeltaSeconds: 0, counted: [] };
     }

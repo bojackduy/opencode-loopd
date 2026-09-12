@@ -396,7 +396,9 @@ export function createGoalService(host: LoopHost): GoalService {
     }
     let tail: SessionMessage[] = []
     try {
-      tail = await host.readMessages(goal.workerSessionID, 10)
+      // Wide enough that a busy turn polled on the maintenance cadence cannot
+      // push completed messages out of view before they are ever accounted.
+      tail = await host.readMessages(goal.workerSessionID, 50)
     } catch {
       return { tokenDelta: 0, costDelta: 0, timeDeltaSeconds: 0, counted: [] as string[] }
     }

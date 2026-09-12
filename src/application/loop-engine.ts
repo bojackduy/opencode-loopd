@@ -746,6 +746,87 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
 
   // ─── Maintenance ──────────────────────────────────────────────────────────
 
+  /**
+   * Fold live worker usage into goal totals, then stop the goal if a budget is
+   * exhausted — including mid-turn. Returns true when the goal was stopped.
+   *
+   * Aborting the worker session is the only way to halt spend inside a running
+   * turn; without it the guard can only ever react after the money is gone.
+   */
+  async function accountAndEnforceBudget(goal: any): Promise<boolean> {
+    try {
+      await goalService.accountUsage(directory, goal.id)
+    } catch {
+      // Accounting is best-effort; never let it break the maintenance sweep.
+    }
+
+    const fresh = await readState(directory)
+    const g = fresh.goals.find((item) => item.id === goal.id)
+    if (!g || g.status !== "active") return false
+
+    const overTokens = typeof g.tokenBudget === "number" && g.tokensUsed >= g.tokenBudget
+    const overCost = typeof g.costBudget === "number" && (g.costUsed ?? 0) >= g.costBudget
+    if (!overTokens && !overCost) return false
+
+    const reason = overCost
+      ? `Cost budget exhausted ($${(g.costUsed ?? 0).toFixed(4)}/$${g.costBudget})`
+      : `Token budget exhausted (${g.tokensUsed}/${g.tokenBudget})`
+
+    // Stop the burn first, then record the stop.
+    if (g.workerSessionID) {
+      try {
+        await host.abortSession(g.workerSessionID)
+      } catch {
+        // Best-effort abort — status change below still stops continuations.
+      }
+    }
+
+    let shouldNotify = false
+    const stoppedState = await mutateState(directory, `maintenance.budget:${goal.id}`, async (s) => {
+      const target = s.goals.find((item) => item.id === goal.id)
+      if (!target || target.status !== "active") return s
+      target.status = "budget_limited"
+      target.updatedAt = new Date().toISOString()
+      const rt = s.runtimes.find((r) => r.goalID === goal.id)
+      if (rt) {
+        Object.assign(rt, releaseLease(rt))
+        rt.activeRunID = undefined
+        rt.updatedAt = new Date().toISOString()
+        if (shouldNotifyParent(rt, "stopped")) {
+          markParentNotified(rt, "stopped")
+          shouldNotify = true
+        }
+      }
+      return s
+    })
+    const stoppedGoal = stoppedState.goals.find((item) => item.id === goal.id)
+    if (stoppedGoal?.status !== "budget_limited") return false
+
+    await appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID(),
+      goalID: goal.id,
+      type: "goal.status_changed",
+      from: "active",
+      to: "budget_limited",
+      timestamp: new Date().toISOString(),
+      revision: stoppedState.revision,
+    } satisfies LoopEvent)
+    await logServerEvent(directory, "maintenance.budget-exhausted", {
+      goalID: goal.id,
+      reason,
+      tokensUsed: stoppedGoal.tokensUsed,
+      costUsed: stoppedGoal.costUsed,
+    })
+    if (shouldNotify) {
+      await host.notifyOwner(
+        goal.ownerSessionID,
+        `Loop goal "${goal.name}" stopped: ${reason}. Worker aborted, status: budget_limited. Resume with resume_goal to continue spending.`,
+      )
+    }
+    return true
+  }
+
   async function maintenance() {
     syncWorkerSessionsFromService()
     // FAST PATH: skip entirely if no known worker sessions
@@ -784,6 +865,16 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
 
       const runtime = state.runtimes.find((r) => r.goalID === goal.id)
       if (!runtime) continue
+
+      // Continuous usage accounting + budget enforcement. Turn boundaries are
+      // not enough: a worker that burns everything inside ONE long turn was
+      // never measured (usage read 0) and never stopped (limits only ran after
+      // a run completed). Poll on the maintenance cadence instead, and abort
+      // mid-turn when a budget is exhausted.
+      if (goal.workerSessionID) {
+        const stopped = await accountAndEnforceBudget(goal)
+        if (stopped) continue
+      }
 
       // Handle waiting_retry: check if retry time has passed
       if (runtime.phase === "waiting_retry" && runtime.retryAfter) {
