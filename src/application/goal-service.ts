@@ -419,11 +419,14 @@ export function createGoalService(host: LoopHost): GoalService {
     }
 
     // Usage accounting: fold newly completed assistant messages into goal totals.
-    // tokensUsed counts model work (input+output+reasoning). The watermark keeps
-    // overlapping transcript tails from double counting; turn-level attribution
-    // is approximate, lifetime totals are exact.
+    // tokensUsed counts total consumption (input+output+reasoning+cache), matching
+    // what OpenCode reports per session — cache dominates in practice, so excluding
+    // it would undercount by orders of magnitude. The watermark keeps overlapping
+    // transcript tails from double counting; turn-level attribution is approximate,
+    // lifetime totals are exact.
     const seenIDs = new Set(freshRuntime.accountedMessageIDs ?? [])
     let tokenDelta = 0
+    let costDelta = 0
     let timeDeltaSeconds = 0
     const newlyAccounted: string[] = []
     for (const m of transcriptTail ?? []) {
@@ -431,7 +434,11 @@ export function createGoalService(host: LoopHost): GoalService {
       if (seenIDs.has(m.messageID)) continue
       seenIDs.add(m.messageID)
       newlyAccounted.push(m.messageID)
-      if (m.tokens) tokenDelta += (m.tokens.input || 0) + (m.tokens.output || 0) + (m.tokens.reasoning || 0)
+      if (m.tokens) {
+        tokenDelta += (m.tokens.input || 0) + (m.tokens.output || 0) + (m.tokens.reasoning || 0)
+          + (m.tokens.cacheRead || 0) + (m.tokens.cacheWrite || 0)
+      }
+      if (typeof m.cost === "number") costDelta += m.cost
       if (typeof m.durationMs === "number") timeDeltaSeconds += m.durationMs / 1000
     }
     if (newlyAccounted.length > 0) {
@@ -440,6 +447,7 @@ export function createGoalService(host: LoopHost): GoalService {
         const g = s.goals.find((item) => item.id === goalID)
         if (g) {
           g.tokensUsed += tokenDelta
+          g.costUsed = (g.costUsed ?? 0) + costDelta
           g.timeUsedSeconds += timeDeltaSeconds
           g.updatedAt = new Date().toISOString()
         }

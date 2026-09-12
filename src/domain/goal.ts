@@ -29,6 +29,9 @@ export interface Goal {
   /** Tokens consumed so far. */
   tokensUsed: number
 
+  /** Provider cost consumed so far (same currency OpenCode reports). */
+  costUsed?: number
+
   /** Wall-clock seconds consumed. */
   timeUsedSeconds: number
 
@@ -176,8 +179,8 @@ export function isRunning(status: GoalStatus): boolean {
 }
 
 export function createGoal(
-  input: Omit<Goal, "tokensUsed" | "timeUsedSeconds" | "createdAt" | "updatedAt">,
+  input: Omit<Goal, "tokensUsed" | "costUsed" | "timeUsedSeconds" | "createdAt" | "updatedAt">,
 ): Goal {
   const now = new Date().toISOString()
-  return { ...input, tokensUsed: 0, timeUsedSeconds: 0, createdAt: now, updatedAt: now }
+  return { ...input, tokensUsed: 0, costUsed: 0, timeUsedSeconds: 0, createdAt: now, updatedAt: now }
 }

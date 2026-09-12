@@ -560,6 +560,7 @@ function formatGoalStructured(goal: Goal, runtime?: GoalRuntimeState): string {
     completionEvidence: goal.completionEvidence,
     blocker: goal.blocker,
     tokensUsed: goal.tokensUsed,
+    costUsed: goal.costUsed ?? 0,
     timeUsedSeconds: goal.timeUsedSeconds,
   }
 

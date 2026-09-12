@@ -95,6 +95,7 @@ describe("Goal Service", () => {
         completedAt: new Date().toISOString(),
         messageID: "asst-billed",
         tokens: { input: 100, output: 50, reasoning: 10, cacheRead: 999, cacheWrite: 999 },
+        cost: 0.012,
         durationMs: 4000,
       })
       host.messages.set(workerID, transcript)
@@ -114,15 +115,17 @@ describe("Goal Service", () => {
 
       await forceIdleTurn()
       let after = await readState(dir)
-      // input+output+reasoning only; cache transport excluded from budget number
-      expect(after.goals[0].tokensUsed).toBe(160)
+      // all five token kinds counted, matching OpenCode's session ledger
+      expect(after.goals[0].tokensUsed).toBe(2158)
+      expect(after.goals[0].costUsed).toBe(0.012)
       expect(after.goals[0].timeUsedSeconds).toBe(4)
-      expect(after.runtimes[0].turnTokensUsed).toBe(160)
+      expect(after.runtimes[0].turnTokensUsed).toBe(2158)
 
       // Overlapping transcript tail on the next turn must not double count
       await forceIdleTurn()
       after = await readState(dir)
-      expect(after.goals[0].tokensUsed).toBe(160)
+      expect(after.goals[0].tokensUsed).toBe(2158)
+      expect(after.goals[0].costUsed).toBe(0.012)
       expect(after.goals[0].timeUsedSeconds).toBe(4)
     })
 

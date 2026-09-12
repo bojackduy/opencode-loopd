@@ -961,7 +961,7 @@ function isTerminal(status) {
 }
 function createGoal(input) {
   const now = new Date().toISOString();
-  return { ...input, tokensUsed: 0, timeUsedSeconds: 0, createdAt: now, updatedAt: now };
+  return { ...input, tokensUsed: 0, costUsed: 0, timeUsedSeconds: 0, createdAt: now, updatedAt: now };
 }
 // src/application/loop-engine.ts
 var CONFIRM_IDLE_DURATION_MS = 2000;
@@ -2263,6 +2263,7 @@ function createGoalService(host) {
     }
     const seenIDs = new Set(freshRuntime.accountedMessageIDs ?? []);
     let tokenDelta = 0;
+    let costDelta = 0;
     let timeDeltaSeconds = 0;
     const newlyAccounted = [];
     for (const m of transcriptTail ?? []) {
@@ -2272,8 +2273,11 @@ function createGoalService(host) {
         continue;
       seenIDs.add(m.messageID);
       newlyAccounted.push(m.messageID);
-      if (m.tokens)
-        tokenDelta += (m.tokens.input || 0) + (m.tokens.output || 0) + (m.tokens.reasoning || 0);
+      if (m.tokens) {
+        tokenDelta += (m.tokens.input || 0) + (m.tokens.output || 0) + (m.tokens.reasoning || 0) + (m.tokens.cacheRead || 0) + (m.tokens.cacheWrite || 0);
+      }
+      if (typeof m.cost === "number")
+        costDelta += m.cost;
       if (typeof m.durationMs === "number")
         timeDeltaSeconds += m.durationMs / 1000;
     }
@@ -2283,6 +2287,7 @@ function createGoalService(host) {
         const g = s.goals.find((item) => item.id === goalID);
         if (g) {
           g.tokensUsed += tokenDelta;
+          g.costUsed = (g.costUsed ?? 0) + costDelta;
           g.timeUsedSeconds += timeDeltaSeconds;
           g.updatedAt = new Date().toISOString();
         }
@@ -3218,6 +3223,7 @@ function formatGoalStructured(goal, runtime) {
     completionEvidence: goal.completionEvidence,
     blocker: goal.blocker,
     tokensUsed: goal.tokensUsed,
+    costUsed: goal.costUsed ?? 0,
     timeUsedSeconds: goal.timeUsedSeconds
   };
   if (runtime) {
@@ -3401,6 +3407,7 @@ function ownerTools(options) {
             completionEvidence: goal.completionEvidence,
             blocker: goal.blocker,
             tokensUsed: goal.tokensUsed,
+            costUsed: goal.costUsed ?? 0,
             timeUsedSeconds: goal.timeUsedSeconds,
             progressHistory,
             pendingInbox,

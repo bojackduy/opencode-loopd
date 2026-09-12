@@ -163,6 +163,7 @@ export function ownerTools(options: OwnerToolsOptions) {
             completionEvidence: goal.completionEvidence,
             blocker: goal.blocker,
             tokensUsed: goal.tokensUsed,
+            costUsed: goal.costUsed ?? 0,
             timeUsedSeconds: goal.timeUsedSeconds,
             progressHistory: progressHistory as any,
             pendingInbox: pendingInbox as any,
