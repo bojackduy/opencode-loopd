@@ -80,6 +80,18 @@ export interface RunFailedEvent extends BaseEvent {
   consecutiveFailures: number
 }
 
+export interface IdleConfirmFailedEvent extends BaseEvent {
+  type: "idle.confirm-failed"
+  reason: "prompt-outside-window" | "assistant-incomplete" | "worker-active"
+  runGeneration: number
+}
+
+export interface RunStuckEvent extends BaseEvent {
+  type: "run.stuck"
+  runID: string
+  stuckSeconds: number
+}
+
 export interface RuntimePhaseChangedEvent extends BaseEvent {
   type: "runtime.phase_changed"
   from: RuntimePhase
@@ -122,6 +134,8 @@ export type LoopEvent =
   | RunStartedEvent
   | RunCompletedEvent
   | RunFailedEvent
+  | IdleConfirmFailedEvent
+  | RunStuckEvent
   | RuntimePhaseChangedEvent
   | CompactionStartedEvent
   | CompactionCompletedEvent

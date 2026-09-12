@@ -978,6 +978,7 @@ function createLoopEngine(options) {
   const maintenanceMs = options.pollIntervalMs ?? 30000;
   const confirmIdleMs = options.confirmIdleMs ?? CONFIRM_IDLE_DURATION_MS;
   const unknownStatusThreshold = Math.max(1, options.unknownStatusThreshold ?? 3);
+  const stuckRunningMs = options.stuckRunningMs ?? 10 * 60000;
   let running = false;
   let maintenanceTimer;
   let knownWorkerSessions = new Set;
@@ -1140,7 +1141,9 @@ function createLoopEngine(options) {
       const elapsed = now - Date.parse(rt.idleCandidateAt);
       if (elapsed < confirmIdleMs)
         return s;
-      if (rt.lastActivityAt && rt.lastActivityAt > rt.idleCandidateAt) {
+      const anchoredHere = Boolean(rt.activeAssistantCompletedAt);
+      const quietSince = anchoredHere && rt.activeAssistantCompletedAt ? rt.activeAssistantCompletedAt : rt.idleCandidateAt;
+      if (rt.lastActivityAt && rt.lastActivityAt > rt.idleCandidateAt && rt.lastActivityAt > quietSince) {
         rt.idleCandidateAt = undefined;
         rt.idleCandidateGeneration = undefined;
         return s;
@@ -1162,8 +1165,33 @@ function createLoopEngine(options) {
     });
     if (confirmation) {
       const candidate = confirmation;
+      const stagedRt = afterIdle.runtimes.find((r) => r.goalID === goalID);
+      const eventAnchored = stagedRt?.runGeneration === candidate.generation && Boolean(stagedRt?.activeAssistantCompletedAt);
       const transcript = await inspectPromptTurn(goal.workerSessionID, candidate.promptMessageID);
-      if (!transcript.latestUserPrompt || !candidate.assistantCompleted && !transcript.assistantCompleted) {
+      if (!transcript.latestUserPrompt && !eventAnchored) {
+        await appendEvent(directory, {
+          version: 1,
+          eventID: randomUUID2(),
+          goalID,
+          type: "idle.confirm-failed",
+          reason: "prompt-outside-window",
+          runGeneration: candidate.generation,
+          timestamp: new Date().toISOString(),
+          revision: afterIdle.revision
+        });
+        return true;
+      }
+      if (!eventAnchored && !candidate.assistantCompleted && !transcript.assistantCompleted) {
+        await appendEvent(directory, {
+          version: 1,
+          eventID: randomUUID2(),
+          goalID,
+          type: "idle.confirm-failed",
+          reason: "assistant-incomplete",
+          runGeneration: candidate.generation,
+          timestamp: new Date().toISOString(),
+          revision: afterIdle.revision
+        });
         return true;
       }
       afterIdle = await mutateState(directory, `idle.confirm:${goalID}`, async (s) => {
@@ -1181,8 +1209,11 @@ function createLoopEngine(options) {
           return s;
         if (rt.idleCandidateAt !== candidate.candidateAt)
           return s;
-        if (rt.lastActivityAt && rt.lastActivityAt > candidate.candidateAt)
-          return s;
+        if (rt.lastActivityAt && rt.lastActivityAt > candidate.candidateAt) {
+          const quiet = rt.runGeneration === candidate.generation && rt.activeAssistantCompletedAt ? rt.activeAssistantCompletedAt : candidate.candidateAt;
+          if (rt.lastActivityAt > quiet)
+            return s;
+        }
         if ((rt.activeToolCallIDs?.length ?? 0) > 0)
           return s;
         completedRunID = rt.activeRunID;
@@ -1307,7 +1338,7 @@ function createLoopEngine(options) {
       return noMatch;
     let messages;
     try {
-      messages = await host.readMessages(workerSessionID, 50);
+      messages = await host.readMessages(workerSessionID, 200);
     } catch {
       return noMatch;
     }
@@ -1463,6 +1494,16 @@ function createLoopEngine(options) {
         blocked: true,
         event: "goal.status_changed",
         reason: `Token budget exhausted (${goal.tokensUsed}/${goal.tokenBudget})`
+      };
+    }
+    if (typeof goal.costBudget === "number" && (goal.costUsed ?? 0) >= goal.costBudget) {
+      goal.status = "budget_limited";
+      goal.updatedAt = new Date().toISOString();
+      return {
+        stop: "budget",
+        blocked: true,
+        event: "goal.status_changed",
+        reason: `Cost budget exhausted ($${(goal.costUsed ?? 0).toFixed(4)}/$${goal.costBudget})`
       };
     }
     return noResult;
@@ -1628,6 +1669,37 @@ function createLoopEngine(options) {
             await handleSessionIdle(state, goal);
           }
           continue;
+        }
+        if ((status === "busy" || status === "retry") && runtime.phase === "running" && runtime.activeRunID && runtime.stuckNotifiedRunID !== runtime.activeRunID) {
+          const leaseExpired = !runtime.leaseExpiresAt || Date.now() >= Date.parse(runtime.leaseExpiresAt);
+          const lastActive = runtime.lastActivityAt ? Date.parse(runtime.lastActivityAt) : 0;
+          if (leaseExpired && Date.now() - lastActive > stuckRunningMs) {
+            const stuckSeconds = Math.floor((Date.now() - lastActive) / 1000);
+            const stuckState = await mutateState(directory, `maintenance.run-stuck:${goal.id}`, async (s) => {
+              const rt = s.runtimes.find((r) => r.goalID === goal.id);
+              if (!rt || rt.activeRunID !== runtime.activeRunID)
+                return s;
+              rt.stuckNotifiedRunID = rt.activeRunID;
+              rt.updatedAt = new Date().toISOString();
+              return s;
+            });
+            await appendEvent(directory, {
+              version: 1,
+              eventID: randomUUID2(),
+              goalID: goal.id,
+              type: "run.stuck",
+              runID: runtime.activeRunID,
+              stuckSeconds,
+              timestamp: new Date().toISOString(),
+              revision: stuckState.revision
+            });
+            await logServerEvent(directory, "maintenance.run-stuck", {
+              goalID: goal.id,
+              runID: runtime.activeRunID,
+              stuckSeconds
+            });
+            await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" worker may be stuck: no activity for ${Math.floor(stuckSeconds / 60)}m while reporting ${status}, lease expired. The goal remains active; use inspect_background_goal to look, nudge_goal to re-prompt, or pause_goal to stop it.`);
+          }
         }
       }
     }
@@ -2085,6 +2157,8 @@ function createGoalService(host) {
         ...input.config
       }
     });
+    if (typeof input.costBudget === "number")
+      goal.costBudget = input.costBudget;
     const artifactDir = goalArtifactDir(directory, id);
     goal.config.artifactDir = artifactDir;
     if (!goal.config.progressFile)
@@ -2782,6 +2856,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}) {
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
         agent: tool.schema.string().optional().describe(`Agent to run the worker as (e.g. "researcher", "smart-agent"). Optional \u2014 uses parent session's agent if omitted, or plugin defaultAgent.`),
         model: tool.schema.string().optional().describe(`Model to run the worker as, as "providerID/modelID" (e.g. "openai/gpt-5.6-sol", "ollama/qwen3.8:27b"). Optional \u2014 uses parent session's model if omitted, or plugin defaultModel.`),
+        costBudget: tool.schema.number().optional().describe("Max provider cost in dollars before the engine stops the goal as budget_limited (e.g. 0.5). Optional \u2014 unlimited if omitted."),
         checks: tool.schema.array(tool.schema.string()).optional().describe('Shell commands that must pass for completion to be accepted. E.g. ["npm test"].'),
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
         workspaceWrite: tool.schema.boolean().optional().describe("Whether this goal edits the shared project workspace. Defaults to true; explicitly set false for artifact-only/read-only work."),
@@ -2852,6 +2927,16 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}) {
             output: JSON.stringify({ ok: false, message: "scheduleMaxRuns requires scheduleEveryMs", errorCode: "invalid_schedule" })
           };
         }
+        let costBudget;
+        if (args.costBudget !== undefined) {
+          if (typeof args.costBudget !== "number" || !Number.isFinite(args.costBudget) || args.costBudget <= 0) {
+            return {
+              title: "Goal not created",
+              output: JSON.stringify({ ok: false, message: "costBudget must be a positive number of dollars", errorCode: "invalid_cost_budget" })
+            };
+          }
+          costBudget = args.costBudget;
+        }
         const resolution = resolveGoalCreationConfig({
           directory: dir,
           objective: args.objective,
@@ -2873,7 +2958,8 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}) {
             name: args.name,
             objective: args.objective,
             ownerSessionID: sessionID,
-            config: resolution.config
+            config: resolution.config,
+            costBudget
           });
           return {
             title: "Goal created",
@@ -2884,6 +2970,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}) {
               artifactDir: goal.config.artifactDir,
               agent: resolution.config.agent,
               model: resolution.config.model,
+              costBudget: goal.costBudget,
               checks: resolution.config.checks || [],
               workspaceWrite: resolution.config.workspaceWrite,
               defaultsApplied: resolution.defaultsApplied,
@@ -3263,7 +3350,9 @@ function formatGoalStructured(goal, runtime) {
     completionEvidence: goal.completionEvidence,
     blocker: goal.blocker,
     tokensUsed: goal.tokensUsed,
+    tokenBudget: goal.tokenBudget,
     costUsed: goal.costUsed ?? 0,
+    costBudget: goal.costBudget,
     timeUsedSeconds: goal.timeUsedSeconds
   };
   if (runtime) {
@@ -3447,7 +3536,9 @@ function ownerTools(options) {
             completionEvidence: goal.completionEvidence,
             blocker: goal.blocker,
             tokensUsed: goal.tokensUsed,
+            tokenBudget: goal.tokenBudget,
             costUsed: goal.costUsed ?? 0,
+            costBudget: goal.costBudget,
             timeUsedSeconds: goal.timeUsedSeconds,
             progressHistory,
             pendingInbox,

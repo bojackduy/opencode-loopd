@@ -60,6 +60,9 @@ export interface GoalRuntimeState {
   /** Set once the owner has been warned for the current unknown-status episode. */
   workerUnreachableNotifiedAt?: string
 
+  /** Active run ID already reported by the stuck-running watchdog (notify once per run). */
+  stuckNotifiedRunID?: string
+
   /** Number of tokens consumed during current turn. */
   turnTokensUsed?: number
 

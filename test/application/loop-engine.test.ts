@@ -5,7 +5,7 @@ import os from "os"
 import { createLoopEngine } from "../../src/application/loop-engine"
 import { createGoalService } from "../../src/application/goal-service"
 import { createFakeHost } from "../../src/server/host-adapter"
-import { readState } from "../../src/infrastructure/state-repository"
+import { readState, readEvents } from "../../src/infrastructure/state-repository"
 import type { GoalID } from "../../src/domain/goal"
 
 function tmpDir(): string {
@@ -412,6 +412,201 @@ describe("Loop Engine", () => {
       expect((host.sessions as any).notifications ?? []).toHaveLength(0)
       // Idle maintenance should keep driving the goal forward.
       expect(host.prompts.length).toBeGreaterThan(1)
+    })
+
+    it("stops a goal as budget_limited when costUsed reaches costBudget", async () => {
+      engine.stop()
+      host = createFakeHost()
+      goalService = createGoalService(host)
+      engine = createLoopEngine({ directory: dir, host, goalService, pollIntervalMs: 10, confirmIdleMs: 0 })
+      engine.start()
+
+      const { goal } = await goalService.start(dir, {
+        name: "capped",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+        costBudget: 0.5,
+      })
+      // Seed spend past the budget before the engine completes the first run
+      const seeded = await readState(dir)
+      seeded.goals.find((g) => g.id === goal.id)!.costBudget = 0.5
+      seeded.goals.find((g) => g.id === goal.id)!.costUsed = 10
+      await fs.writeFile(
+        path.join(dir, ".opencode", "loopd", "state.json"),
+        JSON.stringify(seeded, null, 2),
+      )
+
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      const after = await readState(dir)
+      expect(after.goals[0].status).toBe("budget_limited")
+      // No continuation prompt after the budget trip — only the initial one
+      expect(host.prompts.length).toBe(1)
+    })
+
+    it("confirms an idle turn whose prompt fell outside the transcript tail", async () => {
+      engine.stop()
+      host = createFakeHost()
+      goalService = createGoalService(host)
+      engine = createLoopEngine({ directory: dir, host, goalService, pollIntervalMs: 100, confirmIdleMs: 0 })
+      engine.start()
+
+      const { goal } = await goalService.start(dir, {
+        name: "long-turn",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+      })
+      await engine.preloadWorkerSessions()
+      const promptID = (await readState(dir)).runtimes[0].activePromptMessageID!
+      // Bury the prompt under 60 completions — beyond any fixed tail window
+      const transcript = host.messages.get(goal.workerSessionID!) || []
+      for (let i = 0; i < 60; i++) {
+        transcript.push({
+          role: "assistant",
+          content: `chunk ${i}`,
+          timestamp: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          messageID: `asst-long-${i}`,
+          parentMessageID: promptID,
+        })
+      }
+      host.messages.set(goal.workerSessionID!, transcript)
+
+      await engine.handleEvent({ type: "session.idle", properties: { sessionID: goal.workerSessionID } })
+      await engine.handleEvent({ type: "session.idle", properties: { sessionID: goal.workerSessionID } })
+
+      const completed = (await readEvents(dir, 50)).filter(
+        (e: any) => e.goalID === goal.id && e.type === "run.completed",
+      )
+      expect(completed.length).toBeGreaterThan(0)
+      expect(host.prompts.length).toBeGreaterThan(1)
+      const failed = (await readEvents(dir, 50)).filter(
+        (e: any) => e.goalID === goal.id && e.type === "idle.confirm-failed",
+      )
+      expect(failed).toHaveLength(0)
+    })
+
+    it("confirms via the event anchor when the transcript cannot prove completion", async () => {
+      engine.stop()
+      host = createFakeHost()
+      goalService = createGoalService(host)
+      engine = createLoopEngine({ directory: dir, host, goalService, pollIntervalMs: 100, confirmIdleMs: 0 })
+      engine.start()
+
+      const { goal } = await goalService.start(dir, {
+        name: "anchor-turn",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+      })
+      await engine.preloadWorkerSessions()
+      // 210 completions linked elsewhere + a recorded completion stamp:
+      // transcript alone cannot confirm, the event anchor can.
+      const transcript = host.messages.get(goal.workerSessionID!) || []
+      for (let i = 0; i < 210; i++) {
+        transcript.push({
+          role: "assistant",
+          content: `chunk ${i}`,
+          timestamp: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          messageID: `asst-anchor-${i}`,
+          parentMessageID: "some-other-prompt",
+        })
+      }
+      host.messages.set(goal.workerSessionID!, transcript)
+      const seeded = await readState(dir)
+      const rt = seeded.runtimes.find((r) => r.goalID === goal.id)!
+      rt.activeAssistantCompletedAt = new Date().toISOString()
+      await fs.writeFile(
+        path.join(dir, ".opencode", "loopd", "state.json"),
+        JSON.stringify(seeded, null, 2),
+      )
+
+      await engine.handleEvent({ type: "session.idle", properties: { sessionID: goal.workerSessionID } })
+      await engine.handleEvent({ type: "session.idle", properties: { sessionID: goal.workerSessionID } })
+
+      const completed = (await readEvents(dir, 50)).filter(
+        (e: any) => e.goalID === goal.id && e.type === "run.completed",
+      )
+      expect(completed.length).toBeGreaterThan(0)
+      expect(host.prompts.length).toBeGreaterThan(1)
+    })
+
+    async function svc_start_idle_goal() {
+      return goalService.start(dir, {
+        name: "anchor-turn",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+      })
+    }
+
+    it("emits idle.confirm-failed when the assistant never completed", async () => {
+      engine.stop()
+      host = createFakeHost({ autoCompletePrompts: false })
+      goalService = createGoalService(host)
+      engine = createLoopEngine({ directory: dir, host, goalService, pollIntervalMs: 100, confirmIdleMs: 0 })
+      engine.start()
+
+      const { goal } = await goalService.start(dir, {
+        name: "incomplete-turn",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+      })
+      await engine.preloadWorkerSessions()
+
+      await engine.handleEvent({ type: "session.idle", properties: { sessionID: goal.workerSessionID } })
+      await engine.handleEvent({ type: "session.idle", properties: { sessionID: goal.workerSessionID } })
+
+      const failed = (await readEvents(dir, 50)).filter(
+        (e: any) => e.goalID === goal.id && e.type === "idle.confirm-failed",
+      )
+      expect(failed.length).toBeGreaterThan(0)
+      expect(failed[0].reason).toBe("assistant-incomplete")
+      expect(host.prompts.length).toBe(1)
+    })
+
+    it("reports a lease-expired running turn with no activity as stuck, once", async () => {
+      engine.stop()
+      host = createFakeHost({ sessionStatus: "busy" })
+      goalService = createGoalService(host)
+      engine = createLoopEngine({
+        directory: dir,
+        host,
+        goalService,
+        pollIntervalMs: 10,
+        confirmIdleMs: 0,
+        stuckRunningMs: 50,
+      })
+      engine.start()
+
+      const { goal } = await goalService.start(dir, {
+        name: "stuck-turn",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+      })
+      const seeded = await readState(dir)
+      const rt = seeded.runtimes.find((r) => r.goalID === goal.id)!
+      rt.leaseExpiresAt = new Date(Date.now() - 60_000).toISOString()
+      rt.lastActivityAt = new Date(Date.now() - 3_600_000).toISOString()
+      await fs.writeFile(
+        path.join(dir, ".opencode", "loopd", "state.json"),
+        JSON.stringify(seeded, null, 2),
+      )
+
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      const stuck = (await readEvents(dir, 50)).filter(
+        (e: any) => e.goalID === goal.id && e.type === "run.stuck",
+      )
+      expect(stuck.length).toBeGreaterThan(0)
+      expect((host.sessions as any).notifications).toHaveLength(1)
+      expect((await readState(dir)).goals[0].status).toBe("active")
+
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect((host.sessions as any).notifications).toHaveLength(1)
     })
 
     it("clears a stale active run from an idle runtime", async () => {
