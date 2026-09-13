@@ -1755,7 +1755,7 @@ function LoopDashboard(props) {
               return _el$162;
             })())] : (() => {
               var _el$165 = _$createElement("span");
-              _$insertNode(_el$165, _$createTextNode(`parent default`));
+              _$insertNode(_el$165, _$createTextNode(`parent`));
               _$effect((_$p) => _$setProp(_el$165, "style", {
                 fg: theme().textMuted
               }, _$p));
@@ -1793,7 +1793,7 @@ function LoopDashboard(props) {
               return _el$169;
             })()] : (() => {
               var _el$170 = _$createElement("span");
-              _$insertNode(_el$170, _$createTextNode(`session default`));
+              _$insertNode(_el$170, _$createTextNode(`parent`));
               _$effect((_$p) => _$setProp(_el$170, "style", {
                 fg: theme().textMuted
               }, _$p));
@@ -1815,29 +1815,29 @@ function LoopDashboard(props) {
               return _el$153;
             })(), (() => {
               var _el$155 = _$createElement("span");
-              _$insert(_el$155, () => formatTokens(goal().tokensUsed));
+              _$insert(_el$155, () => formatCost(goal().costUsed));
               _$effect((_$p) => _$setProp(_el$155, "style", {
-                fg: theme().warning,
+                fg: theme().success,
                 bold: true
               }, _$p));
               return _el$155;
             })(), (() => {
               var _el$156 = _$createElement("span");
-              _$insertNode(_el$156, _$createTextNode(` tokens \xB7 `));
+              _$insertNode(_el$156, _$createTextNode(` \xB7 `));
               _$effect((_$p) => _$setProp(_el$156, "style", {
                 fg: theme().textMuted
               }, _$p));
               return _el$156;
             })(), (() => {
               var _el$158 = _$createElement("span");
-              _$insert(_el$158, () => formatCost(goal().costUsed));
+              _$insert(_el$158, () => formatTokens(goal().tokensUsed));
               _$effect((_$p) => _$setProp(_el$158, "style", {
-                fg: theme().success,
+                fg: theme().warning,
                 bold: true
               }, _$p));
               return _el$158;
             })(), (() => {
-              var _el$159 = _$createElement("span"), _el$160 = _$createTextNode(` \xB7 `);
+              var _el$159 = _$createElement("span"), _el$160 = _$createTextNode(` tokens \xB7 `);
               _$insertNode(_el$159, _el$160);
               _$insert(_el$159, () => formatDuration(goal().timeUsedSeconds), null);
               _$effect((_$p) => _$setProp(_el$159, "style", {
