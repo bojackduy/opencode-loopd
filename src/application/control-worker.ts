@@ -16,7 +16,6 @@ import {
   readState,
   writeState,
   appendEvent,
-  appendGoalInbox,
   type ControlRequest,
   type ControlResponse,
 } from "../infrastructure/state-repository"
@@ -237,6 +236,22 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
         break
       }
 
+      case "nudge": {
+        if (!request.goalID) {
+          response = { ...base, ok: false, message: "goalID is required", errorCode: "bad_request" }
+          break
+        }
+        const result = await goalSvc.nudge(directory, request.goalID as any)
+        const state = await readState(directory)
+        response = {
+          ...base,
+          ok: result.ok,
+          message: result.message,
+          stateRevision: state.revision,
+        }
+        break
+      }
+
       case "clear": {
         await goalSvc.clear(directory, request.goalID as any)
         const state = await readState(directory)
@@ -259,12 +274,14 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
           response = { ...base, ok: false, message: "goalID is required", errorCode: "bad_request" }
           break
         }
-        await appendGoalInbox(directory, request.goalID as string, "user", text)
+        // Bare words own turn: queued and delivered immediately as the whole
+        // prompt (no steering wrapper), or queued for later when inactive.
+        const sent = await goalSvc.sendUserMessage(directory, request.goalID as any, text)
         const state = await readState(directory)
-        const goal = state.goals.find((g) => g.id === request.goalID)
         response = {
           ...base,
-          message: `sent to "${goal?.name || request.goalID}"`,
+          ok: sent.ok,
+          message: sent.message,
           stateRevision: state.revision,
         }
         break

@@ -8,7 +8,7 @@ import type { Goal, GoalID } from "../domain/goal"
 import { createGoal, canTransition, isTerminal } from "../domain/goal"
 import type { GoalRuntimeState, RunID } from "../domain/runtime"
 import { createRuntimeState, acquireLease, releaseLease, leaseIsValid, markProgress } from "../domain/runtime"
-import { readState, mutateState, appendEvent, drainGoalInbox, readEvents, goalArtifactDir, ensureGoalArtifactDir } from "../infrastructure/state-repository"
+import { readState, mutateState, appendEvent, appendGoalInbox, drainGoalInbox, readEvents, goalArtifactDir, ensureGoalArtifactDir } from "../infrastructure/state-repository"
 import * as path from "path"
 import { promises as fs } from "fs"
 import type { StoreState } from "../infrastructure/state-repository"
@@ -32,6 +32,14 @@ export interface GoalService {
 
   /** Force re-prompt a stuck worker even if the session reports non-idle. */
   nudge(directory: string, goalID: GoalID): Promise<{ ok: boolean; message: string }>
+
+  /**
+   * Deliver the owner's words as a bare turn: the drained inbox texts become
+   * the WHOLE prompt (no steering, history, or verification wrapper) and the
+   * turn starts immediately instead of waiting for the next idle boundary.
+   * Engine turns are unaffected — they keep building full steering.
+   */
+  sendUserMessage(directory: string, goalID: GoalID, text: string): Promise<{ ok: boolean; message: string }>
 
   /**
    * Abort the worker session without changing goal status. Manual kill switch
@@ -413,7 +421,7 @@ export function createGoalService(host: LoopHost): GoalService {
     return accountTailUsage(directory, goalID, runtime, tail)
   }
 
-  async function continueTurnUnlocked(directory: string, goalID: GoalID, opts?: { forceFinish?: boolean; force?: boolean }) {
+  async function continueTurnUnlocked(directory: string, goalID: GoalID, opts?: { forceFinish?: boolean; force?: boolean; bare?: boolean }) {
     // Read state for pre-checks (lease validity, worker idle)
     const preState = await readState(directory)
     const goal = preState.goals.find((g) => g.id === goalID)
@@ -476,6 +484,23 @@ export function createGoalService(host: LoopHost): GoalService {
       timestamp: new Date().toISOString(),
       revision: state.revision,
     } satisfies LoopEvent)
+
+    // Bare turn: the owner's drained words ARE the prompt — no steering,
+    // history, or verification wrapper. Falls through to full steering when
+    // the inbox is unexpectedly empty (never open a phantom turn).
+    if (opts?.bare) {
+      const bareWords = await drainGoalInbox(directory, goalID)
+      const bareText = bareWords.join("\n").trim()
+      if (bareText) {
+        try {
+          await workers.sendBare(session, freshGoal, freshRuntime, bareText)
+        } catch (error) {
+          await recordPromptFailure(directory, goalID, error)
+          throw error
+        }
+        return
+      }
+    }
 
     // Send continuation with accumulated context (external I/O — not under lock)
     const inboxMessages = await drainGoalInbox(directory, goalID)
@@ -826,7 +851,45 @@ export function createGoalService(host: LoopHost): GoalService {
     return { ok: true, message: `Re-prompted worker for "${freshGoal.name}".` }
   }
 
-  function continueTurn(directory: string, goalID: GoalID, opts?: { forceFinish?: boolean; force?: boolean }) {
+  async function sendUnlocked(directory: string, goalID: GoalID, text: string): Promise<{ ok: boolean; message: string }> {
+    const trimmed = text.trim()
+    if (!trimmed) return { ok: false, message: "Nothing to send." }
+    const preState = await readState(directory)
+    const goal = preState.goals.find((g) => g.id === goalID)
+    if (!goal) return { ok: false, message: "Goal not found." }
+
+    await appendGoalInbox(directory, goalID, "user", trimmed)
+    if (goal.status !== "active") {
+      return { ok: true, message: `Queued for "${goal.name}" (goal is ${goal.status}; delivers on the next active turn).` }
+    }
+
+    // Clear stale run state so the bare turn is not gated on an old lease/run.
+    const cleared = await mutateState(directory, `goal.send:${goalID}`, async (s) => {
+      const rt = s.runtimes.find((r) => r.goalID === goalID)
+      if (!rt) return s
+      rt.phase = "idle"
+      rt.activeRunID = undefined
+      rt.idleCandidateAt = undefined
+      rt.activePromptMessageID = undefined
+      rt.activeToolCallIDs = []
+      rt.updatedAt = new Date().toISOString()
+      return s
+    })
+    const freshGoal = cleared.goals.find((g) => g.id === goalID)
+    if (!freshGoal || !freshGoal.workerSessionID) {
+      return { ok: true, message: `Queued for "${goal.name}" (no worker session yet; delivers on the next turn).` }
+    }
+
+    // Force a bare turn now: the drained words alone, no steering wrapper.
+    await continueTurnUnlocked(directory, goalID, { force: true, bare: true })
+    return { ok: true, message: `Sent to "${freshGoal.name}" as its own turn.` }
+  }
+
+  function sendUserMessage(directory: string, goalID: GoalID, text: string) {
+    return withGoalOperation(goalID, () => sendUnlocked(directory, goalID, text))
+  }
+
+  function continueTurn(directory: string, goalID: GoalID, opts?: { forceFinish?: boolean; force?: boolean; bare?: boolean }) {
     return withGoalOperation(goalID, () => continueTurnUnlocked(directory, goalID, opts))
   }
 
@@ -900,5 +963,5 @@ export function createGoalService(host: LoopHost): GoalService {
     return withGoalOperation(goalID, () => accountUsageUnlocked(directory, goalID))
   }
 
-  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker }
+  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage }
 }

@@ -422,6 +422,48 @@ describe("Goal Service", () => {
     })
   })
 
+  describe("sendUserMessage", () => {
+    it("delivers bare words immediately without steering", async () => {
+      const { goal } = await svc.start(dir, {
+        name: "bare-direct",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+      })
+      const before = host.prompts.length
+      const result = await svc.sendUserMessage(dir, goal.id, "just this")
+      expect(result.ok).toBe(true)
+      expect(host.prompts.length).toBe(before + 1)
+      expect(host.prompts[host.prompts.length - 1]).toBe("[user] just this")
+    })
+
+    it("queues without turning when the goal is not active", async () => {
+      const { goal } = await svc.start(dir, {
+        name: "bare-paused",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+      })
+      await svc.pause(dir, goal.id)
+      const before = host.prompts.length
+      const result = await svc.sendUserMessage(dir, goal.id, "later words")
+      expect(result.ok).toBe(true)
+      expect(result.message).toContain("paused")
+      expect(host.prompts.length).toBe(before)
+    })
+
+    it("rejects blank text", async () => {
+      const { goal } = await svc.start(dir, {
+        name: "bare-blank",
+        objective: "do something",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+      })
+      const result = await svc.sendUserMessage(dir, goal.id, "   ")
+      expect(result.ok).toBe(false)
+    })
+  })
+
   describe("prompt startup failure", () => {
     it("blocks a newly created goal when its first prompt cannot be delivered", async () => {
       host.promptWorker = async () => {

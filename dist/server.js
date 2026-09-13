@@ -787,6 +787,21 @@ function createControlWorker(options) {
         };
         break;
       }
+      case "nudge": {
+        if (!request.goalID) {
+          response = { ...base, ok: false, message: "goalID is required", errorCode: "bad_request" };
+          break;
+        }
+        const result = await goalSvc.nudge(directory, request.goalID);
+        const state2 = await readState(directory);
+        response = {
+          ...base,
+          ok: result.ok,
+          message: result.message,
+          stateRevision: state2.revision
+        };
+        break;
+      }
       case "clear": {
         await goalSvc.clear(directory, request.goalID);
         const state2 = await readState(directory);
@@ -808,12 +823,12 @@ function createControlWorker(options) {
           response = { ...base, ok: false, message: "goalID is required", errorCode: "bad_request" };
           break;
         }
-        await appendGoalInbox(directory, request.goalID, "user", text);
+        const sent = await goalSvc.sendUserMessage(directory, request.goalID, text);
         const state2 = await readState(directory);
-        const goal = state2.goals.find((g) => g.id === request.goalID);
         response = {
           ...base,
-          message: `sent to "${goal?.name || request.goalID}"`,
+          ok: sent.ok,
+          message: sent.message,
           stateRevision: state2.revision
         };
         break;
@@ -2106,6 +2121,16 @@ function createWorkerManager(host) {
       });
       return result;
     },
+    async sendBare(worker, goal, runtime, text) {
+      const result = await host.promptWorker({
+        sessionID: worker.workerSessionID,
+        prompt: text,
+        messageID: runtime.activePromptMessageID,
+        agent: goal.config.agent,
+        model: parseModelRef(goal.config.model)
+      });
+      return result;
+    },
     async isIdle(workerSessionID) {
       const status = await host.sessionStatus(workerSessionID);
       return status === "idle";
@@ -2564,6 +2589,20 @@ function createGoalService(host) {
       timestamp: new Date().toISOString(),
       revision: state.revision
     });
+    if (opts?.bare) {
+      const bareWords = await drainGoalInbox(directory, goalID);
+      const bareText = bareWords.join(`
+`).trim();
+      if (bareText) {
+        try {
+          await workers.sendBare(session, freshGoal, freshRuntime, bareText);
+        } catch (error) {
+          await recordPromptFailure(directory, goalID, error);
+          throw error;
+        }
+        return;
+      }
+    }
     const inboxMessages = await drainGoalInbox(directory, goalID);
     const allEvents = await readEvents(directory, 200);
     const progressHistory = allEvents.filter((e) => e.goalID === goalID && e.type === "goal.progress").map((e) => ({
@@ -2871,6 +2910,40 @@ function createGoalService(host) {
     await continueTurnUnlocked(directory, goalID, { force: true });
     return { ok: true, message: `Re-prompted worker for "${freshGoal.name}".` };
   }
+  async function sendUnlocked(directory, goalID, text) {
+    const trimmed = text.trim();
+    if (!trimmed)
+      return { ok: false, message: "Nothing to send." };
+    const preState = await readState(directory);
+    const goal = preState.goals.find((g) => g.id === goalID);
+    if (!goal)
+      return { ok: false, message: "Goal not found." };
+    await appendGoalInbox(directory, goalID, "user", trimmed);
+    if (goal.status !== "active") {
+      return { ok: true, message: `Queued for "${goal.name}" (goal is ${goal.status}; delivers on the next active turn).` };
+    }
+    const cleared = await mutateState(directory, `goal.send:${goalID}`, async (s) => {
+      const rt = s.runtimes.find((r) => r.goalID === goalID);
+      if (!rt)
+        return s;
+      rt.phase = "idle";
+      rt.activeRunID = undefined;
+      rt.idleCandidateAt = undefined;
+      rt.activePromptMessageID = undefined;
+      rt.activeToolCallIDs = [];
+      rt.updatedAt = new Date().toISOString();
+      return s;
+    });
+    const freshGoal = cleared.goals.find((g) => g.id === goalID);
+    if (!freshGoal || !freshGoal.workerSessionID) {
+      return { ok: true, message: `Queued for "${goal.name}" (no worker session yet; delivers on the next turn).` };
+    }
+    await continueTurnUnlocked(directory, goalID, { force: true, bare: true });
+    return { ok: true, message: `Sent to "${freshGoal.name}" as its own turn.` };
+  }
+  function sendUserMessage(directory, goalID, text) {
+    return withGoalOperation(goalID, () => sendUnlocked(directory, goalID, text));
+  }
   function continueTurn(directory, goalID, opts) {
     return withGoalOperation(goalID, () => continueTurnUnlocked(directory, goalID, opts));
   }
@@ -2930,7 +3003,7 @@ function createGoalService(host) {
   function accountUsage(directory, goalID) {
     return withGoalOperation(goalID, () => accountUsageUnlocked(directory, goalID));
   }
-  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker };
+  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage };
 }
 
 // src/application/schedule-worker.ts

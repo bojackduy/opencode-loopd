@@ -173,6 +173,32 @@ describe("Control Bus", () => {
     expect(host.sessions.has(workerID)).toBe(false)
   })
 
+  it("nudges the worker through the bus with full steering", async () => {
+    await client.execute({
+      version: 1,
+      requestID: crypto.randomUUID(),
+      requestedAt: new Date().toISOString(),
+      command: "start",
+      args: { name: "nudge-bus", objective: "o", config: { workspaceWrite: false }, ownerSessionID: "owner-1" },
+    })
+    const started = await readState(dir)
+    const goalID = started.goals[0].id
+    const promptsBefore = host.prompts.length
+
+    const result = await client.execute({
+      version: 1,
+      requestID: crypto.randomUUID(),
+      requestedAt: new Date().toISOString(),
+      command: "nudge",
+      goalID,
+    })
+
+    expect(result.ok).toBe(true)
+    // Forced continuation carries full steering, not bare words
+    expect(host.prompts.length).toBeGreaterThan(promptsBefore)
+    expect(host.prompts[host.prompts.length - 1]).toContain("COMPLETION REVIEW")
+  })
+
   it("receives events through the bus", async () => {
     await client.execute({
       version: 1,
@@ -217,5 +243,35 @@ describe("Control Bus", () => {
 
     expect(result.ok).toBe(true)
     expect(worker.isRunning()).toBe(true)
+  })
+
+  it("sends bare words as their own turn without steering", async () => {
+    await client.execute({
+      version: 1,
+      requestID: crypto.randomUUID(),
+      requestedAt: new Date().toISOString(),
+      command: "start",
+      args: { name: "bare-send", objective: "o", config: { workspaceWrite: false }, ownerSessionID: "owner-1" },
+    })
+    const started = await readState(dir)
+    const goalID = started.goals[0].id
+
+    const result = await client.execute({
+      version: 1,
+      requestID: crypto.randomUUID(),
+      requestedAt: new Date().toISOString(),
+      command: "send",
+      goalID,
+      args: { message: "just this" },
+    }, 5000)
+
+    expect(result.ok).toBe(true)
+    const lastPrompt = host.prompts[host.prompts.length - 1]
+    expect(lastPrompt).toBe("[user] just this")
+    // Consumed, not queued: the inbox file is drained, so the next engine
+    // turn cannot repeat the words inside steering.
+    await expect(
+      fs.stat(path.join(dir, ".opencode", "loopd", "inboxes", `${goalID}.jsonl`)),
+    ).rejects.toThrow()
   })
 })

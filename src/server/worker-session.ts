@@ -42,6 +42,13 @@ export interface WorkerManager {
   /** Send a continuation prompt to the worker. Returns the SDK messageID. */
   continueWorker(worker: WorkerSession, goal: Goal, runtime: GoalRuntimeState, context?: ContinuationContext): Promise<{ messageID?: string }>
 
+  /**
+   * Send the owner's bare words as the whole prompt — no steering, history,
+   * or verification wrapper. For short directives that must fit small
+   * contexts and arrive now, not folded into the next engine turn.
+   */
+  sendBare(worker: WorkerSession, goal: Goal, runtime: GoalRuntimeState, text: string): Promise<{ messageID?: string }>
+
   /** Check if the worker session is idle. */
   isIdle(workerSessionID: string): Promise<boolean>
 
@@ -74,6 +81,17 @@ export function createWorkerManager(host: LoopHost): WorkerManager {
       const result = await host.promptWorker({
         sessionID: worker.workerSessionID,
         prompt,
+        messageID: runtime.activePromptMessageID,
+        agent: goal.config.agent,
+        model: parseModelRef(goal.config.model),
+      })
+      return result
+    },
+
+    async sendBare(worker, goal, runtime, text) {
+      const result = await host.promptWorker({
+        sessionID: worker.workerSessionID,
+        prompt: text,
         messageID: runtime.activePromptMessageID,
         agent: goal.config.agent,
         model: parseModelRef(goal.config.model),

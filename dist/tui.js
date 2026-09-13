@@ -322,14 +322,15 @@ function tokenize(input) {
 function commandHelp() {
   return [
     "Modes: : insert \u2192 send/commands | Ctrl+N \u2192 normal | ? toggle help | Shift+B bug report",
-    "Nav: j/k move | g/G top/bottom | o open child | c toggle done | p/r/R/x pause/resume/retry/clear | A abort worker | L logs | q close",
+    "Nav: j/k move | g/G top/bottom | o open child | c toggle done | p/r/R/x pause/resume/retry/clear | A abort worker | N nudge | L logs | q close",
     "Commands (insert mode, : prefix):",
-    "  :send <message>                           Send instruction to selected goal",
+    "  :send <message>                           Send bare words now as their own turn (no steering)",
     "  :open                                     Open child session (same as o)",
     "  :force <summary> --evidence <text>        Force-complete (bypass checks)",
     "  :block <reason> --needed <text>           Force-block the selected goal",
     "  :pause / :resume / :retry / :clear        Quick controls (also p/r/R/x)",
     "  :abort                                   Abort worker session now (status unchanged; A)",
+    "  :nudge                                   Force re-prompt now with full steering (N)",
     "  :bug / :report                            Open prefilled GitHub bug report",
     "  :logs / :help / :q                        Toggle logs / help / close",
     "  Tip: create goals via /goal in the parent chat (agent clarifies first)."
@@ -806,6 +807,11 @@ function LoopDashboard(props) {
       executeCommand("abort");
       return;
     }
+    if (key === "N") {
+      prevent(evt);
+      executeCommand("nudge");
+      return;
+    }
     if (key === "L") {
       prevent(evt);
       setShowLogs((value) => !value);
@@ -1016,6 +1022,23 @@ function LoopDashboard(props) {
             await refresh();
           break;
         }
+        case "nudge": {
+          if (!selectedGoal()) {
+            setStatusText("No goal");
+            break;
+          }
+          const r = await client.execute({
+            version: 1,
+            requestID: randomUUID(),
+            requestedAt: new Date().toISOString(),
+            command: "nudge",
+            goalID: selectedGoal().id
+          });
+          setStatusText(r.ok ? r.message : `Error: ${r.message}`);
+          if (r.ok)
+            await refresh();
+          break;
+        }
         case "goal": {
           setStatusText("Create goals via /goal in the parent chat (agent clarifies first). Dashboard: :send to steer the worker.");
           break;
@@ -1167,7 +1190,7 @@ function LoopDashboard(props) {
         _$setProp(_el$32, "maxHeight", 14);
         _$setProp(_el$32, "overflow", "hidden");
         _$insertNode(_el$33, _el$34);
-        _$insertNode(_el$34, _$createTextNode(`\u2501\u2501\u2501 Keys: ? toggle help c toggle done : insert Ctrl+N normal o open A abort worker q close \u2501\u2501\u2501`));
+        _$insertNode(_el$34, _$createTextNode(`\u2501\u2501\u2501 Keys: ? toggle help c toggle done : insert Ctrl+N normal o open A abort worker N nudge q close \u2501\u2501\u2501`));
         _$setProp(_el$34, "style", {
           fg: "yellow",
           bold: true

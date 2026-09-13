@@ -314,6 +314,7 @@ export function LoopDashboard(props: Props) {
     if (key === "R") { prevent(evt); void executeCommand("retry"); return }
     if (key === "x") { prevent(evt); void executeCommand("clear"); return }
     if (key === "A") { prevent(evt); void executeCommand("abort"); return }
+    if (key === "N") { prevent(evt); void executeCommand("nudge"); return }
     if (key === "L") { prevent(evt); setShowLogs((value) => !value); return }
     if (key === "o") {
       prevent(evt)
@@ -382,6 +383,7 @@ export function LoopDashboard(props: Props) {
         case "retry": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "retry", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
         case "clear": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "clear", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
         case "abort": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "abort_worker", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
+        case "nudge": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "nudge", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
         // Legacy: keep :goal start but redirect — creation belongs in parent chat
         case "goal": { setStatusText("Create goals via /goal in the parent chat (agent clarifies first). Dashboard: :send to steer the worker."); break }
         case "bug":
@@ -457,7 +459,7 @@ export function LoopDashboard(props: Props) {
           <Show when={showHelp()}>
             <box flexDirection="column" padding={1} border={true} borderColor="yellow" backgroundColor={theme().background} flexShrink={0} maxHeight={14} overflow="hidden">
               <text>
-                <span style={{ fg: "yellow", bold: true }}>━━━ Keys: ? toggle help  c toggle done  : insert  Ctrl+N normal  o open  A abort worker  q close ━━━</span>
+                <span style={{ fg: "yellow", bold: true }}>━━━ Keys: ? toggle help  c toggle done  : insert  Ctrl+N normal  o open  A abort worker  N nudge  q close ━━━</span>
                 <For each={commandHelp().split("\n")}>{(line) => {
                   // Modes / Nav — split into label + segments, color keys vs descs
                   if (line.startsWith("Modes:") || line.startsWith("Nav:")) {

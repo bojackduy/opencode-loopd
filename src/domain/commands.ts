@@ -37,6 +37,10 @@ export interface RetryGoalCommand extends BaseCommand {
   command: "retry"
 }
 
+export interface NudgeGoalCommand extends BaseCommand {
+  command: "nudge"
+}
+
 export interface ClearGoalCommand extends BaseCommand {
   command: "clear"
 }
@@ -100,6 +104,7 @@ export type LoopCommand =
   | PauseGoalCommand
   | ResumeGoalCommand
   | RetryGoalCommand
+  | NudgeGoalCommand
   | ClearGoalCommand
   | SendCommand
   | AbortWorkerCommand
