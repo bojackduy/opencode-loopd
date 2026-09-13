@@ -556,7 +556,7 @@ export function LoopDashboard(props: Props) {
               <text><span style={{ fg: theme().textMuted }}>Tip: </span><span style={{ fg: theme().warning }}>:send</span><span style={{ fg: theme().textMuted }}> to steer the worker · </span><span style={{ fg: theme().warning }}>o</span><span style={{ fg: theme().textMuted }}> to open child · </span><span style={{ fg: theme().warning }}>:force</span><span style={{ fg: theme().textMuted }}> to complete manually.</span></text>
             </box>
           }>
-            <scrollbox ref={(el) => { listScrollRef = el }} height={listHeight()} scrollbarOptions={{ visible: false }}>
+            <scrollbox ref={(el) => { listScrollRef = el }} height={listHeight()}>
               <For each={activeGoals()}>
                 {(goal, i) => {
                   const runtime = () => state()?.runtimes.find((r) => r.goalID === goal.id)
@@ -620,14 +620,17 @@ export function LoopDashboard(props: Props) {
                       return (<>
                         {"\n"}
                         <span style={{ fg: theme().textMuted }}>🤖 </span>
+                        <span style={{ fg: theme().primary, bold: true }}>Agent: </span>
                         {agentName
                           ? <><span style={{ fg: agentColor(meta?.color, theme()) as any, bold: true }}>{agentName}</span>{meta?.mode && <span style={{ fg: theme().textMuted }}> ({meta.mode})</span>}</>
                           : <span style={{ fg: theme().textMuted }}>parent default</span>}
                         <span style={{ fg: theme().textMuted }}> │ 🧠 </span>
+                        <span style={{ fg: theme().primary, bold: true }}>Model: </span>
                         {model && slash > 0
                           ? <><span style={{ fg: theme().textMuted }}>{model.slice(0, slash)}/</span><span style={{ fg: theme().info, bold: true }}>{model.slice(slash + 1)}</span></>
                           : <span style={{ fg: theme().textMuted }}>session default</span>}
                         <span style={{ fg: theme().textMuted }}> │ 💰 </span>
+                        <span style={{ fg: theme().primary, bold: true }}>Spent: </span>
                         <span style={{ fg: theme().warning, bold: true }}>{formatTokens(goal().tokensUsed)}</span>
                         <span style={{ fg: theme().textMuted }}> tokens · </span>
                         <span style={{ fg: theme().success, bold: true }}>{formatCost((goal() as any).costUsed)}</span>
@@ -635,16 +638,17 @@ export function LoopDashboard(props: Props) {
                       </>)
                     })()}
                     {"\n"}
+                    <span style={{ fg: theme().primary, bold: true }}>🎯 Target: </span>
                     <span style={{ fg: theme().text }}>{goal().objective.slice(0, 160)}</span>
-                    {lp() && <><span style={{ fg: theme().success }}>{"\n"}✔ </span><span style={{ fg: theme().text }}>{lp()!.summary.slice(0, 100)}</span><span style={{ fg: theme().textMuted }}> → {lp()!.next?.slice(0, 60) || ""}</span></>}
-                    {blk() && <><span style={{ fg: theme().error, bold: true }}>{"\n"}✖ blocked: </span><span style={{ fg: theme().error }}>{blk()!.reason.slice(0, 140)}</span><span style={{ fg: theme().textMuted }}> — {blk()!.needed.slice(0, 60)}</span></>}
-                    {goal().config.artifactDir && <><span style={{ fg: theme().accent }}>{"\n"}📁 </span><span style={{ fg: theme().textMuted }}>{String(goal().config.artifactDir).replace(String(props.directory), ".")}</span></>}
-                    {(goal().config.checks?.length ?? 0) > 0 ? <><span style={{ fg: theme().warning }}>{"\n"}▣ checks: </span><span style={{ fg: theme().textMuted }}>{(goal().config.checks as string[]).join(", ").slice(0, 100)}</span></> : null}
+                    {lp() && <><span style={{ fg: theme().success }}>{"\n"}✔ </span><span style={{ fg: theme().success, bold: true }}>Progress: </span><span style={{ fg: theme().text }}>{lp()!.summary.slice(0, 100)}</span><span style={{ fg: theme().textMuted }}> → {lp()!.next?.slice(0, 60) || ""}</span></>}
+                    {blk() && <><span style={{ fg: theme().error, bold: true }}>{"\n"}✖ Blocked: </span><span style={{ fg: theme().error }}>{blk()!.reason.slice(0, 140)}</span><span style={{ fg: theme().textMuted }}> — {blk()!.needed.slice(0, 60)}</span></>}
+                    {goal().config.artifactDir && <><span style={{ fg: theme().accent }}>{"\n"}📁 </span><span style={{ fg: theme().accent, bold: true }}>Artifacts: </span><span style={{ fg: theme().textMuted }}>{String(goal().config.artifactDir).replace(String(props.directory), ".")}</span></>}
+                    {(goal().config.checks?.length ?? 0) > 0 ? <><span style={{ fg: theme().warning }}>{"\n"}▣ </span><span style={{ fg: theme().warning, bold: true }}>Checks: </span><span style={{ fg: theme().textMuted }}>{(goal().config.checks as string[]).join(", ").slice(0, 100)}</span></> : null}
                     {(rt() as any)?.evaluatorRejectionCount > 0 && <><span style={{ fg: theme().warning }}>{"\n"}⚠ rejections: </span><span style={{ fg: theme().warning }}>{String((rt() as any).evaluatorRejectionCount)} — {String((rt() as any).lastRejectionDetails || "").slice(0, 80)}</span></>}
                     {(rt() as any)?.unknownStatusCount > 0 && <><span style={{ fg: theme().error }}>{"\n"}⚠️ unreachable: </span><span style={{ fg: theme().error }}>{String((rt() as any).unknownStatusCount)}/3</span><span style={{ fg: theme().textMuted }}> — nudge to recover</span></>}
                     {(rt() as any)?.retryAfter && <><span style={{ fg: theme().accent }}>{"\n"}↻ retry in: </span><span style={{ fg: theme().accent }}>{countdownLabel((rt() as any).retryAfter, clock())}</span></>}
                     {(rt() as any)?.nextRunAt && <><span style={{ fg: theme().accent }}>{"\n"}⏰ next run: </span><span style={{ fg: theme().accent }}>{countdownLabel((rt() as any).nextRunAt, clock())}</span><span style={{ fg: theme().textMuted }}> ({String((rt() as any).scheduleRunCount || 0)} runs)</span></>}
-                    {rt()?.lastError && <><span style={{ fg: theme().error }}>{"\n"}⚠ </span><span style={{ fg: theme().error }}>{rt()!.lastError!.slice(0, 120)}</span></>}
+                    {rt()?.lastError && <><span style={{ fg: theme().error }}>{"\n"}⚠ </span><span style={{ fg: theme().error, bold: true }}>Error: </span><span style={{ fg: theme().error }}>{rt()!.lastError!.slice(0, 120)}</span></>}
                   </text>
                 </box>
               )
