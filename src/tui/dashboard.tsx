@@ -6,7 +6,7 @@
 import { createSignal, For, Show, onCleanup, onMount, createEffect } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
 import type { TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
-import type { InputRenderable, ParsedKey } from "@opentui/core"
+import type { InputRenderable, ParsedKey, ScrollBoxRenderable } from "@opentui/core"
 import { readEvents } from "../infrastructure/state-repository"
 import { createControlClient } from "../infrastructure/control-client"
 import type { StoreState } from "../infrastructure/state-repository"
@@ -207,6 +207,7 @@ export function LoopDashboard(props: Props) {
   const [clock, setClock] = createSignal(Date.now())
   const [agentIndex, setAgentIndex] = createSignal<Record<string, AgentMeta>>({})
   let inputEl: InputRenderable | undefined
+  let listScrollRef: ScrollBoxRenderable | undefined
   let focusTimer: ReturnType<typeof setTimeout> | undefined
   const client = createControlClient(props.directory)
   const popMode = props.api.mode.push("loopd.dashboard")
@@ -421,6 +422,22 @@ export function LoopDashboard(props: Props) {
 
   createEffect(() => setSelectedGoal(activeGoals()[selected()] || null))
 
+  // Follow selection: keep the highlighted row visible inside the scrollable
+  // list. scrollChildIntoView is a no-op when the row is already on screen,
+  // so this never fights the user — it only scrolls when j/k/g/G moves the
+  // cursor out of view. Sticky scroll stays off for the same reason.
+  function rowIdFor(goalID: string): string {
+    return `loopd-goal-${goalID}`
+  }
+  createEffect(() => {
+    const goals = activeGoals()
+    const goal = goals[selected()]
+    if (!goal || !listScrollRef) return
+    try {
+      listScrollRef.scrollChildIntoView(rowIdFor(goal.id))
+    } catch { /* decorative — selection still works without scrolling */ }
+  })
+
   return (
     <box flexDirection="column" width="100%" alignItems="center" padding={1}>
       <box flexDirection="column" width="90%" border={true} borderColor={theme().border} padding={1}>
@@ -525,8 +542,8 @@ export function LoopDashboard(props: Props) {
             </box>
           </Show>
 
-          {/* Goal list — takes remaining space, clipped */}
-          <box flexDirection="column" flexGrow={1} padding={1} minHeight={0} overflow="hidden">
+          {/* Goal list — scrollable, absorbs shrink so detail + input stay visible */}
+          <scrollbox ref={(el) => { listScrollRef = el }} flexDirection="column" flexGrow={1} padding={1} minHeight={0} scrollY={true}>
             <Show when={activeGoals().length > 0} fallback={
               <box flexDirection="column" gap={1}>
                 <text><span style={{ fg: theme().textMuted }}>No active goals.</span><span style={{ fg: theme().accent }}> /goal</span><span style={{ fg: theme().textMuted }}> in parent chat to create one.</span></text>
@@ -546,7 +563,7 @@ export function LoopDashboard(props: Props) {
                     return phaseColor(runtime()!.phase || "idle", theme())
                   }
                   return (
-                    <box flexDirection="row" paddingLeft={1} paddingRight={1} backgroundColor={isActive() ? theme().backgroundElement : undefined}>
+                    <box id={rowIdFor(goal.id)} flexDirection="row" paddingLeft={1} paddingRight={1} backgroundColor={isActive() ? theme().backgroundElement : undefined}>
                       <text>
                         <span style={{ fg: statusColor(goal.status, theme()), bold: isActive() }}>{isActive() ? `▶ ${statusIcon(goal.status)} ${goal.name}` : `  ${statusIcon(goal.status)} ${goal.name}`}</span>
                         <span style={{ fg: theme().textMuted }}> │ </span>
@@ -570,7 +587,7 @@ export function LoopDashboard(props: Props) {
                 }}
               </For>
             </Show>
-          </box>
+          </scrollbox>
 
           {/* Goal detail — fixed, bounded, border matches status */}
           <Show when={selectedGoal()}>

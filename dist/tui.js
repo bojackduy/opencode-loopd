@@ -643,6 +643,7 @@ function LoopDashboard(props) {
   const [clock, setClock] = createSignal(Date.now());
   const [agentIndex, setAgentIndex] = createSignal({});
   let inputEl;
+  let listScrollRef;
   let focusTimer;
   const client = createControlClient(props.directory);
   const popMode = props.api.mode.push("loopd.dashboard");
@@ -1097,8 +1098,20 @@ function LoopDashboard(props) {
     setStatusText(res.status === "opened" ? "Opening bug report in browser\u2026" : `Could not open browser: ${res.reason} \u2014 ${url}`);
   }
   createEffect(() => setSelectedGoal(activeGoals()[selected()] || null));
+  function rowIdFor(goalID) {
+    return `loopd-goal-${goalID}`;
+  }
+  createEffect(() => {
+    const goals = activeGoals();
+    const goal = goals[selected()];
+    if (!goal || !listScrollRef)
+      return;
+    try {
+      listScrollRef.scrollChildIntoView(rowIdFor(goal.id));
+    } catch {}
+  });
   return (() => {
-    var _el$ = _$createElement("box"), _el$2 = _$createElement("box"), _el$3 = _$createElement("box"), _el$4 = _$createElement("text"), _el$5 = _$createElement("span"), _el$7 = _$createElement("span"), _el$9 = _$createElement("span"), _el$0 = _$createTextNode(` `), _el$1 = _$createTextNode(` `), _el$10 = _$createElement("span"), _el$12 = _$createElement("span"), _el$13 = _$createElement("span"), _el$15 = _$createElement("span"), _el$17 = _$createElement("span"), _el$18 = _$createTextNode(` `), _el$19 = _$createTextNode(` running`), _el$20 = _$createElement("span"), _el$22 = _$createElement("span"), _el$24 = _$createElement("span"), _el$25 = _$createElement("span"), _el$27 = _$createElement("box"), _el$28 = _$createElement("text"), _el$29 = _$createElement("span"), _el$31 = _$createElement("box"), _el$36 = _$createElement("box"), _el$43 = _$createElement("box"), _el$44 = _$createElement("text"), _el$45 = _$createElement("span"), _el$46 = _$createElement("input");
+    var _el$ = _$createElement("box"), _el$2 = _$createElement("box"), _el$3 = _$createElement("box"), _el$4 = _$createElement("text"), _el$5 = _$createElement("span"), _el$7 = _$createElement("span"), _el$9 = _$createElement("span"), _el$0 = _$createTextNode(` `), _el$1 = _$createTextNode(` `), _el$10 = _$createElement("span"), _el$12 = _$createElement("span"), _el$13 = _$createElement("span"), _el$15 = _$createElement("span"), _el$17 = _$createElement("span"), _el$18 = _$createTextNode(` `), _el$19 = _$createTextNode(` running`), _el$20 = _$createElement("span"), _el$22 = _$createElement("span"), _el$24 = _$createElement("span"), _el$25 = _$createElement("span"), _el$27 = _$createElement("box"), _el$28 = _$createElement("text"), _el$29 = _$createElement("span"), _el$31 = _$createElement("box"), _el$36 = _$createElement("scrollbox"), _el$43 = _$createElement("box"), _el$44 = _$createElement("text"), _el$45 = _$createElement("span"), _el$46 = _$createElement("input");
     _$insertNode(_el$, _el$2);
     _$setProp(_el$, "flexDirection", "column");
     _$setProp(_el$, "width", "100%");
@@ -1342,11 +1355,14 @@ function LoopDashboard(props) {
         return _el$32;
       }
     }), _el$36);
+    _$use((el) => {
+      listScrollRef = el;
+    }, _el$36);
     _$setProp(_el$36, "flexDirection", "column");
     _$setProp(_el$36, "flexGrow", 1);
     _$setProp(_el$36, "padding", 1);
     _$setProp(_el$36, "minHeight", 0);
-    _$setProp(_el$36, "overflow", "hidden");
+    _$setProp(_el$36, "scrollY", true);
     _$insert(_el$36, _$createComponent(Show, {
       get when() {
         return activeGoals().length > 0;
@@ -1591,25 +1607,27 @@ function LoopDashboard(props) {
                 })();
               })(), null);
               _$effect((_p$) => {
-                var _v$32 = isActive() ? theme().backgroundElement : undefined, _v$33 = {
+                var _v$32 = rowIdFor(goal.id), _v$33 = isActive() ? theme().backgroundElement : undefined, _v$34 = {
                   fg: statusColor(goal.status, theme()),
                   bold: isActive()
-                }, _v$34 = {
-                  fg: theme().textMuted
                 }, _v$35 = {
+                  fg: theme().textMuted
+                }, _v$36 = {
                   fg: statusColor(goal.status, theme()),
                   bold: true
                 };
-                _v$32 !== _p$.e && (_p$.e = _$setProp(_el$90, "backgroundColor", _v$32, _p$.e));
-                _v$33 !== _p$.t && (_p$.t = _$setProp(_el$92, "style", _v$33, _p$.t));
-                _v$34 !== _p$.a && (_p$.a = _$setProp(_el$93, "style", _v$34, _p$.a));
-                _v$35 !== _p$.o && (_p$.o = _$setProp(_el$95, "style", _v$35, _p$.o));
+                _v$32 !== _p$.e && (_p$.e = _$setProp(_el$90, "id", _v$32, _p$.e));
+                _v$33 !== _p$.t && (_p$.t = _$setProp(_el$90, "backgroundColor", _v$33, _p$.t));
+                _v$34 !== _p$.a && (_p$.a = _$setProp(_el$92, "style", _v$34, _p$.a));
+                _v$35 !== _p$.o && (_p$.o = _$setProp(_el$93, "style", _v$35, _p$.o));
+                _v$36 !== _p$.i && (_p$.i = _$setProp(_el$95, "style", _v$36, _p$.i));
                 return _p$;
               }, {
                 e: undefined,
                 t: undefined,
                 a: undefined,
-                o: undefined
+                o: undefined,
+                i: undefined
               });
               return _el$90;
             })();
@@ -2011,18 +2029,18 @@ function LoopDashboard(props) {
             })()];
           })(), null);
           _$effect((_p$) => {
-            var _v$36 = borderColorForStatus(goal().status, theme()), _v$37 = {
+            var _v$37 = borderColorForStatus(goal().status, theme()), _v$38 = {
               fg: statusColor(goal().status, theme()),
               bold: true
-            }, _v$38 = {
-              fg: statusColor(goal().status, theme())
             }, _v$39 = {
+              fg: statusColor(goal().status, theme())
+            }, _v$40 = {
               fg: theme().text
             };
-            _v$36 !== _p$.e && (_p$.e = _$setProp(_el$121, "borderColor", _v$36, _p$.e));
-            _v$37 !== _p$.t && (_p$.t = _$setProp(_el$123, "style", _v$37, _p$.t));
-            _v$38 !== _p$.a && (_p$.a = _$setProp(_el$125, "style", _v$38, _p$.a));
-            _v$39 !== _p$.o && (_p$.o = _$setProp(_el$128, "style", _v$39, _p$.o));
+            _v$37 !== _p$.e && (_p$.e = _$setProp(_el$121, "borderColor", _v$37, _p$.e));
+            _v$38 !== _p$.t && (_p$.t = _$setProp(_el$123, "style", _v$38, _p$.t));
+            _v$39 !== _p$.a && (_p$.a = _$setProp(_el$125, "style", _v$39, _p$.a));
+            _v$40 !== _p$.o && (_p$.o = _$setProp(_el$128, "style", _v$40, _p$.o));
             return _p$;
           }, {
             e: undefined,
