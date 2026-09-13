@@ -1085,6 +1085,7 @@ function LoopDashboard(props) {
     returnToNormalMode();
   }
   const activeGoals = () => state()?.goals.filter((g) => showCompleted() || g.status !== "complete") || [];
+  const listHeight = () => Math.min(activeGoals().length, 10);
   const runningCount = () => state()?.runtimes.filter((runtime) => runtime.phase === "running").length || 0;
   const runningFrame = () => ["|", "/", "-", "\\"][Math.floor(clock() / 500) % 4];
   function handleBugReport() {
@@ -1111,7 +1112,7 @@ function LoopDashboard(props) {
     } catch {}
   });
   return (() => {
-    var _el$ = _$createElement("box"), _el$2 = _$createElement("box"), _el$3 = _$createElement("box"), _el$4 = _$createElement("text"), _el$5 = _$createElement("span"), _el$7 = _$createElement("span"), _el$9 = _$createElement("span"), _el$0 = _$createTextNode(` `), _el$1 = _$createTextNode(` `), _el$10 = _$createElement("span"), _el$12 = _$createElement("span"), _el$13 = _$createElement("span"), _el$15 = _$createElement("span"), _el$17 = _$createElement("span"), _el$18 = _$createTextNode(` `), _el$19 = _$createTextNode(` running`), _el$20 = _$createElement("span"), _el$22 = _$createElement("span"), _el$24 = _$createElement("span"), _el$25 = _$createElement("span"), _el$27 = _$createElement("box"), _el$28 = _$createElement("text"), _el$29 = _$createElement("span"), _el$31 = _$createElement("box"), _el$36 = _$createElement("scrollbox"), _el$43 = _$createElement("box"), _el$44 = _$createElement("text"), _el$45 = _$createElement("span"), _el$46 = _$createElement("input");
+    var _el$ = _$createElement("box"), _el$2 = _$createElement("box"), _el$3 = _$createElement("box"), _el$4 = _$createElement("text"), _el$5 = _$createElement("span"), _el$7 = _$createElement("span"), _el$9 = _$createElement("span"), _el$0 = _$createTextNode(` `), _el$1 = _$createTextNode(` `), _el$10 = _$createElement("span"), _el$12 = _$createElement("span"), _el$13 = _$createElement("span"), _el$15 = _$createElement("span"), _el$17 = _$createElement("span"), _el$18 = _$createTextNode(` `), _el$19 = _$createTextNode(` running`), _el$20 = _$createElement("span"), _el$22 = _$createElement("span"), _el$24 = _$createElement("span"), _el$25 = _$createElement("span"), _el$27 = _$createElement("box"), _el$28 = _$createElement("text"), _el$29 = _$createElement("span"), _el$31 = _$createElement("box"), _el$43 = _$createElement("box"), _el$44 = _$createElement("text"), _el$45 = _$createElement("span"), _el$46 = _$createElement("input");
     _$insertNode(_el$, _el$2);
     _$setProp(_el$, "flexDirection", "column");
     _$setProp(_el$, "width", "100%");
@@ -1183,9 +1184,8 @@ function LoopDashboard(props) {
       fg: "white",
       bold: true
     });
-    _$insertNode(_el$31, _el$36);
     _$setProp(_el$31, "flexDirection", "column");
-    _$setProp(_el$31, "flexGrow", 1);
+    _$setProp(_el$31, "flexShrink", 1);
     _$setProp(_el$31, "minHeight", 0);
     _$setProp(_el$31, "overflow", "hidden");
     _$insert(_el$31, _$createComponent(Show, {
@@ -1354,16 +1354,8 @@ function LoopDashboard(props) {
         _$effect((_$p) => _$setProp(_el$32, "backgroundColor", theme().background, _$p));
         return _el$32;
       }
-    }), _el$36);
-    _$use((el) => {
-      listScrollRef = el;
-    }, _el$36);
-    _$setProp(_el$36, "flexDirection", "column");
-    _$setProp(_el$36, "flexGrow", 1);
-    _$setProp(_el$36, "padding", 1);
-    _$setProp(_el$36, "minHeight", 0);
-    _$setProp(_el$36, "scrollY", true);
-    _$insert(_el$36, _$createComponent(Show, {
+    }), null);
+    _$insert(_el$31, _$createComponent(Show, {
       get when() {
         return activeGoals().length > 0;
       },
@@ -1374,6 +1366,7 @@ function LoopDashboard(props) {
           _$insertNode(_el$67, _el$75);
           _$setProp(_el$67, "flexDirection", "column");
           _$setProp(_el$67, "gap", 1);
+          _$setProp(_el$67, "padding", 1);
           _$insertNode(_el$68, _el$69);
           _$insertNode(_el$68, _el$71);
           _$insertNode(_el$68, _el$73);
@@ -1443,7 +1436,14 @@ function LoopDashboard(props) {
         })();
       },
       get children() {
-        return _$createComponent(For, {
+        var _el$36 = _$createElement("scrollbox");
+        _$use((el) => {
+          listScrollRef = el;
+        }, _el$36);
+        _$setProp(_el$36, "scrollbarOptions", {
+          visible: false
+        });
+        _$insert(_el$36, _$createComponent(For, {
           get each() {
             return activeGoals();
           },
@@ -1470,6 +1470,8 @@ function LoopDashboard(props) {
               _$insertNode(_el$91, _el$92);
               _$insertNode(_el$91, _el$93);
               _$insertNode(_el$91, _el$95);
+              _$setProp(_el$91, "wrapMode", "none");
+              _$setProp(_el$91, "truncate", true);
               _$insert(_el$92, (() => {
                 var _c$2 = _$memo(() => !!isActive());
                 return () => _c$2() ? `\u25B6 ${statusIcon(goal.status)} ${goal.name}` : `  ${statusIcon(goal.status)} ${goal.name}`;
@@ -1632,9 +1634,11 @@ function LoopDashboard(props) {
               return _el$90;
             })();
           }
-        });
+        }));
+        _$effect((_$p) => _$setProp(_el$36, "height", listHeight(), _$p));
+        return _el$36;
       }
-    }));
+    }), null);
     _$insert(_el$31, _$createComponent(Show, {
       get when() {
         return selectedGoal();

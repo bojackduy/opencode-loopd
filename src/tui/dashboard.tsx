@@ -409,6 +409,10 @@ export function LoopDashboard(props: Props) {
   }
 
   const activeGoals = () => state()?.goals.filter((g) => showCompleted() || g.status !== "complete") || []
+  // Rows are pinned to one line each (wrapMode none + truncate), so the list
+  // viewport is exactly `row count` tall, capped at 10. No padding fudge: the
+  // scrollbox sizes its own viewport, and any extra here renders as dead space.
+  const listHeight = () => Math.min(activeGoals().length, 10)
   const runningCount = () => state()?.runtimes.filter((runtime) => runtime.phase === "running").length || 0
   const runningFrame = () => ["|", "/", "-", "\\"][Math.floor(clock() / 500) % 4]
 
@@ -470,8 +474,8 @@ export function LoopDashboard(props: Props) {
           </box>
         </box>
 
-        {/* Scrollable body — grows, hides overflow */}
-        <box flexDirection="column" flexGrow={1} minHeight={0} overflow="hidden">
+        {/* Scrollable body — sizes to content; the list caps itself so detail + input stay visible */}
+        <box flexDirection="column" flexShrink={1} minHeight={0} overflow="hidden">
           {/* Help panel — single text to avoid flex overlap */}
           <Show when={showHelp()}>
             <box flexDirection="column" padding={1} border={true} borderColor="yellow" backgroundColor={theme().background} flexShrink={0} maxHeight={14} overflow="hidden">
@@ -542,14 +546,17 @@ export function LoopDashboard(props: Props) {
             </box>
           </Show>
 
-          {/* Goal list — scrollable, absorbs shrink so detail + input stay visible */}
-          <scrollbox ref={(el) => { listScrollRef = el }} flexDirection="column" flexGrow={1} padding={1} minHeight={0} scrollY={true}>
-            <Show when={activeGoals().length > 0} fallback={
-              <box flexDirection="column" gap={1}>
-                <text><span style={{ fg: theme().textMuted }}>No active goals.</span><span style={{ fg: theme().accent }}> /goal</span><span style={{ fg: theme().textMuted }}> in parent chat to create one.</span></text>
-                <text><span style={{ fg: theme().textMuted }}>Tip: </span><span style={{ fg: theme().warning }}>:send</span><span style={{ fg: theme().textMuted }}> to steer the worker · </span><span style={{ fg: theme().warning }}>o</span><span style={{ fg: theme().textMuted }}> to open child · </span><span style={{ fg: theme().warning }}>:force</span><span style={{ fg: theme().textMuted }}> to complete manually.</span></text>
-              </box>
-            }>
+          {/* Goal list — scrollable, sized to content up to a cap (~10 rows).
+              Short lists sit compact with no void below; long lists cap out
+              and scroll with selection following via scrollChildIntoView.
+              Detail + input stay pinned below in both cases. */}
+          <Show when={activeGoals().length > 0} fallback={
+            <box flexDirection="column" gap={1} padding={1}>
+              <text><span style={{ fg: theme().textMuted }}>No active goals.</span><span style={{ fg: theme().accent }}> /goal</span><span style={{ fg: theme().textMuted }}> in parent chat to create one.</span></text>
+              <text><span style={{ fg: theme().textMuted }}>Tip: </span><span style={{ fg: theme().warning }}>:send</span><span style={{ fg: theme().textMuted }}> to steer the worker · </span><span style={{ fg: theme().warning }}>o</span><span style={{ fg: theme().textMuted }}> to open child · </span><span style={{ fg: theme().warning }}>:force</span><span style={{ fg: theme().textMuted }}> to complete manually.</span></text>
+            </box>
+          }>
+            <scrollbox ref={(el) => { listScrollRef = el }} height={listHeight()} scrollbarOptions={{ visible: false }}>
               <For each={activeGoals()}>
                 {(goal, i) => {
                   const runtime = () => state()?.runtimes.find((r) => r.goalID === goal.id)
@@ -564,7 +571,10 @@ export function LoopDashboard(props: Props) {
                   }
                   return (
                     <box id={rowIdFor(goal.id)} flexDirection="row" paddingLeft={1} paddingRight={1} backgroundColor={isActive() ? theme().backgroundElement : undefined}>
-                      <text>
+                      {/* Single-line row: wrapMode+truncate pin the height so the
+                          list viewport math (1 line per row) stays exact in any
+                          dialog width. Full info lives in the detail panel. */}
+                      <text wrapMode="none" truncate={true}>
                         <span style={{ fg: statusColor(goal.status, theme()), bold: isActive() }}>{isActive() ? `▶ ${statusIcon(goal.status)} ${goal.name}` : `  ${statusIcon(goal.status)} ${goal.name}`}</span>
                         <span style={{ fg: theme().textMuted }}> │ </span>
                         <span style={{ fg: statusColor(goal.status, theme()), bold: true }}>{goal.status.toUpperCase()}</span>
@@ -586,8 +596,8 @@ export function LoopDashboard(props: Props) {
                   )
                 }}
               </For>
-            </Show>
-          </scrollbox>
+            </scrollbox>
+          </Show>
 
           {/* Goal detail — fixed, bounded, border matches status */}
           <Show when={selectedGoal()}>
