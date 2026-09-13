@@ -1,34 +1,17 @@
 // @bun
-var __defProp = Object.defineProperty;
-var __returnValue = (v) => v;
-function __exportSetter(name, newValue) {
-  this[name] = __returnValue.bind(null, newValue);
-}
-var __export = (target, all) => {
-  for (var name in all)
-    __defProp(target, name, {
-      get: all[name],
-      enumerable: true,
-      configurable: true,
-      set: __exportSetter.bind(all, name)
-    });
+var __esm = (fn, res, err) => () => {
+  if (fn)
+    try {
+      res = fn(fn = 0);
+    } catch (e) {
+      err = [e];
+    }
+  if (err)
+    throw err[0];
+  return res;
 };
 
 // src/domain/runtime.ts
-var exports_runtime = {};
-__export(exports_runtime, {
-  shouldNotifyParent: () => shouldNotifyParent,
-  removeToolCall: () => removeToolCall,
-  releaseLease: () => releaseLease,
-  recordActivity: () => recordActivity,
-  markProgress: () => markProgress,
-  markParentNotified: () => markParentNotified,
-  leaseIsValid: () => leaseIsValid,
-  hasActiveToolCalls: () => hasActiveToolCalls,
-  createRuntimeState: () => createRuntimeState,
-  addToolCall: () => addToolCall,
-  acquireLease: () => acquireLease
-});
 function createRuntimeState(goalID) {
   const now = new Date().toISOString();
   return {
@@ -140,19 +123,12 @@ function removeToolCall(rt, callID) {
     updatedAt: new Date().toISOString()
   };
 }
-function hasActiveToolCalls(rt) {
-  return (rt.activeToolCallIDs?.length ?? 0) > 0;
-}
 var PARENT_NOTIFY_DEDUPE_MS = 60000;
-
-// src/application/control-worker.ts
-import { randomUUID } from "crypto";
 
 // src/infrastructure/state-repository.ts
 import { promises as fs } from "fs";
 import path from "path";
 import os from "os";
-var CURRENT_VERSION = 6;
 function emptyState() {
   return { version: CURRENT_VERSION, revision: 0, goals: [], runtimes: [], commandLedger: [] };
 }
@@ -172,7 +148,6 @@ function lockDir(directory) {
 function lockFile(directory, key) {
   return path.join(lockDir(directory), `${key}.lock`);
 }
-var LOCK_STALE_MS = 1e4;
 async function acquireLock(directory, key, operation) {
   const dir = lockDir(directory);
   await fs.mkdir(dir, { recursive: true });
@@ -181,8 +156,8 @@ async function acquireLock(directory, key, operation) {
     try {
       try {
         const raw = await fs.readFile(lockPath, "utf8");
-        const meta2 = JSON.parse(raw);
-        const age = Date.now() - Date.parse(meta2.acquiredAt);
+        const meta = JSON.parse(raw);
+        const age = Date.now() - Date.parse(meta.acquiredAt);
         if (age > LOCK_STALE_MS) {
           await fs.rm(lockPath, { force: true });
         }
@@ -508,6 +483,15 @@ async function peekGoalInbox(directory, goalID) {
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+var CURRENT_VERSION = 6, LOCK_STALE_MS = 1e4;
+var init_state_repository = () => {};
+
+// src/server/plugin.ts
+import { define } from "@opencode-ai/plugin/v2/promise";
+
+// src/application/control-worker.ts
+init_state_repository();
+import { randomUUID } from "crypto";
 
 // src/application/goal-policy.ts
 function resolveGoalCreationConfig(input) {
@@ -746,44 +730,44 @@ function createControlWorker(options) {
           ownerSessionID: args.ownerSessionID,
           config: resolution.config
         });
-        const state2 = await readState(directory);
+        const state = await readState(directory);
         response = {
           ...base,
           message: `goal "${args.name}" created (${goal.id.slice(0, 8)}...)`,
-          stateRevision: state2.revision
+          stateRevision: state.revision
         };
         break;
       }
       case "pause": {
         await goalSvc.pause(directory, request.goalID);
-        const state2 = await readState(directory);
-        const goal = state2.goals.find((g) => g.id === request.goalID);
+        const state = await readState(directory);
+        const goal = state.goals.find((g) => g.id === request.goalID);
         response = {
           ...base,
           message: `goal "${goal?.name || request.goalID}" paused`,
-          stateRevision: state2.revision
+          stateRevision: state.revision
         };
         break;
       }
       case "resume": {
         await goalSvc.resume(directory, request.goalID);
-        const state2 = await readState(directory);
-        const goal = state2.goals.find((g) => g.id === request.goalID);
+        const state = await readState(directory);
+        const goal = state.goals.find((g) => g.id === request.goalID);
         response = {
           ...base,
           message: `goal "${goal?.name || request.goalID}" resumed`,
-          stateRevision: state2.revision
+          stateRevision: state.revision
         };
         break;
       }
       case "retry": {
         await goalSvc.retry(directory, request.goalID);
-        const state2 = await readState(directory);
-        const goal = state2.goals.find((g) => g.id === request.goalID);
+        const state = await readState(directory);
+        const goal = state.goals.find((g) => g.id === request.goalID);
         response = {
           ...base,
           message: `goal "${goal?.name || request.goalID}" retried`,
-          stateRevision: state2.revision
+          stateRevision: state.revision
         };
         break;
       }
@@ -793,22 +777,22 @@ function createControlWorker(options) {
           break;
         }
         const result = await goalSvc.nudge(directory, request.goalID);
-        const state2 = await readState(directory);
+        const state = await readState(directory);
         response = {
           ...base,
           ok: result.ok,
           message: result.message,
-          stateRevision: state2.revision
+          stateRevision: state.revision
         };
         break;
       }
       case "clear": {
         await goalSvc.clear(directory, request.goalID);
-        const state2 = await readState(directory);
+        const state = await readState(directory);
         response = {
           ...base,
           message: `goal cleared`,
-          stateRevision: state2.revision
+          stateRevision: state.revision
         };
         break;
       }
@@ -824,12 +808,12 @@ function createControlWorker(options) {
           break;
         }
         const sent = await goalSvc.sendUserMessage(directory, request.goalID, text);
-        const state2 = await readState(directory);
+        const state = await readState(directory);
         response = {
           ...base,
           ok: sent.ok,
           message: sent.message,
-          stateRevision: state2.revision
+          stateRevision: state.revision
         };
         break;
       }
@@ -839,25 +823,25 @@ function createControlWorker(options) {
           break;
         }
         const result = await goalSvc.abortWorker(directory, request.goalID);
-        const state2 = await readState(directory);
+        const state = await readState(directory);
         response = {
           ...base,
           ok: result.ok,
           message: result.message,
-          stateRevision: state2.revision
+          stateRevision: state.revision
         };
         break;
       }
       case "force_complete": {
         const args = request.args;
-        const state2 = await readState(directory);
-        const goal = state2.goals.find((g) => g.id === request.goalID);
+        const state = await readState(directory);
+        const goal = state.goals.find((g) => g.id === request.goalID);
         if (!goal) {
           response = { ...base, ok: false, message: "goal not found", errorCode: "not_found" };
           break;
         }
         if (goal.status === "complete") {
-          response = { ...base, message: `goal "${goal.name}" already complete`, stateRevision: state2.revision };
+          response = { ...base, message: `goal "${goal.name}" already complete`, stateRevision: state.revision };
           break;
         }
         goal.status = "complete";
@@ -867,14 +851,14 @@ function createControlWorker(options) {
           evidence: String(args.evidence || "Manual override \u2014 no verification checks run."),
           at: new Date().toISOString()
         };
-        const runtime = state2.runtimes.find((r) => r.goalID === goal.id);
+        const runtime = state.runtimes.find((r) => r.goalID === goal.id);
         if (runtime) {
           Object.assign(runtime, releaseLease(runtime));
           runtime.activeRunID = undefined;
           runtime.lastError = undefined;
           runtime.updatedAt = new Date().toISOString();
         }
-        await writeState(directory, state2);
+        await writeState(directory, state);
         await appendEvent(directory, {
           version: 1,
           eventID: randomUUID(),
@@ -883,22 +867,22 @@ function createControlWorker(options) {
           summary: goal.completionEvidence.summary,
           evidence: goal.completionEvidence.evidence,
           timestamp: new Date().toISOString(),
-          revision: state2.revision
+          revision: state.revision
         });
-        response = { ...base, message: `goal "${goal.name}" force-completed`, stateRevision: state2.revision };
+        response = { ...base, message: `goal "${goal.name}" force-completed`, stateRevision: state.revision };
         break;
       }
       case "force_block":
       case "block": {
         const args = request.args;
-        const state2 = await readState(directory);
-        const goal = state2.goals.find((g) => g.id === request.goalID);
+        const state = await readState(directory);
+        const goal = state.goals.find((g) => g.id === request.goalID);
         if (!goal) {
           response = { ...base, ok: false, message: "goal not found", errorCode: "not_found" };
           break;
         }
         if (goal.status === "blocked") {
-          response = { ...base, message: `goal "${goal.name}" already blocked`, stateRevision: state2.revision };
+          response = { ...base, message: `goal "${goal.name}" already blocked`, stateRevision: state.revision };
           break;
         }
         goal.status = "blocked";
@@ -908,14 +892,14 @@ function createControlWorker(options) {
           needed: String(args.needed || "User intervention required."),
           at: new Date().toISOString()
         };
-        const runtime = state2.runtimes.find((r) => r.goalID === goal.id);
+        const runtime = state.runtimes.find((r) => r.goalID === goal.id);
         if (runtime) {
           Object.assign(runtime, releaseLease(runtime));
           runtime.activeRunID = undefined;
           runtime.lastError = undefined;
           runtime.updatedAt = new Date().toISOString();
         }
-        await writeState(directory, state2);
+        await writeState(directory, state);
         await appendEvent(directory, {
           version: 1,
           eventID: randomUUID(),
@@ -924,9 +908,9 @@ function createControlWorker(options) {
           reason: goal.blocker.reason,
           needed: goal.blocker.needed,
           timestamp: new Date().toISOString(),
-          revision: state2.revision
+          revision: state.revision
         });
-        response = { ...base, message: `goal "${goal.name}" blocked`, stateRevision: state2.revision };
+        response = { ...base, message: `goal "${goal.name}" blocked`, stateRevision: state.revision };
         break;
       }
       default: {
@@ -942,8 +926,8 @@ function createControlWorker(options) {
     await recordInLedger(directory, request);
     return response;
   }
-  async function recordInLedger(directory2, request) {
-    const state = await readState(directory2);
+  async function recordInLedger(directory, request) {
+    const state = await readState(directory);
     if (!state.commandLedger)
       state.commandLedger = [];
     state.commandLedger.push({
@@ -956,7 +940,7 @@ function createControlWorker(options) {
     if (state.commandLedger.length > MAX_LEDGER_SIZE) {
       state.commandLedger = state.commandLedger.slice(-MAX_LEDGER_SIZE);
     }
-    await writeState(directory2, state);
+    await writeState(directory, state);
   }
   return { start, stop: async () => {
     await stop();
@@ -964,6 +948,7 @@ function createControlWorker(options) {
 }
 
 // src/application/loop-engine.ts
+init_state_repository();
 import { randomUUID as randomUUID2 } from "crypto";
 
 // src/domain/goal.ts
@@ -1903,6 +1888,7 @@ function createLoopEngine(options) {
 
 // src/application/goal-service.ts
 import { randomUUID as randomUUID3 } from "crypto";
+init_state_repository();
 import * as path2 from "path";
 import { promises as fs2 } from "fs";
 
@@ -2378,9 +2364,9 @@ function createGoalService(host) {
         rt.lastScheduleAt = undefined;
       }
       state.runtimes.push(rt);
-      const runtime2 = state.runtimes.find((r) => r.goalID === id);
-      if (runtime2)
-        runtime2.phase = "queued";
+      const runtime = state.runtimes.find((r) => r.goalID === id);
+      if (runtime)
+        runtime.phase = "queued";
       return state;
     });
     let runtime = state1.runtimes.find((r) => r.goalID === id);
@@ -2693,17 +2679,17 @@ function createGoalService(host) {
   }
   async function resumeUnlocked(directory, goalID) {
     let resumed = false;
-    const state = await mutateState(directory, `goal.resume:${goalID}`, async (state2) => {
-      const goal2 = state2.goals.find((g) => g.id === goalID);
-      if (!goal2)
-        return state2;
-      if (!canTransition(goal2.status, "active", "user"))
-        return state2;
-      assertWorkspaceWriteAvailable(state2, goal2);
-      goal2.status = "active";
-      goal2.updatedAt = new Date().toISOString();
+    const state = await mutateState(directory, `goal.resume:${goalID}`, async (state) => {
+      const goal = state.goals.find((g) => g.id === goalID);
+      if (!goal)
+        return state;
+      if (!canTransition(goal.status, "active", "user"))
+        return state;
+      assertWorkspaceWriteAvailable(state, goal);
+      goal.status = "active";
+      goal.updatedAt = new Date().toISOString();
       resumed = true;
-      return state2;
+      return state;
     });
     const goal = state.goals.find((g) => g.id === goalID);
     if (!goal || !resumed)
@@ -2733,15 +2719,15 @@ function createGoalService(host) {
   }
   async function retryUnlocked(directory, goalID) {
     let retried = false;
-    const state = await mutateState(directory, `goal.retry:${goalID}`, async (state2) => {
-      const goal2 = state2.goals.find((g) => g.id === goalID);
-      if (!goal2 || goal2.status !== "blocked")
-        return state2;
-      assertWorkspaceWriteAvailable(state2, goal2);
-      goal2.status = "active";
-      goal2.updatedAt = new Date().toISOString();
+    const state = await mutateState(directory, `goal.retry:${goalID}`, async (state) => {
+      const goal = state.goals.find((g) => g.id === goalID);
+      if (!goal || goal.status !== "blocked")
+        return state;
+      assertWorkspaceWriteAvailable(state, goal);
+      goal.status = "active";
+      goal.updatedAt = new Date().toISOString();
       retried = true;
-      const runtime = state2.runtimes.find((r) => r.goalID === goalID);
+      const runtime = state.runtimes.find((r) => r.goalID === goalID);
       if (runtime) {
         runtime.consecutiveFailures = 0;
         runtime.lastError = undefined;
@@ -2751,7 +2737,7 @@ function createGoalService(host) {
         runtime.phase = "idle";
         runtime.updatedAt = new Date().toISOString();
       }
-      return state2;
+      return state;
     });
     const goal = state.goals.find((g) => g.id === goalID);
     if (!goal || !retried)
@@ -3007,6 +2993,7 @@ function createGoalService(host) {
 }
 
 // src/application/schedule-worker.ts
+init_state_repository();
 import { randomUUID as randomUUID4 } from "crypto";
 function createScheduleWorker(options) {
   const { directory, goalService } = options;
@@ -3121,6 +3108,7 @@ function createScheduleWorker(options) {
 }
 
 // src/server/goal-tools.ts
+init_state_repository();
 import { randomUUID as randomUUID5 } from "crypto";
 import { tool } from "@opencode-ai/plugin/tool";
 // src/domain/verification.ts
@@ -3375,9 +3363,9 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}) {
           const cwd = goal.config.checkCwd || goal.config.artifactDir || dir;
           const checkResults = await runCompletionChecks(goal.config.checks, cwd);
           if (!checkResults.passed) {
-            const runtime2 = state.runtimes.find((r) => r.goalID === goal.id);
-            if (runtime2) {
-              runtime2.evaluatorRejectionCount = (runtime2.evaluatorRejectionCount || 0) + 1;
+            const runtime = state.runtimes.find((r) => r.goalID === goal.id);
+            if (runtime) {
+              runtime.evaluatorRejectionCount = (runtime.evaluatorRejectionCount || 0) + 1;
               const failureDetails = checkResults.failures.map((f) => {
                 const stdoutSnippet = f.stdout ? `
 Stdout: ${f.stdout.slice(0, 500)}` : "";
@@ -3388,7 +3376,7 @@ Exit code: ${f.exitCode}${stdoutSnippet}${stderrSnippet}`;
               }).join(`
 
 `);
-              runtime2.lastRejectionDetails = `Rejection #${runtime2.evaluatorRejectionCount} at ${new Date().toISOString()}
+              runtime.lastRejectionDetails = `Rejection #${runtime.evaluatorRejectionCount} at ${new Date().toISOString()}
 
 Working directory: ${cwd}
 
@@ -3396,8 +3384,8 @@ ${failureDetails}`;
               const attemptID = randomUUID5();
               const verificationAttempt = {
                 id: attemptID,
-                sequence: runtime2.evaluatorRejectionCount,
-                runGeneration: runtime2.runGeneration,
+                sequence: runtime.evaluatorRejectionCount,
+                runGeneration: runtime.runGeneration,
                 claimedSummary: args.summary,
                 claimedEvidence: args.evidence,
                 startedAt: new Date().toISOString(),
@@ -3411,15 +3399,15 @@ ${failureDetails}`;
                   stdout: f.stdout
                 }))
               };
-              runtime2.lastVerificationAttempt = verificationAttempt;
-              runtime2.recentVerificationAttempts = appendVerificationAttempt(runtime2.recentVerificationAttempts || [], verificationAttempt);
+              runtime.lastVerificationAttempt = verificationAttempt;
+              runtime.recentVerificationAttempts = appendVerificationAttempt(runtime.recentVerificationAttempts || [], verificationAttempt);
               const rejectEvent = {
                 version: 1,
                 eventID: randomUUID5(),
                 goalID: goal.id,
                 type: "goal.completion_rejected",
                 attemptID,
-                rejectionCount: runtime2.evaluatorRejectionCount,
+                rejectionCount: runtime.evaluatorRejectionCount,
                 failedCheckCount: checkResults.failures.length,
                 failureSummary: failureDetails.slice(0, 500),
                 timestamp: new Date().toISOString(),
@@ -3427,16 +3415,16 @@ ${failureDetails}`;
               };
               await appendEvent(dir, rejectEvent);
               const maxRejections = goal.config.maxEvaluatorRejections || 3;
-              if (runtime2.evaluatorRejectionCount >= maxRejections) {
+              if (runtime.evaluatorRejectionCount >= maxRejections) {
                 goal.status = "blocked";
                 goal.updatedAt = new Date().toISOString();
                 goal.blocker = {
-                  reason: `Evaluator rejected ${runtime2.evaluatorRejectionCount} time(s). Last failure:
+                  reason: `Evaluator rejected ${runtime.evaluatorRejectionCount} time(s). Last failure:
 ${failureDetails.slice(0, 500)}`,
                   needed: "Fix the failing checks and retry the goal.",
                   at: new Date().toISOString()
                 };
-                runtime2.forceFinishRequested = undefined;
+                runtime.forceFinishRequested = undefined;
                 await appendEvent(dir, {
                   version: 1,
                   eventID: randomUUID5(),
@@ -3448,10 +3436,10 @@ ${failureDetails.slice(0, 500)}`,
                   revision: state.revision
                 });
               } else {
-                runtime2.forceFinishRequested = false;
-                runtime2.freeRetryPending = true;
+                runtime.forceFinishRequested = false;
+                runtime.freeRetryPending = true;
               }
-              runtime2.updatedAt = new Date().toISOString();
+              runtime.updatedAt = new Date().toISOString();
               await writeState(dir, state);
             }
             return {
@@ -3460,7 +3448,7 @@ ${failureDetails.slice(0, 500)}`,
                 passed: false,
                 failedChecks: checkResults.failures,
                 message: "Evaluator rejected completion. Fix the issues above and try again.",
-                rejectionCount: runtime2?.evaluatorRejectionCount || 0,
+                rejectionCount: runtime?.evaluatorRejectionCount || 0,
                 status: goal.status
               })
             };
@@ -3698,6 +3686,7 @@ async function runCompletionChecks(checks, cwd) {
 }
 
 // src/server/owner-tools.ts
+init_state_repository();
 import { tool as tool2 } from "@opencode-ai/plugin/tool";
 import { promises as fs3 } from "fs";
 function withTimeout2(promise, ms) {
@@ -3925,7 +3914,7 @@ function ownerTools(options) {
       }
     }),
     send_goal_input: tool2({
-      description: "Send an inbox message to the worker (injected as ## USER INSTRUCTIONS on next turn). Use to answer `question`, redirect, or refine scope. Does NOT itself re-prompt \u2014 the engine re-prompts on next idle/maintenance; use nudge_goal if the worker is stuck with no activity.",
+      description: "Send bare words to the worker as their own turn (no steering wrapper). Delivers immediately if the goal is active, otherwise queues for the next active turn. Use to answer `question`, redirect, or nudge with a short message.",
       args: {
         goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to target the first active goal."),
         message: tool2.schema.string().describe("Message to send to the worker.")
@@ -3940,14 +3929,14 @@ function ownerTools(options) {
             output: JSON.stringify({ ok: false, message: "No matching active goal for this session." })
           };
         }
-        await appendGoalInbox(directory, goal.id, "user", args.message);
+        const result = await goalService.sendUserMessage(directory, goal.id, args.message);
         return {
-          title: "Message sent",
+          title: result.ok ? "Message sent" : "Send failed",
           output: JSON.stringify({
-            ok: true,
+            ok: result.ok,
             goalID: goal.id,
             goalName: goal.name,
-            message: `Message delivered to "${goal.name}". It will appear in the worker's next turn.`
+            message: result.message
           })
         };
       }
@@ -4080,6 +4069,141 @@ function ownerTools(options) {
         }
       }
     }),
+    abort_goal_worker: tool2({
+      description: "Abort the worker session only (N / :abort in TUI). Keeps goal+transcript+session browsable, clears the run lease. Use for compaction-spin or stuck runs. Status unchanged; active goals resume next turn in the same session.",
+      args: {
+        goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to abort the first active goal.")
+      },
+      execute: async (args, context) => {
+        const state = await readState(directory);
+        const ownerID = context?.sessionID;
+        const goal = args.goal_id ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID) : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete");
+        if (!goal) {
+          return {
+            title: "No goal found",
+            output: JSON.stringify({ ok: false, message: "No matching active goal for this session." })
+          };
+        }
+        try {
+          const result = await goalService.abortWorker(directory, goal.id);
+          return {
+            title: result.ok ? "Worker aborted" : "Abort failed",
+            output: JSON.stringify({ ...result, goalID: goal.id, goalName: goal.name })
+          };
+        } catch (error) {
+          return {
+            title: "Abort failed",
+            output: JSON.stringify({
+              ok: false,
+              goalName: goal.name,
+              message: error instanceof Error ? error.message : String(error)
+            })
+          };
+        }
+      }
+    }),
+    force_complete_goal: tool2({
+      description: "Force-complete a goal with summary/evidence, bypassing checks (:force in TUI). Use when the worker produced the right artifact but checks are stale or you have verified manually.",
+      args: {
+        goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to target the first non-complete goal."),
+        summary: tool2.schema.string().describe("What was completed."),
+        evidence: tool2.schema.string().describe("Concrete evidence of completion.")
+      },
+      execute: async (args, context) => {
+        const state = await readState(directory);
+        const ownerID = context?.sessionID;
+        const goal = args.goal_id ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID) : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete");
+        if (!goal) {
+          return {
+            title: "No goal found",
+            output: JSON.stringify({ ok: false, message: "No matching active goal for this session." })
+          };
+        }
+        await Promise.resolve().then(() => init_state_repository());
+        await Promise.resolve();
+        const { randomUUID } = await import("crypto");
+        const st = await readState(directory);
+        const g = st.goals.find((x) => x.id === goal.id);
+        if (!g)
+          return { title: "No goal", output: JSON.stringify({ ok: false, message: "Goal not found." }) };
+        if (g.status === "complete") {
+          return { title: "Already complete", output: JSON.stringify({ ok: true, message: `Goal "${g.name}" already complete.` }) };
+        }
+        g.status = "complete";
+        g.updatedAt = new Date().toISOString();
+        g.completionEvidence = { summary: args.summary, evidence: args.evidence, at: new Date().toISOString() };
+        const rt = st.runtimes.find((r) => r.goalID === goal.id);
+        if (rt) {
+          Object.assign(rt, releaseLease(rt));
+          rt.activeRunID = undefined;
+          rt.lastError = undefined;
+          rt.updatedAt = new Date().toISOString();
+        }
+        await writeState(directory, st);
+        await appendEvent(directory, {
+          version: 1,
+          eventID: randomUUID(),
+          goalID: goal.id,
+          type: "goal.completed",
+          summary: args.summary,
+          evidence: args.evidence,
+          timestamp: new Date().toISOString(),
+          revision: st.revision
+        });
+        return { title: "Goal force-completed", output: JSON.stringify({ ok: true, goalID: goal.id, goalName: g.name }) };
+      }
+    }),
+    force_block_goal: tool2({
+      description: "Force-block a goal with reason/needed (:block in TUI). Use when the goal is stuck on an external blocker and should stop retrying.",
+      args: {
+        goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to target the first non-complete goal."),
+        reason: tool2.schema.string().describe("Why the goal is blocked."),
+        needed: tool2.schema.string().describe("What is needed to unblock.")
+      },
+      execute: async (args, context) => {
+        const state = await readState(directory);
+        const ownerID = context?.sessionID;
+        const goal = args.goal_id ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID) : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete");
+        if (!goal) {
+          return {
+            title: "No goal found",
+            output: JSON.stringify({ ok: false, message: "No matching active goal for this session." })
+          };
+        }
+        await Promise.resolve().then(() => init_state_repository());
+        await Promise.resolve();
+        const { randomUUID } = await import("crypto");
+        const st = await readState(directory);
+        const g = st.goals.find((x) => x.id === goal.id);
+        if (!g)
+          return { title: "No goal", output: JSON.stringify({ ok: false, message: "Goal not found." }) };
+        if (g.status === "blocked") {
+          return { title: "Already blocked", output: JSON.stringify({ ok: true, message: `Goal "${g.name}" already blocked.` }) };
+        }
+        g.status = "blocked";
+        g.updatedAt = new Date().toISOString();
+        g.blocker = { reason: args.reason, needed: args.needed, at: new Date().toISOString() };
+        const rt = st.runtimes.find((r) => r.goalID === goal.id);
+        if (rt) {
+          Object.assign(rt, releaseLease(rt));
+          rt.activeRunID = undefined;
+          rt.lastError = undefined;
+          rt.updatedAt = new Date().toISOString();
+        }
+        await writeState(directory, st);
+        await appendEvent(directory, {
+          version: 1,
+          eventID: randomUUID(),
+          goalID: goal.id,
+          type: "goal.blocked",
+          reason: args.reason,
+          needed: args.needed,
+          timestamp: new Date().toISOString(),
+          revision: st.revision
+        });
+        return { title: "Goal blocked", output: JSON.stringify({ ok: true, goalID: goal.id, goalName: g.name }) };
+      }
+    }),
     clear_goal: tool2({
       description: "Clear a goal: aborts worker and removes goal+runtime+ledger (cannot be undone). Use when the goal is no longer needed or to free a stuck writer slot after inspection.",
       args: {
@@ -4120,7 +4244,9 @@ function ownerTools(options) {
     })
   };
 }
+
 // src/server/plugin.ts
+init_state_repository();
 var PLUGIN_ID = "opencode-loopd.server";
 var server = async ({ client, directory }, pluginOptions) => {
   const defaults = parsePluginDefaults(pluginOptions);
@@ -4174,8 +4300,8 @@ var server = async ({ client, directory }, pluginOptions) => {
     "tool.execute.before": async (input, _output) => {
       const activeWorkers = goalService.getActiveWorkers();
       let matchedGoalID;
-      for (const [goalID, worker2] of activeWorkers) {
-        if (worker2.workerSessionID === input.sessionID) {
+      for (const [goalID, worker] of activeWorkers) {
+        if (worker.workerSessionID === input.sessionID) {
           matchedGoalID = goalID;
           break;
         }
@@ -4198,8 +4324,8 @@ var server = async ({ client, directory }, pluginOptions) => {
       }
       const activeWorkers = goalService.getActiveWorkers();
       let matchedGoalID;
-      for (const [goalID, worker2] of activeWorkers) {
-        if (worker2.workerSessionID === input.sessionID) {
+      for (const [goalID, worker] of activeWorkers) {
+        if (worker.workerSessionID === input.sessionID) {
           matchedGoalID = goalID;
           break;
         }
@@ -4225,20 +4351,20 @@ var server = async ({ client, directory }, pluginOptions) => {
           const goalID = parsed.goalID;
           if (!goalID)
             return;
-          const { shouldNotifyParent: shouldNotifyParent2, markParentNotified: markParentNotified2 } = await Promise.resolve().then(() => exports_runtime);
+          await Promise.resolve();
           const state = await readState(directory);
           const goal = state.goals.find((g) => g.id === goalID);
           if (!goal)
             return;
           const runtime = state.runtimes.find((r) => r.goalID === goalID);
           const notifyType = parsed.status === "complete" ? "complete" : "blocked";
-          if (runtime && !shouldNotifyParent2(runtime, notifyType))
+          if (runtime && !shouldNotifyParent(runtime, notifyType))
             return;
           if (runtime) {
             await mutateState(directory, `notify-parent:${goalID}`, async (s) => {
               const rt = s.runtimes.find((r) => r.goalID === goalID);
               if (rt)
-                markParentNotified2(rt, notifyType);
+                markParentNotified(rt, notifyType);
               return s;
             });
           }
@@ -4264,9 +4390,14 @@ function parsePluginDefaults(options) {
     defaultChecks: checks.length > 0 ? checks : undefined
   };
 }
+var v2 = define({
+  id: PLUGIN_ID,
+  async setup() {}
+});
 var plugin_default = {
   id: PLUGIN_ID,
-  server
+  server,
+  setup: v2.setup
 };
 export {
   plugin_default as default

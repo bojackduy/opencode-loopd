@@ -270,7 +270,7 @@ export function ownerTools(options: OwnerToolsOptions) {
 
     send_goal_input: tool({
       description:
-        "Send an inbox message to the worker (injected as ## USER INSTRUCTIONS on next turn). Use to answer `question`, redirect, or refine scope. Does NOT itself re-prompt — the engine re-prompts on next idle/maintenance; use nudge_goal if the worker is stuck with no activity.",
+        "Send bare words to the worker as their own turn (no steering wrapper). Delivers immediately if the goal is active, otherwise queues for the next active turn. Use to answer `question`, redirect, or nudge with a short message.",
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to target the first active goal."),
         message: tool.schema.string().describe("Message to send to the worker."),
@@ -289,15 +289,15 @@ export function ownerTools(options: OwnerToolsOptions) {
           }
         }
 
-        await appendGoalInbox(directory, goal.id, "user", args.message)
+        const result = await goalService.sendUserMessage(directory, goal.id, args.message)
 
         return {
-          title: "Message sent",
+          title: result.ok ? "Message sent" : "Send failed",
           output: JSON.stringify({
-            ok: true,
+            ok: result.ok,
             goalID: goal.id,
             goalName: goal.name,
-            message: `Message delivered to "${goal.name}". It will appear in the worker's next turn.`,
+            message: result.message,
           }),
         }
       },
@@ -452,6 +452,159 @@ export function ownerTools(options: OwnerToolsOptions) {
             }),
           }
         }
+      },
+    }),
+
+    abort_goal_worker: tool({
+      description:
+        "Abort the worker session only (N / :abort in TUI). Keeps goal+transcript+session browsable, clears the run lease. Use for compaction-spin or stuck runs. Status unchanged; active goals resume next turn in the same session.",
+      args: {
+        goal_id: tool.schema.string().optional().describe("Goal ID. Omit to abort the first active goal."),
+      },
+      execute: async (args, context) => {
+        const state = await readState(directory)
+        const ownerID = context?.sessionID
+        const goal = args.goal_id
+          ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID)
+          : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete")
+
+        if (!goal) {
+          return {
+            title: "No goal found",
+            output: JSON.stringify({ ok: false, message: "No matching active goal for this session." }),
+          }
+        }
+
+        try {
+          const result = await goalService.abortWorker(directory, goal.id)
+          return {
+            title: result.ok ? "Worker aborted" : "Abort failed",
+            output: JSON.stringify({ ...result, goalID: goal.id, goalName: goal.name }),
+          }
+        } catch (error) {
+          return {
+            title: "Abort failed",
+            output: JSON.stringify({
+              ok: false,
+              goalName: goal.name,
+              message: error instanceof Error ? error.message : String(error),
+            }),
+          }
+        }
+      },
+    }),
+
+    force_complete_goal: tool({
+      description:
+        "Force-complete a goal with summary/evidence, bypassing checks (:force in TUI). Use when the worker produced the right artifact but checks are stale or you have verified manually.",
+      args: {
+        goal_id: tool.schema.string().optional().describe("Goal ID. Omit to target the first non-complete goal."),
+        summary: tool.schema.string().describe("What was completed."),
+        evidence: tool.schema.string().describe("Concrete evidence of completion."),
+      },
+      execute: async (args, context) => {
+        const state = await readState(directory)
+        const ownerID = context?.sessionID
+        const goal = args.goal_id
+          ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID)
+          : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete")
+
+        if (!goal) {
+          return {
+            title: "No goal found",
+            output: JSON.stringify({ ok: false, message: "No matching active goal for this session." }),
+          }
+        }
+
+        // Reuse control bus path so ledger/events stay consistent; direct write would bypass it.
+        // We do the state mutation here for the agent path — same effect as :force via control worker.
+        const { readState: rs, writeState: ws, appendEvent: ae } = await import("../infrastructure/state-repository")
+        const { releaseLease } = await import("../domain/runtime")
+        const { randomUUID } = await import("crypto")
+        const st = await rs(directory)
+        const g = st.goals.find((x) => x.id === goal.id)
+        if (!g) return { title: "No goal", output: JSON.stringify({ ok: false, message: "Goal not found." }) }
+        if (g.status === "complete") {
+          return { title: "Already complete", output: JSON.stringify({ ok: true, message: `Goal "${g.name}" already complete.` }) }
+        }
+        g.status = "complete"
+        g.updatedAt = new Date().toISOString()
+        g.completionEvidence = { summary: args.summary, evidence: args.evidence, at: new Date().toISOString() }
+        const rt = st.runtimes.find((r) => r.goalID === goal.id)
+        if (rt) {
+          Object.assign(rt, releaseLease(rt))
+          rt.activeRunID = undefined
+          rt.lastError = undefined
+          rt.updatedAt = new Date().toISOString()
+        }
+        await ws(directory, st)
+        await ae(directory, {
+          version: 1,
+          eventID: randomUUID(),
+          goalID: goal.id as any,
+          type: "goal.completed",
+          summary: args.summary,
+          evidence: args.evidence,
+          timestamp: new Date().toISOString(),
+          revision: st.revision,
+        })
+        return { title: "Goal force-completed", output: JSON.stringify({ ok: true, goalID: goal.id, goalName: g.name }) }
+      },
+    }),
+
+    force_block_goal: tool({
+      description:
+        "Force-block a goal with reason/needed (:block in TUI). Use when the goal is stuck on an external blocker and should stop retrying.",
+      args: {
+        goal_id: tool.schema.string().optional().describe("Goal ID. Omit to target the first non-complete goal."),
+        reason: tool.schema.string().describe("Why the goal is blocked."),
+        needed: tool.schema.string().describe("What is needed to unblock."),
+      },
+      execute: async (args, context) => {
+        const state = await readState(directory)
+        const ownerID = context?.sessionID
+        const goal = args.goal_id
+          ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID)
+          : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete")
+
+        if (!goal) {
+          return {
+            title: "No goal found",
+            output: JSON.stringify({ ok: false, message: "No matching active goal for this session." }),
+          }
+        }
+
+        const { readState: rs, writeState: ws, appendEvent: ae } = await import("../infrastructure/state-repository")
+        const { releaseLease } = await import("../domain/runtime")
+        const { randomUUID } = await import("crypto")
+        const st = await rs(directory)
+        const g = st.goals.find((x) => x.id === goal.id)
+        if (!g) return { title: "No goal", output: JSON.stringify({ ok: false, message: "Goal not found." }) }
+        if (g.status === "blocked") {
+          return { title: "Already blocked", output: JSON.stringify({ ok: true, message: `Goal "${g.name}" already blocked.` }) }
+        }
+        g.status = "blocked"
+        g.updatedAt = new Date().toISOString()
+        g.blocker = { reason: args.reason, needed: args.needed, at: new Date().toISOString() }
+        const rt = st.runtimes.find((r) => r.goalID === goal.id)
+        if (rt) {
+          Object.assign(rt, releaseLease(rt))
+          rt.activeRunID = undefined
+          rt.lastError = undefined
+          rt.updatedAt = new Date().toISOString()
+        }
+        await ws(directory, st)
+        await ae(directory, {
+          version: 1,
+          eventID: randomUUID(),
+          goalID: goal.id as any,
+          type: "goal.blocked",
+          reason: args.reason,
+          needed: args.needed,
+          timestamp: new Date().toISOString(),
+          revision: st.revision,
+        })
+        return { title: "Goal blocked", output: JSON.stringify({ ok: true, goalID: goal.id, goalName: g.name }) }
       },
     }),
 

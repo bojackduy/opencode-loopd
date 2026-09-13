@@ -660,10 +660,10 @@ function LoopDashboard(props) {
     try {
       const s = await client.getState();
       setState(s);
-      const goals2 = s.goals.filter((g) => showCompleted() || g.status !== "complete");
-      if (goals2.length > 0 && selected() >= goals2.length)
-        setSelected(goals2.length - 1);
-      setSelectedGoal(goals2[selected()] || null);
+      const goals = s.goals.filter((g) => showCompleted() || g.status !== "complete");
+      if (goals.length > 0 && selected() >= goals.length)
+        setSelected(goals.length - 1);
+      setSelectedGoal(goals[selected()] || null);
       setEvents(await client.getEvents(20));
     } catch (e) {
       setStatusText(`Error: ${e instanceof Error ? e.message : String(e)}`);
@@ -1226,7 +1226,7 @@ function LoopDashboard(props) {
                 children: (seg, idx) => {
                   const hasArrow = seg.includes("\u2192");
                   if (hasArrow) {
-                    const [k2, d2] = seg.split("\u2192").map((s) => s.trim());
+                    const [k, d] = seg.split("\u2192").map((s) => s.trim());
                     return [_$memo(() => _$memo(() => idx() > 0)() && (() => {
                       var _el$54 = _$createElement("span");
                       _$insertNode(_el$54, _$createTextNode(` | `));
@@ -1236,7 +1236,7 @@ function LoopDashboard(props) {
                       return _el$54;
                     })()), (() => {
                       var _el$50 = _$createElement("span");
-                      _$insert(_el$50, k2);
+                      _$insert(_el$50, k);
                       _$effect((_$p) => _$setProp(_el$50, "style", {
                         fg: theme().warning,
                         bold: true
@@ -1251,7 +1251,7 @@ function LoopDashboard(props) {
                       return _el$51;
                     })(), (() => {
                       var _el$53 = _$createElement("span");
-                      _$insert(_el$53, d2);
+                      _$insert(_el$53, d);
                       _$effect((_$p) => _$setProp(_el$53, "style", {
                         fg: theme().text
                       }, _$p));

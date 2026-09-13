@@ -3,6 +3,7 @@
 // Starts lazily: no timers, no polling, no disk reads until a goal exists.
 
 import type { Plugin, PluginModule } from "@opencode-ai/plugin"
+import { define } from "@opencode-ai/plugin/v2/promise"
 import { createControlWorker } from "../application/control-worker"
 import { createLoopEngine } from "../application/loop-engine"
 import { createGoalService } from "../application/goal-service"
@@ -177,7 +178,22 @@ function parsePluginDefaults(options: Record<string, unknown> | undefined): Goal
   }
 }
 
+// ─── V2 (opencode v2 core) ───────────────────────────────────────────────────
+// Dual export: the v1 loader (`readV1Plugin`, kind=server) reads `.server` and
+// ignores the extra `setup` key; the v2 external loader
+// (`core/src/config/plugin/external.ts`, decodes default as { id, effect } |
+// { id, setup }) reads `.setup` and ignores the extra `server` key.
+// The engine is v1-driven (tools + session events + client.session.* have no
+// v2 PluginContext equivalent yet), so v2 setup is intentionally dormant: it
+// lets the package load cleanly on v2 instead of being silently skipped,
+// while the TUI dashboard (unchanged v1 TUI runtime) keeps rendering state.
+const v2 = define({
+  id: PLUGIN_ID,
+  async setup() {},
+})
+
 export default {
   id: PLUGIN_ID,
   server,
-} satisfies PluginModule & { id: string }
+  setup: v2.setup,
+} satisfies PluginModule & { id: string; setup: typeof v2.setup }
