@@ -29,6 +29,15 @@ export interface Goal {
   /** Cost budget in the same currency OpenCode reports. undefined = unlimited. */
   costBudget?: number
 
+  /**
+   * Parent session identity at creation ("providerID/modelID").
+   * Snapshot for display/fallback only; never sent back to the API.
+   */
+  parentModel?: string
+
+  /** Parent session agent at creation, for display/fallback only. */
+  parentAgent?: string
+
   /** Tokens consumed so far. */
   tokensUsed: number
 

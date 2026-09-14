@@ -157,6 +157,8 @@ export function ownerTools(options: OwnerToolsOptions) {
               workspaceWrite: goal.config.workspaceWrite,
               agent: goal.config.agent,
               model: goal.config.model,
+              parentAgent: goal.parentAgent,
+              parentModel: goal.parentModel,
               schedule: (goal.config as any).schedule,
             },
             lastProgress: goal.lastProgress,

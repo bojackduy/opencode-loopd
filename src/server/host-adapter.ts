@@ -67,6 +67,12 @@ export interface LoopHost {
     model?: ModelRef
     agent?: string
   }): Promise<{ messageID?: string }>
+  /**
+   * Read a session's current identity (agent + model). Returns undefined when
+   * the session cannot be read or reports no identity. Best-effort: callers
+   * treat undefined as "fall back to existing defaults".
+   */
+  readSession(sessionID: string): Promise<{ agent?: string; model?: ModelRef } | undefined>
   sessionStatus(sessionID: string): Promise<SessionStatusType>
   abortSession(sessionID: string): Promise<void>
   readMessages(sessionID: string, limit?: number): Promise<SessionMessage[]>
@@ -149,6 +155,29 @@ export function createRealHost(client: any, directory: string): LoopHost {
       await logServerEvent(directory, "worker.prompted", { sessionID })
       // SDK may return the created message ID in response headers or body
       return { messageID: result?.data?.messageID }
+    },
+
+    async readSession(sessionID) {
+      try {
+        const result = await client.session.get({ path: { id: sessionID } })
+        if (result?.error) return undefined
+        const data = result?.data
+        if (!data || typeof data !== "object") return undefined
+        const agent = typeof (data as any).agent === "string" ? (data as any).agent : undefined
+        const rawModel = (data as any).model
+        let model: ModelRef | undefined
+        if (rawModel && typeof rawModel === "object") {
+          // v1 get returns {id, providerID, variant}; accept modelID spelling too.
+          const modelID = typeof rawModel.modelID === "string" ? rawModel.modelID
+            : typeof rawModel.id === "string" ? rawModel.id : undefined
+          const providerID = typeof rawModel.providerID === "string" ? rawModel.providerID : undefined
+          if (modelID && providerID) model = { providerID, modelID }
+        }
+        if (!agent && !model) return undefined
+        return { agent, model }
+      } catch {
+        return undefined
+      }
     },
 
     async sessionStatus(sessionID) {
@@ -305,6 +334,11 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
       messages.set(id, [])
       if (agent) (sessions as any).agents = { ...((sessions as any).agents || {}), [id]: agent }
       return id
+    },
+    async readSession(_sessionID) {
+      // Fake host carries no session identity registry; production reads it
+      // via session.get. Tests set identity explicitly where needed.
+      return undefined
     },
     async promptWorker({ sessionID, prompt, messageID, model, agent }) {
       const rawID = messageID || `msg-${crypto.randomUUID().slice(0, 8)}`

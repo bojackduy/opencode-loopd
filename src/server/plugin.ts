@@ -76,7 +76,7 @@ const server: Plugin = async ({ client, directory }, pluginOptions) => {
       await engine.handleEvent(event)
       if (type?.startsWith("session.")) reconcileInBackground()
     },
-    tool: { ...goalTools(directory, goalService, undefined, defaults), ...ownerTools({ directory, host, goalService }) },
+    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }) },
     "tool.execute.before": async (input, _output) => {
       // Track tool call start for worker sessions only
       const activeWorkers = goalService.getActiveWorkers()

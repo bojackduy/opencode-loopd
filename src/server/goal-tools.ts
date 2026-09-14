@@ -15,6 +15,7 @@ import { appendVerificationAttempt } from "../domain/verification"
 import { exec as execChild } from "child_process"
 import { promisify } from "util"
 import type { GoalService } from "../application/goal-service"
+import type { LoopHost } from "./host-adapter"
 import {
   resolveGoalCreationConfig,
   type GoalCreationDefaults,
@@ -30,6 +31,7 @@ export function goalTools(
   goalService: GoalService,
   hostSessionID?: string,
   defaults: GoalToolDefaults = {},
+  host?: LoopHost,
 ) {
   return {
     loopd_create_goal: tool({
@@ -38,15 +40,14 @@ export function goalTools(
         "The engine spawns a dedicated worker session that does the work autonomously — it never runs in this chat. " +
         "Call this after clarifying the contract with the user. " +
         "Worker identity is free-form: agent is any OpenCode agent name (built-in, ~/.config/opencode/agents/*.md, or opencode.jsonc agent.* — discover with `opencode agent list`), " +
-        "model is any \"providerID/modelID\" (discover with `opencode models [provider]`). Both are sent on every worker prompt. " +
+        "model is any \"providerID/modelID\" (discover with `opencode models [provider]`). When omitted, both inherit the CALLING session's live agent/model (read at creation), then plugin defaultAgent/defaultModel. " +
         "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " +
-        "Workspace-writing goals are serialized (only one active writer) and require checks. " +
-        "agent/model are optional — fall back to the parent session's agent/model, or plugin defaultAgent/defaultModel in opencode.jsonc.",
+        "Workspace-writing goals are serialized (only one active writer) and require checks.",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
-        agent: tool.schema.string().optional().describe("Agent to run the worker as (e.g. \"researcher\", \"smart-agent\"). Optional — uses parent session's agent if omitted, or plugin defaultAgent."),
-        model: tool.schema.string().optional().describe("Model to run the worker as, as \"providerID/modelID\" (e.g. \"openai/gpt-5.6-sol\", \"ollama/qwen3.8:27b\"). Optional — uses parent session's model if omitted, or plugin defaultModel."),
+        agent: tool.schema.string().optional().describe("Agent to run the worker as (e.g. \"researcher\", \"smart-agent\"). Optional — inherits the calling session's agent if omitted, else plugin defaultAgent."),
+        model: tool.schema.string().optional().describe("Model to run the worker as, as \"providerID/modelID\" (e.g. \"openai/gpt-5.6-sol\", \"ollama/qwen3.8:27b\"). Optional — inherits the calling session's live model if omitted, else plugin defaultModel."),
         costBudget: tool.schema.number().optional().describe("Max provider cost in dollars before the engine stops the goal as budget_limited (e.g. 0.5). Optional — unlimited if omitted."),
         checks: tool.schema.array(tool.schema.string()).optional().describe("Shell commands that must pass for completion to be accepted. E.g. [\"npm test\"]."),
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
@@ -123,7 +124,7 @@ export function goalTools(
           directory: dir,
           objective: args.objective,
           config,
-          defaults,
+          defaults: await withParentIdentity(defaults, host, sessionID),
         })
         if (!resolution.ok) {
           return {
@@ -137,12 +138,15 @@ export function goalTools(
         }
 
         try {
+          const parentDefaults = await withParentIdentity(defaults, host, sessionID)
           const { goal, worker } = await goalService.start(dir, {
             name: args.name,
             objective: args.objective,
             ownerSessionID: sessionID,
             config: resolution.config,
             costBudget,
+            parentAgent: parentDefaults.parentAgent,
+            parentModel: parentDefaults.parentModel,
           })
           return {
             title: "Goal created",
@@ -550,6 +554,42 @@ export function goalTools(
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Merge the calling session's live identity into creation defaults.
+ * Best-effort and cached per owner session: session.get is one extra call at
+ * creation time only, never on the hot turn path.
+ */
+const parentIdentityCache = new Map<string, { agent?: string; model?: string }>()
+async function withParentIdentity(
+  defaults: GoalToolDefaults,
+  host: LoopHost | undefined,
+  ownerSessionID: string,
+): Promise<GoalToolDefaults> {
+  if (!host?.readSession) return defaults
+  let cached = parentIdentityCache.get(ownerSessionID)
+  if (!cached) {
+    try {
+      const identity = await host.readSession(ownerSessionID)
+      cached = {
+        agent: identity?.agent,
+        model: identity?.model ? `${identity.model.providerID}/${identity.model.modelID}` : undefined,
+      }
+    } catch {
+      cached = {}
+    }
+    parentIdentityCache.set(ownerSessionID, cached)
+    if (parentIdentityCache.size > 200) {
+      const first = parentIdentityCache.keys().next()
+      if (!first.done) parentIdentityCache.delete(first.value)
+    }
+  }
+  return {
+    ...defaults,
+    parentAgent: cached.agent,
+    parentModel: cached.model,
+  }
+}
 
 function findGoalByWorkerSession(
   state: { goals: Goal[]; runtimes: GoalRuntimeState[] },

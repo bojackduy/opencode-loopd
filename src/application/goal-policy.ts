@@ -4,6 +4,9 @@ export interface GoalCreationDefaults {
   defaultAgent?: string
   defaultModel?: string
   defaultChecks?: string[]
+  /** Parent session identity, read live at creation. Overrides static defaults. */
+  parentAgent?: string
+  parentModel?: string
 }
 
 export type GoalConfigResolution =
@@ -24,12 +27,16 @@ export function resolveGoalCreationConfig(input: {
   const defaults = input.defaults || {}
   const explicitAgent = cleanText(requested.agent)
   const defaultAgent = cleanText(defaults.defaultAgent)
-  // agent is optional — SDK falls back to parent session's agent when neither explicit nor default
-  const agent = explicitAgent || defaultAgent || undefined
+  const parentAgent = cleanText(defaults.parentAgent)
+  // Resolution: explicit > live parent identity > static default.
+  // When nothing is set, config.agent stays undefined and OpenCode falls back
+  // to its global default agent on each prompt.
+  const agent = explicitAgent || parentAgent || defaultAgent || undefined
 
   const explicitModel = cleanText(requested.model)
   const defaultModel = cleanText(defaults.defaultModel)
-  const model = explicitModel || defaultModel || undefined
+  const parentModel = cleanText(defaults.parentModel)
+  const model = explicitModel || parentModel || defaultModel || undefined
   if (model && !isValidModelRef(model)) {
     return {
       ok: false,
@@ -63,8 +70,8 @@ export function resolveGoalCreationConfig(input: {
       checkCwd: requested.checkCwd || (workspaceWrite ? input.directory : undefined),
     },
     defaultsApplied: {
-      agent: !explicitAgent && Boolean(defaultAgent),
-      model: !explicitModel && Boolean(defaultModel),
+      agent: !explicitAgent && Boolean(parentAgent || defaultAgent),
+      model: !explicitModel && Boolean(parentModel || defaultModel),
       checks: explicitChecks.length === 0 && defaultChecks.length > 0,
     },
   }

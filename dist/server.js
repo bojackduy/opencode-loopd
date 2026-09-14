@@ -499,10 +499,12 @@ function resolveGoalCreationConfig(input) {
   const defaults = input.defaults || {};
   const explicitAgent = cleanText(requested.agent);
   const defaultAgent = cleanText(defaults.defaultAgent);
-  const agent = explicitAgent || defaultAgent || undefined;
+  const parentAgent = cleanText(defaults.parentAgent);
+  const agent = explicitAgent || parentAgent || defaultAgent || undefined;
   const explicitModel = cleanText(requested.model);
   const defaultModel = cleanText(defaults.defaultModel);
-  const model = explicitModel || defaultModel || undefined;
+  const parentModel = cleanText(defaults.parentModel);
+  const model = explicitModel || parentModel || defaultModel || undefined;
   if (model && !isValidModelRef(model)) {
     return {
       ok: false,
@@ -532,8 +534,8 @@ function resolveGoalCreationConfig(input) {
       checkCwd: requested.checkCwd || (workspaceWrite ? input.directory : undefined)
     },
     defaultsApplied: {
-      agent: !explicitAgent && Boolean(defaultAgent),
-      model: !explicitModel && Boolean(defaultModel),
+      agent: !explicitAgent && Boolean(parentAgent || defaultAgent),
+      model: !explicitModel && Boolean(parentModel || defaultModel),
       checks: explicitChecks.length === 0 && defaultChecks.length > 0
     }
   };
@@ -1975,6 +1977,30 @@ function createRealHost(client, directory) {
       await logServerEvent(directory, "worker.prompted", { sessionID });
       return { messageID: result?.data?.messageID };
     },
+    async readSession(sessionID) {
+      try {
+        const result = await client.session.get({ path: { id: sessionID } });
+        if (result?.error)
+          return;
+        const data = result?.data;
+        if (!data || typeof data !== "object")
+          return;
+        const agent = typeof data.agent === "string" ? data.agent : undefined;
+        const rawModel = data.model;
+        let model;
+        if (rawModel && typeof rawModel === "object") {
+          const modelID = typeof rawModel.modelID === "string" ? rawModel.modelID : typeof rawModel.id === "string" ? rawModel.id : undefined;
+          const providerID = typeof rawModel.providerID === "string" ? rawModel.providerID : undefined;
+          if (modelID && providerID)
+            model = { providerID, modelID };
+        }
+        if (!agent && !model)
+          return;
+        return { agent, model };
+      } catch {
+        return;
+      }
+    },
     async sessionStatus(sessionID) {
       try {
         const result = await client.session.status({});
@@ -2349,6 +2375,10 @@ function createGoalService(host) {
     });
     if (typeof input.costBudget === "number")
       goal.costBudget = input.costBudget;
+    if (input.parentAgent)
+      goal.parentAgent = input.parentAgent;
+    if (input.parentModel)
+      goal.parentModel = input.parentModel;
     const artifactDir = goalArtifactDir(directory, id);
     goal.config.artifactDir = artifactDir;
     if (!goal.config.progressFile)
@@ -3125,15 +3155,15 @@ function appendVerificationAttempt(recent, attempt) {
 import { exec as execChild } from "child_process";
 import { promisify } from "util";
 var execAsync = promisify(execChild);
-function goalTools(dir, goalService, hostSessionID, defaults = {}) {
+function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
   return {
     loopd_create_goal: tool({
-      description: "Create a new background loop goal (contract: objective + checks + agent/model + workspaceWrite). " + "The engine spawns a dedicated worker session that does the work autonomously \u2014 it never runs in this chat. " + "Call this after clarifying the contract with the user. " + "Worker identity is free-form: agent is any OpenCode agent name (built-in, ~/.config/opencode/agents/*.md, or opencode.jsonc agent.* \u2014 discover with `opencode agent list`), " + 'model is any "providerID/modelID" (discover with `opencode models [provider]`). Both are sent on every worker prompt. ' + "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " + "Workspace-writing goals are serialized (only one active writer) and require checks. " + "agent/model are optional \u2014 fall back to the parent session's agent/model, or plugin defaultAgent/defaultModel in opencode.jsonc.",
+      description: "Create a new background loop goal (contract: objective + checks + agent/model + workspaceWrite). " + "The engine spawns a dedicated worker session that does the work autonomously \u2014 it never runs in this chat. " + "Call this after clarifying the contract with the user. " + "Worker identity is free-form: agent is any OpenCode agent name (built-in, ~/.config/opencode/agents/*.md, or opencode.jsonc agent.* \u2014 discover with `opencode agent list`), " + 'model is any "providerID/modelID" (discover with `opencode models [provider]`). When omitted, both inherit the CALLING session\'s live agent/model (read at creation), then plugin defaultAgent/defaultModel. ' + "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " + "Workspace-writing goals are serialized (only one active writer) and require checks.",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
-        agent: tool.schema.string().optional().describe(`Agent to run the worker as (e.g. "researcher", "smart-agent"). Optional \u2014 uses parent session's agent if omitted, or plugin defaultAgent.`),
-        model: tool.schema.string().optional().describe(`Model to run the worker as, as "providerID/modelID" (e.g. "openai/gpt-5.6-sol", "ollama/qwen3.8:27b"). Optional \u2014 uses parent session's model if omitted, or plugin defaultModel.`),
+        agent: tool.schema.string().optional().describe(`Agent to run the worker as (e.g. "researcher", "smart-agent"). Optional \u2014 inherits the calling session's agent if omitted, else plugin defaultAgent.`),
+        model: tool.schema.string().optional().describe(`Model to run the worker as, as "providerID/modelID" (e.g. "openai/gpt-5.6-sol", "ollama/qwen3.8:27b"). Optional \u2014 inherits the calling session's live model if omitted, else plugin defaultModel.`),
         costBudget: tool.schema.number().optional().describe("Max provider cost in dollars before the engine stops the goal as budget_limited (e.g. 0.5). Optional \u2014 unlimited if omitted."),
         checks: tool.schema.array(tool.schema.string()).optional().describe('Shell commands that must pass for completion to be accepted. E.g. ["npm test"].'),
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
@@ -3219,7 +3249,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}) {
           directory: dir,
           objective: args.objective,
           config,
-          defaults
+          defaults: await withParentIdentity(defaults, host, sessionID)
         });
         if (!resolution.ok) {
           return {
@@ -3232,12 +3262,15 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}) {
           };
         }
         try {
+          const parentDefaults = await withParentIdentity(defaults, host, sessionID);
           const { goal, worker } = await goalService.start(dir, {
             name: args.name,
             objective: args.objective,
             ownerSessionID: sessionID,
             config: resolution.config,
-            costBudget
+            costBudget,
+            parentAgent: parentDefaults.parentAgent,
+            parentModel: parentDefaults.parentModel
           });
           return {
             title: "Goal created",
@@ -3595,6 +3628,34 @@ ${failureDetails.slice(0, 500)}`,
     })
   };
 }
+var parentIdentityCache = new Map;
+async function withParentIdentity(defaults, host, ownerSessionID) {
+  if (!host?.readSession)
+    return defaults;
+  let cached = parentIdentityCache.get(ownerSessionID);
+  if (!cached) {
+    try {
+      const identity = await host.readSession(ownerSessionID);
+      cached = {
+        agent: identity?.agent,
+        model: identity?.model ? `${identity.model.providerID}/${identity.model.modelID}` : undefined
+      };
+    } catch {
+      cached = {};
+    }
+    parentIdentityCache.set(ownerSessionID, cached);
+    if (parentIdentityCache.size > 200) {
+      const first = parentIdentityCache.keys().next();
+      if (!first.done)
+        parentIdentityCache.delete(first.value);
+    }
+  }
+  return {
+    ...defaults,
+    parentAgent: cached.agent,
+    parentModel: cached.model
+  };
+}
 function findGoalByWorkerSession(state, sessionID) {
   if (!sessionID)
     return;
@@ -3809,6 +3870,8 @@ function ownerTools(options) {
               workspaceWrite: goal.config.workspaceWrite,
               agent: goal.config.agent,
               model: goal.config.model,
+              parentAgent: goal.parentAgent,
+              parentModel: goal.parentModel,
               schedule: goal.config.schedule
             },
             lastProgress: goal.lastProgress,
@@ -4296,7 +4359,7 @@ var server = async ({ client, directory }, pluginOptions) => {
       if (type?.startsWith("session."))
         reconcileInBackground();
     },
-    tool: { ...goalTools(directory, goalService, undefined, defaults), ...ownerTools({ directory, host, goalService }) },
+    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }) },
     "tool.execute.before": async (input, _output) => {
       const activeWorkers = goalService.getActiveWorkers();
       let matchedGoalID;

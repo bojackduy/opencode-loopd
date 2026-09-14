@@ -65,6 +65,52 @@ describe("Goal Tools", () => {
       expect((await readState(dir)).goals).toHaveLength(1)
     })
 
+    it("inherits the calling session's live agent/model when unset", async () => {
+      const liveHost: any = {
+        ...host,
+        readSession: async (sessionID: string) => {
+          expect(sessionID).toBe("owner-live")
+          return { agent: "plan", model: { providerID: "openrouter", modelID: "meta/muse-spark-1.3-contributor" } }
+        },
+      }
+      const create = goalTools(dir, goalService, "owner-live", {}, liveHost).loopd_create_goal
+      const result = await create.execute({
+        name: "inherit-live",
+        objective: "Analyze the existing implementation without changing files.",
+        workspaceWrite: false,
+      }, { sessionID: "owner-live" })
+
+      const output = JSON.parse(result.output)
+      expect(output.ok).toBe(true)
+      expect(output.agent).toBe("plan")
+      expect(output.model).toBe("openrouter/meta/muse-spark-1.3-contributor")
+      const goal = (await readState(dir)).goals[0]
+      expect(goal.config.agent).toBe("plan")
+      expect(goal.config.model).toBe("openrouter/meta/muse-spark-1.3-contributor")
+      expect(goal.parentAgent).toBe("plan")
+      expect(goal.parentModel).toBe("openrouter/meta/muse-spark-1.3-contributor")
+      // Worker prompts carry the inherited identity
+      expect(host.promptCalls[host.promptCalls.length - 1]).toMatchObject({
+        agent: "plan",
+        model: { providerID: "openrouter", modelID: "meta/muse-spark-1.3-contributor" },
+      })
+    })
+
+    it("falls back to static defaults when the parent session is unreadable", async () => {
+      const deadHost: any = { ...host, readSession: async () => undefined }
+      const create = goalTools(dir, goalService, "owner-dead", { defaultAgent: "smart-agent" }, deadHost).loopd_create_goal
+      const result = await create.execute({
+        name: "inherit-fallback",
+        objective: "Analyze the existing implementation without changing files.",
+        workspaceWrite: false,
+      }, { sessionID: "owner-dead" })
+
+      const output = JSON.parse(result.output)
+      expect(output.ok).toBe(true)
+      expect(output.agent).toBe("smart-agent")
+      expect(output.defaultsApplied).toEqual({ agent: true, model: false, checks: false })
+    })
+
     it("applies configured agent and checks to a workspace-writing goal", async () => {
       const create = goalTools(dir, goalService, "owner-1", {
         defaultAgent: "smart-agent",

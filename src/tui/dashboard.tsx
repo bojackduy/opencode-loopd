@@ -623,12 +623,16 @@ export function LoopDashboard(props: Props) {
                         <span style={{ fg: theme().primary, bold: true }}>Agent: </span>
                         {agentName
                           ? <><span style={{ fg: agentColor(meta?.color, theme()) as any, bold: true }}>{agentName}</span>{meta?.mode && <span style={{ fg: theme().textMuted }}> ({meta.mode})</span>}</>
-                          : <span style={{ fg: theme().textMuted }}>parent</span>}
+                          : goal().parentAgent
+                            ? <><span style={{ fg: theme().textMuted }}>↩ </span><span style={{ fg: theme().text, bold: true }}>{goal().parentAgent}</span><span style={{ fg: theme().textMuted }}> (parent)</span></>
+                            : <span style={{ fg: theme().textMuted }}>parent</span>}
                         <span style={{ fg: theme().textMuted }}> │ 🧠 </span>
                         <span style={{ fg: theme().primary, bold: true }}>Model: </span>
                         {model && slash > 0
                           ? <><span style={{ fg: theme().textMuted }}>{model.slice(0, slash)}/</span><span style={{ fg: theme().info, bold: true }}>{model.slice(slash + 1)}</span></>
-                          : <span style={{ fg: theme().textMuted }}>parent</span>}
+                          : goal().parentModel
+                            ? <><span style={{ fg: theme().textMuted }}>↩ </span><span style={{ fg: theme().info, bold: true }}>{goal().parentModel}</span><span style={{ fg: theme().textMuted }}> (parent)</span></>
+                            : <span style={{ fg: theme().textMuted }}>parent</span>}
                         <span style={{ fg: theme().textMuted }}> │ 💰 </span>
                         <span style={{ fg: theme().primary, bold: true }}>Spent: </span>
                         <span style={{ fg: theme().success, bold: true }}>{formatCost((goal() as any).costUsed)}</span>

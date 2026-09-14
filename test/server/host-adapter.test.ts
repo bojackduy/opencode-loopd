@@ -160,4 +160,27 @@ describe("Real Host Adapter", () => {
     expect(msgs[1].tokens).toBeUndefined()
     expect(msgs[1].durationMs).toBeUndefined()
   })
+
+  it("reads session identity via session.get", async () => {
+    const host = createRealHost({
+      session: {
+        get: async ({ path }: any) => {
+          expect(path.id).toBe("owner-9")
+          return { data: { id: "owner-9", agent: "plan", model: { id: "meta/muse-spark-1.3-contributor", providerID: "openrouter" } } }
+        },
+      },
+    }, "/tmp/loopd-host-test")
+
+    await expect(host.readSession("owner-9")).resolves.toEqual({
+      agent: "plan",
+      model: { providerID: "openrouter", modelID: "meta/muse-spark-1.3-contributor" },
+    })
+  })
+
+  it("returns undefined identity when session.get fails or is empty", async () => {
+    const failing = createRealHost({ session: { get: async () => { throw new Error("gone") } } }, "/tmp/loopd-host-test")
+    const empty = createRealHost({ session: { get: async () => ({ data: { id: "x" } }) } }, "/tmp/loopd-host-test")
+    await expect(failing.readSession("x")).resolves.toBeUndefined()
+    await expect(empty.readSession("x")).resolves.toBeUndefined()
+  })
 })

@@ -83,4 +83,42 @@ describe("goal creation policy", () => {
       if (!result.ok) expect(result.errorCode).toBe("invalid_model")
     }
   })
+
+  it("prefers live parent identity over static defaults", () => {
+    const result = resolveGoalCreationConfig({
+      directory: "/project",
+      objective: "Research and report",
+      config: { workspaceWrite: false },
+      defaults: {
+        defaultAgent: "smart-agent",
+        defaultModel: "openai/gpt-5.6-sol",
+        parentAgent: "plan",
+        parentModel: "openrouter/meta/muse-spark-1.3-contributor",
+      },
+    })
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      // Parent was in Plan on muse-spark: worker inherits that, not Build/defaults
+      expect(result.config.agent).toBe("plan")
+      expect(result.config.model).toBe("openrouter/meta/muse-spark-1.3-contributor")
+      expect(result.defaultsApplied).toEqual({ agent: true, model: true, checks: false })
+    }
+  })
+
+  it("explicit args still beat parent identity", () => {
+    const result = resolveGoalCreationConfig({
+      directory: "/project",
+      objective: "Research and report",
+      config: { workspaceWrite: false, agent: "researcher", model: "ollama/qwen3.8:27b" },
+      defaults: { parentAgent: "plan", parentModel: "openrouter/meta/muse-spark-1.3-contributor" },
+    })
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.config.agent).toBe("researcher")
+      expect(result.config.model).toBe("ollama/qwen3.8:27b")
+      expect(result.defaultsApplied).toEqual({ agent: false, model: false, checks: false })
+    }
+  })
 })
