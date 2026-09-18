@@ -444,6 +444,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
         await host.notifyOwner(
           goal.ownerSessionID,
           `Loop goal "${goal.name}" stopped: ${limitResult.reason} (child did not wrap up). Status: blocked. Last progress: ${goal.lastProgress?.summary || "none"}.`,
+          (goal as any).parentAgent,
         )
       }
       return true
@@ -613,6 +614,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
         await host.notifyOwner(
           goal.ownerSessionID,
           `Loop goal "${goal.name}" blocked after ${runtime.consecutiveFailures + 1} failures. Last error: ${message}.`,
+          (goal as any).parentAgent,
         )
       }
     }
@@ -829,6 +831,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       await host.notifyOwner(
         goal.ownerSessionID,
         `Loop goal "${goal.name}" stopped: ${reason}. Worker aborted, status: budget_limited. Resume with resume_goal to continue spending.`,
+        (goal as any).parentAgent,
       )
     }
     return true
@@ -961,7 +964,8 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
             await host.notifyOwner(
               goal.ownerSessionID,
               `Loop goal "${goal.name}" worker is unreachable after ${unknownRuntime?.unknownStatusCount ?? unknownStatusThreshold} status checks. The goal remains active; use inspect_background_goal, nudge_goal, pause_goal, or resume_goal to recover it.`,
-            )
+          (goal as any).parentAgent
+        )
           }
           continue
         }
@@ -1078,7 +1082,8 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
           await host.notifyOwner(
             goal.ownerSessionID,
             `Loop goal "${goal.name}" worker is idle but its turn will not confirm (unconfirmed for ${quietMinutes}m, no activity). The goal remains active; use inspect_background_goal to look, nudge_goal to re-prompt, or pause_goal to stop it.`,
-          )
+          (goal as any).parentAgent
+        )
           continue
         }
 
@@ -1127,7 +1132,8 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
             await host.notifyOwner(
               goal.ownerSessionID,
               `Loop goal "${goal.name}" worker may be stuck: no activity for ${Math.floor(stuckSeconds / 60)}m while reporting ${status}, lease expired. The goal remains active; use inspect_background_goal to look, nudge_goal to re-prompt, or pause_goal to stop it.`,
-            )
+          (goal as any).parentAgent
+        )
           }
         }
       }

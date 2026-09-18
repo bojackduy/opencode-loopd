@@ -150,7 +150,7 @@ const server: Plugin = async ({ client, directory }, pluginOptions) => {
             parsed.status === "complete"
               ? `Loop goal "${goal.name}" completed: ${parsed.summary || ""}. Evidence: ${parsed.evidence || ""}. Artifacts: ${goal.config.artifactDir || "n/a"}.`
               : `Loop goal "${goal.name}" blocked: ${parsed.reason || ""}. Needed: ${parsed.needed || ""}.`
-          await host.notifyOwner(goal.ownerSessionID, message)
+          await host.notifyOwner(goal.ownerSessionID, message, goal.parentAgent)
         } catch {}
       }
     },

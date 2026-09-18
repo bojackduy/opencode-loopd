@@ -1334,7 +1334,7 @@ function createLoopEngine(options) {
         revision: blockedState.revision
       });
       if (shouldNotifyBlocked) {
-        await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" stopped: ${limitResult.reason} (child did not wrap up). Status: blocked. Last progress: ${goal.lastProgress?.summary || "none"}.`);
+        await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" stopped: ${limitResult.reason} (child did not wrap up). Status: blocked. Last progress: ${goal.lastProgress?.summary || "none"}.`, goal.parentAgent);
       }
       return true;
     }
@@ -1473,7 +1473,7 @@ function createLoopEngine(options) {
         revision: newState.revision
       });
       if (shouldNotify) {
-        await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" blocked after ${runtime.consecutiveFailures + 1} failures. Last error: ${message}.`);
+        await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" blocked after ${runtime.consecutiveFailures + 1} failures. Last error: ${message}.`, goal.parentAgent);
       }
     }
     return true;
@@ -1635,7 +1635,7 @@ function createLoopEngine(options) {
       costUsed: stoppedGoal.costUsed
     });
     if (shouldNotify) {
-      await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" stopped: ${reason}. Worker aborted, status: budget_limited. Resume with resume_goal to continue spending.`);
+      await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" stopped: ${reason}. Worker aborted, status: budget_limited. Resume with resume_goal to continue spending.`, goal.parentAgent);
     }
     return true;
   }
@@ -1745,7 +1745,7 @@ function createLoopEngine(options) {
               workerSessionID: goal.workerSessionID,
               count: unknownRuntime?.unknownStatusCount
             });
-            await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" worker is unreachable after ${unknownRuntime?.unknownStatusCount ?? unknownStatusThreshold} status checks. The goal remains active; use inspect_background_goal, nudge_goal, pause_goal, or resume_goal to recover it.`);
+            await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" worker is unreachable after ${unknownRuntime?.unknownStatusCount ?? unknownStatusThreshold} status checks. The goal remains active; use inspect_background_goal, nudge_goal, pause_goal, or resume_goal to recover it.`, goal.parentAgent);
           }
           continue;
         }
@@ -1840,7 +1840,7 @@ function createLoopEngine(options) {
             stuckSeconds
           });
           const quietMinutes = Math.max(1, Math.floor(stuckSeconds / 60));
-          await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" worker is idle but its turn will not confirm (unconfirmed for ${quietMinutes}m, no activity). The goal remains active; use inspect_background_goal to look, nudge_goal to re-prompt, or pause_goal to stop it.`);
+          await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" worker is idle but its turn will not confirm (unconfirmed for ${quietMinutes}m, no activity). The goal remains active; use inspect_background_goal to look, nudge_goal to re-prompt, or pause_goal to stop it.`, goal.parentAgent);
           continue;
         }
         if (status === "idle") {
@@ -1879,7 +1879,7 @@ function createLoopEngine(options) {
               runID: runtime.activeRunID,
               stuckSeconds
             });
-            await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" worker may be stuck: no activity for ${Math.floor(stuckSeconds / 60)}m while reporting ${status}, lease expired. The goal remains active; use inspect_background_goal to look, nudge_goal to re-prompt, or pause_goal to stop it.`);
+            await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" worker may be stuck: no activity for ${Math.floor(stuckSeconds / 60)}m while reporting ${status}, lease expired. The goal remains active; use inspect_background_goal to look, nudge_goal to re-prompt, or pause_goal to stop it.`, goal.parentAgent);
           }
         }
       }
@@ -2070,15 +2070,27 @@ function createRealHost(client, directory) {
         await client.session.compact({ sessionID });
       } catch {}
     },
-    async notifyOwner(ownerSessionID, message) {
+    async notifyOwner(ownerSessionID, message, agent) {
       if (shouldDedupParentNotify(ownerSessionID, message)) {
         await logServerEvent(directory, "parent.notify.deduped", { ownerSessionID, preview: message.slice(0, 160) });
         return;
       }
+      let resolvedAgent = agent?.trim() || undefined;
+      if (!resolvedAgent) {
+        try {
+          const sess = await client.session.get({ path: { id: ownerSessionID } });
+          const liveAgent = sess?.data?.agent;
+          if (typeof liveAgent === "string" && liveAgent.trim())
+            resolvedAgent = liveAgent.trim();
+        } catch {}
+      }
       try {
+        const body = { parts: [{ type: "text", text: message }] };
+        if (resolvedAgent)
+          body.agent = resolvedAgent;
         const result = await withTimeout(client.session.promptAsync({
           path: { id: ownerSessionID },
-          body: { parts: [{ type: "text", text: message }] }
+          body
         }), 1e4, "OpenCode parent notify");
         if (result?.error) {
           await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(result.error) });
@@ -2361,6 +2373,17 @@ function createGoalService(host) {
     return withGoalOperation(id, () => startUnlocked(directory, input, id));
   }
   async function startUnlocked(directory, input, id) {
+    let parentAgent = input.parentAgent;
+    let parentModel = input.parentModel;
+    if ((!parentAgent || !parentModel) && host.readSession) {
+      try {
+        const identity = await host.readSession(input.ownerSessionID);
+        if (!parentAgent && identity?.agent)
+          parentAgent = identity.agent;
+        if (!parentModel && identity?.model)
+          parentModel = `${identity.model.providerID}/${identity.model.modelID}`;
+      } catch {}
+    }
     const goal = createGoal({
       id,
       name: input.name,
@@ -2375,10 +2398,10 @@ function createGoalService(host) {
     });
     if (typeof input.costBudget === "number")
       goal.costBudget = input.costBudget;
-    if (input.parentAgent)
-      goal.parentAgent = input.parentAgent;
-    if (input.parentModel)
-      goal.parentModel = input.parentModel;
+    if (parentAgent)
+      goal.parentAgent = parentAgent;
+    if (parentModel)
+      goal.parentModel = parentModel;
     const artifactDir = goalArtifactDir(directory, id);
     goal.config.artifactDir = artifactDir;
     if (!goal.config.progressFile)
@@ -4432,7 +4455,7 @@ var server = async ({ client, directory }, pluginOptions) => {
             });
           }
           const message = parsed.status === "complete" ? `Loop goal "${goal.name}" completed: ${parsed.summary || ""}. Evidence: ${parsed.evidence || ""}. Artifacts: ${goal.config.artifactDir || "n/a"}.` : `Loop goal "${goal.name}" blocked: ${parsed.reason || ""}. Needed: ${parsed.needed || ""}.`;
-          await host.notifyOwner(goal.ownerSessionID, message);
+          await host.notifyOwner(goal.ownerSessionID, message, goal.parentAgent);
         } catch {}
       }
     },

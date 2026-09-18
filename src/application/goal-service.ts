@@ -234,6 +234,21 @@ export function createGoalService(host: LoopHost): GoalService {
     parentAgent?: string
     parentModel?: string
   }, id: GoalID) {
+    // Inherit the calling session's live identity when the caller didn't
+    // snapshot it (TUI path). Best-effort: failure falls back to existing
+    // defaults/global behavior. Keep this outside the state lock.
+    let parentAgent = input.parentAgent
+    let parentModel = input.parentModel
+    if ((!parentAgent || !parentModel) && host.readSession) {
+      try {
+        const identity = await host.readSession(input.ownerSessionID)
+        if (!parentAgent && identity?.agent) parentAgent = identity.agent
+        if (!parentModel && identity?.model) parentModel = `${identity.model.providerID}/${identity.model.modelID}`
+      } catch {
+        // ignore — will fall back
+      }
+    }
+
     // Create goal and artifact directory (external I/O before lock)
     const goal = createGoal({
       id,
@@ -248,8 +263,8 @@ export function createGoalService(host: LoopHost): GoalService {
       },
     })
     if (typeof input.costBudget === "number") goal.costBudget = input.costBudget
-    if (input.parentAgent) goal.parentAgent = input.parentAgent
-    if (input.parentModel) goal.parentModel = input.parentModel
+    if (parentAgent) goal.parentAgent = parentAgent
+    if (parentModel) goal.parentModel = parentModel
     const artifactDir = goalArtifactDir(directory, id)
     goal.config.artifactDir = artifactDir
     if (!goal.config.progressFile) goal.config.progressFile = path.join(artifactDir, "progress.md")

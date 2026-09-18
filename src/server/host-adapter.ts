@@ -77,7 +77,7 @@ export interface LoopHost {
   abortSession(sessionID: string): Promise<void>
   readMessages(sessionID: string, limit?: number): Promise<SessionMessage[]>
   compactSession(sessionID: string): Promise<void>
-  notifyOwner(ownerSessionID: string, message: string): Promise<void>
+  notifyOwner(ownerSessionID: string, message: string, agent?: string): Promise<void>
 }
 
 const recentParentNotifies = new Map<string, number>()
@@ -263,16 +263,32 @@ export function createRealHost(client: any, directory: string): LoopHost {
       }
     },
 
-    async notifyOwner(ownerSessionID, message) {
+    async notifyOwner(ownerSessionID, message, agent) {
       if (shouldDedupParentNotify(ownerSessionID, message)) {
         await logServerEvent(directory, "parent.notify.deduped", { ownerSessionID, preview: message.slice(0, 160) })
         return
       }
+      // Preserve the parent's identity: without an explicit agent the session
+      // falls back to the global default (often Build), not the parent that
+      // spawned the subagent. Callers pass the snapshot `parentAgent` when
+      // available; otherwise we best-effort read the live session.
+      let resolvedAgent = agent?.trim() || undefined
+      if (!resolvedAgent) {
+        try {
+          const sess = await client.session.get({ path: { id: ownerSessionID } })
+          const liveAgent = (sess as any)?.data?.agent
+          if (typeof liveAgent === "string" && liveAgent.trim()) resolvedAgent = liveAgent.trim()
+        } catch {
+          // ignore — will fall through to no agent
+        }
+      }
       try {
+        const body: any = { parts: [{ type: "text", text: message }] }
+        if (resolvedAgent) body.agent = resolvedAgent
         const result = await withTimeout<any>(
           client.session.promptAsync({
             path: { id: ownerSessionID },
-            body: { parts: [{ type: "text", text: message }] },
+            body,
           }),
           10_000,
           "OpenCode parent notify",
@@ -340,6 +356,16 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
       // via session.get. Tests set identity explicitly where needed.
       return undefined
     },
+    async notifyOwner(ownerSessionID, message, agent) {
+      const key = `${ownerSessionID}:${message.slice(0, 200)}`
+      const now = Date.now()
+      const last = recentNotifies.get(key)
+      if (last !== undefined && now - last < 60_000) return
+      recentNotifies.set(key, now)
+      // Fake host records for tests
+      ;(sessions as any).notifications = (sessions as any).notifications || []
+      ;(sessions as any).notifications.push({ ownerSessionID, message, agent })
+    },
     async promptWorker({ sessionID, prompt, messageID, model, agent }) {
       const rawID = messageID || `msg-${crypto.randomUUID().slice(0, 8)}`
       const resolvedMessageID = rawID.replace(/^(msg-)+/, "msg-")
@@ -388,17 +414,6 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
     },
     async compactSession(sessionID) {
       // No-op for fake host
-    },
-
-    async notifyOwner(ownerSessionID, message) {
-      const key = `${ownerSessionID}:${message.slice(0, 200)}`
-      const now = Date.now()
-      const last = recentNotifies.get(key)
-      if (last !== undefined && now - last < 60_000) return
-      recentNotifies.set(key, now)
-      // Fake host records for tests
-      ;(sessions as any).notifications = (sessions as any).notifications || []
-      ;(sessions as any).notifications.push({ ownerSessionID, message })
     },
   }
 }
