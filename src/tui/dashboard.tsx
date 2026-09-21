@@ -13,6 +13,7 @@ import type { StoreState } from "../infrastructure/state-repository"
 import type { Goal, GoalStatus } from "../domain/goal"
 import type { GoalRuntimeState, RuntimePhase } from "../domain/runtime"
 import { parseCommand, commandHelp } from "./command-parser"
+import { goalStatusLabel, phaseLabel, describeGoalState } from "../domain/status-labels"
 import { bugReportUrl, openBrowserUrl } from "../browser"
 import { randomUUID } from "crypto"
 
@@ -453,10 +454,9 @@ export function LoopDashboard(props: Props) {
             <span style={{ fg: mode() === "normal" ? theme().success : theme().warning, bold: true, bg: mode() === "insert" ? (theme().backgroundElement as unknown as string) : undefined }}> {mode().toUpperCase()} </span>
             <span style={{ fg: theme().textMuted }}> │ </span>
             <span style={{ fg: theme().accent, bold: true }}>{activeGoals().length}</span>
-            <span style={{ fg: theme().textMuted }}> active</span>
+            <span style={{ fg: theme().textMuted }}> open</span>
             <span style={{ fg: theme().textMuted }}> │ </span>
-            <span style={{ fg: runningCount() > 0 ? theme().success : theme().textMuted, bold: runningCount() > 0 }}>{runningCount() > 0 ? runningFrame() : "○"} {runningCount()} running</span>
-            <span style={{ fg: theme().textMuted }}> (phase)</span>
+            <span style={{ fg: runningCount() > 0 ? theme().success : theme().textMuted, bold: runningCount() > 0 }}>{runningCount() > 0 ? runningFrame() : "○"} {runningCount()} acting now</span>
             <span style={{ fg: theme().textMuted }}> │ </span>
             <span style={{ fg: theme().info, bold: true }}>{state()?.goals.filter((g) => g.status === "complete").length || 0}</span>
             <span style={{ fg: theme().textMuted }}> done</span>
@@ -577,10 +577,11 @@ export function LoopDashboard(props: Props) {
                       <text wrapMode="none" truncate={true}>
                         <span style={{ fg: statusColor(goal.status, theme()), bold: isActive() }}>{isActive() ? `▶ ${statusIcon(goal.status)} ${goal.name}` : `  ${statusIcon(goal.status)} ${goal.name}`}</span>
                         <span style={{ fg: theme().textMuted }}> │ </span>
-                        <span style={{ fg: statusColor(goal.status, theme()), bold: true }}>{goal.status.toUpperCase()}</span>
+                        <span style={{ fg: theme().textMuted }}>Goal </span>
+                        <span style={{ fg: statusColor(goal.status, theme()), bold: true }}>{goalStatusLabel(goal.status).short.toUpperCase()}</span>
                         {runtime() && <>
-                          <span style={{ fg: theme().textMuted }}> │ </span>
-                          <span style={{ fg: turnColor(), bold: runtime()!.phase === "running" }}>{runtime()!.phase === "running" ? runningFrame() : phaseIcon(runtime()!.phase)} {runtime()!.phase.toUpperCase()}</span>
+                          <span style={{ fg: theme().textMuted }}> │ Worker </span>
+                          <span style={{ fg: turnColor(), bold: runtime()!.phase === "running" }}>{runtime()!.phase === "running" ? runningFrame() : phaseIcon(runtime()!.phase)} {phaseLabel(runtime()!.phase).short.toUpperCase()}</span>
                           <span style={{ fg: turnColor() }}> {runtime()!.budgetTurnCount}{maxTurns ? `/${maxTurns}` : ""}</span>
                           <span style={{ fg: theme().textMuted }}> {ageLabel(runtime()!.lastProgressAt || runtime()!.lastRunAt, clock())}</span>
                         </>}
@@ -609,8 +610,11 @@ export function LoopDashboard(props: Props) {
                 <box flexDirection="column" border={true} borderColor={borderColorForStatus(goal().status, theme())} padding={1} flexShrink={0} maxHeight={13}>
                   <text>
                     <span style={{ fg: statusColor(goal().status, theme()), bold: true }}>{statusIcon(goal().status)} {goal().name}</span>
-                    <span style={{ fg: statusColor(goal().status, theme()) }}> {goal().status.toUpperCase()}</span>
-                    {rt() && <><span style={{ fg: theme().textMuted }}> │ </span><span style={{ fg: phaseColor(rt()!.phase, theme()), bold: true }}>{phaseIcon(rt()!.phase)} {rt()!.phase}</span><span style={{ fg: theme().textMuted }}> run {rt()!.runCount} (budget {rt()!.budgetTurnCount})</span></>}
+                    <span style={{ fg: theme().textMuted }}> Goal </span>
+                    <span style={{ fg: statusColor(goal().status, theme()) }}>{goalStatusLabel(goal().status).short} — {goalStatusLabel(goal().status).hint}</span>
+                    {rt() && <><span style={{ fg: theme().textMuted }}> │ Worker </span><span style={{ fg: phaseColor(rt()!.phase, theme()), bold: true }}>{phaseIcon(rt()!.phase)} {phaseLabel(rt()!.phase).short} — {phaseLabel(rt()!.phase).hint}</span><span style={{ fg: theme().textMuted }}> run {rt()!.runCount} (budget {rt()!.budgetTurnCount})</span></>}
+                    {"\n"}
+                    <span style={{ fg: theme().textMuted }}>{describeGoalState(goal().status, rt()?.phase)}</span>
                     {(rt() as any)?.workerAbortedAt && <><span style={{ fg: theme().warning, bold: true }}> │ ⚠ worker aborted </span><span style={{ fg: theme().textMuted }}>{ageLabel((rt() as any).workerAbortedAt, clock())} — session kept, next turn reuses it</span></>}
                     {(() => {
                       const agentName = goal().config.agent

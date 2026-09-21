@@ -1639,6 +1639,9 @@ function createLoopEngine(options) {
     }
     return true;
   }
+  function hasExecutionLeak(runtime) {
+    return runtime.phase !== "idle" || Boolean(runtime.activeRunID) || Boolean(runtime.leaseExpiresAt) || Boolean(runtime.turnStartedAt) || Boolean(runtime.activePromptMessageID) || Boolean(runtime.activePromptObservedAt) || Boolean(runtime.activeAssistantMessageID) || Boolean(runtime.activeAssistantCompletedAt) || Boolean(runtime.idleCandidateAt) || (runtime.activeToolCallIDs?.length ?? 0) > 0;
+  }
   async function maintenance() {
     syncWorkerSessionsFromService();
     if (knownWorkerSessions.size === 0)
@@ -1650,10 +1653,11 @@ function createLoopEngine(options) {
       const rt = state.runtimes.find((r) => r.goalID === goal.id);
       if (!rt)
         continue;
-      if (rt.phase === "idle" && (rt.activeRunID || rt.leaseExpiresAt || rt.activePromptMessageID)) {
+      if (hasExecutionLeak(rt)) {
         await mutateState(directory, `maintenance.clear-terminal-leak:${goal.id}`, async (s) => {
           const r = s.runtimes.find((x) => x.goalID === goal.id);
-          if (r && r.phase === "idle" && (r.activeRunID || r.leaseExpiresAt || r.activePromptMessageID)) {
+          const g = s.goals.find((item) => item.id === goal.id);
+          if (g?.status !== "active" && r && hasExecutionLeak(r)) {
             Object.assign(r, releaseLease(r));
             r.activeRunID = undefined;
             r.unknownStatusCount = 0;
@@ -2894,9 +2898,13 @@ function createGoalService(host) {
         runtime.consecutiveFailures = 0;
         runtime.lastError = undefined;
         runtime.forceFinishRequested = undefined;
+        runtime.evaluatorRejectionCount = 0;
+        runtime.lastRejectionDetails = undefined;
+        runtime.freeRetryPending = false;
         runtime.lastParentNotifiedAt = undefined;
         runtime.lastParentNotifiedFor = undefined;
-        runtime.phase = "idle";
+        Object.assign(runtime, releaseLease(runtime));
+        runtime.activeRunID = undefined;
         runtime.updatedAt = new Date().toISOString();
       }
       return state;
@@ -3528,25 +3536,32 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
           const cwd = goal.config.checkCwd || goal.config.artifactDir || dir;
           const checkResults = await runCompletionChecks(goal.config.checks, cwd);
           if (!checkResults.passed) {
-            const runtime = state.runtimes.find((r) => r.goalID === goal.id);
-            if (runtime) {
-              runtime.evaluatorRejectionCount = (runtime.evaluatorRejectionCount || 0) + 1;
-              const failureDetails = checkResults.failures.map((f) => {
-                const stdoutSnippet = f.stdout ? `
+            const failureDetails = checkResults.failures.map((f) => {
+              const stdoutSnippet = f.stdout ? `
 Stdout: ${f.stdout.slice(0, 500)}` : "";
-                const stderrSnippet = f.stderr ? `
+              const stderrSnippet = f.stderr ? `
 Stderr: ${f.stderr.slice(0, 500)}` : "";
-                return `Command: ${f.command}
+              return `Command: ${f.command}
 Exit code: ${f.exitCode}${stdoutSnippet}${stderrSnippet}`;
-              }).join(`
+            }).join(`
 
 `);
+            let rejectionCount = 0;
+            let blocked = false;
+            let attemptID = "";
+            const rejectionState = await mutateState(dir, `goal.completion-rejected:${goal.id}`, async (current) => {
+              const currentGoal = current.goals.find((item) => item.id === goal.id);
+              const runtime = current.runtimes.find((r) => r.goalID === goal.id);
+              if (!currentGoal || !runtime || currentGoal.status !== "active")
+                return current;
+              runtime.evaluatorRejectionCount = (runtime.evaluatorRejectionCount || 0) + 1;
+              rejectionCount = runtime.evaluatorRejectionCount;
               runtime.lastRejectionDetails = `Rejection #${runtime.evaluatorRejectionCount} at ${new Date().toISOString()}
 
 Working directory: ${cwd}
 
 ${failureDetails}`;
-              const attemptID = randomUUID5();
+              attemptID = randomUUID5();
               const verificationAttempt = {
                 id: attemptID,
                 sequence: runtime.evaluatorRejectionCount,
@@ -3566,55 +3581,71 @@ ${failureDetails}`;
               };
               runtime.lastVerificationAttempt = verificationAttempt;
               runtime.recentVerificationAttempts = appendVerificationAttempt(runtime.recentVerificationAttempts || [], verificationAttempt);
-              const rejectEvent = {
-                version: 1,
-                eventID: randomUUID5(),
-                goalID: goal.id,
-                type: "goal.completion_rejected",
-                attemptID,
-                rejectionCount: runtime.evaluatorRejectionCount,
-                failedCheckCount: checkResults.failures.length,
-                failureSummary: failureDetails.slice(0, 500),
-                timestamp: new Date().toISOString(),
-                revision: state.revision
-              };
-              await appendEvent(dir, rejectEvent);
-              const maxRejections = goal.config.maxEvaluatorRejections || 3;
+              const maxRejections = currentGoal.config.maxEvaluatorRejections || 3;
               if (runtime.evaluatorRejectionCount >= maxRejections) {
-                goal.status = "blocked";
-                goal.updatedAt = new Date().toISOString();
-                goal.blocker = {
+                blocked = true;
+                currentGoal.status = "blocked";
+                currentGoal.updatedAt = new Date().toISOString();
+                currentGoal.blocker = {
                   reason: `Evaluator rejected ${runtime.evaluatorRejectionCount} time(s). Last failure:
 ${failureDetails.slice(0, 500)}`,
                   needed: "Fix the failing checks and retry the goal.",
                   at: new Date().toISOString()
                 };
+                Object.assign(runtime, releaseLease(runtime));
+                runtime.activeRunID = undefined;
                 runtime.forceFinishRequested = undefined;
-                await appendEvent(dir, {
-                  version: 1,
-                  eventID: randomUUID5(),
-                  goalID: goal.id,
-                  type: "goal.blocked",
-                  reason: goal.blocker.reason,
-                  needed: goal.blocker.needed,
-                  timestamp: new Date().toISOString(),
-                  revision: state.revision
-                });
+                runtime.freeRetryPending = false;
               } else {
                 runtime.forceFinishRequested = false;
                 runtime.freeRetryPending = true;
               }
               runtime.updatedAt = new Date().toISOString();
-              await writeState(dir, state);
+              return current;
+            });
+            if (attemptID) {
+              await appendEvent(dir, {
+                version: 1,
+                eventID: randomUUID5(),
+                goalID: goal.id,
+                type: "goal.completion_rejected",
+                attemptID,
+                rejectionCount,
+                failedCheckCount: checkResults.failures.length,
+                failureSummary: failureDetails.slice(0, 500),
+                timestamp: new Date().toISOString(),
+                revision: rejectionState.revision
+              });
+            }
+            const rejectedGoal = rejectionState.goals.find((item) => item.id === goal.id);
+            const rejectedRuntime = rejectionState.runtimes.find((item) => item.goalID === goal.id);
+            rejectionCount = rejectedRuntime?.evaluatorRejectionCount ?? rejectionCount;
+            const goalIsBlocked = rejectedGoal?.status === "blocked";
+            if (blocked && rejectedGoal?.blocker) {
+              await appendEvent(dir, {
+                version: 1,
+                eventID: randomUUID5(),
+                goalID: goal.id,
+                type: "goal.blocked",
+                reason: rejectedGoal.blocker.reason,
+                needed: rejectedGoal.blocker.needed,
+                timestamp: new Date().toISOString(),
+                revision: rejectionState.revision
+              });
+              await goalService.accountUsage(dir, goal.id).catch(() => {
+                return;
+              });
             }
             return {
-              title: "Completion rejected \u2014 keep working",
+              title: goalIsBlocked ? "Completion rejected \u2014 goal blocked" : "Completion rejected \u2014 keep working",
               output: JSON.stringify({
+                goalID: goal.id,
+                goalName: goal.name,
                 passed: false,
                 failedChecks: checkResults.failures,
-                message: "Evaluator rejected completion. Fix the issues above and try again.",
-                rejectionCount: runtime?.evaluatorRejectionCount || 0,
-                status: goal.status
+                message: goalIsBlocked ? "Evaluator rejection limit reached. Goal blocked; owner retry required." : "Evaluator rejected completion. Fix the issues above and try again.",
+                rejectionCount,
+                status: rejectedGoal?.status ?? goal.status
               })
             };
           }
@@ -3881,6 +3912,42 @@ async function runCompletionChecks(checks, cwd) {
 // src/server/owner-tools.ts
 init_state_repository();
 import { tool as tool2 } from "@opencode-ai/plugin/tool";
+
+// src/domain/status-labels.ts
+var GOAL_STATUS_META = {
+  active: { short: "Active", hint: "loopd owns it" },
+  paused: { short: "Paused", hint: "stopped by you" },
+  blocked: { short: "Blocked", hint: "needs you" },
+  budget_limited: { short: "Out of budget", hint: "resume to spend" },
+  usage_limited: { short: "Waiting for capacity", hint: "auto-resumes" },
+  complete: { short: "Done", hint: "verified" }
+};
+var PHASE_META = {
+  idle: { short: "Idle", hint: "between turns" },
+  queued: { short: "Queued", hint: "waiting to start" },
+  running: { short: "Running", hint: "worker acting now" },
+  compacting: { short: "Compacting", hint: "summarizing context" },
+  waiting_retry: { short: "Retrying", hint: "backing off" },
+  stopping: { short: "Stopping", hint: "abort in flight" }
+};
+function goalStatusLabel(status) {
+  return GOAL_STATUS_META[status] ?? { short: status, hint: "" };
+}
+function phaseLabel(phase) {
+  return PHASE_META[phase] ?? { short: phase, hint: "" };
+}
+function describeGoalState(status, phase) {
+  const goal = goalStatusLabel(status);
+  const activity = phase ? phaseLabel(phase) : undefined;
+  const workerClause = activity ? `worker is ${activity.hint || activity.short.toLowerCase()}` : "worker state unknown";
+  if (status === "active")
+    return `Loopd owns this; ${workerClause}.`;
+  if (status === "complete")
+    return "Done \u2014 verified; worker is stopped.";
+  return `Parked \u2014 ${goal.hint || goal.short.toLowerCase()}; ${workerClause}.`;
+}
+
+// src/server/owner-tools.ts
 import { promises as fs3 } from "fs";
 function withTimeout2(promise, ms) {
   return Promise.race([
@@ -3916,11 +3983,17 @@ function ownerTools(options) {
         }
         const summaries = goals.map((g) => {
           const runtime = state.runtimes.find((r) => r.goalID === g.id);
+          const phase = runtime?.phase ?? "unknown";
+          const goalLabel = goalStatusLabel(g.status);
+          const activityLabel = phaseLabel(phase);
           return {
             id: g.id,
             name: g.name,
             status: g.status,
-            phase: runtime?.phase ?? "unknown",
+            statusDisplay: `${goalLabel.short} \u2014 ${goalLabel.hint}`,
+            phase,
+            activityDisplay: `${activityLabel.short} \u2014 ${activityLabel.hint}`,
+            stateSummary: describeGoalState(g.status, runtime?.phase),
             turn: runtime?.runCount ?? 0,
             budgetTurnCount: runtime?.budgetTurnCount ?? 0,
             maxTurns: g.config.maxTurns,
@@ -3990,6 +4063,9 @@ function ownerTools(options) {
             name: goal.name,
             objective: goal.objective,
             status: goal.status,
+            statusDisplay: `${goalStatusLabel(goal.status).short} \u2014 ${goalStatusLabel(goal.status).hint}`,
+            activityDisplay: runtime?.phase ? `${phaseLabel(runtime.phase).short} \u2014 ${phaseLabel(runtime.phase).hint}` : undefined,
+            stateSummary: describeGoalState(goal.status, runtime?.phase),
             ownerSessionID: goal.ownerSessionID,
             workerSessionID: goal.workerSessionID,
             config: {

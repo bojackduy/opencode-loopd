@@ -926,7 +926,7 @@ describe("Loop Engine", () => {
       expect(repaired.activePromptMessageID).toBeUndefined()
     })
 
-    it("does not restart blocked goals during maintenance", async () => {
+    it("quiesces a blocked running runtime without restarting it", async () => {
       const { goal } = await goalService.start(dir, {
         name: "blocked-maintenance",
         objective: "do something",
@@ -934,8 +934,9 @@ describe("Loop Engine", () => {
       })
       const state = await readState(dir)
       state.goals[0].status = "blocked"
-      state.runtimes[0].phase = "idle"
-      state.runtimes[0].activeRunID = undefined
+      state.runtimes[0].activeToolCallIDs = ["stale-call"]
+      expect(state.runtimes[0].phase).toBe("running")
+      expect(state.runtimes[0].activeRunID).toBeDefined()
       await fs.writeFile(
         path.join(dir, ".opencode", "loopd", "state.json"),
         JSON.stringify(state, null, 2),
@@ -943,7 +944,13 @@ describe("Loop Engine", () => {
 
       await new Promise((resolve) => setTimeout(resolve, 150))
       expect(host.prompts).toHaveLength(1)
-      expect((await readState(dir)).goals[0].status).toBe("blocked")
+      const repaired = await readState(dir)
+      expect(repaired.goals[0].status).toBe("blocked")
+      expect(repaired.runtimes[0].phase).toBe("idle")
+      expect(repaired.runtimes[0].activeRunID).toBeUndefined()
+      expect(repaired.runtimes[0].leaseExpiresAt).toBeUndefined()
+      expect(repaired.runtimes[0].activePromptMessageID).toBeUndefined()
+      expect(repaired.runtimes[0].activeToolCallIDs).toEqual([])
     })
   })
 

@@ -4,7 +4,7 @@
 
 import { randomUUID } from "crypto"
 import { tool } from "@opencode-ai/plugin/tool"
-import { readState, writeState, appendEvent, appendGoalInbox } from "../infrastructure/state-repository"
+import { readState, writeState, mutateState, appendEvent, appendGoalInbox } from "../infrastructure/state-repository"
 import type { Goal, GoalID, GoalConfig } from "../domain/goal"
 import { canTransition } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
@@ -292,20 +292,27 @@ export function goalTools(
           const cwd = goal.config.checkCwd || goal.config.artifactDir || dir
           const checkResults = await runCompletionChecks(goal.config.checks, cwd)
           if (!checkResults.passed) {
-            // Evaluator rejected — child gets a free retry turn
-            const runtime = state.runtimes.find((r) => r.goalID === goal.id)
-            if (runtime) {
+            const failureDetails = checkResults.failures.map((f) => {
+              const stdoutSnippet = f.stdout ? `\nStdout: ${f.stdout.slice(0, 500)}` : ""
+              const stderrSnippet = f.stderr ? `\nStderr: ${f.stderr.slice(0, 500)}` : ""
+              return `Command: ${f.command}\nExit code: ${f.exitCode}${stdoutSnippet}${stderrSnippet}`
+            }).join("\n\n")
+            let rejectionCount = 0
+            let blocked = false
+            let attemptID = ""
+
+            // Checks can run for a long time. Apply their result to fresh state
+            // so activity updates cannot be overwritten by this tool's snapshot.
+            const rejectionState = await mutateState(dir, `goal.completion-rejected:${goal.id}`, async (current) => {
+              const currentGoal = current.goals.find((item) => item.id === goal.id)
+              const runtime = current.runtimes.find((r) => r.goalID === goal.id)
+              if (!currentGoal || !runtime || currentGoal.status !== "active") return current
+
               runtime.evaluatorRejectionCount = (runtime.evaluatorRejectionCount || 0) + 1
-              // Build detailed rejection message — include stdout+stderr for diagnostics
-              const failureDetails = checkResults.failures.map((f) => {
-                const stdoutSnippet = f.stdout ? `\nStdout: ${f.stdout.slice(0, 500)}` : ""
-                const stderrSnippet = f.stderr ? `\nStderr: ${f.stderr.slice(0, 500)}` : ""
-                return `Command: ${f.command}\nExit code: ${f.exitCode}${stdoutSnippet}${stderrSnippet}`
-              }).join("\n\n")
+              rejectionCount = runtime.evaluatorRejectionCount
               runtime.lastRejectionDetails = `Rejection #${runtime.evaluatorRejectionCount} at ${new Date().toISOString()}\n\nWorking directory: ${cwd}\n\n${failureDetails}`
 
-              // Create a VerificationAttempt for this rejection
-              const attemptID = randomUUID()
+              attemptID = randomUUID()
               const verificationAttempt: VerificationAttempt = {
                 id: attemptID,
                 sequence: runtime.evaluatorRejectionCount,
@@ -329,59 +336,73 @@ export function goalTools(
                 verificationAttempt,
               )
 
-              // Emit goal.completion_rejected event
-              const rejectEvent: LoopEvent = {
+              const maxRejections = (currentGoal.config as any).maxEvaluatorRejections || 3
+              if (runtime.evaluatorRejectionCount >= maxRejections) {
+                blocked = true
+                currentGoal.status = "blocked"
+                currentGoal.updatedAt = new Date().toISOString()
+                currentGoal.blocker = {
+                  reason: `Evaluator rejected ${runtime.evaluatorRejectionCount} time(s). Last failure:\n${failureDetails.slice(0, 500)}`,
+                  needed: "Fix the failing checks and retry the goal.",
+                  at: new Date().toISOString(),
+                }
+                Object.assign(runtime, releaseLease(runtime))
+                runtime.activeRunID = undefined
+                runtime.forceFinishRequested = undefined
+                runtime.freeRetryPending = false
+              } else {
+                runtime.forceFinishRequested = false
+                runtime.freeRetryPending = true
+              }
+              runtime.updatedAt = new Date().toISOString()
+              return current
+            })
+
+            if (attemptID) {
+              await appendEvent(dir, {
                 version: 1,
                 eventID: randomUUID(),
                 goalID: goal.id,
                 type: "goal.completion_rejected",
                 attemptID,
-                rejectionCount: runtime.evaluatorRejectionCount,
+                rejectionCount,
                 failedCheckCount: checkResults.failures.length,
                 failureSummary: failureDetails.slice(0, 500),
                 timestamp: new Date().toISOString(),
-                revision: state.revision,
-              }
-              await appendEvent(dir, rejectEvent)
-
-              // After maxEvaluatorRejections (default 3), block immediately
-              const maxRejections = (goal.config as any).maxEvaluatorRejections || 3
-              if (runtime.evaluatorRejectionCount >= maxRejections) {
-                goal.status = "blocked"
-                goal.updatedAt = new Date().toISOString()
-                goal.blocker = {
-                  reason: `Evaluator rejected ${runtime.evaluatorRejectionCount} time(s). Last failure:\n${failureDetails.slice(0, 500)}`,
-                  needed: "Fix the failing checks and retry the goal.",
-                  at: new Date().toISOString(),
-                }
-                runtime.forceFinishRequested = undefined
-                // Emit blocked event
-                await appendEvent(dir, {
-                  version: 1,
-                  eventID: randomUUID(),
-                  goalID: goal.id,
-                  type: "goal.blocked",
-                  reason: goal.blocker.reason,
-                  needed: goal.blocker.needed,
-                  timestamp: new Date().toISOString(),
-                  revision: state.revision,
-                } satisfies LoopEvent)
-              } else {
-                // Free retry: grant un-charged continuation
-                runtime.forceFinishRequested = false
-                runtime.freeRetryPending = true
-              }
-              runtime.updatedAt = new Date().toISOString()
-              await writeState(dir, state)
+                revision: rejectionState.revision,
+              } satisfies LoopEvent)
             }
+
+            const rejectedGoal = rejectionState.goals.find((item) => item.id === goal.id)
+            const rejectedRuntime = rejectionState.runtimes.find((item) => item.goalID === goal.id)
+            rejectionCount = rejectedRuntime?.evaluatorRejectionCount ?? rejectionCount
+            const goalIsBlocked = rejectedGoal?.status === "blocked"
+            if (blocked && rejectedGoal?.blocker) {
+              await appendEvent(dir, {
+                version: 1,
+                eventID: randomUUID(),
+                goalID: goal.id,
+                type: "goal.blocked",
+                reason: rejectedGoal.blocker.reason,
+                needed: rejectedGoal.blocker.needed,
+                timestamp: new Date().toISOString(),
+                revision: rejectionState.revision,
+              } satisfies LoopEvent)
+              await goalService.accountUsage(dir, goal.id).catch(() => undefined)
+            }
+
             return {
-              title: "Completion rejected — keep working",
+              title: goalIsBlocked ? "Completion rejected — goal blocked" : "Completion rejected — keep working",
               output: JSON.stringify({
+                goalID: goal.id,
+                goalName: goal.name,
                 passed: false,
                 failedChecks: checkResults.failures,
-                message: "Evaluator rejected completion. Fix the issues above and try again.",
-                rejectionCount: runtime?.evaluatorRejectionCount || 0,
-                status: goal.status,
+                message: goalIsBlocked
+                  ? "Evaluator rejection limit reached. Goal blocked; owner retry required."
+                  : "Evaluator rejected completion. Fix the issues above and try again.",
+                rejectionCount,
+                status: rejectedGoal?.status ?? goal.status,
               }),
             }
           }

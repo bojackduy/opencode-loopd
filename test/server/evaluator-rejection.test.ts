@@ -116,8 +116,9 @@ describe("Evaluator Rejection Path", () => {
     const context = { sessionID: goal.workerSessionID }
 
     // Simulate 3 rejections
+    let finalResult
     for (let i = 0; i < 3; i++) {
-      await completeTool.execute(
+      finalResult = await completeTool.execute(
         { summary: "done", evidence: "evidence" },
         context,
       )
@@ -129,6 +130,42 @@ describe("Evaluator Rejection Path", () => {
     expect(runtime?.evaluatorRejectionCount).toBe(3)
     expect(state.goals[0].status).toBe("blocked")
     expect(state.goals[0].blocker?.reason).toContain("rejected")
+    expect(runtime?.phase).toBe("idle")
+    expect(runtime?.activeRunID).toBeUndefined()
+    expect(runtime?.leaseExpiresAt).toBeUndefined()
+    expect(runtime?.activePromptMessageID).toBeUndefined()
+    expect(runtime?.activeToolCallIDs).toEqual([])
+    expect(runtime?.freeRetryPending).toBe(false)
+
+    const output = JSON.parse(finalResult!.output)
+    expect(finalResult!.title).toBe("Completion rejected — goal blocked")
+    expect(output.goalID).toBe(goal.id)
+    expect(output.status).toBe("blocked")
+    expect(output.message).toContain("owner retry required")
+  })
+
+  it("starts a fresh rejection episode when the owner retries", async () => {
+    const { goal } = await goalService.start(dir, {
+      name: "test",
+      objective: "do something",
+      ownerSessionID: "owner-1",
+      config: { checks: ["false"] },
+    })
+    const completeTool = goalTools(dir, goalService, "owner-1").complete_goal
+    const context = { sessionID: goal.workerSessionID }
+
+    for (let i = 0; i < 3; i++) {
+      await completeTool.execute({ summary: "done", evidence: "evidence" }, context)
+    }
+    await goalService.retry(dir, goal.id)
+
+    const state = await readState(dir)
+    const runtime = state.runtimes.find((r) => r.goalID === goal.id)
+    expect(state.goals[0].status).toBe("active")
+    expect(runtime?.evaluatorRejectionCount).toBe(0)
+    expect(runtime?.lastRejectionDetails).toBeUndefined()
+    expect(runtime?.freeRetryPending).toBe(false)
+    expect(runtime?.recentVerificationAttempts).toHaveLength(3)
   })
 
   it("does not decrement budgetTurnCount on rejection", async () => {

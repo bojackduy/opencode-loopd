@@ -7,6 +7,7 @@ import { readState, appendGoalInbox, readEvents, peekGoalInbox } from "../infras
 import type { GoalID } from "../domain/goal"
 import type { LoopHost } from "./host-adapter"
 import type { GoalService } from "../application/goal-service"
+import { goalStatusLabel, phaseLabel, describeGoalState } from "../domain/status-labels"
 import { promises as fs } from "fs"
 import path from "path"
 
@@ -57,11 +58,17 @@ export function ownerTools(options: OwnerToolsOptions) {
 
         const summaries = goals.map((g) => {
           const runtime = state.runtimes.find((r) => r.goalID === g.id) as any
+          const phase = runtime?.phase ?? "unknown"
+          const goalLabel = goalStatusLabel(g.status)
+          const activityLabel = phaseLabel(phase)
           return {
             id: g.id,
             name: g.name,
             status: g.status,
-            phase: runtime?.phase ?? "unknown",
+            statusDisplay: `${goalLabel.short} — ${goalLabel.hint}`,
+            phase,
+            activityDisplay: `${activityLabel.short} — ${activityLabel.hint}`,
+            stateSummary: describeGoalState(g.status, runtime?.phase),
             turn: runtime?.runCount ?? 0,
             budgetTurnCount: runtime?.budgetTurnCount ?? 0,
             maxTurns: (g.config as any).maxTurns,
@@ -145,6 +152,9 @@ export function ownerTools(options: OwnerToolsOptions) {
             name: goal.name,
             objective: goal.objective,
             status: goal.status,
+            statusDisplay: `${goalStatusLabel(goal.status).short} — ${goalStatusLabel(goal.status).hint}`,
+            activityDisplay: runtime?.phase ? `${phaseLabel(runtime.phase).short} — ${phaseLabel(runtime.phase).hint}` : undefined,
+            stateSummary: describeGoalState(goal.status, runtime?.phase),
             ownerSessionID: goal.ownerSessionID,
             workerSessionID: goal.workerSessionID,
             config: {

@@ -84,6 +84,8 @@ export function commandHelp(): string {
   return [
     "Modes: : insert → send/commands | Ctrl+N → normal | ? toggle help | Shift+B bug report",
     "Nav: j/k move | g/G top/bottom | o open child | c toggle done | p/r/R/x pause/resume/retry/clear | A abort worker | N nudge | L logs | q close",
+    "Goal (ownership): Active=loopd owns it | Blocked/Paused=needs you | Out of budget=resume to spend | Waiting for capacity=auto-resumes | Done=verified",
+    "Worker (activity now): Running=acting now | Idle=between turns | Retrying=backing off | Queued/Compacting/Stopping=transitional",
     "Commands (insert mode, : prefix):",
     "  :send <message>                           Send bare words now as their own turn (no steering)",
     "  :open                                     Open child session (same as o)",

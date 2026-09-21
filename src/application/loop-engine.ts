@@ -837,6 +837,19 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     return true
   }
 
+  function hasExecutionLeak(runtime: GoalRuntimeState): boolean {
+    return runtime.phase !== "idle"
+      || Boolean(runtime.activeRunID)
+      || Boolean(runtime.leaseExpiresAt)
+      || Boolean(runtime.turnStartedAt)
+      || Boolean(runtime.activePromptMessageID)
+      || Boolean(runtime.activePromptObservedAt)
+      || Boolean(runtime.activeAssistantMessageID)
+      || Boolean(runtime.activeAssistantCompletedAt)
+      || Boolean(runtime.idleCandidateAt)
+      || (runtime.activeToolCallIDs?.length ?? 0) > 0
+  }
+
   async function maintenance() {
     syncWorkerSessionsFromService()
     // FAST PATH: skip entirely if no known worker sessions
@@ -849,10 +862,11 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       if (goal.status === "active") continue
       const rt = state.runtimes.find((r) => r.goalID === goal.id)
       if (!rt) continue
-      if (rt.phase === "idle" && (rt.activeRunID || rt.leaseExpiresAt || rt.activePromptMessageID)) {
+      if (hasExecutionLeak(rt)) {
         await mutateState(directory, `maintenance.clear-terminal-leak:${goal.id}`, async (s) => {
           const r = s.runtimes.find((x) => x.goalID === goal.id)
-          if (r && r.phase === "idle" && (r.activeRunID || r.leaseExpiresAt || r.activePromptMessageID)) {
+          const g = s.goals.find((item) => item.id === goal.id)
+          if (g?.status !== "active" && r && hasExecutionLeak(r)) {
             Object.assign(r, releaseLease(r))
             r.activeRunID = undefined
             r.unknownStatusCount = 0
