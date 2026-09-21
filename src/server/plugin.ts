@@ -2,13 +2,14 @@
 // The engine. Hooks, tools, control worker, goal tools, event handling.
 // Starts lazily: no timers, no polling, no disk reads until a goal exists.
 
-import type { Plugin, PluginModule } from "@opencode-ai/plugin"
-import { define } from "@opencode-ai/plugin/v2/promise"
+import type { Hooks, Plugin, PluginModule } from "@opencode-ai/plugin"
+import { tool as v1Tool, type ToolDefinition } from "@opencode-ai/plugin/tool"
+import type { Plugin as V2Plugin } from "@opencode/plugin"
 import { createControlWorker } from "../application/control-worker"
 import { createLoopEngine } from "../application/loop-engine"
 import { createGoalService } from "../application/goal-service"
 import { createScheduleWorker } from "../application/schedule-worker"
-import { createRealHost } from "./host-adapter"
+import { createRealHost, createV2Host, type LoopHost, type SessionStatusType } from "./host-adapter"
 import { goalTools } from "./goal-tools"
 import { ownerTools } from "./owner-tools"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
@@ -21,6 +22,10 @@ const PLUGIN_ID = "opencode-loopd.server"
 const server: Plugin = async ({ client, directory }, pluginOptions) => {
   const defaults = parsePluginDefaults(pluginOptions)
   const host = createRealHost(client, directory)
+  return createServerHooks(directory, host, defaults)
+}
+
+function createServerHooks(directory: string, host: LoopHost, defaults: GoalToolDefaults): Hooks {
   const goalService = createGoalService(host)
 
   const worker = createControlWorker({
@@ -179,21 +184,135 @@ function parsePluginDefaults(options: Record<string, unknown> | undefined): Goal
 }
 
 // ─── V2 (opencode v2 core) ───────────────────────────────────────────────────
-// Dual export: the v1 loader (`readV1Plugin`, kind=server) reads `.server` and
-// ignores the extra `setup` key; the v2 external loader
-// (`core/src/config/plugin/external.ts`, decodes default as { id, effect } |
-// { id, setup }) reads `.setup` and ignores the extra `server` key.
-// The engine is v1-driven (tools + session events + client.session.* have no
-// v2 PluginContext equivalent yet), so v2 setup is intentionally dormant: it
-// lets the package load cleanly on v2 instead of being silently skipped,
-// while the TUI dashboard (unchanged v1 TUI runtime) keeps rendering state.
-const v2 = define({
+
+const v2 = {
   id: PLUGIN_ID,
-  async setup() {},
-})
+  async setup(context: V2Plugin.Context) {
+    const directory = context.location.directory
+    const statuses = new Map<string, SessionStatusType>()
+    const host = createV2Host(context, statuses)
+    const hooks = createServerHooks(directory, host, parsePluginDefaults(context.options))
+    const registrations: Array<{ dispose(): Promise<void> }> = []
+    const eventController = new AbortController()
+    let eventTask = Promise.resolve()
+    let disposed = false
+
+    const cleanup = async () => {
+      if (disposed) return
+      disposed = true
+      eventController.abort()
+      await eventTask
+      try {
+        await Promise.allSettled(registrations.reverse().map((registration) => registration.dispose()))
+      } finally {
+        await hooks.dispose?.()
+      }
+    }
+
+    try {
+      registrations.push(await context.tool.transform((editor) => {
+        for (const [id, definition] of Object.entries(hooks.tool ?? {})) {
+          editor.add(toV2Tool(id, definition, directory))
+        }
+      }))
+      registrations.push(await context.tool.hook("execute.before", async (input) => {
+        await hooks["tool.execute.before"]?.({
+          tool: input.tool,
+          sessionID: input.sessionID,
+          callID: input.id,
+        }, { args: input.input })
+      }))
+      registrations.push(await context.tool.hook("execute.after", async (input) => {
+        const output = input.status === "completed" ? input.result : { content: JSON.stringify(input.error) }
+        await hooks["tool.execute.after"]?.({
+          tool: input.tool,
+          sessionID: input.sessionID,
+          callID: input.id,
+          args: input.input,
+        }, {
+          title: "",
+          output: typeof output.content === "string" ? output.content : JSON.stringify(output.content ?? ""),
+          metadata: output.metadata ?? {},
+        })
+      }))
+
+      eventTask = consumeV2Events(context, eventController.signal, statuses, hooks).catch(async (error) => {
+        if (!eventController.signal.aborted) {
+          await logServerEvent(directory, "events.failed", { detail: describeError(error) })
+        }
+      })
+      return cleanup
+    } catch (error) {
+      await cleanup()
+      throw error
+    }
+  },
+} satisfies V2Plugin.Plugin
+
+function toV2Tool(id: string, definition: ToolDefinition, directory: string) {
+  return {
+    name: id,
+    description: definition.description,
+    input: v1Tool.schema.object(definition.args),
+    async execute(input: unknown, context: { sessionID: string; agent: string; messageID: string; id: string }) {
+      const result = await definition.execute(input as never, {
+        sessionID: context.sessionID,
+        agent: context.agent,
+        messageID: context.messageID,
+        directory,
+        worktree: directory,
+        abort: new AbortController().signal,
+        metadata() {},
+        async ask() {},
+      })
+      if (typeof result === "string") return { content: result }
+      return {
+        content: result.output,
+        metadata: {
+          ...result.metadata,
+          ...(result.title ? { title: result.title } : {}),
+        },
+      }
+    },
+  }
+}
+
+async function consumeV2Events(
+  context: V2Plugin.Context,
+  signal: AbortSignal,
+  statuses: Map<string, SessionStatusType>,
+  hooks: Hooks,
+) {
+  for await (const event of context.event.subscribe({ signal })) {
+    const data = "data" in event && event.data && typeof event.data === "object" ? event.data as Record<string, any> : {}
+    const sessionID = typeof data.sessionID === "string" ? data.sessionID : undefined
+    if (sessionID) {
+      if (event.type === "session.status") statuses.set(sessionID, data.status?.type ?? "unknown")
+      else if (event.type === "session.idle") statuses.set(sessionID, "idle")
+      else if (event.type === "session.execution.started") statuses.set(sessionID, "busy")
+    }
+    await hooks.event?.({ event: normalizeV2Event(event) as any })
+  }
+}
+
+function normalizeV2Event(event: any) {
+  const properties = event?.data && typeof event.data === "object" ? event.data : {}
+  if (event?.type === "session.compaction.ended") return { type: "session.compacted", properties }
+  if (event?.type === "session.execution.failed") return { type: "session.error", properties }
+  if (event?.type === "session.message.content.updated") {
+    return {
+      type: "message.part.updated",
+      properties: {
+        sessionID: properties.sessionID,
+        part: { messageID: properties.messageID },
+      },
+    }
+  }
+  return { type: event?.type, properties }
+}
 
 export default {
   id: PLUGIN_ID,
   server,
   setup: v2.setup,
-} satisfies PluginModule & { id: string; setup: typeof v2.setup }
+} satisfies PluginModule & V2Plugin.Plugin

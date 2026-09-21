@@ -86,3 +86,74 @@ describe("Server Plugin Startup", () => {
     await hooks.dispose?.()
   })
 })
+
+describe("Server Plugin V2", () => {
+  it("registers every tool and lifecycle hook and disposes them on cleanup", async () => {
+    const toolIDs: string[] = []
+    const hookNames: string[] = []
+    const disposed: string[] = []
+    let eventSubscriptionAborted = false
+
+    const registration = (name: string) => ({
+      async dispose() {
+        disposed.push(name)
+      },
+    })
+    const context = {
+      location: { directory: os.tmpdir() },
+      options: {},
+      tool: {
+        async transform(callback: (editor: { add(tool: { name: string }): void }) => void) {
+          callback({ add: (tool) => toolIDs.push(tool.name) })
+          return registration("transform")
+        },
+        async hook(name: string) {
+          hookNames.push(name)
+          return registration(name)
+        },
+      },
+      event: {
+        subscribe({ signal }: { signal: AbortSignal }) {
+          return {
+            async *[Symbol.asyncIterator]() {
+              await new Promise<void>((resolve) => {
+                signal.addEventListener("abort", () => {
+                  eventSubscriptionAborted = true
+                  resolve()
+                }, { once: true })
+              })
+            },
+          }
+        },
+      },
+      session: {},
+    }
+
+    const cleanup = await plugin.setup(context as any)
+
+    expect(toolIDs).toEqual([
+      "loopd_create_goal",
+      "get_goal",
+      "report_goal_progress",
+      "complete_goal",
+      "block_goal",
+      "list_background_goals",
+      "inspect_background_goal",
+      "read_goal_transcript",
+      "send_goal_input",
+      "pause_goal",
+      "resume_goal",
+      "nudge_goal",
+      "abort_goal_worker",
+      "force_complete_goal",
+      "force_block_goal",
+      "clear_goal",
+    ])
+    expect(hookNames).toEqual(["execute.before", "execute.after"])
+
+    await cleanup?.()
+
+    expect(eventSubscriptionAborted).toBe(true)
+    expect(disposed).toEqual(["execute.after", "execute.before", "transform"])
+  })
+})

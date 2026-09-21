@@ -2373,9 +2373,171 @@ var tui = async (api) => {
   });
   api.lifecycle.onDispose(() => {});
 };
+function adaptThemeV2(theme) {
+  const t = theme ?? {};
+  const text = t.text ?? {};
+  const fb = text.feedback ?? {};
+  const bg = t.background ?? {};
+  const surface = bg.surface ?? {};
+  const diff = t.diff ?? {};
+  const diffText = diff.text ?? {};
+  const diffBg = diff.background ?? {};
+  const diffHi = diff.highlight ?? {};
+  const diffLn = diff.lineNumber ?? {};
+  const syntax = t.syntax ?? {};
+  const md = t.markdown ?? {};
+  const dv = (v, fallback) => typeof v === "string" ? v : fallback;
+  const base = dv(text.default, "#ffffff");
+  const muted = dv(text.subdued, "#888888");
+  return {
+    text: base,
+    textMuted: muted,
+    primary: base,
+    accent: base,
+    success: dv(fb.success?.default, "#22c55e"),
+    warning: dv(fb.warning?.default, "#eab308"),
+    error: dv(fb.error?.default, "#ef4444"),
+    info: dv(fb.info?.default, base),
+    background: dv(bg.default, "#000000"),
+    backgroundPanel: dv(surface.overlay, dv(bg.default, "#000000")),
+    backgroundElement: dv(surface.offset, dv(bg.default, "#000000")),
+    diffAdded: dv(diffText.added, base),
+    diffRemoved: dv(diffText.removed, base),
+    diffContext: dv(diffText.context, muted),
+    diffAddedBg: dv(diffBg.added, dv(bg.default, "#000000")),
+    diffRemovedBg: dv(diffBg.removed, dv(bg.default, "#000000")),
+    diffContextBg: dv(diffBg.context, dv(bg.default, "#000000")),
+    diffHighlightAdded: dv(diffHi.added, base),
+    diffHighlightRemoved: dv(diffHi.removed, base),
+    diffLineNumber: dv(diffLn.text, muted),
+    diffAddedLineNumberBg: dv(diffLn.background?.added, dv(bg.default, "#000000")),
+    diffRemovedLineNumberBg: dv(diffLn.background?.removed, dv(bg.default, "#000000")),
+    syntaxComment: dv(syntax.comment, muted),
+    syntaxKeyword: dv(syntax.keyword, base),
+    syntaxFunction: dv(syntax.function, base),
+    syntaxVariable: dv(syntax.variable, base),
+    syntaxString: dv(syntax.string, base),
+    syntaxNumber: dv(syntax.number, base),
+    syntaxType: dv(syntax.type, base),
+    syntaxOperator: dv(syntax.operator, base),
+    syntaxPunctuation: dv(syntax.punctuation, muted),
+    markdownText: dv(md.text, base),
+    markdownHeading: dv(md.heading, base),
+    markdownLink: dv(md.link, base),
+    markdownLinkText: dv(md.linkText, base),
+    markdownCode: dv(md.code, base),
+    markdownBlockQuote: dv(md.blockQuote, muted),
+    markdownEmph: dv(md.emphasis, base),
+    markdownStrong: dv(md.strong, base),
+    markdownListItem: dv(md.listItem, base)
+  };
+}
+var v2setup = (ctx) => {
+  const directory = ctx.location?.directory ?? ctx.data.location.default().directory;
+  let dialogOpen = false;
+  const closeDialog = () => {
+    dialogOpen = false;
+    ctx.ui.dialog.clear();
+  };
+  const facade = {
+    theme: {
+      get current() {
+        return adaptThemeV2(ctx.theme);
+      }
+    },
+    mode: {
+      push: (name) => ctx.keymap.mode.push(name)
+    },
+    renderer: ctx.renderer,
+    client: ctx.client,
+    event: {
+      on: (name, callback) => {
+        if (name === "session.idle")
+          return ctx.data.on("session.idle", callback);
+        if (name === "session.status") {
+          const unsubs = [ctx.data.on("session.execution.started", callback), ctx.data.on("session.execution.succeeded", callback)];
+          return () => void unsubs.forEach((un) => un());
+        }
+        if (name === "session.error")
+          return ctx.data.on("session.execution.failed", callback);
+        if (name === "session.compacted")
+          return ctx.data.on("session.compaction.ended", callback);
+        return ctx.data.on(name, callback);
+      }
+    },
+    ui: {
+      dialog: {
+        clear: closeDialog,
+        get open() {
+          return dialogOpen;
+        },
+        replace: (render) => {
+          dialogOpen = true;
+          ctx.ui.dialog.show(render);
+        },
+        setSize: (_size) => ctx.ui.dialog.set({
+          size: "xlarge"
+        })
+      }
+    },
+    route: {
+      navigate: (name, params) => {
+        if (name === "session")
+          ctx.ui.router.navigate({
+            type: "session",
+            sessionID: params?.sessionID
+          });
+      }
+    }
+  };
+  const open = () => {
+    const previousFocus = ctx.renderer.currentFocusedRenderable;
+    dialogOpen = true;
+    ctx.ui.dialog.show(() => _$createComponent2(LoopDashboard, {
+      api: facade,
+      directory
+    }), () => {
+      dialogOpen = false;
+    });
+    ctx.ui.dialog.set({
+      size: "xlarge"
+    });
+    previousFocus?.blur();
+  };
+  const command = "opencode.loopd.dashboard";
+  let layerRegistered = false;
+  const unclaimSlot = ctx.ui.slot({
+    append: "app",
+    render: () => {
+      if (!layerRegistered) {
+        layerRegistered = true;
+        ctx.keymap.layer(() => ({
+          commands: [{
+            id: command,
+            title: "Loop Dashboard",
+            group: "Loop",
+            palette: true,
+            slash: {
+              name: "loop"
+            },
+            bind: "<leader>o",
+            run: open
+          }],
+          bindings: [command]
+        }));
+      }
+      return null;
+    }
+  });
+  return () => {
+    closeDialog();
+    unclaimSlot();
+  };
+};
 var plugin_default = {
   id: PLUGIN_ID,
-  tui
+  tui,
+  setup: v2setup
 };
 export {
   plugin_default as default

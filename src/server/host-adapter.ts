@@ -3,6 +3,7 @@
 // Production uses the real client; tests use a fake.
 
 import { describeError, logServerEvent } from "../infrastructure/server-log"
+import type { Plugin as V2Plugin } from "@opencode/plugin"
 
 export interface ModelRef {
   providerID: string
@@ -298,6 +299,134 @@ export function createRealHost(client: any, directory: string): LoopHost {
         } else {
           await logServerEvent(directory, "parent.notified", { ownerSessionID, preview: message.slice(0, 160) })
         }
+      } catch (error) {
+        await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(error) })
+      }
+    },
+  }
+}
+
+// ─── V2 Host ────────────────────────────────────────────────────────────────
+
+export function createV2Host(
+  context: V2Plugin.Context,
+  statuses: Map<string, SessionStatusType>,
+): LoopHost {
+  const directory = context.location.directory
+
+  return {
+    async createWorker({ parentID, title, agent, model }) {
+      const session = await context.session.create({
+        title,
+        agent,
+        model: model ? { id: model.modelID, providerID: model.providerID } : undefined,
+        location: { directory },
+        metadata: { "loopd.parentID": parentID },
+      })
+      statuses.set(session.id, "idle")
+      await logServerEvent(directory, "worker.created", { parentID, workerSessionID: session.id, title })
+      return session.id
+    },
+
+    async promptWorker({ sessionID, prompt, messageID, model, agent }) {
+      if (agent) await context.session.switchAgent({ sessionID, agent })
+      if (model) {
+        await context.session.switchModel({
+          sessionID,
+          model: { id: model.modelID, providerID: model.providerID },
+        })
+      }
+      const result = await context.session.prompt({
+        sessionID,
+        id: messageID,
+        text: prompt,
+      })
+      statuses.set(sessionID, "busy")
+      await logServerEvent(directory, "worker.prompted", { sessionID })
+      return { messageID: result.id }
+    },
+
+    async readSession(sessionID) {
+      try {
+        const session = await context.session.get({ sessionID })
+        const model = session.model
+          ? { providerID: session.model.providerID, modelID: session.model.id }
+          : undefined
+        if (!session.agent && !model) return undefined
+        return { agent: session.agent, model }
+      } catch {
+        return undefined
+      }
+    },
+
+    async sessionStatus(sessionID) {
+      return statuses.get(sessionID) ?? "unknown"
+    },
+
+    async abortSession(sessionID) {
+      try {
+        await context.session.interrupt({ sessionID })
+        statuses.set(sessionID, "idle")
+      } catch {
+        // Best-effort abort
+      }
+    },
+
+    async readMessages(sessionID, limit = 10) {
+      try {
+        const messages = await context.session.context({ sessionID })
+        let parentMessageID: string | undefined
+        return messages.flatMap((message): SessionMessage[] => {
+          if (message.type === "user") {
+            parentMessageID = message.id
+            return [{
+              role: "user",
+              content: message.text,
+              timestamp: new Date(message.time.created).toISOString(),
+              messageID: message.id,
+            }]
+          }
+          if (message.type !== "assistant") return []
+          const created = message.time.created
+          const completed = message.time.completed
+          return [{
+            role: "assistant",
+            content: message.content
+              .filter((part) => part.type === "text")
+              .map((part) => part.text)
+              .join("\n"),
+            timestamp: new Date(completed ?? created).toISOString(),
+            messageID: message.id,
+            parentMessageID,
+            completedAt: completed ? new Date(completed).toISOString() : undefined,
+            tokens: message.tokens ? {
+              input: message.tokens.input,
+              output: message.tokens.output,
+              reasoning: message.tokens.reasoning,
+              cacheRead: message.tokens.cache.read,
+              cacheWrite: message.tokens.cache.write,
+            } : undefined,
+            cost: message.cost,
+            durationMs: completed && completed >= created ? completed - created : undefined,
+          }]
+        }).slice(-limit)
+      } catch {
+        return []
+      }
+    },
+
+    async compactSession(sessionID) {
+      try {
+        await context.session.command({ sessionID, name: "compact", text: "" })
+      } catch {
+        // Best-effort compaction
+      }
+    },
+
+    async notifyOwner(ownerSessionID, message) {
+      try {
+        await context.session.prompt({ sessionID: ownerSessionID, text: message })
+        await logServerEvent(directory, "parent.notified", { ownerSessionID, preview: message.slice(0, 160) })
       } catch (error) {
         await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(error) })
       }

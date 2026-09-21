@@ -487,7 +487,7 @@ var CURRENT_VERSION = 6, LOCK_STALE_MS = 1e4;
 var init_state_repository = () => {};
 
 // src/server/plugin.ts
-import { define } from "@opencode-ai/plugin/v2/promise";
+import { tool as v1Tool } from "@opencode-ai/plugin/tool";
 
 // src/application/control-worker.ts
 init_state_repository();
@@ -2097,6 +2097,115 @@ function createRealHost(client, directory) {
         } else {
           await logServerEvent(directory, "parent.notified", { ownerSessionID, preview: message.slice(0, 160) });
         }
+      } catch (error) {
+        await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(error) });
+      }
+    }
+  };
+}
+function createV2Host(context, statuses) {
+  const directory = context.location.directory;
+  return {
+    async createWorker({ parentID, title, agent, model }) {
+      const session = await context.session.create({
+        title,
+        agent,
+        model: model ? { id: model.modelID, providerID: model.providerID } : undefined,
+        location: { directory },
+        metadata: { "loopd.parentID": parentID }
+      });
+      statuses.set(session.id, "idle");
+      await logServerEvent(directory, "worker.created", { parentID, workerSessionID: session.id, title });
+      return session.id;
+    },
+    async promptWorker({ sessionID, prompt, messageID, model, agent }) {
+      if (agent)
+        await context.session.switchAgent({ sessionID, agent });
+      if (model) {
+        await context.session.switchModel({
+          sessionID,
+          model: { id: model.modelID, providerID: model.providerID }
+        });
+      }
+      const result = await context.session.prompt({
+        sessionID,
+        id: messageID,
+        text: prompt
+      });
+      statuses.set(sessionID, "busy");
+      await logServerEvent(directory, "worker.prompted", { sessionID });
+      return { messageID: result.id };
+    },
+    async readSession(sessionID) {
+      try {
+        const session = await context.session.get({ sessionID });
+        const model = session.model ? { providerID: session.model.providerID, modelID: session.model.id } : undefined;
+        if (!session.agent && !model)
+          return;
+        return { agent: session.agent, model };
+      } catch {
+        return;
+      }
+    },
+    async sessionStatus(sessionID) {
+      return statuses.get(sessionID) ?? "unknown";
+    },
+    async abortSession(sessionID) {
+      try {
+        await context.session.interrupt({ sessionID });
+        statuses.set(sessionID, "idle");
+      } catch {}
+    },
+    async readMessages(sessionID, limit = 10) {
+      try {
+        const messages = await context.session.context({ sessionID });
+        let parentMessageID;
+        return messages.flatMap((message) => {
+          if (message.type === "user") {
+            parentMessageID = message.id;
+            return [{
+              role: "user",
+              content: message.text,
+              timestamp: new Date(message.time.created).toISOString(),
+              messageID: message.id
+            }];
+          }
+          if (message.type !== "assistant")
+            return [];
+          const created = message.time.created;
+          const completed = message.time.completed;
+          return [{
+            role: "assistant",
+            content: message.content.filter((part) => part.type === "text").map((part) => part.text).join(`
+`),
+            timestamp: new Date(completed ?? created).toISOString(),
+            messageID: message.id,
+            parentMessageID,
+            completedAt: completed ? new Date(completed).toISOString() : undefined,
+            tokens: message.tokens ? {
+              input: message.tokens.input,
+              output: message.tokens.output,
+              reasoning: message.tokens.reasoning,
+              cacheRead: message.tokens.cache.read,
+              cacheWrite: message.tokens.cache.write
+            } : undefined,
+            cost: message.cost,
+            durationMs: completed && completed >= created ? completed - created : undefined
+          }];
+        }).slice(-limit);
+      } catch {
+        return [];
+      }
+    },
+    async compactSession(sessionID) {
+      try {
+        await context.session.command({ sessionID, name: "compact", text: "" });
+      } catch {}
+    },
+    async notifyOwner(ownerSessionID, message) {
+      try {
+        await context.session.prompt({ sessionID: ownerSessionID, text: message });
+        await logServerEvent(directory, "parent.notified", { ownerSessionID, preview: message.slice(0, 160) });
       } catch (error) {
         await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(error) });
       }
@@ -4337,6 +4446,9 @@ var PLUGIN_ID = "opencode-loopd.server";
 var server = async ({ client, directory }, pluginOptions) => {
   const defaults = parsePluginDefaults(pluginOptions);
   const host = createRealHost(client, directory);
+  return createServerHooks(directory, host, defaults);
+};
+function createServerHooks(directory, host, defaults) {
   const goalService = createGoalService(host);
   const worker = createControlWorker({
     directory,
@@ -4465,7 +4577,7 @@ var server = async ({ client, directory }, pluginOptions) => {
       scheduleWorker.stop();
     }
   };
-};
+}
 function parsePluginDefaults(options) {
   const agent = typeof options?.defaultAgent === "string" ? options.defaultAgent.trim() : "";
   const model = typeof options?.defaultModel === "string" ? options.defaultModel.trim() : "";
@@ -4476,10 +4588,127 @@ function parsePluginDefaults(options) {
     defaultChecks: checks.length > 0 ? checks : undefined
   };
 }
-var v2 = define({
+var v2 = {
   id: PLUGIN_ID,
-  async setup() {}
-});
+  async setup(context) {
+    const directory = context.location.directory;
+    const statuses = new Map;
+    const host = createV2Host(context, statuses);
+    const hooks = createServerHooks(directory, host, parsePluginDefaults(context.options));
+    const registrations = [];
+    const eventController = new AbortController;
+    let eventTask = Promise.resolve();
+    let disposed = false;
+    const cleanup = async () => {
+      if (disposed)
+        return;
+      disposed = true;
+      eventController.abort();
+      await eventTask;
+      try {
+        await Promise.allSettled(registrations.reverse().map((registration) => registration.dispose()));
+      } finally {
+        await hooks.dispose?.();
+      }
+    };
+    try {
+      registrations.push(await context.tool.transform((editor) => {
+        for (const [id, definition] of Object.entries(hooks.tool ?? {})) {
+          editor.add(toV2Tool(id, definition, directory));
+        }
+      }));
+      registrations.push(await context.tool.hook("execute.before", async (input) => {
+        await hooks["tool.execute.before"]?.({
+          tool: input.tool,
+          sessionID: input.sessionID,
+          callID: input.id
+        }, { args: input.input });
+      }));
+      registrations.push(await context.tool.hook("execute.after", async (input) => {
+        const output = input.status === "completed" ? input.result : { content: JSON.stringify(input.error) };
+        await hooks["tool.execute.after"]?.({
+          tool: input.tool,
+          sessionID: input.sessionID,
+          callID: input.id,
+          args: input.input
+        }, {
+          title: "",
+          output: typeof output.content === "string" ? output.content : JSON.stringify(output.content ?? ""),
+          metadata: output.metadata ?? {}
+        });
+      }));
+      eventTask = consumeV2Events(context, eventController.signal, statuses, hooks).catch(async (error) => {
+        if (!eventController.signal.aborted) {
+          await logServerEvent(directory, "events.failed", { detail: describeError(error) });
+        }
+      });
+      return cleanup;
+    } catch (error) {
+      await cleanup();
+      throw error;
+    }
+  }
+};
+function toV2Tool(id, definition, directory) {
+  return {
+    name: id,
+    description: definition.description,
+    input: v1Tool.schema.object(definition.args),
+    async execute(input, context) {
+      const result = await definition.execute(input, {
+        sessionID: context.sessionID,
+        agent: context.agent,
+        messageID: context.messageID,
+        directory,
+        worktree: directory,
+        abort: new AbortController().signal,
+        metadata() {},
+        async ask() {}
+      });
+      if (typeof result === "string")
+        return { content: result };
+      return {
+        content: result.output,
+        metadata: {
+          ...result.metadata,
+          ...result.title ? { title: result.title } : {}
+        }
+      };
+    }
+  };
+}
+async function consumeV2Events(context, signal, statuses, hooks) {
+  for await (const event of context.event.subscribe({ signal })) {
+    const data = "data" in event && event.data && typeof event.data === "object" ? event.data : {};
+    const sessionID = typeof data.sessionID === "string" ? data.sessionID : undefined;
+    if (sessionID) {
+      if (event.type === "session.status")
+        statuses.set(sessionID, data.status?.type ?? "unknown");
+      else if (event.type === "session.idle")
+        statuses.set(sessionID, "idle");
+      else if (event.type === "session.execution.started")
+        statuses.set(sessionID, "busy");
+    }
+    await hooks.event?.({ event: normalizeV2Event(event) });
+  }
+}
+function normalizeV2Event(event) {
+  const properties = event?.data && typeof event.data === "object" ? event.data : {};
+  if (event?.type === "session.compaction.ended")
+    return { type: "session.compacted", properties };
+  if (event?.type === "session.execution.failed")
+    return { type: "session.error", properties };
+  if (event?.type === "session.message.content.updated") {
+    return {
+      type: "message.part.updated",
+      properties: {
+        sessionID: properties.sessionID,
+        part: { messageID: properties.messageID }
+      }
+    };
+  }
+  return { type: event?.type, properties };
+}
 var plugin_default = {
   id: PLUGIN_ID,
   server,
