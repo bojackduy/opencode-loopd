@@ -97,6 +97,25 @@ separate questions per API: (a) does it exist, (b) is it reachable from the
   remains: `terminalEmulation: false` (real PTY bytes — cursor addressing and
   alt-screen pass through untouched — but still a byte stream, not a screen;
   the emulator is Milestone 6).
+
+## Milestone 6: view-side terminal emulation (2026-09-22)
+
+- Decision: emulate in the TUI as a VIEW over the unchanged byte stream
+  (`src/tui/terminal-screen.ts` wrapping `@xterm/headless` 6.0.0), NOT in the
+  host. Verified first by reading the installed
+  `typings/xterm-headless.d.ts` (write bytes, `buffer.active` cursor readout,
+  `normal`/`alternate` buffers, per-cell `getChars`/`getFgColor`/`getBgColor`/
+  `isBold`/`isUnderline`/`isInverse`, all behind `allowProposedApi`) plus a
+  throwaway `bun` probe (raw SGR colors, cursor readout, `?1049h/l`
+  switching, CUP positioning, bold/underline/inverse flags — all confirmed;
+  probe not committed).
+- Host `terminalEmulation` stays `false` ON PURPOSE: the capability describes
+  what the host captures (a byte stream), and view-side emulation must not
+  masquerade as host-side support. The panel learns PTY-vs-pipe per command
+  from the existing `cmd_resize` result (`ok` ⇒ PTY ⇒ emulated screen,
+  `unsupported` ⇒ pipe ⇒ raw text) — no protocol/broker/transport/service
+  changes. Emulator state after log truncation is best-effort (documented on
+  the module); the raw log is the durable record.
 - Host-owned swap follow-up (needs live-host proof before claiming):
   1. v1 server: replace spawn/status/remove with `client.pty.*` once a
      plugin-process WS `connect` round-trip (write + output frames) is

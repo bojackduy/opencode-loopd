@@ -89,6 +89,7 @@
     "typescript": "^5.7.0"
   },
   "dependencies": {
+    "@xterm/headless": "^6.0.0",
     "bun-pty": "^0.4.10"
   }
 }

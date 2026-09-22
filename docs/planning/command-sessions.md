@@ -19,7 +19,10 @@ installed host APIs can and cannot do, with file/type evidence.
   move, `:` types (`:new <cmd> [args]`, `:terminate`, `:remove`,
   `:interrupt`, `:resize <cols> <rows>`, `:open-cmd` refresh), Enter in
   insert mode sends raw stdin (newline appended), `ctrl-c` interrupts,
-  `q` detaches. The overlay labels output as a byte stream, never a terminal.
+  `q` detaches. Commands confirmed on the PTY backend render an emulated
+  terminal screen (headless `@xterm/headless` view over the byte stream —
+  cursor addressing, SGR colors, alt-screen, scroll regions); pipe-backend
+  sessions keep the raw-text view. The panel header says which view is shown.
 - Every response carries the host capability flags of the ACTIVE backend
   (`resize: true` on the PTY backend, `false` on the pipe fallback;
   `terminalEmulation: false` always), so callers never have to
@@ -60,8 +63,20 @@ agent actions. Missing session ownership fails closed.
 - Real PTY bytes (`bun-pty`, TERM=xterm-256color, default 80x24): cursor
   addressing and alt-screen sequences pass through output untouched, `stty
   size` reflects spawn/resize winsize, Ctrl+C is line-discipline SIGINT
-  (trappable/ignorable). Still no screen emulation: output stays a byte
-  stream, never a terminal grid (Milestone 6).
+  (trappable/ignorable). The panel renders a VIEW-SIDE emulation of those
+  bytes (`src/tui/terminal-screen.ts`, `@xterm/headless`): cursor movement,
+  SGR colors/attrs, erase, scroll regions, wrap, alt-screen enter/exit, and
+  resize reflow. Best-effort after log truncation — bytes before the retained
+  window are gone, so the grid can diverge from a live terminal; the raw log
+  is the durable record. Host `terminalEmulation` stays `false` deliberately:
+  the host captures a byte stream, the TUI emulates a screen from it.
+- Panel/backend handshake (no new channel): the panel learns PTY-vs-pipe per
+  command from the existing `cmd_resize` result (`ok` = PTY winsize applied,
+  `unsupported` = pipe fallback) and auto-pushes its dimensions on selection
+  (trailing-debounced 500ms) so the child observes the real winsize. Snapshot
+  and resync reset + re-feed the emulator; deltas append incrementally with
+  offset tracking; repaints coalesce (≥120ms trailing throttle + the existing
+  2s refresh cadence) so a chatty `yes` cannot storm renderer state.
 - v2 server plugins cannot drive host-owned PTYs at all (context exposes
   `terminal.read` only); both TUI clients could attach natively later via
   `pty.connectToken` + `connect` — recorded as follow-up, not implemented.

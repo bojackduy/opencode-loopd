@@ -1,10 +1,12 @@
 // ─── TUI: Command Sessions Panel ─────────────────────────────────────────────
 // Native host-owned overlay (xlarge dialog) for standalone command sessions.
-// Honest bounded slice: output is a replayed byte stream (plain text), NOT
-// full terminal emulation — labeled as such in the UI. Live updates via the
-// command stream socket when available (2s polling stays as the fallback);
-// keyboard input writes raw stdin; closing detaches, never
-// terminates. Resize is stored-only (pipe host has no tty winsize).
+// Output is a replayed byte stream; commands confirmed on the PTY backend
+// render through a headless screen emulator (terminal-screen.ts, view only —
+// the raw log stays the durable record), pipe-backend sessions keep the raw
+// text view. Live updates via the command stream socket when available (2s
+// polling stays as the fallback); keyboard input writes raw stdin; closing
+// detaches, never terminates. Resize applies live on PTY (debounced),
+// stored-only on pipes.
 //
 // TUI key/action vocabulary (mirrors interaction-registry tuiKeys):
 // "commands" (open), "new", "open-cmd" (refresh), "write"/"input" (insert
@@ -29,6 +31,13 @@ import {
   type CommandPanelState,
 } from "./command-controller"
 import { createCommandStreamClient } from "./command-stream-client"
+import {
+  createCommandScreenFeed,
+  createTerminalScreen,
+  type CommandScreenFeed,
+  type ScreenCell,
+  type TerminalScreen,
+} from "./terminal-screen"
 import { isEnterKey, isEscapeKey } from "./dashboard"
 
 interface Props {
@@ -49,6 +58,63 @@ function routeOwnerSessionID(api: TuiPluginApi): string | undefined {  try {
     if (current?.name === "session" && current.params?.sessionID) return current.params.sessionID
   } catch {}
   return undefined
+}
+
+// ─── Emulated screen rows (PTY view) ─────────────────────────────────────────
+// One display row: runs coalesce consecutive same-style cells so a row renders
+// as a handful of spans, not one span per column. Inverse is already resolved
+// into fg/bg by terminal-screen; only fg/bg/bold/underline reach the renderer.
+interface ScreenRun {
+  text: string
+  fg?: string
+  bg?: string
+  bold?: boolean
+  underline?: boolean
+}
+
+interface ScreenRow {
+  runs: ScreenRun[]
+}
+
+function sameStyle(a: ScreenCell, b: ScreenCell): boolean {
+  return a.fg === b.fg && a.bg === b.bg && a.bold === b.bold && a.underline === b.underline
+}
+
+function buildScreenRows(cells: ScreenCell[], cols: number): ScreenRow[] {
+  const rows: ScreenRow[] = []
+  const rowCount = Math.floor(cells.length / cols)
+  for (let y = 0; y < rowCount; y++) {
+    const runs: ScreenRun[] = []
+    let current: ScreenRun | undefined
+    for (let x = 0; x < cols; x++) {
+      const cell = cells[y * cols + x]
+      if (!cell) continue
+      const prev = x > 0 ? cells[y * cols + x - 1] : undefined
+      if (current && prev && sameStyle(cell, prev)) {
+        current.text += cell.text
+      } else {
+        current = { text: cell.text }
+        if (cell.fg !== undefined) current.fg = cell.fg
+        if (cell.bg !== undefined) current.bg = cell.bg
+        if (cell.bold) current.bold = true
+        if (cell.underline) current.underline = true
+        runs.push(current)
+      }
+    }
+    // Trailing blank cells carry no information — drop them so rows render
+    // tight; a fully blank row keeps one space to preserve the line.
+    while (runs.length > 1 && runs[runs.length - 1] && /^ *$/.test((runs[runs.length - 1] as ScreenRun).text)) runs.pop()
+    const first = runs[0]
+    if (runs.length === 1 && first && /^ *$/.test(first.text)) first.text = " "
+    rows.push({ runs })
+  }
+  // Trailing blank rows carry no information either.
+  while (rows.length > 1) {
+    const last = rows[rows.length - 1]
+    if (!last || !last.runs.every((r) => /^ *$/.test(r.text))) break
+    rows.pop()
+  }
+  return rows
 }
 
 export function CommandPanel(props: Props) {
@@ -73,6 +139,145 @@ export function CommandPanel(props: Props) {
   let streamConnected = false
   let lastSlowListRefresh = 0
   const SLOW_LIST_REFRESH_MS = 30_000
+
+  // ─── Terminal emulation view (PTY backend only) ──────────────────────────
+  // One headless emulator for the selected command, fed from the same
+  // snapshot/delta bytes as the raw view (never a second byte source).
+  // PTY-vs-pipe is learned per command from the existing cmd_resize result
+  // (ok = PTY winsize applied, unsupported = pipe fallback): the panel owns
+  // no new capability channel, and protocol/broker/transport/service are
+  // untouched. Until a command is confirmed PTY, it keeps today's raw view.
+  const [screenRows, setScreenRows] = createSignal<ScreenRow[]>([])
+  const [emulated, setEmulated] = createSignal(false)
+  let screen: TerminalScreen | undefined
+  let feed: CommandScreenFeed | undefined
+  let feedForID: string | undefined
+  const ptyKnown = new Map<string, boolean>()
+  let screenDirty = false
+  let screenFlushTimer: ReturnType<typeof setTimeout> | undefined
+  let lastScreenFlushAt = 0
+  const SCREEN_FLUSH_MIN_MS = 120
+  let lastResizeAppliedAt = 0
+  const RESIZE_DEBOUNCE_MS = 500
+  let autoResizeTimer: ReturnType<typeof setTimeout> | undefined
+  let pendingAutoResize: { cols: number; rows: number } | undefined
+
+  function emuSizeFor(cmd: CommandSession): { cols: number; rows: number } {
+    return { cols: cmd.cols ?? 80, rows: cmd.rows ?? 24 }
+  }
+
+  function ensureEmulatorFor(cmd: CommandSession): void {
+    if (!screen || !feed) {
+      const size = emuSizeFor(cmd)
+      screen = createTerminalScreen(size.cols, size.rows)
+      feed = createCommandScreenFeed(screen)
+      feedForID = undefined
+    }
+    if (feedForID === cmd.id) return
+    const size = emuSizeFor(cmd)
+    screen.resize(size.cols, size.rows)
+    feed.reset()
+    feedForID = cmd.id
+    setScreenRows([])
+    screenDirty = false
+    setEmulated(ptyKnown.get(cmd.id) === true)
+  }
+
+  function flushScreenRows(): void {
+    lastScreenFlushAt = Date.now()
+    if (!screenDirty) return
+    screenDirty = false
+    if (!screen || !feedForID) return
+    const sel = state().selectedCommand
+    if (!sel || sel.id !== feedForID) return
+    if (ptyKnown.get(sel.id) !== true) return // raw view owns the paint
+    try {
+      setScreenRows(buildScreenRows(screen.readScreen(), screen.cols))
+    } catch {
+      // Best-effort view: a failed paint never breaks the panel.
+    }
+  }
+
+  function markScreenDirty(): void {
+    screenDirty = true
+    if (screenFlushTimer) return // one trailing paint at a time — no per-chunk storms
+    const wait = Math.max(0, SCREEN_FLUSH_MIN_MS - (Date.now() - lastScreenFlushAt))
+    screenFlushTimer = setTimeout(() => {
+      screenFlushTimer = undefined
+      flushScreenRows()
+    }, wait)
+  }
+
+  function feedSnapshotFor(id: string, data: string, startOffset: number, endOffset: number): void {
+    if (!feed || feedForID !== id) return
+    feed.applySnapshot(data, startOffset, endOffset)
+    markScreenDirty()
+  }
+
+  function feedDeltaFor(id: string, data: string, startOffset: number, endOffset: number): void {
+    if (!feed || feedForID !== id) return
+    if (feed.applyDelta(data, startOffset, endOffset)) markScreenDirty()
+  }
+
+  /** Existing resize flow + backend learning: ok ⇒ PTY, unsupported ⇒ pipe. */
+  async function doResizeAndLearn(cols: number, rows: number): Promise<void> {
+    const id = selectedID()
+    if (!id || !ownerSessionID) return
+    lastResizeAppliedAt = Date.now()
+    try {
+      screen?.resize(cols, rows)
+      const r = await client.executeRaw({
+        command: "cmd_resize",
+        goalID: id,
+        args: { commandID: id, cols, rows, ownerSessionID },
+      })
+      ptyKnown.set(id, r.ok)
+      if (selectedID() === id) {
+        setEmulated(r.ok)
+        if (r.ok) markScreenDirty() // same-size winsize can reflow the grid
+        else setStatusText(r.message)
+      }
+      if (r.ok) await refresh()
+    } catch (e) {
+      setStatusText(`Error: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  /**
+   * Push the panel's layout dimensions to the child so a PTY observes the real
+   * winsize. Auto path (selection change): trailing — collapses bursts into
+   * one send at the end of the debounce window, and doubles as the PTY probe
+   * for commands whose backend is still unknown.
+   */
+  function scheduleAutoResize(cmd: CommandSession): void {
+    // Probe + winsize sync for commands whose backend is still unknown: push
+    // the panel's current dimensions (the emulator size, seeded from the
+    // command's stored size) through the existing resize flow. Known backends
+    // skip — future syncs belong to the explicit :resize path below.
+    if (!ownerSessionID) return
+    if (ptyKnown.has(cmd.id)) return
+    pendingAutoResize = emuSizeFor(cmd)
+    if (autoResizeTimer) return
+    const wait = Math.max(0, RESIZE_DEBOUNCE_MS - (Date.now() - lastResizeAppliedAt))
+    autoResizeTimer = setTimeout(() => {
+      autoResizeTimer = undefined
+      const p = pendingAutoResize
+      pendingAutoResize = undefined
+      if (!p) return
+      if (selectedID() !== cmd.id) return // selection moved on; its own select schedules fresh
+      void doResizeAndLearn(p.cols, p.rows)
+    }, wait)
+  }
+
+  function selectChanged(): void {
+    const sel = state().selectedCommand
+    syncStreamSubscription()
+    if (sel) {
+      ensureEmulatorFor(sel)
+      scheduleAutoResize(sel)
+    }
+    void refreshOutput()
+  }
 
   function streamLiveForSelected(): boolean {
     const id = state().selectedCommand?.id
@@ -104,14 +309,18 @@ export function CommandPanel(props: Props) {
     stream.subscribe(sel.id, ownerSessionID, {
       onSnapshot: (snap) => {
         if (subscribedID !== sel.id) return
+        ensureEmulatorFor(snap.command)
         setOutput(snap.data)
         setOutputMeta({ startByte: snap.startOffset, totalBytes: snap.endOffset, live: snap.command.status === "running" })
+        // Snapshot AND resync share this path: reset + re-feed, never append.
+        feedSnapshotFor(snap.command.id, snap.data, snap.startOffset, snap.endOffset)
         applyCommandMetadata(snap.command)
       },
       onDelta: (delta) => {
         if (subscribedID !== sel.id) return
         setOutput((prev) => prev + delta.data)
         setOutputMeta((prev) => ({ ...prev, totalBytes: delta.endOffset }))
+        feedDeltaFor(delta.commandID, delta.data, delta.startOffset, delta.endOffset)
       },
       onStatus: (cmd) => {
         applyCommandMetadata(cmd)
@@ -148,6 +357,7 @@ export function CommandPanel(props: Props) {
       // (new commands started elsewhere); output comes from live deltas.
       if (streamLiveForSelected()) {
         const now = Date.now()
+        flushScreenRows() // reuse the existing cadence for coalesced paints
         if (now - lastSlowListRefresh < SLOW_LIST_REFRESH_MS) return
         lastSlowListRefresh = now
         const s = await readState(props.directory)
@@ -188,8 +398,15 @@ export function CommandPanel(props: Props) {
       const window = 32 * 1024
       const startByte = Math.max(0, total - window)
       const log = await readCommandLog(props.directory, sel.id, { offsetBytes: startByte, limitBytes: window })
+      if (state().selectedCommand?.id !== sel.id) return // selection moved on
+      ensureEmulatorFor(sel)
       setOutput(log.text)
       setOutputMeta({ startByte: log.startByte, totalBytes: total, live: sel.status === "running" })
+      // Poll fallback feeds as a snapshot: reset + re-feed (same path as a
+      // stream resync). flushScreenRows below reuses this 2s cadence so the
+      // emulated view paints without per-chunk setState storms.
+      feedSnapshotFor(sel.id, log.text, log.startByte, total)
+      flushScreenRows()
     } catch {
       setOutput("")
     }
@@ -269,7 +486,13 @@ export function CommandPanel(props: Props) {
       setStatusText("No command selected.")
       return
     }
-    await sendRaw("cmd_resize", { commandID: id, cols, rows }, id)
+    // Debounce: ignore explicit resizes within 500ms of the last applied one
+    // so a burst (or a held key) cannot storm the control bus / child winsize.
+    if (Date.now() - lastResizeAppliedAt < RESIZE_DEBOUNCE_MS) {
+      setStatusText("resize debounced — retry in a moment.")
+      return
+    }
+    await doResizeAndLearn(cols, rows)
   }
 
   // "new": start a command — ":new <command> [args...]" typed in insert mode.
@@ -364,6 +587,16 @@ export function CommandPanel(props: Props) {
   onCleanup(() => {
     for (const u of unsubs) if (typeof u === "function") (u as () => void)()
     for (const p of pollers) clearInterval(p)
+    if (screenFlushTimer) clearTimeout(screenFlushTimer)
+    if (autoResizeTimer) clearTimeout(autoResizeTimer)
+    screenFlushTimer = undefined
+    autoResizeTimer = undefined
+    try {
+      screen?.dispose()
+    } catch {}
+    screen = undefined
+    feed = undefined
+    feedForID = undefined
     // Detach semantics unchanged: unsubscribe locally, never terminate.
     if (subscribedID) stream.unsubscribe(subscribedID)
     subscribedID = undefined
@@ -413,29 +646,25 @@ export function CommandPanel(props: Props) {
     if (name === "down" || key === "j") {
       prevent(evt)
       setState((s) => moveCommandSelection(s, 1))
-      syncStreamSubscription()
-      void refreshOutput()
+      selectChanged()
       return
     }
     if (name === "up" || key === "k") {
       prevent(evt)
       setState((s) => moveCommandSelection(s, -1))
-      syncStreamSubscription()
-      void refreshOutput()
+      selectChanged()
       return
     }
     if (key === "g") {
       prevent(evt)
       setState(selectCommandFirst)
-      syncStreamSubscription()
-      void refreshOutput()
+      selectChanged()
       return
     }
     if (key === "G") {
       prevent(evt)
       setState(selectCommandLast)
-      syncStreamSubscription()
-      void refreshOutput()
+      selectChanged()
       return
     }
     // Detach: "q"/close only clears the view — the command keeps running.
@@ -455,7 +684,7 @@ export function CommandPanel(props: Props) {
         <box flexDirection="row" justifyContent="space-between" flexShrink={0}>
           <text>
             <span style={{ fg: theme().primary, bold: true }}>⬢ Command Sessions</span>
-            <span style={{ fg: theme().textMuted }}> │ byte-stream output (not a terminal emulator)</span>
+            <span style={{ fg: theme().textMuted }}>{emulated() ? " │ terminal screen (emulated view · raw log is the record)" : " │ byte-stream output (raw text)"}</span>
           </text>
           <text>
             <span style={{ fg: theme().textMuted }}>{state().commands.length} owned</span>
@@ -495,10 +724,37 @@ export function CommandPanel(props: Props) {
             <box flexDirection="column" border={true} borderColor={theme().border} padding={1} flexShrink={0} maxHeight={16} overflow="hidden">
               <text>
                 <span style={{ fg: theme().primary, bold: true }}>{cmd().title}</span>
-                <span style={{ fg: theme().textMuted }}> │ {[cmd().command, ...cmd().args].join(" ")} │ {cmd().status} │ {outputMeta().totalBytes} bytes{outputMeta().live ? " · live" : ""}{cmd().truncated ? " · truncated" : ""}</span>
-                {"\n"}
-                <span style={{ fg: theme().text }}>{output().slice(-4000) || "(no output yet)"}</span>
+                <span style={{ fg: theme().textMuted }}> │ {[cmd().command, ...cmd().args].join(" ")} │ {cmd().status} │ {outputMeta().totalBytes} bytes{outputMeta().live ? " · live" : ""}{cmd().truncated ? " · truncated" : ""}{emulated() && screen && feedForID === cmd().id ? ` · ${screen.cols}x${screen.rows} screen${screen.activeBuffer === "alternate" ? " · alt-screen" : ""}` : ""}</span>
               </text>
+              <Show
+                when={emulated() && screenRows().length > 0}
+                fallback={
+                  <text>
+                    <span style={{ fg: theme().text }}>{output().slice(-4000) || "(no output yet)"}</span>
+                  </text>
+                }
+              >
+                <For each={screenRows()}>
+                  {(row) => (
+                    <text wrapMode="none" truncate={true}>
+                      <For each={row.runs}>
+                        {(run) => (
+                          <span
+                            style={{
+                              fg: run.fg ?? theme().text,
+                              bg: run.bg,
+                              bold: run.bold,
+                              underline: run.underline,
+                            }}
+                          >
+                            {run.text}
+                          </span>
+                        )}
+                      </For>
+                    </text>
+                  )}
+                </For>
+              </Show>
             </box>
           )}
         </Show>
