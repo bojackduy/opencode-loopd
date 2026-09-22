@@ -12,6 +12,8 @@ import { createScheduleWorker } from "../application/schedule-worker"
 import { createRealHost, createV2Host, type LoopHost, type SessionStatusType } from "./host-adapter"
 import { createLocalProcessHost } from "./command-host"
 import { createCommandService } from "../application/command-service"
+import { createCommandEventBroker } from "../application/command-event-broker"
+import { createCommandStreamServer } from "./command-stream-server"
 import { goalTools } from "./goal-tools"
 import { ownerTools } from "./owner-tools"
 import { commandTools } from "./command-tools"
@@ -38,7 +40,12 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
   // Command sessions are standalone (no goal coupling): their own host
   // (local child processes — see command-host.ts + capability matrix) and
   // their own service. Never share the AI worker host methods.
-  const commandService = createCommandService(createLocalProcessHost())
+  // The event broker + private loopback stream transport (Milestone 2/3)
+  // publish validated events; start/terminate/remove/resize stay on the
+  // existing idempotent control bus — never move them to the socket.
+  const commandBroker = createCommandEventBroker()
+  const commandService = createCommandService(createLocalProcessHost(), { broker: commandBroker })
+  const commandStream = createCommandStreamServer(directory, commandService, commandBroker)
 
   const worker = createControlWorker({
     directory,
@@ -70,6 +77,9 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
     engine.start()
     worker.start()
     scheduleWorker.start()
+    void commandStream.start().catch((error) =>
+      logServerEvent(directory, "command-stream.start-failed", { detail: describeError(error) }),
+    )
   }
 
   function reconcileInBackground() {
@@ -176,6 +186,8 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
       }
     },
     dispose: async () => {
+      // Stop accepting stream clients BEFORE terminating children.
+      await commandStream.stop().catch(() => {})
       engine.stop()
       await worker.stop()
       scheduleWorker.stop()

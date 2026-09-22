@@ -3579,6 +3579,167 @@ var _encoder = new TextEncoder;
 function utf8ByteLength(data) {
   return _encoder.encode(data).length;
 }
+function expectedNextEnd(startOffset, data) {
+  return startOffset + utf8ByteLength(data);
+}
+var VALID_STATUSES = [
+  "running",
+  "exited",
+  "terminated",
+  "missing"
+];
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.length > 0;
+}
+function isNonNegativeInt(value) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+function isCommandSessionLike(value) {
+  if (!isRecord(value))
+    return false;
+  if (typeof value["id"] !== "string" || value["id"].length === 0)
+    return false;
+  if (typeof value["title"] !== "string")
+    return false;
+  if (typeof value["command"] !== "string")
+    return false;
+  if (typeof value["cwd"] !== "string")
+    return false;
+  if (typeof value["ownerSessionID"] !== "string")
+    return false;
+  if (typeof value["status"] !== "string")
+    return false;
+  if (!VALID_STATUSES.includes(value["status"]))
+    return false;
+  if (!isNonNegativeInt(value["outputBytes"]))
+    return false;
+  if (typeof value["truncated"] !== "boolean")
+    return false;
+  if (typeof value["createdAt"] !== "string")
+    return false;
+  if (typeof value["updatedAt"] !== "string")
+    return false;
+  if (value["args"] !== undefined && !Array.isArray(value["args"]))
+    return false;
+  if (value["streamBytes"] !== undefined && !isNonNegativeInt(value["streamBytes"]))
+    return false;
+  return true;
+}
+function checkOffsets(startOffset, endOffset, data) {
+  if (typeof data !== "string")
+    return "data must be a string";
+  if (!isNonNegativeInt(startOffset))
+    return "startOffset must be a non-negative integer";
+  if (!isNonNegativeInt(endOffset))
+    return "endOffset must be a non-negative integer";
+  if (endOffset < startOffset)
+    return "endOffset must be >= startOffset";
+  const expected = expectedNextEnd(startOffset, data);
+  if (endOffset !== expected)
+    return `endOffset mismatch: expected ${expected} (startOffset + UTF-8 byte length ${expected - startOffset}), got ${endOffset}`;
+  return null;
+}
+function validateCommandStreamMessage(value) {
+  try {
+    if (!isRecord(value))
+      return { ok: false, error: "message must be an object" };
+    const type = value["type"];
+    if (typeof type !== "string")
+      return { ok: false, error: "missing type field" };
+    switch (type) {
+      case "subscribe": {
+        if (!isNonEmptyString(value["commandID"]))
+          return { ok: false, error: "subscribe.commandID must be a non-empty string" };
+        if (!isNonEmptyString(value["ownerSessionID"]))
+          return { ok: false, error: "subscribe.ownerSessionID must be a non-empty string" };
+        return {
+          ok: true,
+          message: {
+            type: "subscribe",
+            commandID: value["commandID"],
+            ownerSessionID: value["ownerSessionID"]
+          }
+        };
+      }
+      case "snapshot": {
+        if (!isCommandSessionLike(value["command"]))
+          return { ok: false, error: "snapshot.command must be CommandSession metadata" };
+        const offsetError = checkOffsets(value["startOffset"], value["endOffset"], value["data"]);
+        if (offsetError)
+          return { ok: false, error: `snapshot.${offsetError}` };
+        return {
+          ok: true,
+          message: {
+            type: "snapshot",
+            command: value["command"],
+            data: value["data"],
+            startOffset: value["startOffset"],
+            endOffset: value["endOffset"]
+          }
+        };
+      }
+      case "output": {
+        if (!isNonEmptyString(value["commandID"]))
+          return { ok: false, error: "output.commandID must be a non-empty string" };
+        const offsetError = checkOffsets(value["startOffset"], value["endOffset"], value["data"]);
+        if (offsetError)
+          return { ok: false, error: `output.${offsetError}` };
+        return {
+          ok: true,
+          message: {
+            type: "output",
+            commandID: value["commandID"],
+            data: value["data"],
+            startOffset: value["startOffset"],
+            endOffset: value["endOffset"]
+          }
+        };
+      }
+      case "status": {
+        if (!isCommandSessionLike(value["command"]))
+          return { ok: false, error: "status.command must be CommandSession metadata" };
+        return { ok: true, message: { type: "status", command: value["command"] } };
+      }
+      case "input": {
+        if (!isNonEmptyString(value["commandID"]))
+          return { ok: false, error: "input.commandID must be a non-empty string" };
+        if (typeof value["data"] !== "string")
+          return { ok: false, error: "input.data must be a string" };
+        return {
+          ok: true,
+          message: { type: "input", commandID: value["commandID"], data: value["data"] }
+        };
+      }
+      case "interrupt": {
+        if (!isNonEmptyString(value["commandID"]))
+          return { ok: false, error: "interrupt.commandID must be a non-empty string" };
+        return { ok: true, message: { type: "interrupt", commandID: value["commandID"] } };
+      }
+      case "resync": {
+        if (!isNonEmptyString(value["commandID"]))
+          return { ok: false, error: "resync.commandID must be a non-empty string" };
+        return { ok: true, message: { type: "resync", commandID: value["commandID"] } };
+      }
+      case "error": {
+        if (!isNonEmptyString(value["code"]))
+          return { ok: false, error: "error.code must be a non-empty string" };
+        if (typeof value["message"] !== "string")
+          return { ok: false, error: "error.message must be a string" };
+        return {
+          ok: true,
+          message: { type: "error", code: value["code"], message: value["message"] }
+        };
+      }
+      default:
+        return { ok: false, error: `unknown message type: ${type}` };
+    }
+  } catch (err) {
+    return { ok: false, error: `validation failed: ${String(err)}` };
+  }
+}
 
 // src/application/command-service.ts
 init_state_repository();
@@ -4072,9 +4233,445 @@ function createCommandService(host, opts) {
   };
 }
 
+// src/application/command-event-broker.ts
+import { randomUUID as randomUUID7 } from "crypto";
+function safeDeliver(sink, msg) {
+  try {
+    sink(msg);
+  } catch {}
+}
+function isCoveredBySnapshot(msg, snapshot) {
+  if (msg.type === "output") {
+    const out = msg;
+    return out.endOffset <= snapshot.endOffset;
+  }
+  if (msg.type === "status") {
+    const st = msg;
+    const bufferedAt = st.command.updatedAt ?? "";
+    const snapshotAt = snapshot.command.updatedAt ?? "";
+    return bufferedAt <= snapshotAt;
+  }
+  return true;
+}
+function createCommandEventBroker(resolver) {
+  let currentResolver = resolver;
+  const subscribers = new Map;
+  function entriesFor(commandID) {
+    let m = subscribers.get(commandID);
+    if (!m) {
+      m = new Map;
+      subscribers.set(commandID, m);
+    }
+    return m;
+  }
+  return {
+    setResolver(next) {
+      currentResolver = next;
+    },
+    async subscribe(commandID, ownerSessionID, sink) {
+      if (!currentResolver)
+        throw new Error("Command event broker has no resolver (service not wired).");
+      if (!commandID)
+        throw new Error("commandID is required.");
+      if (!ownerSessionID)
+        throw new Error("ownerSessionID is required.");
+      if (typeof sink !== "function")
+        throw new Error("sink must be a function.");
+      const sinkID = randomUUID7();
+      const entry = { sinkID, sink, state: "subscribing", buffer: [] };
+      entriesFor(commandID).set(sinkID, entry);
+      try {
+        const session = await currentResolver.getSession(commandID, ownerSessionID);
+        if (!session) {
+          throw new Error("Command not found or not owned by this session (cross-owner subscribe rejected).");
+        }
+        await currentResolver.waitForQuiesce(commandID);
+        const snap = await currentResolver.readSnapshot(commandID, ownerSessionID);
+        if (!snap) {
+          throw new Error("Command snapshot unavailable (removed or unreadable).");
+        }
+        const snapshotMsg = {
+          type: "snapshot",
+          command: snap.command,
+          data: snap.data,
+          startOffset: snap.startOffset,
+          endOffset: snap.endOffset
+        };
+        const validated = validateCommandStreamMessage(snapshotMsg);
+        if (!validated.ok) {
+          throw new Error(`Invalid snapshot: ${validated.error}`);
+        }
+        const stillThere = subscribers.get(commandID)?.get(sinkID);
+        if (!stillThere)
+          throw new Error("Subscription cancelled during handshake.");
+        const buffered = entry.buffer.splice(0);
+        safeDeliver(entry.sink, validated.message);
+        for (const msg of buffered) {
+          if (isCoveredBySnapshot(msg, snapshotMsg))
+            continue;
+          safeDeliver(entry.sink, msg);
+        }
+        const extra = entry.buffer.splice(0);
+        for (const msg of extra) {
+          if (isCoveredBySnapshot(msg, snapshotMsg))
+            continue;
+          safeDeliver(entry.sink, msg);
+        }
+        entry.state = "live";
+        return sinkID;
+      } catch (error) {
+        subscribers.get(commandID)?.delete(sinkID);
+        if (subscribers.get(commandID)?.size === 0)
+          subscribers.delete(commandID);
+        throw error;
+      }
+    },
+    unsubscribe(commandID, sinkID) {
+      const m = subscribers.get(commandID);
+      if (!m)
+        return;
+      m.delete(sinkID);
+      if (m.size === 0)
+        subscribers.delete(commandID);
+    },
+    publish(commandID, message) {
+      let valid;
+      try {
+        const result = validateCommandStreamMessage(message);
+        if (!result.ok)
+          return false;
+        valid = result.message;
+      } catch {
+        return false;
+      }
+      const m = subscribers.get(commandID);
+      if (!m || m.size === 0)
+        return false;
+      let handled = false;
+      for (const entry of m.values()) {
+        if (entry.state === "subscribing") {
+          entry.buffer.push(valid);
+          handled = true;
+          continue;
+        }
+        safeDeliver(entry.sink, valid);
+        handled = true;
+      }
+      return handled;
+    },
+    subscriberCount(commandID) {
+      return subscribers.get(commandID)?.size ?? 0;
+    }
+  };
+}
+
+// src/server/command-stream-server.ts
+import { randomBytes, randomUUID as randomUUID8, timingSafeEqual } from "crypto";
+import { promises as fs4 } from "fs";
+import path4 from "path";
+function streamEndpointPath(directory) {
+  return path4.join(directory, ".opencode", "loopd", "commands", ".stream-endpoint.json");
+}
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0)
+    return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = error?.code;
+    if (code === "EPERM")
+      return true;
+    return false;
+  }
+}
+function tokensEqual(a, b) {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length)
+    return false;
+  try {
+    return timingSafeEqual(ab, bb);
+  } catch {
+    return false;
+  }
+}
+var MAX_BUFFERED_BYTES = 512 * 1024;
+function createCommandStreamServer(directory, commandService, broker) {
+  const endpointPath = streamEndpointPath(directory);
+  const token = randomBytes(32).toString("hex");
+  const generation = randomUUID8();
+  const startedAt = new Date().toISOString();
+  let server;
+  let serverURL;
+  let started = false;
+  let stopped = false;
+  const sockets = new Set;
+  const subsBySocket = new Map;
+  function sendError(ws, code, message) {
+    try {
+      ws.send(JSON.stringify({ type: "error", code, message }));
+    } catch {}
+  }
+  function sendToSocket(ws, payload) {
+    try {
+      const buffered = ws.bufferedAmount ?? 0;
+      if (buffered > MAX_BUFFERED_BYTES) {
+        try {
+          ws.close(1011, "backpressure overflow: resync");
+        } catch {}
+        return false;
+      }
+      ws.send(payload);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  function makeSink(ws) {
+    return (msg) => {
+      if (stopped || !sockets.has(ws))
+        return;
+      sendToSocket(ws, JSON.stringify(msg));
+    };
+  }
+  function subsFor(ws) {
+    let m = subsBySocket.get(ws);
+    if (!m) {
+      m = new Map;
+      subsBySocket.set(ws, m);
+    }
+    return m;
+  }
+  function cleanupSocket(ws) {
+    const subs = subsBySocket.get(ws);
+    if (subs) {
+      for (const [commandID, entry] of subs) {
+        try {
+          broker.unsubscribe(commandID, entry.sinkID);
+        } catch {}
+      }
+      subsBySocket.delete(ws);
+    }
+    sockets.delete(ws);
+  }
+  async function handleSubscribe(ws, commandID, ownerSessionID) {
+    const subs = subsFor(ws);
+    const previous = subs.get(commandID);
+    if (previous) {
+      try {
+        broker.unsubscribe(commandID, previous.sinkID);
+      } catch {}
+      subs.delete(commandID);
+    }
+    const sink = makeSink(ws);
+    let sinkID;
+    try {
+      sinkID = await broker.subscribe(commandID, ownerSessionID, sink);
+    } catch (error) {
+      sendError(ws, "subscribe-failed", error instanceof Error ? error.message : String(error));
+      return;
+    }
+    if (!sockets.has(ws)) {
+      try {
+        broker.unsubscribe(commandID, sinkID);
+      } catch {}
+      return;
+    }
+    subs.set(commandID, { sinkID, ownerSessionID });
+  }
+  async function handleResync(ws, commandID) {
+    const subs = subsFor(ws);
+    const previous = subs.get(commandID);
+    if (!previous) {
+      sendError(ws, "not-subscribed", `No subscription for command ${commandID} on this socket; subscribe first.`);
+      return;
+    }
+    await handleSubscribe(ws, commandID, previous.ownerSessionID);
+  }
+  async function handleInput(ws, commandID, data) {
+    const owner = subsFor(ws).get(commandID)?.ownerSessionID;
+    if (!owner) {
+      sendError(ws, "not-subscribed", `No subscription for command ${commandID} on this socket; subscribe first.`);
+      return;
+    }
+    try {
+      const result = await commandService.write(directory, commandID, owner, data);
+      if (!result.ok)
+        sendError(ws, "input-failed", result.message);
+    } catch (error) {
+      sendError(ws, "input-failed", error instanceof Error ? error.message : String(error));
+    }
+  }
+  async function handleInterrupt(ws, commandID) {
+    const owner = subsFor(ws).get(commandID)?.ownerSessionID;
+    if (!owner) {
+      sendError(ws, "not-subscribed", `No subscription for command ${commandID} on this socket; subscribe first.`);
+      return;
+    }
+    try {
+      const result = await commandService.interrupt(directory, commandID, owner);
+      if (!result.ok)
+        sendError(ws, "interrupt-failed", result.message);
+    } catch (error) {
+      sendError(ws, "interrupt-failed", error instanceof Error ? error.message : String(error));
+    }
+  }
+  async function handleSocketMessage(ws, raw) {
+    let parsed;
+    try {
+      const text = typeof raw === "string" ? raw : Buffer.from(raw).toString("utf8");
+      parsed = JSON.parse(text);
+    } catch {
+      sendError(ws, "invalid-message", "Message must be JSON.");
+      return;
+    }
+    let validated;
+    try {
+      validated = validateCommandStreamMessage(parsed);
+    } catch (error) {
+      sendError(ws, "invalid-message", `Validation failed: ${String(error)}`);
+      return;
+    }
+    if (!validated.ok) {
+      sendError(ws, "invalid-message", validated.error);
+      return;
+    }
+    const msg = validated.message;
+    try {
+      switch (msg.type) {
+        case "subscribe":
+          await handleSubscribe(ws, msg.commandID, msg.ownerSessionID);
+          break;
+        case "resync":
+          await handleResync(ws, msg.commandID);
+          break;
+        case "input":
+          await handleInput(ws, msg.commandID, msg.data);
+          break;
+        case "interrupt":
+          await handleInterrupt(ws, msg.commandID);
+          break;
+        default:
+          sendError(ws, "invalid-message", `Message type "${msg.type}" is not accepted inbound.`);
+          break;
+      }
+    } catch (error) {
+      sendError(ws, "internal-error", error instanceof Error ? error.message : String(error));
+    }
+  }
+  async function writeEndpointFile(url) {
+    const endpoint = {
+      url,
+      token,
+      pid: process.pid,
+      generation,
+      startedAt
+    };
+    await fs4.mkdir(path4.dirname(endpointPath), { recursive: true });
+    await fs4.writeFile(endpointPath, JSON.stringify(endpoint, null, 2) + `
+`, { mode: 384 });
+    await fs4.chmod(endpointPath, 384);
+  }
+  return {
+    get url() {
+      return serverURL;
+    },
+    token,
+    generation,
+    endpointPath,
+    async start() {
+      if (started)
+        return;
+      started = true;
+      try {
+        const previous = await fs4.readFile(endpointPath, "utf8").then((text) => JSON.parse(text), () => {
+          return;
+        });
+        if (previous && typeof previous.pid === "number" && isPidAlive(previous.pid) && previous.pid !== process.pid) {
+          logServerEvent(directory, "command-stream.superseded-live-endpoint", { pid: previous.pid });
+        }
+      } catch {}
+      const srv = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch(req, upgrading) {
+          if (stopped)
+            return new Response("Server is stopping.", { status: 503 });
+          let url;
+          try {
+            url = new URL(req.url);
+          } catch {
+            return new Response("Bad request.", { status: 400 });
+          }
+          if (url.pathname !== "/" && url.pathname !== "/stream") {
+            return new Response("Not found.", { status: 404 });
+          }
+          const presented = url.searchParams.get("token") ?? "";
+          if (!presented || !tokensEqual(presented, token)) {
+            return new Response("Forbidden: valid connection token required.", { status: 403 });
+          }
+          const ok = upgrading.upgrade(req, { data: undefined });
+          if (!ok)
+            return new Response("WebSocket upgrade required.", { status: 400 });
+          return;
+        },
+        websocket: {
+          open(ws) {
+            sockets.add(ws);
+          },
+          message(ws, raw) {
+            handleSocketMessage(ws, raw).catch((error) => {
+              try {
+                sendError(ws, "internal-error", describeError(error));
+              } catch {}
+            });
+          },
+          close(ws) {
+            cleanupSocket(ws);
+          }
+        }
+      });
+      server = srv;
+      const port = srv.port;
+      serverURL = `ws://127.0.0.1:${port}/stream?token=${token}`;
+      await writeEndpointFile(serverURL);
+      logServerEvent(directory, "command-stream.started", { port, generation });
+    },
+    async stop() {
+      stopped = true;
+      for (const ws of [...sockets]) {
+        try {
+          ws.close(1001, "server shutting down");
+        } catch {}
+        cleanupSocket(ws);
+      }
+      sockets.clear();
+      subsBySocket.clear();
+      try {
+        server?.stop(true);
+      } catch {}
+      server = undefined;
+      serverURL = undefined;
+      try {
+        const text = await fs4.readFile(endpointPath, "utf8");
+        const current = JSON.parse(text);
+        if (current?.generation === generation) {
+          await fs4.unlink(endpointPath);
+        } else {
+          logServerEvent(directory, "command-stream.keep-endpoint", {
+            reason: "generation mismatch \u2014 another server owns the file"
+          });
+        }
+      } catch {}
+      logServerEvent(directory, "command-stream.stopped", { generation });
+    }
+  };
+}
+
 // src/server/goal-tools.ts
 init_state_repository();
-import { randomUUID as randomUUID7 } from "crypto";
+import { randomUUID as randomUUID9 } from "crypto";
 import { tool } from "@opencode-ai/plugin/tool";
 // src/domain/verification.ts
 var MAX_RECENT_ATTEMPTS = 10;
@@ -4299,7 +4896,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID7(),
+          eventID: randomUUID9(),
           goalID: goal.id,
           type: "goal.progress",
           summary: args.summary,
@@ -4364,7 +4961,7 @@ Exit code: ${f.exitCode}${stdoutSnippet}${stderrSnippet}`;
 Working directory: ${cwd}
 
 ${failureDetails}`;
-              attemptID = randomUUID7();
+              attemptID = randomUUID9();
               const verificationAttempt = {
                 id: attemptID,
                 sequence: runtime.evaluatorRejectionCount,
@@ -4409,7 +5006,7 @@ ${failureDetails.slice(0, 500)}`,
             if (attemptID) {
               await appendEvent(dir, {
                 version: 1,
-                eventID: randomUUID7(),
+                eventID: randomUUID9(),
                 goalID: goal.id,
                 type: "goal.completion_rejected",
                 attemptID,
@@ -4427,7 +5024,7 @@ ${failureDetails.slice(0, 500)}`,
             if (blocked && rejectedGoal?.blocker) {
               await appendEvent(dir, {
                 version: 1,
-                eventID: randomUUID7(),
+                eventID: randomUUID9(),
                 goalID: goal.id,
                 type: "goal.blocked",
                 reason: rejectedGoal.blocker.reason,
@@ -4487,7 +5084,7 @@ ${failureDetails.slice(0, 500)}`,
             }
             runtime.updatedAt = new Date().toISOString();
           }
-          const attemptID = randomUUID7();
+          const attemptID = randomUUID9();
           const cwd = goal.config.checkCwd || goal.config.artifactDir || dir;
           const checks = (goal.config.checks || []).map((cmd) => ({
             command: cmd,
@@ -4511,7 +5108,7 @@ ${failureDetails.slice(0, 500)}`,
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID7(),
+          eventID: randomUUID9(),
           goalID: goal.id,
           type: "goal.completed",
           summary: args.summary,
@@ -4571,7 +5168,7 @@ ${failureDetails.slice(0, 500)}`,
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID7(),
+          eventID: randomUUID9(),
           goalID: goal.id,
           type: "goal.blocked",
           reason: args.reason,
@@ -4751,7 +5348,7 @@ function describeGoalState(status, phase) {
 }
 
 // src/server/owner-tools.ts
-import { promises as fs4 } from "fs";
+import { promises as fs5 } from "fs";
 function withTimeout2(promise, ms) {
   return Promise.race([
     promise,
@@ -4864,7 +5461,7 @@ function ownerTools(options) {
             if (!dir)
               return;
             try {
-              const files = await fs4.readdir(dir);
+              const files = await fs5.readdir(dir);
               return files.length ? `${files.length} file(s): ${files.slice(0, 8).join(", ")}` : "no artifacts yet";
             } catch {
               return "no artifacts yet";
@@ -5543,7 +6140,9 @@ var server = async ({ client, directory }, pluginOptions) => {
 };
 function createServerHooks(directory, host, defaults) {
   const goalService = createGoalService(host);
-  const commandService = createCommandService(createLocalProcessHost());
+  const commandBroker = createCommandEventBroker();
+  const commandService = createCommandService(createLocalProcessHost(), { broker: commandBroker });
+  const commandStream = createCommandStreamServer(directory, commandService, commandBroker);
   const worker = createControlWorker({
     directory,
     goalService,
@@ -5571,6 +6170,7 @@ function createServerHooks(directory, host, defaults) {
     engine.start();
     worker.start();
     scheduleWorker.start();
+    commandStream.start().catch((error) => logServerEvent(directory, "command-stream.start-failed", { detail: describeError(error) }));
   }
   function reconcileInBackground() {
     if (reconciliationStarted)
@@ -5667,6 +6267,7 @@ function createServerHooks(directory, host, defaults) {
       }
     },
     dispose: async () => {
+      await commandStream.stop().catch(() => {});
       engine.stop();
       await worker.stop();
       scheduleWorker.stop();
