@@ -59,8 +59,12 @@ agent actions. Missing session ownership fails closed.
 - v2 server plugins cannot drive host-owned PTYs at all (context exposes
   `terminal.read` only); both TUI clients could attach natively later via
   `pty.connectToken` + `connect` — recorded as follow-up, not implemented.
-- Live output in the panel polls every 2 s. Closing/reopening replays from
-  the retained log (detach/reopen safe).
+- Live output in the panel is stream-primary with a poll fallback: when the
+  command stream socket is connected and subscribed, deltas append
+  immediately (2 s output poller gated off, 30 s metadata safety refresh);
+  when disconnected or before the server starts, the panel falls back to the
+  2 s pollers and resumes the stream on reconnect. Closing/reopening
+  replays from the retained log (detach/reopen safe).
 
 ## Evidence owed before the v2 AI-worker migration
 

@@ -2530,6 +2530,518 @@ function parseCommandLine(input) {
   return args;
 }
 
+// src/tui/command-stream-client.ts
+import { promises as fs2 } from "fs";
+import path2 from "path";
+
+// src/domain/command-events.ts
+var _encoder = new TextEncoder;
+function utf8ByteLength(data) {
+  return _encoder.encode(data).length;
+}
+function offsetsContinuous(prevEnd, nextStart) {
+  return prevEnd === nextStart;
+}
+function expectedNextEnd(startOffset, data) {
+  return startOffset + utf8ByteLength(data);
+}
+var VALID_STATUSES = [
+  "running",
+  "exited",
+  "terminated",
+  "missing"
+];
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.length > 0;
+}
+function isNonNegativeInt(value) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+function isCommandSessionLike(value) {
+  if (!isRecord(value))
+    return false;
+  if (typeof value["id"] !== "string" || value["id"].length === 0)
+    return false;
+  if (typeof value["title"] !== "string")
+    return false;
+  if (typeof value["command"] !== "string")
+    return false;
+  if (typeof value["cwd"] !== "string")
+    return false;
+  if (typeof value["ownerSessionID"] !== "string")
+    return false;
+  if (typeof value["status"] !== "string")
+    return false;
+  if (!VALID_STATUSES.includes(value["status"]))
+    return false;
+  if (!isNonNegativeInt(value["outputBytes"]))
+    return false;
+  if (typeof value["truncated"] !== "boolean")
+    return false;
+  if (typeof value["createdAt"] !== "string")
+    return false;
+  if (typeof value["updatedAt"] !== "string")
+    return false;
+  if (value["args"] !== undefined && !Array.isArray(value["args"]))
+    return false;
+  if (value["streamBytes"] !== undefined && !isNonNegativeInt(value["streamBytes"]))
+    return false;
+  return true;
+}
+function checkOffsets(startOffset, endOffset, data) {
+  if (typeof data !== "string")
+    return "data must be a string";
+  if (!isNonNegativeInt(startOffset))
+    return "startOffset must be a non-negative integer";
+  if (!isNonNegativeInt(endOffset))
+    return "endOffset must be a non-negative integer";
+  if (endOffset < startOffset)
+    return "endOffset must be >= startOffset";
+  const expected = expectedNextEnd(startOffset, data);
+  if (endOffset !== expected)
+    return `endOffset mismatch: expected ${expected} (startOffset + UTF-8 byte length ${expected - startOffset}), got ${endOffset}`;
+  return null;
+}
+function validateCommandStreamMessage(value) {
+  try {
+    if (!isRecord(value))
+      return { ok: false, error: "message must be an object" };
+    const type = value["type"];
+    if (typeof type !== "string")
+      return { ok: false, error: "missing type field" };
+    switch (type) {
+      case "subscribe": {
+        if (!isNonEmptyString(value["commandID"]))
+          return { ok: false, error: "subscribe.commandID must be a non-empty string" };
+        if (!isNonEmptyString(value["ownerSessionID"]))
+          return { ok: false, error: "subscribe.ownerSessionID must be a non-empty string" };
+        return {
+          ok: true,
+          message: {
+            type: "subscribe",
+            commandID: value["commandID"],
+            ownerSessionID: value["ownerSessionID"]
+          }
+        };
+      }
+      case "snapshot": {
+        if (!isCommandSessionLike(value["command"]))
+          return { ok: false, error: "snapshot.command must be CommandSession metadata" };
+        const offsetError = checkOffsets(value["startOffset"], value["endOffset"], value["data"]);
+        if (offsetError)
+          return { ok: false, error: `snapshot.${offsetError}` };
+        return {
+          ok: true,
+          message: {
+            type: "snapshot",
+            command: value["command"],
+            data: value["data"],
+            startOffset: value["startOffset"],
+            endOffset: value["endOffset"]
+          }
+        };
+      }
+      case "output": {
+        if (!isNonEmptyString(value["commandID"]))
+          return { ok: false, error: "output.commandID must be a non-empty string" };
+        const offsetError = checkOffsets(value["startOffset"], value["endOffset"], value["data"]);
+        if (offsetError)
+          return { ok: false, error: `output.${offsetError}` };
+        return {
+          ok: true,
+          message: {
+            type: "output",
+            commandID: value["commandID"],
+            data: value["data"],
+            startOffset: value["startOffset"],
+            endOffset: value["endOffset"]
+          }
+        };
+      }
+      case "status": {
+        if (!isCommandSessionLike(value["command"]))
+          return { ok: false, error: "status.command must be CommandSession metadata" };
+        return { ok: true, message: { type: "status", command: value["command"] } };
+      }
+      case "input": {
+        if (!isNonEmptyString(value["commandID"]))
+          return { ok: false, error: "input.commandID must be a non-empty string" };
+        if (typeof value["data"] !== "string")
+          return { ok: false, error: "input.data must be a string" };
+        return {
+          ok: true,
+          message: { type: "input", commandID: value["commandID"], data: value["data"] }
+        };
+      }
+      case "interrupt": {
+        if (!isNonEmptyString(value["commandID"]))
+          return { ok: false, error: "interrupt.commandID must be a non-empty string" };
+        return { ok: true, message: { type: "interrupt", commandID: value["commandID"] } };
+      }
+      case "resync": {
+        if (!isNonEmptyString(value["commandID"]))
+          return { ok: false, error: "resync.commandID must be a non-empty string" };
+        return { ok: true, message: { type: "resync", commandID: value["commandID"] } };
+      }
+      case "error": {
+        if (!isNonEmptyString(value["code"]))
+          return { ok: false, error: "error.code must be a non-empty string" };
+        if (typeof value["message"] !== "string")
+          return { ok: false, error: "error.message must be a string" };
+        return {
+          ok: true,
+          message: { type: "error", code: value["code"], message: value["message"] }
+        };
+      }
+      default:
+        return { ok: false, error: `unknown message type: ${type}` };
+    }
+  } catch (err) {
+    return { ok: false, error: `validation failed: ${String(err)}` };
+  }
+}
+
+// src/tui/command-stream-client.ts
+function defaultEndpointPath(directory) {
+  return path2.join(directory, ".opencode", "loopd", "commands", ".stream-endpoint.json");
+}
+async function defaultReadEndpoint(directory) {
+  let text;
+  try {
+    text = await fs2.readFile(defaultEndpointPath(directory), "utf8");
+  } catch {
+    return;
+  }
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed.url !== "string" || parsed.url.length === 0)
+      return;
+    return { url: parsed.url };
+  } catch {
+    return;
+  }
+}
+function defaultCreateSocket(url) {
+  const ws = new WebSocket(url);
+  const socket = {
+    send: (data) => ws.send(data),
+    close: (code, reason) => ws.close(code, reason),
+    onopen: null,
+    onmessage: null,
+    onclose: null,
+    onerror: null
+  };
+  ws.onopen = () => socket.onopen?.();
+  ws.onmessage = (ev) => socket.onmessage?.(String(ev.data));
+  ws.onclose = (ev) => socket.onclose?.(ev.code, ev.reason);
+  ws.onerror = (err) => socket.onerror?.(err);
+  return socket;
+}
+function createCommandStreamClient(options = {}) {
+  const readEndpoint = options.readEndpoint ?? defaultReadEndpoint;
+  const createSocket = options.createSocket ?? defaultCreateSocket;
+  const initialBackoffMs = options.initialBackoffMs ?? 250;
+  const maxBackoffMs = options.maxBackoffMs ?? 8000;
+  const maxResyncsPerWindow = options.maxResyncsPerWindow ?? 5;
+  const resyncWindowMs = options.resyncWindowMs ?? 30000;
+  let state = "disconnected";
+  let directory = "";
+  let endpointURL = "";
+  let socket;
+  let closedIntentionally = false;
+  let reconnectAttempt = 0;
+  let reconnectTimer;
+  const subs = new Map;
+  function emitConnection(next) {
+    if (state === next)
+      return;
+    state = next;
+    try {
+      options.onConnection?.(next);
+    } catch {}
+    for (const sub of subs.values()) {
+      try {
+        sub.handlers.onConnection?.(next);
+      } catch {}
+    }
+  }
+  function sendWire(msg) {
+    if (!socket || state !== "connected")
+      return false;
+    try {
+      socket.send(JSON.stringify(msg));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  function sendSubscribe(sub) {
+    return sendWire({ type: "subscribe", commandID: sub.commandID, ownerSessionID: sub.ownerSessionID });
+  }
+  function pruneResyncTimes(sub, now) {
+    sub.resyncTimes = sub.resyncTimes.filter((t) => now - t < resyncWindowMs);
+  }
+  function requestResync(sub, reason) {
+    if (sub.resyncPending)
+      return;
+    const now = Date.now();
+    pruneResyncTimes(sub, now);
+    if (sub.resyncTimes.length >= maxResyncsPerWindow) {
+      try {
+        sub.handlers.onError?.(`resync-loop-guard: giving up after ${sub.resyncTimes.length} resyncs (${reason})`);
+      } catch {}
+      return;
+    }
+    sub.resyncTimes.push(now);
+    sub.resyncPending = true;
+    if (!sendSubscribe(sub)) {
+      return;
+    }
+  }
+  function handleMessage(raw) {
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    let validated;
+    try {
+      validated = validateCommandStreamMessage(parsed);
+    } catch {
+      return;
+    }
+    if (!validated.ok)
+      return;
+    const msg = validated.message;
+    switch (msg.type) {
+      case "snapshot": {
+        const id = msg.command.id;
+        const sub = subs.get(id);
+        if (!sub)
+          return;
+        sub.startOffset = msg.startOffset;
+        sub.endOffset = msg.endOffset;
+        sub.resyncPending = false;
+        try {
+          sub.handlers.onSnapshot?.({
+            command: msg.command,
+            data: msg.data,
+            startOffset: msg.startOffset,
+            endOffset: msg.endOffset
+          });
+        } catch {}
+        break;
+      }
+      case "output": {
+        const sub = subs.get(msg.commandID);
+        if (!sub)
+          return;
+        if (sub.endOffset === undefined) {
+          requestResync(sub, "no-baseline");
+          return;
+        }
+        if (offsetsContinuous(sub.endOffset, msg.startOffset)) {
+          sub.endOffset = msg.endOffset;
+          try {
+            sub.handlers.onDelta?.({
+              commandID: msg.commandID,
+              data: msg.data,
+              startOffset: msg.startOffset,
+              endOffset: msg.endOffset
+            });
+          } catch {}
+        } else {
+          requestResync(sub, msg.startOffset > sub.endOffset ? "gap" : "overlap");
+        }
+        break;
+      }
+      case "status": {
+        const id = msg.command.id;
+        const sub = subs.get(id);
+        if (!sub)
+          return;
+        try {
+          sub.handlers.onStatus?.(msg.command);
+        } catch {}
+        break;
+      }
+      case "error": {
+        const text = `${msg.code}: ${msg.message}`;
+        for (const sub of subs.values()) {
+          try {
+            sub.handlers.onError?.(text);
+          } catch {}
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  function openSocket() {
+    if (!endpointURL)
+      return false;
+    closedIntentionally = false;
+    emitConnection("connecting");
+    let next;
+    try {
+      next = createSocket(endpointURL);
+    } catch {
+      scheduleReconnect();
+      return false;
+    }
+    socket = next;
+    socket.onopen = () => {
+      reconnectAttempt = 0;
+      emitConnection("connected");
+      for (const sub of subs.values()) {
+        sub.resyncPending = false;
+        sendSubscribe(sub);
+      }
+    };
+    socket.onmessage = (data) => handleMessage(data);
+    socket.onclose = () => {
+      socket = undefined;
+      if (closedIntentionally) {
+        emitConnection("disconnected");
+        return;
+      }
+      emitConnection("disconnected");
+      scheduleReconnect();
+    };
+    socket.onerror = () => {};
+    return true;
+  }
+  function scheduleReconnect() {
+    if (closedIntentionally)
+      return;
+    if (reconnectTimer)
+      return;
+    const delay = Math.min(initialBackoffMs * 2 ** reconnectAttempt, maxBackoffMs);
+    reconnectAttempt += 1;
+    emitConnection("connecting");
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined;
+      if (closedIntentionally || !endpointURL || !directory)
+        return;
+      openSocket();
+    }, delay);
+    const t = reconnectTimer;
+    try {
+      t.unref?.();
+    } catch {}
+  }
+  return {
+    get connectionState() {
+      return state;
+    },
+    async connect(nextDirectory) {
+      directory = nextDirectory;
+      let endpoint;
+      try {
+        endpoint = await readEndpoint(nextDirectory);
+      } catch {
+        return { ok: false, reason: "no-endpoint" };
+      }
+      if (!endpoint || typeof endpoint.url !== "string" || endpoint.url.length === 0) {
+        return { ok: false, reason: "no-endpoint" };
+      }
+      if (endpointURL === endpoint.url && socket && (state === "connected" || state === "connecting")) {
+        return { ok: true };
+      }
+      try {
+        socket?.close(1000, "reconnect");
+      } catch {}
+      socket = undefined;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = undefined;
+      }
+      reconnectAttempt = 0;
+      endpointURL = endpoint.url;
+      const opened = openSocket();
+      if (!opened)
+        return { ok: false, reason: "connect-failed" };
+      return { ok: true };
+    },
+    subscribe(commandID, ownerSessionID, handlers = {}) {
+      if (!commandID || !ownerSessionID)
+        return { ok: false, reason: "owner-required" };
+      let sub = subs.get(commandID);
+      if (!sub) {
+        sub = {
+          commandID,
+          ownerSessionID,
+          handlers,
+          endOffset: undefined,
+          startOffset: undefined,
+          resyncPending: false,
+          resyncTimes: []
+        };
+        subs.set(commandID, sub);
+      } else {
+        sub.ownerSessionID = ownerSessionID;
+        sub.handlers = handlers;
+        sub.endOffset = undefined;
+        sub.startOffset = undefined;
+        sub.resyncPending = false;
+      }
+      if (!socket || state !== "connected") {
+        return { ok: true };
+      }
+      return sendSubscribe(sub) ? { ok: true } : { ok: false, reason: "send-failed" };
+    },
+    unsubscribe(commandID) {
+      subs.delete(commandID);
+    },
+    sendInput(commandID, data) {
+      if (!socket || state !== "connected" || !subs.has(commandID)) {
+        return { ok: false, reason: "not-subscribed" };
+      }
+      return sendWire({ type: "input", commandID, data }) ? { ok: true } : { ok: false, reason: "send-failed" };
+    },
+    sendInterrupt(commandID) {
+      if (!socket || state !== "connected" || !subs.has(commandID)) {
+        return { ok: false, reason: "not-subscribed" };
+      }
+      return sendWire({ type: "interrupt", commandID }) ? { ok: true } : { ok: false, reason: "send-failed" };
+    },
+    isLive(commandID) {
+      return state === "connected" && subs.has(commandID);
+    },
+    disconnect() {
+      closedIntentionally = true;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = undefined;
+      }
+      try {
+        socket?.close(1000, "client disconnect");
+      } catch {}
+      socket = undefined;
+      emitConnection("disconnected");
+    },
+    dispose() {
+      subs.clear();
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = undefined;
+      }
+      closedIntentionally = true;
+      try {
+        socket?.close(1000, "client dispose");
+      } catch {}
+      socket = undefined;
+      if (state !== "disconnected")
+        emitConnection("disconnected");
+    }
+  };
+}
+
 // src/tui/command-panel.tsx
 function prevent2(evt) {
   const e = evt;
@@ -2559,17 +3071,115 @@ function CommandPanel(props) {
   let inputEl;
   const client = createControlClient(props.directory);
   const ownerSessionID = props.ownerSessionID ?? routeOwnerSessionID(props.api);
+  const stream = createCommandStreamClient();
+  let subscribedID;
+  let streamConnected = false;
+  let lastSlowListRefresh = 0;
+  const SLOW_LIST_REFRESH_MS = 30000;
+  function streamLiveForSelected() {
+    const id = state().selectedCommand?.id;
+    return streamConnected && !!id && stream.isLive(id);
+  }
+  function applyCommandMetadata(cmd) {
+    setState((prev) => {
+      const idx = prev.commands.findIndex((c) => c.id === cmd.id);
+      if (idx < 0)
+        return prev;
+      const next = [...prev.commands];
+      next[idx] = cmd;
+      return {
+        ...prev,
+        commands: next,
+        selectedCommand: next[prev.selected] ?? null
+      };
+    });
+  }
+  function syncStreamSubscription() {
+    const sel = state().selectedCommand;
+    if (!ownerSessionID || !sel) {
+      if (subscribedID) {
+        stream.unsubscribe(subscribedID);
+        subscribedID = undefined;
+      }
+      return;
+    }
+    if (subscribedID === sel.id && stream.isLive(sel.id))
+      return;
+    if (subscribedID && subscribedID !== sel.id)
+      stream.unsubscribe(subscribedID);
+    subscribedID = sel.id;
+    stream.subscribe(sel.id, ownerSessionID, {
+      onSnapshot: (snap) => {
+        if (subscribedID !== sel.id)
+          return;
+        setOutput(snap.data);
+        setOutputMeta({
+          startByte: snap.startOffset,
+          totalBytes: snap.endOffset,
+          live: snap.command.status === "running"
+        });
+        applyCommandMetadata(snap.command);
+      },
+      onDelta: (delta) => {
+        if (subscribedID !== sel.id)
+          return;
+        setOutput((prev) => prev + delta.data);
+        setOutputMeta((prev) => ({
+          ...prev,
+          totalBytes: delta.endOffset
+        }));
+      },
+      onStatus: (cmd) => {
+        applyCommandMetadata(cmd);
+      },
+      onError: (message) => {
+        setStatusText(message);
+      },
+      onConnection: (s) => {
+        streamConnected = s === "connected";
+        if (streamConnected)
+          syncStreamSubscription();
+      }
+    });
+    streamConnected = stream.connectionState === "connected";
+  }
+  async function tryStreamConnect() {
+    if (!ownerSessionID)
+      return;
+    try {
+      const r = await stream.connect(props.directory);
+      streamConnected = stream.connectionState === "connected";
+      if (r.ok)
+        syncStreamSubscription();
+    } catch {}
+  }
   async function refresh() {
     try {
+      if (streamLiveForSelected()) {
+        const now = Date.now();
+        if (now - lastSlowListRefresh < SLOW_LIST_REFRESH_MS)
+          return;
+        lastSlowListRefresh = now;
+        const s = await readState(props.directory);
+        const mine = (s.commands ?? []).filter((c) => ownerSessionID ? c.ownerSessionID === ownerSessionID : false);
+        setState((prev) => refreshCommandList(prev, mine));
+        syncStreamSubscription();
+        return;
+      }
       const s = await readState(props.directory);
       const mine = (s.commands ?? []).filter((c) => ownerSessionID ? c.ownerSessionID === ownerSessionID : false);
       setState((prev) => refreshCommandList(prev, mine));
+      syncStreamSubscription();
+      if (!streamConnected)
+        tryStreamConnect();
       await refreshOutput();
     } catch (e) {
       setStatusText(`Error: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
   async function refreshOutput() {
+    if (streamLiveForSelected())
+      return;
     const sel = state().selectedCommand;
     if (!sel) {
       setOutput("");
@@ -2628,11 +3238,14 @@ function CommandPanel(props) {
       setStatusText("No command selected.");
       return;
     }
+    const payload = text.endsWith(`
+`) ? text : `${text}
+`;
+    if (streamLiveForSelected() && stream.sendInput(id, payload).ok)
+      return;
     await sendRaw("cmd_write", {
       commandID: id,
-      input: text.endsWith(`
-`) ? text : `${text}
-`
+      input: payload
     }, id);
   }
   async function interrupt() {
@@ -2641,6 +3254,8 @@ function CommandPanel(props) {
       setStatusText("No command selected.");
       return;
     }
+    if (streamLiveForSelected() && stream.sendInterrupt(id).ok)
+      return;
     await sendRaw("cmd_interrupt", {
       commandID: id
     }, id);
@@ -2753,6 +3368,7 @@ function CommandPanel(props) {
   }
   onMount2(() => {
     refresh();
+    tryStreamConnect();
     focusInput();
   });
   const pollers = [setInterval(refresh, 2000), setInterval(refreshOutput, 2000)];
@@ -2763,6 +3379,10 @@ function CommandPanel(props) {
         u();
     for (const p of pollers)
       clearInterval(p);
+    if (subscribedID)
+      stream.unsubscribe(subscribedID);
+    subscribedID = undefined;
+    stream.dispose();
   });
   useKeyboard2((evt) => {
     const name = (evt.name || "").toLowerCase();
@@ -2808,24 +3428,28 @@ function CommandPanel(props) {
     if (name === "down" || key === "j") {
       prevent2(evt);
       setState((s) => moveCommandSelection(s, 1));
+      syncStreamSubscription();
       refreshOutput();
       return;
     }
     if (name === "up" || key === "k") {
       prevent2(evt);
       setState((s) => moveCommandSelection(s, -1));
+      syncStreamSubscription();
       refreshOutput();
       return;
     }
     if (key === "g") {
       prevent2(evt);
       setState(selectCommandFirst);
+      syncStreamSubscription();
       refreshOutput();
       return;
     }
     if (key === "G") {
       prevent2(evt);
       setState(selectCommandLast);
+      syncStreamSubscription();
       refreshOutput();
       return;
     }

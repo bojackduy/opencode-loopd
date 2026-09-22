@@ -1,8 +1,9 @@
 // ─── TUI: Command Sessions Panel ─────────────────────────────────────────────
 // Native host-owned overlay (xlarge dialog) for standalone command sessions.
 // Honest bounded slice: output is a replayed byte stream (plain text), NOT
-// full terminal emulation — labeled as such in the UI. Live updates via
-// polling; keyboard input writes raw stdin; closing detaches, never
+// full terminal emulation — labeled as such in the UI. Live updates via the
+// command stream socket when available (2s polling stays as the fallback);
+// keyboard input writes raw stdin; closing detaches, never
 // terminates. Resize is stored-only (pipe host has no tty winsize).
 //
 // TUI key/action vocabulary (mirrors interaction-registry tuiKeys):
@@ -27,6 +28,7 @@ import {
   parseCommandLine,
   type CommandPanelState,
 } from "./command-controller"
+import { createCommandStreamClient } from "./command-stream-client"
 import { isEnterKey, isEscapeKey } from "./dashboard"
 
 interface Props {
@@ -61,13 +63,110 @@ export function CommandPanel(props: Props) {
   const client = createControlClient(props.directory)
   const ownerSessionID = props.ownerSessionID ?? routeOwnerSessionID(props.api)
 
+  // ─── Stream-primary output (poll fallback) ──────────────────────────────
+  // The stream client owns live deltas when connected+subscribed; the 2s
+  // pollers below stay as the fallback and are gated off while the stream is
+  // live (same client drives both the v1 xlarge dialog and the v2 fullscreen
+  // session.panel paths — this component is shared).
+  const stream = createCommandStreamClient()
+  let subscribedID: string | undefined
+  let streamConnected = false
+  let lastSlowListRefresh = 0
+  const SLOW_LIST_REFRESH_MS = 30_000
+
+  function streamLiveForSelected(): boolean {
+    const id = state().selectedCommand?.id
+    return streamConnected && !!id && stream.isLive(id)
+  }
+
+  function applyCommandMetadata(cmd: CommandSession) {
+    setState((prev) => {
+      const idx = prev.commands.findIndex((c) => c.id === cmd.id)
+      if (idx < 0) return prev
+      const next = [...prev.commands]
+      next[idx] = cmd
+      return { ...prev, commands: next, selectedCommand: next[prev.selected] ?? null }
+    })
+  }
+
+  function syncStreamSubscription() {
+    const sel = state().selectedCommand
+    if (!ownerSessionID || !sel) {
+      if (subscribedID) {
+        stream.unsubscribe(subscribedID)
+        subscribedID = undefined
+      }
+      return
+    }
+    if (subscribedID === sel.id && stream.isLive(sel.id)) return
+    if (subscribedID && subscribedID !== sel.id) stream.unsubscribe(subscribedID)
+    subscribedID = sel.id
+    stream.subscribe(sel.id, ownerSessionID, {
+      onSnapshot: (snap) => {
+        if (subscribedID !== sel.id) return
+        setOutput(snap.data)
+        setOutputMeta({ startByte: snap.startOffset, totalBytes: snap.endOffset, live: snap.command.status === "running" })
+        applyCommandMetadata(snap.command)
+      },
+      onDelta: (delta) => {
+        if (subscribedID !== sel.id) return
+        setOutput((prev) => prev + delta.data)
+        setOutputMeta((prev) => ({ ...prev, totalBytes: delta.endOffset }))
+      },
+      onStatus: (cmd) => {
+        applyCommandMetadata(cmd)
+      },
+      onError: (message) => {
+        setStatusText(message)
+      },
+      onConnection: (s) => {
+        streamConnected = s === "connected"
+        if (streamConnected) syncStreamSubscription()
+      },
+    })
+    // Keep the locally tracked flag in sync for the synchronous path (the
+    // onConnection callback above covers async transitions).
+    streamConnected = stream.connectionState === "connected"
+  }
+
+  async function tryStreamConnect() {
+    if (!ownerSessionID) return
+    try {
+      const r = await stream.connect(props.directory)
+      streamConnected = stream.connectionState === "connected"
+      if (r.ok) syncStreamSubscription()
+      // "no-endpoint" is NORMAL (server starts lazily) — stay on polling;
+      // the refresh tick below retries discovery on its existing cadence.
+    } catch {
+      // Connect failure → stay on polling, retry on the refresh tick.
+    }
+  }
+
   async function refresh() {
     try {
+      // Stream-live: slow 30s metadata safety refresh for list-level changes
+      // (new commands started elsewhere); output comes from live deltas.
+      if (streamLiveForSelected()) {
+        const now = Date.now()
+        if (now - lastSlowListRefresh < SLOW_LIST_REFRESH_MS) return
+        lastSlowListRefresh = now
+        const s = await readState(props.directory)
+        const mine = (s.commands ?? []).filter((c) =>
+          ownerSessionID ? c.ownerSessionID === ownerSessionID : false,
+        )
+        setState((prev) => refreshCommandList(prev, mine as CommandSession[]))
+        syncStreamSubscription()
+        return
+      }
       const s = await readState(props.directory)
       const mine = (s.commands ?? []).filter((c) =>
         ownerSessionID ? c.ownerSessionID === ownerSessionID : false,
       )
       setState((prev) => refreshCommandList(prev, mine as CommandSession[]))
+      syncStreamSubscription()
+      // Disconnected: retry endpoint discovery on the existing refresh tick
+      // (no new timer) so the stream resumes when the server appears.
+      if (!streamConnected) void tryStreamConnect()
       await refreshOutput()
     } catch (e) {
       setStatusText(`Error: ${e instanceof Error ? e.message : String(e)}`)
@@ -75,6 +174,9 @@ export function CommandPanel(props: Props) {
   }
 
   async function refreshOutput() {
+    // Stream-live: deltas append immediately; the 2s output poller is
+    // effectively stopped for the selected command (early return, no fetch).
+    if (streamLiveForSelected()) return
     const sel = state().selectedCommand
     if (!sel) {
       setOutput("")
@@ -119,13 +221,17 @@ export function CommandPanel(props: Props) {
   }
 
   // "write"/"input": insert-mode typing goes to stdin as raw bytes.
+  // Prefers the stream socket when connected+subscribed, else falls back to
+  // the control bus. Never double-sends on both paths.
   async function writeInput(text: string) {
     const id = selectedID()
     if (!id) {
       setStatusText("No command selected.")
       return
     }
-    await sendRaw("cmd_write", { commandID: id, input: text.endsWith("\n") ? text : `${text}\n` }, id)
+    const payload = text.endsWith("\n") ? text : `${text}\n`
+    if (streamLiveForSelected() && stream.sendInput(id, payload).ok) return
+    await sendRaw("cmd_write", { commandID: id, input: payload }, id)
   }
 
   // "ctrl-c"/"interrupt": SIGINT delivery, never a kill.
@@ -135,6 +241,7 @@ export function CommandPanel(props: Props) {
       setStatusText("No command selected.")
       return
     }
+    if (streamLiveForSelected() && stream.sendInterrupt(id).ok) return
     await sendRaw("cmd_interrupt", { commandID: id }, id)
   }
 
@@ -246,6 +353,7 @@ export function CommandPanel(props: Props) {
 
   onMount(() => {
     void refresh()
+    void tryStreamConnect()
     focusInput()
   })
   const pollers = [setInterval(refresh, 2000), setInterval(refreshOutput, 2000)]
@@ -256,6 +364,10 @@ export function CommandPanel(props: Props) {
   onCleanup(() => {
     for (const u of unsubs) if (typeof u === "function") (u as () => void)()
     for (const p of pollers) clearInterval(p)
+    // Detach semantics unchanged: unsubscribe locally, never terminate.
+    if (subscribedID) stream.unsubscribe(subscribedID)
+    subscribedID = undefined
+    stream.dispose()
   })
 
   useKeyboard((evt: ParsedKey) => {
@@ -301,24 +413,28 @@ export function CommandPanel(props: Props) {
     if (name === "down" || key === "j") {
       prevent(evt)
       setState((s) => moveCommandSelection(s, 1))
+      syncStreamSubscription()
       void refreshOutput()
       return
     }
     if (name === "up" || key === "k") {
       prevent(evt)
       setState((s) => moveCommandSelection(s, -1))
+      syncStreamSubscription()
       void refreshOutput()
       return
     }
     if (key === "g") {
       prevent(evt)
       setState(selectCommandFirst)
+      syncStreamSubscription()
       void refreshOutput()
       return
     }
     if (key === "G") {
       prevent(evt)
       setState(selectCommandLast)
+      syncStreamSubscription()
       void refreshOutput()
       return
     }
