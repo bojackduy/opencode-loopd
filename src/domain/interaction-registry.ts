@@ -145,6 +145,73 @@ export const INTERACTIONS: InteractionDef[] = [
     needsGoal: false,
     transport: "worker",
   },
+
+  // ── Command sessions (standalone; never coupled to goals) ──────────
+  // Agent side: loopd_command_* owner tools. TUI side: the :commands panel
+  // (src/tui/command-panel.tsx) over the same control-bus ops (cmd_*).
+  {
+    command: "—",
+    agentTools: ["loopd_command_start"],
+    tuiKeys: ["commands", "new"],
+    label: "Start command",
+    description: "Start a standalone interactive command session (owner-scoped; goal linkage is display-only)",
+    needsGoal: false,
+    transport: "both",
+  },
+  {
+    command: "—",
+    agentTools: ["loopd_command_list", "loopd_command_get"],
+    tuiKeys: ["commands", "open-cmd"],
+    label: "Inspect command",
+    description: "List/select command sessions with bounded byte-stream output replay plus live updates; closing detaches, never terminates",
+    needsGoal: false,
+    transport: "both",
+  },
+  {
+    command: "—",
+    agentTools: ["loopd_command_write"],
+    tuiKeys: ["write", "input"],
+    label: "Write to command",
+    description: "Send raw stdin bytes to a running command",
+    needsGoal: false,
+    transport: "both",
+  },
+  {
+    command: "—",
+    agentTools: ["loopd_command_interrupt"],
+    tuiKeys: ["ctrl-c", "interrupt"],
+    label: "Interrupt command",
+    description: "Deliver SIGINT (Ctrl+C) as a signal, not a kill; a trapping process may continue",
+    needsGoal: false,
+    transport: "both",
+  },
+  {
+    command: "—",
+    agentTools: ["loopd_command_terminate"],
+    tuiKeys: ["terminate"],
+    label: "Terminate command",
+    description: "SIGTERM escalating to SIGKILL; never pauses/blocks any goal",
+    needsGoal: false,
+    transport: "both",
+  },
+  {
+    command: "—",
+    agentTools: ["loopd_command_remove"],
+    tuiKeys: ["remove"],
+    label: "Remove command",
+    description: "Remove a finished command and its log; refuses while running (terminate ≠ remove)",
+    needsGoal: false,
+    transport: "both",
+  },
+  {
+    command: "—",
+    agentTools: ["loopd_command_resize"],
+    tuiKeys: ["resize"],
+    label: "Resize command",
+    description: "Requested size is stored only; the pipe host has no tty winsize (honestly unsupported)",
+    needsGoal: false,
+    transport: "both",
+  },
 ]
 
 // ── Helpers for codegen / validation ─────────────────────────────────

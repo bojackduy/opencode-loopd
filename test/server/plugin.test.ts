@@ -148,6 +148,14 @@ describe("Server Plugin V2", () => {
       "force_complete_goal",
       "force_block_goal",
       "clear_goal",
+      "loopd_command_start",
+      "loopd_command_list",
+      "loopd_command_get",
+      "loopd_command_write",
+      "loopd_command_interrupt",
+      "loopd_command_terminate",
+      "loopd_command_remove",
+      "loopd_command_resize",
     ])
     expect(hookNames).toEqual(["execute.before", "execute.after"])
 

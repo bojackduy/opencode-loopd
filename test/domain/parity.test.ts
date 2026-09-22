@@ -1,8 +1,11 @@
 import { describe, expect, it } from "bun:test"
 import { INTERACTIONS } from "../../src/domain/interaction-registry"
 import { ownerTools } from "../../src/server/owner-tools"
+import { commandTools } from "../../src/server/command-tools"
 import { createFakeHost } from "../../src/server/host-adapter"
+import { createFakeCommandHost } from "../../src/server/command-host"
 import { createGoalService } from "../../src/application/goal-service"
+import { createCommandService } from "../../src/application/command-service"
 import { readFileSync } from "fs"
 import path from "path"
 
@@ -59,12 +62,14 @@ describe("Interaction parity registry", () => {
     expect(INTERACTIONS.length).toBeGreaterThanOrEqual(12)
   })
 
-  it("agent tools in the registry actually exist in ownerTools", async () => {
+  it("agent tools in the registry actually exist in ownerTools/commandTools", async () => {
     const dir = `/tmp/loopd-parity-${crypto.randomUUID()}`
     const host = createFakeHost()
     const goalService = createGoalService(host)
     const tools = ownerTools({ directory: dir, host, goalService })
-    const toolNames = new Set(Object.keys(tools))
+    const commandService = createCommandService(createFakeCommandHost())
+    const cmdTools = commandTools({ directory: dir, commandService })
+    const toolNames = new Set([...Object.keys(tools), ...Object.keys(cmdTools)])
     // Worker tools live in goalTools, not ownerTools — skip them
     const workerTools = new Set(["get_goal", "report_goal_progress", "complete_goal", "block_goal"])
     for (const def of INTERACTIONS) {
@@ -76,14 +81,18 @@ describe("Interaction parity registry", () => {
     }
   })
 
-  it("TUI keys in the registry appear in dashboard code", () => {
+  it("TUI keys in the registry appear in dashboard/command code", () => {
     const dashboardPath = path.join(import.meta.dir, "../../src/tui/dashboard.tsx")
     const dashboardSrc = readFileSync(dashboardPath, "utf8")
     const parserPath = path.join(import.meta.dir, "../../src/tui/command-parser.ts")
     const parserSrc = readFileSync(parserPath, "utf8")
     const workerPath = path.join(import.meta.dir, "../../src/application/control-worker.ts")
     const workerSrc = readFileSync(workerPath, "utf8")
-    const combined = dashboardSrc + "\n" + parserSrc + "\n" + workerSrc
+    const panelPath = path.join(import.meta.dir, "../../src/tui/command-panel.tsx")
+    const panelSrc = readFileSync(panelPath, "utf8")
+    const controllerPath = path.join(import.meta.dir, "../../src/tui/command-controller.ts")
+    const controllerSrc = readFileSync(controllerPath, "utf8")
+    const combined = dashboardSrc + "\n" + parserSrc + "\n" + workerSrc + "\n" + panelSrc + "\n" + controllerSrc
     for (const def of INTERACTIONS) {
       if (def.transport === "worker") continue
       // "start" is exposed via control bus, not a dashboard key — its TUI side is the deprecated :goal alias

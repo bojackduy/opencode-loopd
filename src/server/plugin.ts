@@ -10,8 +10,11 @@ import { createLoopEngine } from "../application/loop-engine"
 import { createGoalService } from "../application/goal-service"
 import { createScheduleWorker } from "../application/schedule-worker"
 import { createRealHost, createV2Host, type LoopHost, type SessionStatusType } from "./host-adapter"
+import { createLocalProcessHost } from "./command-host"
+import { createCommandService } from "../application/command-service"
 import { goalTools } from "./goal-tools"
 import { ownerTools } from "./owner-tools"
+import { commandTools } from "./command-tools"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
 import { addToolCall, removeToolCall } from "../domain/runtime"
 import { readState, mutateState } from "../infrastructure/state-repository"
@@ -32,10 +35,15 @@ const server: Plugin = async ({ client, directory }, pluginOptions) => {
 
 function createServerHooks(directory: string, host: LoopHost, defaults: GoalToolDefaults): Hooks {
   const goalService = createGoalService(host)
+  // Command sessions are standalone (no goal coupling): their own host
+  // (local child processes — see command-host.ts + capability matrix) and
+  // their own service. Never share the AI worker host methods.
+  const commandService = createCommandService(createLocalProcessHost())
 
   const worker = createControlWorker({
     directory,
     goalService,
+    commandService,
     pollIntervalMs: 1_000,
     defaults,
   })
@@ -69,6 +77,9 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
     reconciliationStarted = true
     void logServerEvent(directory, "reconcile.started")
     void goalService.reconcile(directory).then(
+      () => commandService.reconcile(directory),
+      (error) => logServerEvent(directory, "reconcile.failed", { detail: describeError(error) }),
+    ).then(
       () => logServerEvent(directory, "reconcile.completed"),
       (error) => logServerEvent(directory, "reconcile.failed", { detail: describeError(error) }),
     )
@@ -86,7 +97,7 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
       await engine.handleEvent(event)
       if (type?.startsWith("session.")) reconcileInBackground()
     },
-    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }) },
+    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }), ...commandTools({ directory, commandService }) },
     "tool.execute.before": async (input, _output) => {
       // Track tool call start for worker sessions only
       const activeWorkers = goalService.getActiveWorkers()
@@ -168,6 +179,7 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
       engine.stop()
       await worker.stop()
       scheduleWorker.stop()
+      await commandService.dispose(directory)
     },
   }
 }
@@ -261,6 +273,7 @@ function toV2Tool(id: string, definition: ToolDefinition, directory: string) {
   return {
     name: id,
     description: definition.description,
+    ...(id === "loopd_command_start" ? { permission: "bash" } : {}),
     input: v1Tool.schema.object(definition.args),
     async execute(input: unknown, context: { sessionID: string; agent: string; messageID: string; id: string }) {
       const result = await definition.execute(input as never, {
@@ -271,6 +284,8 @@ function toV2Tool(id: string, definition: ToolDefinition, directory: string) {
         worktree: directory,
         abort: new AbortController().signal,
         metadata() {},
+        // v2 applies the tool's declared `permission: "bash"` before execute.
+        // v1 definitions still call ask() so both hosts preserve authorization.
         async ask() {},
       })
       if (typeof result === "string") return { content: result }

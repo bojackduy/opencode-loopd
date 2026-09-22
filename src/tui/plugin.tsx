@@ -5,6 +5,7 @@
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import type { Plugin as TuiV2 } from "@opencode/plugin/tui"
 import { LoopDashboard } from "./dashboard"
+import { CommandPanel } from "./command-panel"
 
 const PLUGIN_ID = "opencode-loopd.tui"
 
@@ -18,6 +19,13 @@ const tui: TuiPlugin = async (api) => {
     previousFocus?.blur()
   }
 
+  const openCommands = () => {
+    const previousFocus = api.renderer.currentFocusedRenderable
+    api.ui.dialog.replace(() => <CommandPanel api={api} directory={directory} />)
+    api.ui.dialog.setSize("xlarge")
+    previousFocus?.blur()
+  }
+
   api.keymap.registerLayer({
     commands: [
       {
@@ -27,6 +35,14 @@ const tui: TuiPlugin = async (api) => {
         namespace: "palette",
         slashName: "loop",
         run: open,
+      },
+      {
+        name: "opencode.loopd.commands",
+        title: "Command Sessions",
+        category: "Loop",
+        namespace: "palette",
+        slashName: "commands",
+        run: openCommands,
       },
     ],
     bindings: [
@@ -171,6 +187,12 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
       },
     },
     route: {
+      get current() {
+        const current = ctx.ui.router.current()
+        return current.type === "session"
+          ? { name: "session", params: { sessionID: current.sessionID } }
+          : { name: current.type, params: {} }
+      },
       navigate: (name: string, params?: Record<string, unknown>) => {
         if (name === "session") ctx.ui.router.navigate({ type: "session", sessionID: params?.sessionID as string })
       },
@@ -188,11 +210,35 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
     previousFocus?.blur()
   }
 
+  const openCommands = () => {
+    const previousFocus = (ctx.renderer as unknown as { currentFocusedRenderable?: { blur(): void } })
+      .currentFocusedRenderable
+    dialogOpen = true
+    ctx.ui.dialog.show(() => <CommandPanel api={facade} directory={directory} />, () => {
+      dialogOpen = false
+    })
+    ctx.ui.dialog.set({ size: "xlarge" })
+    previousFocus?.blur()
+  }
+
   // NOTE: ctx.keymap.layer() must run inside a component — the host resolves
   // the layer against the ambient Keymap provider, so calling it in setup()
   // throws. Claim the always-mounted "app" slot with a null-render component
   // as the mount point (same pattern as telescope).
   const command = "opencode.loopd.dashboard"
+  const commandsCommand = "opencode.loopd.commands"
+  const commandsPanel = "opencode.loopd.commands"
+  const unclaimCommandPanel = ctx.ui.slot({
+    append: "session.panel",
+    render: (input) => input.name === commandsPanel
+      ? <CommandPanel
+          api={facade}
+          directory={directory}
+          ownerSessionID={input.sessionID}
+          onDetach={input.close}
+        />
+      : null,
+  })
   let layerRegistered = false
   const unclaimSlot = ctx.ui.slot({
     append: "app",
@@ -210,6 +256,16 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
               bind: "<leader>o",
               run: open,
             },
+            {
+              id: commandsCommand,
+              title: "Command Sessions",
+              group: "Loop",
+              palette: true,
+              slash: { name: "commands" },
+              run: () => {
+                if (!ctx.ui.panel.open(commandsPanel, { presentation: "fullscreen" })) openCommands()
+              },
+            },
           ],
           bindings: [command],
         }))
@@ -220,6 +276,8 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
 
   return () => {
     closeDialog()
+    ctx.ui.panel.close()
+    unclaimCommandPanel()
     unclaimSlot()
   }
 }

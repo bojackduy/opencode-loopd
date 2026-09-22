@@ -34,6 +34,8 @@ docs/
 ## Quick links
 
 - **Planning**
+  - [Command Sessions](./planning/command-sessions.md)
+  - [Command Session Capability Matrix](./planning/command-session-capability-matrix.md)
   - [E2E Hardened Plan](./planning/e2e-hardened-plan.md)
   - [Future Work](./planning/future-work.md)
   - [Remaining Work](./planning/remaining-work.md)

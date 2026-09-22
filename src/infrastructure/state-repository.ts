@@ -8,8 +8,9 @@ import os from "os"
 
 import type { Goal, GoalID } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
+import type { CommandSession } from "../domain/command-session"
 
-const CURRENT_VERSION = 6
+const CURRENT_VERSION = 7
 
 export interface StoreState {
   version: number
@@ -18,6 +19,8 @@ export interface StoreState {
   runtimes: GoalRuntimeState[]
   /** Command ledger for idempotency. Bounded to last 100 entries. */
   commandLedger?: CommandLedgerEntry[]
+  /** Standalone command sessions (metadata only — never handles/screens). */
+  commands?: CommandSession[]
 }
 
 export interface CommandLedgerEntry {
@@ -29,7 +32,7 @@ export interface CommandLedgerEntry {
 }
 
 function emptyState(): StoreState {
-  return { version: CURRENT_VERSION, revision: 0, goals: [], runtimes: [], commandLedger: [] }
+  return { version: CURRENT_VERSION, revision: 0, goals: [], runtimes: [], commandLedger: [], commands: [] }
 }
 
 function loopDir(directory: string): string {
@@ -264,6 +267,13 @@ function migrate(state: StoreState): StoreState {
       nextRunAt: rt.nextRunAt ?? undefined,
       lastScheduleAt: rt.lastScheduleAt ?? undefined,
     }))
+  }
+
+  if (result.version < 7) {
+    result.version = 7
+    // Command sessions are new in v7. Never synthesize them: only ensure the
+    // array exists so readers can treat it as authoritative.
+    if (!Array.isArray((result as any).commands)) (result as any).commands = []
   }
 
   return result
@@ -558,6 +568,57 @@ export async function peekGoalInbox(
   } catch {
     return []
   }
+}
+
+// ─── Command Session Output Logs ─────────────────────────────────────────────
+// Per-command byte-stream logs so cross-process readers (TUI) can replay
+// output without access to the server's in-memory handles. Bounded: when the
+// file exceeds twice the retain budget, the oldest half is dropped and the
+// session is flagged truncated.
+
+export function commandLogFile(directory: string, commandID: string): string {
+  return path.join(loopDir(directory), "commands", `${commandID}.log`)
+}
+
+export async function appendCommandLog(
+  directory: string,
+  commandID: string,
+  chunk: string,
+): Promise<void> {
+  const file = commandLogFile(directory, commandID)
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  await fs.appendFile(file, chunk, "utf8")
+}
+
+export async function readCommandLog(
+  directory: string,
+  commandID: string,
+  opts?: { offsetBytes?: number; limitBytes?: number },
+): Promise<{ text: string; totalBytes: number; startByte: number }> {
+  const file = commandLogFile(directory, commandID)
+  try {
+    const stat = await fs.stat(file)
+    const totalBytes = stat.size
+    const startByte = Math.max(0, opts?.offsetBytes ?? 0)
+    if (startByte >= totalBytes) return { text: "", totalBytes, startByte }
+    const fh = await fs.open(file, "r")
+    try {
+      const want = Math.min(opts?.limitBytes ?? 64 * 1024, totalBytes - startByte)
+      const buf = Buffer.alloc(want)
+      await fh.read(buf, 0, want, startByte)
+      return { text: buf.toString("utf8"), totalBytes, startByte }
+    } finally {
+      await fh.close()
+    }
+  } catch {
+    return { text: "", totalBytes: 0, startByte: 0 }
+  }
+}
+
+export async function removeCommandLog(directory: string, commandID: string): Promise<void> {
+  try {
+    await fs.rm(commandLogFile(directory, commandID), { force: true })
+  } catch {}
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

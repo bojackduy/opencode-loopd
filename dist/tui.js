@@ -2,7 +2,7 @@
 var __require = import.meta.require;
 
 // src/tui/plugin.tsx
-import { createComponent as _$createComponent2 } from "@opentui/solid";
+import { createComponent as _$createComponent3 } from "@opentui/solid";
 
 // src/tui/dashboard.tsx
 import { use as _$use } from "@opentui/solid";
@@ -19,12 +19,15 @@ import { createElement as _$createElement } from "@opentui/solid";
 import { createSignal, For, Show, onCleanup, onMount, createEffect } from "solid-js";
 import { useKeyboard } from "@opentui/solid";
 
+// src/infrastructure/control-client.ts
+import { randomUUID } from "crypto";
+
 // src/infrastructure/state-repository.ts
 import { promises as fs } from "fs";
 import path from "path";
-var CURRENT_VERSION = 6;
+var CURRENT_VERSION = 7;
 function emptyState() {
-  return { version: CURRENT_VERSION, revision: 0, goals: [], runtimes: [], commandLedger: [] };
+  return { version: CURRENT_VERSION, revision: 0, goals: [], runtimes: [], commandLedger: [], commands: [] };
 }
 function loopDir(directory) {
   return path.join(directory, ".opencode", "loopd");
@@ -149,6 +152,11 @@ function migrate(state) {
       lastScheduleAt: rt.lastScheduleAt ?? undefined
     }));
   }
+  if (result.version < 7) {
+    result.version = 7;
+    if (!Array.isArray(result.commands))
+      result.commands = [];
+  }
   return result;
 }
 async function writeAtomic(target, contents) {
@@ -209,6 +217,30 @@ async function readControlResponse(directory, requestID) {
     return;
   }
 }
+function commandLogFile(directory, commandID) {
+  return path.join(loopDir(directory), "commands", `${commandID}.log`);
+}
+async function readCommandLog(directory, commandID, opts) {
+  const file = commandLogFile(directory, commandID);
+  try {
+    const stat = await fs.stat(file);
+    const totalBytes = stat.size;
+    const startByte = Math.max(0, opts?.offsetBytes ?? 0);
+    if (startByte >= totalBytes)
+      return { text: "", totalBytes, startByte };
+    const fh = await fs.open(file, "r");
+    try {
+      const want = Math.min(opts?.limitBytes ?? 64 * 1024, totalBytes - startByte);
+      const buf = Buffer.alloc(want);
+      await fh.read(buf, 0, want, startByte);
+      return { text: buf.toString("utf8"), totalBytes, startByte };
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return { text: "", totalBytes: 0, startByte: 0 };
+  }
+}
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -216,12 +248,19 @@ function delay(ms) {
 // src/infrastructure/control-client.ts
 function createControlClient(directory) {
   async function execute(command, timeoutMs = 30000) {
-    const request = {
-      requestID: command.requestID,
+    return executeRaw({
       command: command.command,
       goalID: command.goalID,
-      args: "args" in command ? command.args : undefined,
-      requestedAt: command.requestedAt
+      args: "args" in command ? command.args : undefined
+    }, timeoutMs);
+  }
+  async function executeRaw(command, timeoutMs = 30000) {
+    const request = {
+      requestID: randomUUID(),
+      command: command.command,
+      goalID: command.goalID,
+      args: command.args,
+      requestedAt: new Date().toISOString()
     };
     await writeControlRequest(directory, request);
     const deadline = Date.now() + timeoutMs;
@@ -245,7 +284,7 @@ function createControlClient(directory) {
   async function getEvents(limit) {
     return readEvents(directory, limit);
   }
-  return { execute, getState, getEvents };
+  return { execute, executeRaw, getState, getEvents };
 }
 function delay2(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -449,7 +488,7 @@ function launchBrowserCommand(command, args) {
 }
 
 // src/tui/dashboard.tsx
-import { randomUUID } from "crypto";
+import { randomUUID as randomUUID2 } from "crypto";
 var LOG_FILE = "/tmp/loopd-tui.log";
 function debugLog(...args) {
   try {
@@ -903,7 +942,7 @@ function LoopDashboard(props) {
           }
           const r = await client.execute({
             version: 1,
-            requestID: randomUUID(),
+            requestID: randomUUID2(),
             requestedAt: new Date().toISOString(),
             command: "send",
             goalID: selectedGoal().id,
@@ -937,7 +976,7 @@ function LoopDashboard(props) {
           const evidence = parsed.args.evidence || "Manual override \u2014 no verification checks run.";
           const r = await client.execute({
             version: 1,
-            requestID: randomUUID(),
+            requestID: randomUUID2(),
             requestedAt: new Date().toISOString(),
             command: "force_complete",
             goalID: selectedGoal().id,
@@ -960,7 +999,7 @@ function LoopDashboard(props) {
           const needed = parsed.args.needed || "User intervention required.";
           const r = await client.execute({
             version: 1,
-            requestID: randomUUID(),
+            requestID: randomUUID2(),
             requestedAt: new Date().toISOString(),
             command: "block",
             goalID: selectedGoal().id,
@@ -981,7 +1020,7 @@ function LoopDashboard(props) {
           }
           const r = await client.execute({
             version: 1,
-            requestID: randomUUID(),
+            requestID: randomUUID2(),
             requestedAt: new Date().toISOString(),
             command: "pause",
             goalID: selectedGoal().id
@@ -998,7 +1037,7 @@ function LoopDashboard(props) {
           }
           const r = await client.execute({
             version: 1,
-            requestID: randomUUID(),
+            requestID: randomUUID2(),
             requestedAt: new Date().toISOString(),
             command: "resume",
             goalID: selectedGoal().id
@@ -1015,7 +1054,7 @@ function LoopDashboard(props) {
           }
           const r = await client.execute({
             version: 1,
-            requestID: randomUUID(),
+            requestID: randomUUID2(),
             requestedAt: new Date().toISOString(),
             command: "retry",
             goalID: selectedGoal().id
@@ -1032,7 +1071,7 @@ function LoopDashboard(props) {
           }
           const r = await client.execute({
             version: 1,
-            requestID: randomUUID(),
+            requestID: randomUUID2(),
             requestedAt: new Date().toISOString(),
             command: "clear",
             goalID: selectedGoal().id
@@ -1049,7 +1088,7 @@ function LoopDashboard(props) {
           }
           const r = await client.execute({
             version: 1,
-            requestID: randomUUID(),
+            requestID: randomUUID2(),
             requestedAt: new Date().toISOString(),
             command: "abort_worker",
             goalID: selectedGoal().id
@@ -1066,7 +1105,7 @@ function LoopDashboard(props) {
           }
           const r = await client.execute({
             version: 1,
-            requestID: randomUUID(),
+            requestID: randomUUID2(),
             requestedAt: new Date().toISOString(),
             command: "nudge",
             goalID: selectedGoal().id
@@ -1100,7 +1139,7 @@ function LoopDashboard(props) {
             const message = parsed.raw;
             const r = await client.execute({
               version: 1,
-              requestID: randomUUID(),
+              requestID: randomUUID2(),
               requestedAt: new Date().toISOString(),
               command: "send",
               goalID: selectedGoal().id,
@@ -2396,13 +2435,633 @@ function LoopDashboard(props) {
   })();
 }
 
+// src/tui/command-panel.tsx
+import { effect as _$effect2 } from "@opentui/solid";
+import { use as _$use2 } from "@opentui/solid";
+import { memo as _$memo2 } from "@opentui/solid";
+import { createComponent as _$createComponent2 } from "@opentui/solid";
+import { insert as _$insert2 } from "@opentui/solid";
+import { createTextNode as _$createTextNode2 } from "@opentui/solid";
+import { insertNode as _$insertNode2 } from "@opentui/solid";
+import { setProp as _$setProp2 } from "@opentui/solid";
+import { createElement as _$createElement2 } from "@opentui/solid";
+import { createSignal as createSignal2, For as For2, Show as Show2, onCleanup as onCleanup2, onMount as onMount2 } from "solid-js";
+import { useKeyboard as useKeyboard2 } from "@opentui/solid";
+
+// src/tui/command-controller.ts
+function emptyCommandPanelState() {
+  return { commands: [], selected: 0, selectedCommand: null, outputOffset: 0, statusText: "", inputMode: false };
+}
+function refreshCommandList(state, commands) {
+  const prevID = state.selectedCommand?.id;
+  let selected = 0;
+  if (prevID) {
+    const idx = commands.findIndex((c) => c.id === prevID);
+    if (idx >= 0)
+      selected = idx;
+    else
+      selected = Math.min(state.selected, Math.max(0, commands.length - 1));
+  }
+  return { ...state, commands, selected, selectedCommand: commands[selected] ?? null, outputOffset: 0 };
+}
+function moveCommandSelection(state, delta) {
+  if (state.commands.length === 0)
+    return state;
+  const next = Math.min(Math.max(0, state.selected + delta), state.commands.length - 1);
+  return { ...state, selected: next, selectedCommand: state.commands[next] ?? null, outputOffset: 0 };
+}
+function selectCommandFirst(state) {
+  if (state.commands.length === 0)
+    return state;
+  return { ...state, selected: 0, selectedCommand: state.commands[0] ?? null, outputOffset: 0 };
+}
+function selectCommandLast(state) {
+  if (state.commands.length === 0)
+    return state;
+  const last = state.commands.length - 1;
+  return { ...state, selected: last, selectedCommand: state.commands[last] ?? null, outputOffset: 0 };
+}
+function parseCommandLine(input) {
+  const args = [];
+  let current = "";
+  let quote;
+  let escaped = false;
+  let started = false;
+  for (const char of input.trim()) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      started = true;
+      continue;
+    }
+    if (char === "\\" && quote !== "'") {
+      escaped = true;
+      started = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote)
+        quote = undefined;
+      else
+        current += char;
+      started = true;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      started = true;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (started) {
+        args.push(current);
+        current = "";
+        started = false;
+      }
+      continue;
+    }
+    current += char;
+    started = true;
+  }
+  if (quote || escaped)
+    return;
+  if (started)
+    args.push(current);
+  return args;
+}
+
+// src/tui/command-panel.tsx
+function prevent2(evt) {
+  const e = evt;
+  e.preventDefault?.();
+  e.stopPropagation?.();
+}
+function routeOwnerSessionID(api) {
+  try {
+    const current = api.route?.current;
+    if (current?.name === "session" && current.params?.sessionID)
+      return current.params.sessionID;
+  } catch {}
+  return;
+}
+function CommandPanel(props) {
+  const theme = () => props.api.theme.current;
+  const [state, setState] = createSignal2(emptyCommandPanelState());
+  const [output, setOutput] = createSignal2("");
+  const [outputMeta, setOutputMeta] = createSignal2({
+    startByte: 0,
+    totalBytes: 0,
+    live: false
+  });
+  const [insertMode, setInsertMode] = createSignal2(false);
+  const [inputValue, setInputValue] = createSignal2("");
+  const [statusText, setStatusText] = createSignal2("commands: j/k move \xB7 enter write-mode \xB7 ctrl-c interrupt \xB7 :terminate :remove :resize \xB7 q detach");
+  let inputEl;
+  const client = createControlClient(props.directory);
+  const ownerSessionID = props.ownerSessionID ?? routeOwnerSessionID(props.api);
+  async function refresh() {
+    try {
+      const s = await readState(props.directory);
+      const mine = (s.commands ?? []).filter((c) => ownerSessionID ? c.ownerSessionID === ownerSessionID : false);
+      setState((prev) => refreshCommandList(prev, mine));
+      await refreshOutput();
+    } catch (e) {
+      setStatusText(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  async function refreshOutput() {
+    const sel = state().selectedCommand;
+    if (!sel) {
+      setOutput("");
+      return;
+    }
+    try {
+      const total = sel.outputBytes;
+      const window = 32 * 1024;
+      const startByte = Math.max(0, total - window);
+      const log = await readCommandLog(props.directory, sel.id, {
+        offsetBytes: startByte,
+        limitBytes: window
+      });
+      setOutput(log.text);
+      setOutputMeta({
+        startByte: log.startByte,
+        totalBytes: total,
+        live: sel.status === "running"
+      });
+    } catch {
+      setOutput("");
+    }
+  }
+  async function sendRaw(command, args, commandID) {
+    if (!ownerSessionID) {
+      setStatusText("No owning session (open from a session view) \u2014 mutations disabled.");
+      return;
+    }
+    setStatusText(`sending ${command}\u2026`);
+    try {
+      const r = await client.executeRaw({
+        command,
+        goalID: commandID,
+        args: {
+          ...args,
+          ownerSessionID
+        }
+      });
+      setStatusText(r.ok ? r.message : `Error: ${r.message}`);
+      if (r.ok)
+        await refresh();
+    } catch (e) {
+      setStatusText(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  function selectedID() {
+    return state().selectedCommand?.id;
+  }
+  async function openCmd() {
+    await refreshOutput();
+    setStatusText("open-cmd: output snapshot refreshed (live while running).");
+  }
+  async function writeInput(text) {
+    const id = selectedID();
+    if (!id) {
+      setStatusText("No command selected.");
+      return;
+    }
+    await sendRaw("cmd_write", {
+      commandID: id,
+      input: text.endsWith(`
+`) ? text : `${text}
+`
+    }, id);
+  }
+  async function interrupt() {
+    const id = selectedID();
+    if (!id) {
+      setStatusText("No command selected.");
+      return;
+    }
+    await sendRaw("cmd_interrupt", {
+      commandID: id
+    }, id);
+  }
+  async function terminate() {
+    const id = selectedID();
+    if (!id) {
+      setStatusText("No command selected.");
+      return;
+    }
+    await sendRaw("cmd_terminate", {
+      commandID: id
+    }, id);
+  }
+  async function remove() {
+    const id = selectedID();
+    if (!id) {
+      setStatusText("No command selected.");
+      return;
+    }
+    await sendRaw("cmd_remove", {
+      commandID: id
+    }, id);
+  }
+  async function resize(cols, rows) {
+    const id = selectedID();
+    if (!id) {
+      setStatusText("No command selected.");
+      return;
+    }
+    await sendRaw("cmd_resize", {
+      commandID: id,
+      cols,
+      rows
+    }, id);
+  }
+  async function startNew(raw) {
+    const parts = parseCommandLine(raw);
+    if (!parts) {
+      setStatusText("Invalid command line: close quotes and trailing escapes.");
+      return;
+    }
+    if (parts.length === 0) {
+      setStatusText("Usage: :new <command> [args...]");
+      return;
+    }
+    const [command, ...cmdArgs] = parts;
+    if (!ownerSessionID) {
+      setStatusText("No owning session (open from a session view) \u2014 mutations disabled.");
+      return;
+    }
+    setStatusText(`sending cmd_start\u2026`);
+    try {
+      const r = await client.executeRaw({
+        command: "cmd_start",
+        args: {
+          title: command,
+          command,
+          cmdArgs,
+          ownerSessionID
+        }
+      });
+      setStatusText(r.ok ? r.message : `Error: ${r.message}`);
+      if (r.ok)
+        await refresh();
+    } catch (e) {
+      setStatusText(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  async function executeColonCommand(raw) {
+    const text = raw.startsWith(":") ? raw.slice(1) : raw;
+    const [verb, ...rest] = text.trim().split(/\s+/);
+    switch (verb) {
+      case "new":
+        await startNew(rest.join(" "));
+        break;
+      case "terminate":
+        await terminate();
+        break;
+      case "remove":
+        await remove();
+        break;
+      case "interrupt":
+        await interrupt();
+        break;
+      case "resize": {
+        const cols = Number(rest[0]);
+        const rows = Number(rest[1]);
+        if (!Number.isInteger(cols) || !Number.isInteger(rows)) {
+          setStatusText("Usage: :resize <cols> <rows> (stored only \u2014 unsupported by pipe host)");
+          break;
+        }
+        await resize(cols, rows);
+        break;
+      }
+      case "open-cmd":
+        await openCmd();
+        break;
+      default:
+        setStatusText(`Unknown :${verb}. Try :new, :terminate, :remove, :interrupt, :resize, :open-cmd`);
+    }
+  }
+  function focusInput() {
+    setTimeout(() => {
+      const current = props.api.renderer.currentFocusedRenderable;
+      if (current && current !== inputEl)
+        current.blur();
+      inputEl?.focus();
+    }, 10);
+  }
+  onMount2(() => {
+    refresh();
+    focusInput();
+  });
+  const pollers = [setInterval(refresh, 2000), setInterval(refreshOutput, 2000)];
+  const unsubs = [props.api.event.on("session.idle", () => refresh()), props.api.event.on("session.status", () => refresh())];
+  onCleanup2(() => {
+    for (const u of unsubs)
+      if (typeof u === "function")
+        u();
+    for (const p of pollers)
+      clearInterval(p);
+  });
+  useKeyboard2((evt) => {
+    const name = (evt.name || "").toLowerCase();
+    const seq = evt.sequence || "";
+    const raw = evt.raw || "";
+    const key = raw || seq || name;
+    const ctrlC = Boolean(evt.ctrl) && name === "c";
+    if (insertMode()) {
+      if (isEnterKey(evt)) {
+        prevent2(evt);
+        const v = inputValue();
+        if (v.startsWith(":"))
+          executeColonCommand(v);
+        else
+          writeInput(v);
+        setInputValue("");
+        if (inputEl)
+          inputEl.value = "";
+        setInsertMode(false);
+        return;
+      }
+      if (isEscapeKey(evt)) {
+        prevent2(evt);
+        setInsertMode(false);
+        setInputValue("");
+        if (inputEl)
+          inputEl.value = "";
+        return;
+      }
+      return;
+    }
+    if (ctrlC) {
+      prevent2(evt);
+      interrupt();
+      return;
+    }
+    if (key === ":") {
+      prevent2(evt);
+      setInsertMode(true);
+      focusInput();
+      return;
+    }
+    if (name === "down" || key === "j") {
+      prevent2(evt);
+      setState((s) => moveCommandSelection(s, 1));
+      refreshOutput();
+      return;
+    }
+    if (name === "up" || key === "k") {
+      prevent2(evt);
+      setState((s) => moveCommandSelection(s, -1));
+      refreshOutput();
+      return;
+    }
+    if (key === "g") {
+      prevent2(evt);
+      setState(selectCommandFirst);
+      refreshOutput();
+      return;
+    }
+    if (key === "G") {
+      prevent2(evt);
+      setState(selectCommandLast);
+      refreshOutput();
+      return;
+    }
+    if (key === "q") {
+      prevent2(evt);
+      if (props.onDetach)
+        props.onDetach();
+      else
+        props.api.ui.dialog.clear();
+      return;
+    }
+  });
+  const sel = () => state().selectedCommand;
+  return (() => {
+    var _el$ = _$createElement2("box"), _el$2 = _$createElement2("box"), _el$3 = _$createElement2("box"), _el$4 = _$createElement2("text"), _el$5 = _$createElement2("span"), _el$7 = _$createElement2("span"), _el$9 = _$createElement2("text"), _el$0 = _$createElement2("span"), _el$1 = _$createTextNode2(` owned`), _el$11 = _$createElement2("box"), _el$12 = _$createElement2("text"), _el$13 = _$createElement2("span"), _el$14 = _$createElement2("input");
+    _$insertNode2(_el$, _el$2);
+    _$setProp2(_el$, "flexDirection", "column");
+    _$setProp2(_el$, "width", "100%");
+    _$setProp2(_el$, "alignItems", "center");
+    _$setProp2(_el$, "padding", 1);
+    _$insertNode2(_el$2, _el$3);
+    _$insertNode2(_el$2, _el$11);
+    _$setProp2(_el$2, "flexDirection", "column");
+    _$setProp2(_el$2, "width", "90%");
+    _$setProp2(_el$2, "border", true);
+    _$setProp2(_el$2, "padding", 1);
+    _$insertNode2(_el$3, _el$4);
+    _$insertNode2(_el$3, _el$9);
+    _$setProp2(_el$3, "flexDirection", "row");
+    _$setProp2(_el$3, "justifyContent", "space-between");
+    _$setProp2(_el$3, "flexShrink", 0);
+    _$insertNode2(_el$4, _el$5);
+    _$insertNode2(_el$4, _el$7);
+    _$insertNode2(_el$5, _$createTextNode2(`\u2B22 Command Sessions`));
+    _$insertNode2(_el$7, _$createTextNode2(` \u2502 byte-stream output (not a terminal emulator)`));
+    _$insertNode2(_el$9, _el$0);
+    _$insertNode2(_el$0, _el$1);
+    _$insert2(_el$0, () => state().commands.length, _el$1);
+    _$insert2(_el$2, _$createComponent2(Show2, {
+      get when() {
+        return state().commands.length > 0;
+      },
+      get fallback() {
+        return (() => {
+          var _el$15 = _$createElement2("box"), _el$16 = _$createElement2("text"), _el$17 = _$createElement2("span");
+          _$insertNode2(_el$15, _el$16);
+          _$setProp2(_el$15, "padding", 1);
+          _$insertNode2(_el$16, _el$17);
+          _$insert2(_el$17, ownerSessionID ? "No command sessions. :new <command> [args...] to start one." : "Open this panel from a session view \u2014 owner scoping needs a session.");
+          _$effect2((_$p) => _$setProp2(_el$17, "style", {
+            fg: theme().textMuted
+          }, _$p));
+          return _el$15;
+        })();
+      },
+      get children() {
+        var _el$10 = _$createElement2("box");
+        _$setProp2(_el$10, "flexDirection", "column");
+        _$setProp2(_el$10, "flexShrink", 1);
+        _$setProp2(_el$10, "minHeight", 0);
+        _$setProp2(_el$10, "overflow", "hidden");
+        _$insert2(_el$10, _$createComponent2(For2, {
+          get each() {
+            return state().commands;
+          },
+          children: (cmd, i) => (() => {
+            var _el$18 = _$createElement2("box"), _el$19 = _$createElement2("text"), _el$20 = _$createElement2("span"), _el$21 = _$createElement2("span"), _el$22 = _$createTextNode2(` \u2502 `), _el$23 = _$createTextNode2(` \u2502 `);
+            _$insertNode2(_el$18, _el$19);
+            _$setProp2(_el$18, "paddingLeft", 1);
+            _$setProp2(_el$18, "paddingRight", 1);
+            _$insertNode2(_el$19, _el$20);
+            _$insertNode2(_el$19, _el$21);
+            _$setProp2(_el$19, "wrapMode", "none");
+            _$setProp2(_el$19, "truncate", true);
+            _$insert2(_el$20, () => i() === state().selected ? "\u25B6 " : "  ", null);
+            _$insert2(_el$20, () => cmd.title, null);
+            _$insertNode2(_el$21, _el$22);
+            _$insertNode2(_el$21, _el$23);
+            _$insert2(_el$21, () => [cmd.command, ...cmd.args].join(" ").slice(0, 60), _el$23);
+            _$insert2(_el$21, () => cmd.status, null);
+            _$insert2(_el$21, (() => {
+              var _c$ = _$memo2(() => cmd.exitCode !== undefined);
+              return () => _c$() ? ` (${cmd.exitCode})` : "";
+            })(), null);
+            _$effect2((_p$) => {
+              var _v$10 = i() === state().selected ? theme().backgroundElement : undefined, _v$11 = {
+                fg: cmd.status === "running" ? theme().success : theme().textMuted,
+                bold: i() === state().selected
+              }, _v$12 = {
+                fg: theme().textMuted
+              };
+              _v$10 !== _p$.e && (_p$.e = _$setProp2(_el$18, "backgroundColor", _v$10, _p$.e));
+              _v$11 !== _p$.t && (_p$.t = _$setProp2(_el$20, "style", _v$11, _p$.t));
+              _v$12 !== _p$.a && (_p$.a = _$setProp2(_el$21, "style", _v$12, _p$.a));
+              return _p$;
+            }, {
+              e: undefined,
+              t: undefined,
+              a: undefined
+            });
+            return _el$18;
+          })()
+        }));
+        return _el$10;
+      }
+    }), _el$11);
+    _$insert2(_el$2, _$createComponent2(Show2, {
+      get when() {
+        return sel();
+      },
+      children: (cmd) => (() => {
+        var _el$24 = _$createElement2("box"), _el$25 = _$createElement2("text"), _el$26 = _$createElement2("span"), _el$27 = _$createElement2("span"), _el$28 = _$createTextNode2(` \u2502 `), _el$29 = _$createTextNode2(` \u2502 `), _el$30 = _$createTextNode2(` \u2502 `), _el$31 = _$createTextNode2(` bytes`), _el$32 = _$createTextNode2(`
+`), _el$33 = _$createElement2("span");
+        _$insertNode2(_el$24, _el$25);
+        _$setProp2(_el$24, "flexDirection", "column");
+        _$setProp2(_el$24, "border", true);
+        _$setProp2(_el$24, "padding", 1);
+        _$setProp2(_el$24, "flexShrink", 0);
+        _$setProp2(_el$24, "maxHeight", 16);
+        _$setProp2(_el$24, "overflow", "hidden");
+        _$insertNode2(_el$25, _el$26);
+        _$insertNode2(_el$25, _el$27);
+        _$insertNode2(_el$25, _el$32);
+        _$insertNode2(_el$25, _el$33);
+        _$insert2(_el$26, () => cmd().title);
+        _$insertNode2(_el$27, _el$28);
+        _$insertNode2(_el$27, _el$29);
+        _$insertNode2(_el$27, _el$30);
+        _$insertNode2(_el$27, _el$31);
+        _$insert2(_el$27, () => [cmd().command, ...cmd().args].join(" "), _el$29);
+        _$insert2(_el$27, () => cmd().status, _el$30);
+        _$insert2(_el$27, () => outputMeta().totalBytes, _el$31);
+        _$insert2(_el$27, () => outputMeta().live ? " \xB7 live" : "", null);
+        _$insert2(_el$27, () => cmd().truncated ? " \xB7 truncated" : "", null);
+        _$insert2(_el$33, () => output().slice(-4000) || "(no output yet)");
+        _$effect2((_p$) => {
+          var _v$13 = theme().border, _v$14 = {
+            fg: theme().primary,
+            bold: true
+          }, _v$15 = {
+            fg: theme().textMuted
+          }, _v$16 = {
+            fg: theme().text
+          };
+          _v$13 !== _p$.e && (_p$.e = _$setProp2(_el$24, "borderColor", _v$13, _p$.e));
+          _v$14 !== _p$.t && (_p$.t = _$setProp2(_el$26, "style", _v$14, _p$.t));
+          _v$15 !== _p$.a && (_p$.a = _$setProp2(_el$27, "style", _v$15, _p$.a));
+          _v$16 !== _p$.o && (_p$.o = _$setProp2(_el$33, "style", _v$16, _p$.o));
+          return _p$;
+        }, {
+          e: undefined,
+          t: undefined,
+          a: undefined,
+          o: undefined
+        });
+        return _el$24;
+      })()
+    }), _el$11);
+    _$insertNode2(_el$11, _el$12);
+    _$insertNode2(_el$11, _el$14);
+    _$setProp2(_el$11, "flexDirection", "row");
+    _$setProp2(_el$11, "border", true);
+    _$setProp2(_el$11, "paddingLeft", 1);
+    _$setProp2(_el$11, "paddingRight", 1);
+    _$setProp2(_el$11, "flexShrink", 0);
+    _$setProp2(_el$11, "height", 3);
+    _$setProp2(_el$11, "gap", 1);
+    _$insertNode2(_el$12, _el$13);
+    _$insert2(_el$13, () => insertMode() ? " INPUT " : " NORMAL ");
+    _$use2((el) => {
+      inputEl = el;
+    }, _el$14);
+    _$setProp2(_el$14, "flexGrow", 1);
+    _$setProp2(_el$14, "onInput", (v) => {
+      if (insertMode())
+        setInputValue(v);
+      else if (inputEl?.value)
+        inputEl.value = "";
+    });
+    _$effect2((_p$) => {
+      var _v$ = theme().border, _v$2 = {
+        fg: theme().primary,
+        bold: true
+      }, _v$3 = {
+        fg: theme().textMuted
+      }, _v$4 = {
+        fg: theme().textMuted
+      }, _v$5 = insertMode() ? theme().warning : theme().border, _v$6 = {
+        fg: insertMode() ? theme().warning : theme().success,
+        bold: true
+      }, _v$7 = insertMode() ? "type stdin, Enter sends (:new/:terminate/:remove/:interrupt/:resize/:open-cmd)" : statusText() || "Press : to type, q to detach", _v$8 = theme().textMuted, _v$9 = theme().primary, _v$0 = theme().text, _v$1 = theme().background;
+      _v$ !== _p$.e && (_p$.e = _$setProp2(_el$2, "borderColor", _v$, _p$.e));
+      _v$2 !== _p$.t && (_p$.t = _$setProp2(_el$5, "style", _v$2, _p$.t));
+      _v$3 !== _p$.a && (_p$.a = _$setProp2(_el$7, "style", _v$3, _p$.a));
+      _v$4 !== _p$.o && (_p$.o = _$setProp2(_el$0, "style", _v$4, _p$.o));
+      _v$5 !== _p$.i && (_p$.i = _$setProp2(_el$11, "borderColor", _v$5, _p$.i));
+      _v$6 !== _p$.n && (_p$.n = _$setProp2(_el$13, "style", _v$6, _p$.n));
+      _v$7 !== _p$.s && (_p$.s = _$setProp2(_el$14, "placeholder", _v$7, _p$.s));
+      _v$8 !== _p$.h && (_p$.h = _$setProp2(_el$14, "placeholderColor", _v$8, _p$.h));
+      _v$9 !== _p$.r && (_p$.r = _$setProp2(_el$14, "cursorColor", _v$9, _p$.r));
+      _v$0 !== _p$.d && (_p$.d = _$setProp2(_el$14, "focusedTextColor", _v$0, _p$.d));
+      _v$1 !== _p$.l && (_p$.l = _$setProp2(_el$14, "focusedBackgroundColor", _v$1, _p$.l));
+      return _p$;
+    }, {
+      e: undefined,
+      t: undefined,
+      a: undefined,
+      o: undefined,
+      i: undefined,
+      n: undefined,
+      s: undefined,
+      h: undefined,
+      r: undefined,
+      d: undefined,
+      l: undefined
+    });
+    return _el$;
+  })();
+}
+
 // src/tui/plugin.tsx
 var PLUGIN_ID = "opencode-loopd.tui";
 var tui = async (api) => {
   const directory = api.state.path.directory;
   const open = () => {
     const previousFocus = api.renderer.currentFocusedRenderable;
-    api.ui.dialog.replace(() => _$createComponent2(LoopDashboard, {
+    api.ui.dialog.replace(() => _$createComponent3(LoopDashboard, {
+      api,
+      directory
+    }));
+    api.ui.dialog.setSize("xlarge");
+    previousFocus?.blur();
+  };
+  const openCommands = () => {
+    const previousFocus = api.renderer.currentFocusedRenderable;
+    api.ui.dialog.replace(() => _$createComponent3(CommandPanel, {
       api,
       directory
     }));
@@ -2417,6 +3076,13 @@ var tui = async (api) => {
       namespace: "palette",
       slashName: "loop",
       run: open
+    }, {
+      name: "opencode.loopd.commands",
+      title: "Command Sessions",
+      category: "Loop",
+      namespace: "palette",
+      slashName: "commands",
+      run: openCommands
     }],
     bindings: [{
       key: "<leader>o",
@@ -2534,6 +3200,18 @@ var v2setup = (ctx) => {
       }
     },
     route: {
+      get current() {
+        const current = ctx.ui.router.current();
+        return current.type === "session" ? {
+          name: "session",
+          params: {
+            sessionID: current.sessionID
+          }
+        } : {
+          name: current.type,
+          params: {}
+        };
+      },
       navigate: (name, params) => {
         if (name === "session")
           ctx.ui.router.navigate({
@@ -2546,7 +3224,21 @@ var v2setup = (ctx) => {
   const open = () => {
     const previousFocus = ctx.renderer.currentFocusedRenderable;
     dialogOpen = true;
-    ctx.ui.dialog.show(() => _$createComponent2(LoopDashboard, {
+    ctx.ui.dialog.show(() => _$createComponent3(LoopDashboard, {
+      api: facade,
+      directory
+    }), () => {
+      dialogOpen = false;
+    });
+    ctx.ui.dialog.set({
+      size: "xlarge"
+    });
+    previousFocus?.blur();
+  };
+  const openCommands = () => {
+    const previousFocus = ctx.renderer.currentFocusedRenderable;
+    dialogOpen = true;
+    ctx.ui.dialog.show(() => _$createComponent3(CommandPanel, {
       api: facade,
       directory
     }), () => {
@@ -2558,6 +3250,21 @@ var v2setup = (ctx) => {
     previousFocus?.blur();
   };
   const command = "opencode.loopd.dashboard";
+  const commandsCommand = "opencode.loopd.commands";
+  const commandsPanel = "opencode.loopd.commands";
+  const unclaimCommandPanel = ctx.ui.slot({
+    append: "session.panel",
+    render: (input) => input.name === commandsPanel ? _$createComponent3(CommandPanel, {
+      api: facade,
+      directory,
+      get ownerSessionID() {
+        return input.sessionID;
+      },
+      get onDetach() {
+        return input.close;
+      }
+    }) : null
+  });
   let layerRegistered = false;
   const unclaimSlot = ctx.ui.slot({
     append: "app",
@@ -2575,6 +3282,20 @@ var v2setup = (ctx) => {
             },
             bind: "<leader>o",
             run: open
+          }, {
+            id: commandsCommand,
+            title: "Command Sessions",
+            group: "Loop",
+            palette: true,
+            slash: {
+              name: "commands"
+            },
+            run: () => {
+              if (!ctx.ui.panel.open(commandsPanel, {
+                presentation: "fullscreen"
+              }))
+                openCommands();
+            }
           }],
           bindings: [command]
         }));
@@ -2584,6 +3305,8 @@ var v2setup = (ctx) => {
   });
   return () => {
     closeDialog();
+    ctx.ui.panel.close();
+    unclaimCommandPanel();
     unclaimSlot();
   };
 };

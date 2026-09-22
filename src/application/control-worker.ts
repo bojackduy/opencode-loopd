@@ -15,11 +15,13 @@ import {
   recoverStaleProcessing,
   readState,
   writeState,
+  mutateState,
   appendEvent,
   type ControlRequest,
   type ControlResponse,
 } from "../infrastructure/state-repository"
 import type { GoalService } from "./goal-service"
+import type { CommandService } from "./command-service"
 import {
   resolveGoalCreationConfig,
   type GoalCreationDefaults,
@@ -32,6 +34,7 @@ const RESPONSE_CLEANUP_AGE_MS = 60 * 60 * 1000 // 1 hour
 export interface ControlWorkerOptions {
   directory: string
   goalService: GoalService
+  commandService?: CommandService
   pollIntervalMs?: number
   defaults?: GoalCreationDefaults
   onRequest?: (request: ControlRequest) => void
@@ -386,6 +389,81 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
         break
       }
 
+      // ── Command sessions (standalone; never touch goals) ──────────────
+      case "cmd_start":
+      case "cmd_write":
+      case "cmd_interrupt":
+      case "cmd_terminate":
+      case "cmd_remove":
+      case "cmd_resize": {
+        const cmdSvc = options.commandService
+        if (!cmdSvc) {
+          response = {
+            requestID: request.requestID,
+            ok: false,
+            message: `command "${request.command}" unavailable (command service not initialized)`,
+            errorCode: "unavailable",
+            completedAt: new Date().toISOString(),
+          }
+          break
+        }
+        const args = (request.args ?? {}) as Record<string, unknown>
+        const ownerSessionID = typeof args.ownerSessionID === "string" ? args.ownerSessionID : ""
+        // The local control bus is not an authentication boundary. Require the
+        // selected session explicitly so the TUI cannot accidentally cross
+        // session ownership; autonomous agent starts use OpenCode permission.
+        if (!ownerSessionID || ownerSessionID === "main") {
+          response = { ...base, ok: false, message: "ownerSessionID is required for command operations", errorCode: "no_session" }
+          break
+        }
+        try {
+          if (request.command === "cmd_start") {
+            const session = await cmdSvc.start(directory, {
+              title: String(args.title || "command"),
+              command: String(args.command || ""),
+              args: Array.isArray(args.cmdArgs) ? (args.cmdArgs as string[]) : [],
+              cwd: typeof args.cwd === "string" ? args.cwd : undefined,
+              ownerSessionID,
+              goalID: typeof args.goalID === "string" ? args.goalID : undefined,
+              cols: typeof args.cols === "number" ? args.cols : undefined,
+              rows: typeof args.rows === "number" ? args.rows : undefined,
+            })
+            const state = await readState(directory)
+            response = { ...base, message: `command "${session.title}" started (${session.id.slice(0, 8)}...)`, stateRevision: state.revision }
+          } else {
+            const id = String(args.commandID || request.goalID || "")
+            if (!id) {
+              response = { ...base, ok: false, message: "commandID is required", errorCode: "bad_request" }
+              break
+            }
+            if (request.command === "cmd_write") {
+              const r = await cmdSvc.write(directory, id, ownerSessionID, String(args.input ?? ""))
+              const state = await readState(directory)
+              response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision }
+            } else if (request.command === "cmd_interrupt") {
+              const r = await cmdSvc.interrupt(directory, id, ownerSessionID)
+              const state = await readState(directory)
+              response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision }
+            } else if (request.command === "cmd_terminate") {
+              const r = await cmdSvc.terminate(directory, id, ownerSessionID)
+              const state = await readState(directory)
+              response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision }
+            } else if (request.command === "cmd_remove") {
+              const r = await cmdSvc.remove(directory, id, ownerSessionID)
+              const state = await readState(directory)
+              response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision }
+            } else {
+              const r = await cmdSvc.resize(directory, id, ownerSessionID, Number(args.cols), Number(args.rows))
+              const state = await readState(directory)
+              response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision }
+            }
+          }
+        } catch (error) {
+          response = { ...base, ok: false, message: error instanceof Error ? error.message : String(error), errorCode: "command_failed" }
+        }
+        break
+      }
+
       default: {
         response = {
           requestID: request.requestID,
@@ -404,23 +482,21 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
   }
 
   async function recordInLedger(directory: string, request: ControlRequest) {
-    const state = await readState(directory)
-    if (!state.commandLedger) state.commandLedger = []
-
-    state.commandLedger.push({
-      requestID: request.requestID,
-      command: request.command,
-      goalID: request.goalID,
-      acceptedAt: request.requestedAt,
-      completedAt: new Date().toISOString(),
+    await mutateState(directory, `control.ledger:${request.requestID}`, async (state) => {
+      if (!state.commandLedger) state.commandLedger = []
+      if (state.commandLedger.some((entry) => entry.requestID === request.requestID)) return state
+      state.commandLedger.push({
+        requestID: request.requestID,
+        command: request.command,
+        goalID: request.goalID,
+        acceptedAt: request.requestedAt,
+        completedAt: new Date().toISOString(),
+      })
+      if (state.commandLedger.length > MAX_LEDGER_SIZE) {
+        state.commandLedger = state.commandLedger.slice(-MAX_LEDGER_SIZE)
+      }
+      return state
     })
-
-    // Trim to max size
-    if (state.commandLedger.length > MAX_LEDGER_SIZE) {
-      state.commandLedger = state.commandLedger.slice(-MAX_LEDGER_SIZE)
-    }
-
-    await writeState(directory, state)
   }
 
   return { start, stop: async () => { await stop() }, isRunning: () => running }

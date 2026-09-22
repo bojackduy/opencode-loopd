@@ -16,6 +16,11 @@ import type { LoopCommand } from "../domain/commands"
 export interface ControlClient {
   /** Send a command and wait for the response. */
   execute(command: LoopCommand, timeoutMs?: number): Promise<ControlResponse>
+  /** Send a raw control-bus command (e.g. cmd_* command-session ops). */
+  executeRaw(
+    command: { command: string; goalID?: string; args?: Record<string, unknown> },
+    timeoutMs?: number,
+  ): Promise<ControlResponse>
   /** Read current state. */
   getState(): Promise<StoreState>
   /** Read recent events. */
@@ -27,12 +32,26 @@ export function createControlClient(directory: string): ControlClient {
     command: LoopCommand,
     timeoutMs = 30_000,
   ): Promise<ControlResponse> {
+    return executeRaw(
+      {
+        command: command.command,
+        goalID: command.goalID,
+        args: "args" in command ? (command as any).args : undefined,
+      },
+      timeoutMs,
+    )
+  }
+
+  async function executeRaw(
+    command: { command: string; goalID?: string; args?: Record<string, unknown> },
+    timeoutMs = 30_000,
+  ): Promise<ControlResponse> {
     const request: ControlRequest = {
-      requestID: command.requestID,
+      requestID: randomUUID(),
       command: command.command,
       goalID: command.goalID,
-      args: "args" in command ? (command as any).args : undefined,
-      requestedAt: command.requestedAt,
+      args: command.args,
+      requestedAt: new Date().toISOString(),
     }
 
     await writeControlRequest(directory, request)
@@ -62,7 +81,7 @@ export function createControlClient(directory: string): ControlClient {
     return readEvents(directory, limit)
   }
 
-  return { execute, getState, getEvents }
+  return { execute, executeRaw, getState, getEvents }
 }
 
 function delay(ms: number): Promise<void> {

@@ -130,7 +130,7 @@ import { promises as fs } from "fs";
 import path from "path";
 import os from "os";
 function emptyState() {
-  return { version: CURRENT_VERSION, revision: 0, goals: [], runtimes: [], commandLedger: [] };
+  return { version: CURRENT_VERSION, revision: 0, goals: [], runtimes: [], commandLedger: [], commands: [] };
 }
 function loopDir(directory) {
   return path.join(directory, ".opencode", "loopd");
@@ -316,6 +316,11 @@ function migrate(state) {
       lastScheduleAt: rt.lastScheduleAt ?? undefined
     }));
   }
+  if (result.version < 7) {
+    result.version = 7;
+    if (!Array.isArray(result.commands))
+      result.commands = [];
+  }
   return result;
 }
 async function writeAtomic(target, contents) {
@@ -480,10 +485,44 @@ async function peekGoalInbox(directory, goalID) {
     return [];
   }
 }
+function commandLogFile(directory, commandID) {
+  return path.join(loopDir(directory), "commands", `${commandID}.log`);
+}
+async function appendCommandLog(directory, commandID, chunk) {
+  const file = commandLogFile(directory, commandID);
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.appendFile(file, chunk, "utf8");
+}
+async function readCommandLog(directory, commandID, opts) {
+  const file = commandLogFile(directory, commandID);
+  try {
+    const stat = await fs.stat(file);
+    const totalBytes = stat.size;
+    const startByte = Math.max(0, opts?.offsetBytes ?? 0);
+    if (startByte >= totalBytes)
+      return { text: "", totalBytes, startByte };
+    const fh = await fs.open(file, "r");
+    try {
+      const want = Math.min(opts?.limitBytes ?? 64 * 1024, totalBytes - startByte);
+      const buf = Buffer.alloc(want);
+      await fh.read(buf, 0, want, startByte);
+      return { text: buf.toString("utf8"), totalBytes, startByte };
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return { text: "", totalBytes: 0, startByte: 0 };
+  }
+}
+async function removeCommandLog(directory, commandID) {
+  try {
+    await fs.rm(commandLogFile(directory, commandID), { force: true });
+  } catch {}
+}
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-var CURRENT_VERSION = 6, LOCK_STALE_MS = 1e4;
+var CURRENT_VERSION = 7, LOCK_STALE_MS = 1e4;
 var init_state_repository = () => {};
 
 // src/server/plugin.ts
@@ -915,6 +954,76 @@ function createControlWorker(options) {
         response = { ...base, message: `goal "${goal.name}" blocked`, stateRevision: state.revision };
         break;
       }
+      case "cmd_start":
+      case "cmd_write":
+      case "cmd_interrupt":
+      case "cmd_terminate":
+      case "cmd_remove":
+      case "cmd_resize": {
+        const cmdSvc = options.commandService;
+        if (!cmdSvc) {
+          response = {
+            requestID: request.requestID,
+            ok: false,
+            message: `command "${request.command}" unavailable (command service not initialized)`,
+            errorCode: "unavailable",
+            completedAt: new Date().toISOString()
+          };
+          break;
+        }
+        const args = request.args ?? {};
+        const ownerSessionID = typeof args.ownerSessionID === "string" ? args.ownerSessionID : "";
+        if (!ownerSessionID || ownerSessionID === "main") {
+          response = { ...base, ok: false, message: "ownerSessionID is required for command operations", errorCode: "no_session" };
+          break;
+        }
+        try {
+          if (request.command === "cmd_start") {
+            const session = await cmdSvc.start(directory, {
+              title: String(args.title || "command"),
+              command: String(args.command || ""),
+              args: Array.isArray(args.cmdArgs) ? args.cmdArgs : [],
+              cwd: typeof args.cwd === "string" ? args.cwd : undefined,
+              ownerSessionID,
+              goalID: typeof args.goalID === "string" ? args.goalID : undefined,
+              cols: typeof args.cols === "number" ? args.cols : undefined,
+              rows: typeof args.rows === "number" ? args.rows : undefined
+            });
+            const state = await readState(directory);
+            response = { ...base, message: `command "${session.title}" started (${session.id.slice(0, 8)}...)`, stateRevision: state.revision };
+          } else {
+            const id = String(args.commandID || request.goalID || "");
+            if (!id) {
+              response = { ...base, ok: false, message: "commandID is required", errorCode: "bad_request" };
+              break;
+            }
+            if (request.command === "cmd_write") {
+              const r = await cmdSvc.write(directory, id, ownerSessionID, String(args.input ?? ""));
+              const state = await readState(directory);
+              response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision };
+            } else if (request.command === "cmd_interrupt") {
+              const r = await cmdSvc.interrupt(directory, id, ownerSessionID);
+              const state = await readState(directory);
+              response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision };
+            } else if (request.command === "cmd_terminate") {
+              const r = await cmdSvc.terminate(directory, id, ownerSessionID);
+              const state = await readState(directory);
+              response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision };
+            } else if (request.command === "cmd_remove") {
+              const r = await cmdSvc.remove(directory, id, ownerSessionID);
+              const state = await readState(directory);
+              response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision };
+            } else {
+              const r = await cmdSvc.resize(directory, id, ownerSessionID, Number(args.cols), Number(args.rows));
+              const state = await readState(directory);
+              response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision };
+            }
+          }
+        } catch (error) {
+          response = { ...base, ok: false, message: error instanceof Error ? error.message : String(error), errorCode: "command_failed" };
+        }
+        break;
+      }
       default: {
         response = {
           requestID: request.requestID,
@@ -929,20 +1038,23 @@ function createControlWorker(options) {
     return response;
   }
   async function recordInLedger(directory, request) {
-    const state = await readState(directory);
-    if (!state.commandLedger)
-      state.commandLedger = [];
-    state.commandLedger.push({
-      requestID: request.requestID,
-      command: request.command,
-      goalID: request.goalID,
-      acceptedAt: request.requestedAt,
-      completedAt: new Date().toISOString()
+    await mutateState(directory, `control.ledger:${request.requestID}`, async (state) => {
+      if (!state.commandLedger)
+        state.commandLedger = [];
+      if (state.commandLedger.some((entry) => entry.requestID === request.requestID))
+        return state;
+      state.commandLedger.push({
+        requestID: request.requestID,
+        command: request.command,
+        goalID: request.goalID,
+        acceptedAt: request.requestedAt,
+        completedAt: new Date().toISOString()
+      });
+      if (state.commandLedger.length > MAX_LEDGER_SIZE) {
+        state.commandLedger = state.commandLedger.slice(-MAX_LEDGER_SIZE);
+      }
+      return state;
     });
-    if (state.commandLedger.length > MAX_LEDGER_SIZE) {
-      state.commandLedger = state.commandLedger.slice(-MAX_LEDGER_SIZE);
-    }
-    await writeState(directory, state);
   }
   return { start, stop: async () => {
     await stop();
@@ -3321,9 +3433,532 @@ function createScheduleWorker(options) {
   return { start, stop, isRunning, tick };
 }
 
+// src/server/command-host.ts
+var COMMAND_HOST_CAPABILITIES = {
+  spawn: true,
+  write: true,
+  interruptSignal: true,
+  terminate: true,
+  resize: false,
+  terminalEmulation: false
+};
+function createLocalProcessHost() {
+  return {
+    capabilities: COMMAND_HOST_CAPABILITIES,
+    spawn(opts, onOutput, onExit) {
+      const proc = Bun.spawn([opts.command, ...opts.args ?? []], {
+        cwd: opts.cwd,
+        env: { ...process.env, ...opts.env ?? {} },
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe"
+      });
+      let settled = false;
+      let signal;
+      const exitPromise = (async () => {
+        const pumps = [pumpStream(proc.stdout, onOutput), pumpStream(proc.stderr, onOutput)];
+        const code = await proc.exited;
+        await Promise.allSettled(pumps);
+        settled = true;
+        const info = { exitCode: code ?? 0, signal };
+        onExit(info);
+        return info;
+      })();
+      return {
+        pid: proc.pid,
+        write(data) {
+          try {
+            proc.stdin.write(data);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        interrupt() {
+          try {
+            signal = "SIGINT";
+            proc.kill("SIGINT");
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        terminate() {
+          try {
+            if (!signal)
+              signal = "SIGTERM";
+            proc.kill("SIGTERM");
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        kill() {
+          try {
+            signal = "SIGKILL";
+            proc.kill("SIGKILL");
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        isAlive() {
+          if (settled)
+            return false;
+          try {
+            process.kill(proc.pid, 0);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        exited() {
+          return exitPromise;
+        }
+      };
+    },
+    livePids() {
+      return new Set;
+    }
+  };
+}
+async function pumpStream(stream, onOutput) {
+  if (!stream)
+    return;
+  const reader = stream.getReader();
+  const decoder = new TextDecoder;
+  try {
+    for (;; ) {
+      const { done, value } = await reader.read();
+      if (done)
+        break;
+      if (value && value.length > 0)
+        onOutput(decoder.decode(value, { stream: true }));
+    }
+    const rest = decoder.decode();
+    if (rest)
+      onOutput(rest);
+  } catch {} finally {
+    try {
+      reader.releaseLock();
+    } catch {}
+  }
+}
+
+// src/application/command-service.ts
+import { randomUUID as randomUUID6 } from "crypto";
+import { promises as fs3 } from "fs";
+import path3 from "path";
+
+// src/domain/command-session.ts
+function createCommandSession(input) {
+  const now = new Date().toISOString();
+  return {
+    id: input.id,
+    title: input.title,
+    command: input.command,
+    args: input.args ?? [],
+    cwd: input.cwd,
+    ownerSessionID: input.ownerSessionID,
+    goalID: input.goalID,
+    status: "running",
+    pid: input.pid,
+    cols: input.cols,
+    rows: input.rows,
+    outputBytes: 0,
+    truncated: false,
+    createdAt: now,
+    updatedAt: now
+  };
+}
+var MAX_COMMAND_OUTPUT_BYTES = 512 * 1024;
+
+// src/application/command-service.ts
+init_state_repository();
+function loopCommandsDir(directory) {
+  return path3.join(directory, ".opencode", "loopd", "commands");
+}
+function createCommandService(host) {
+  const live = new Map;
+  const operations = new Map;
+  function tailText(entry, limitBytes = 64 * 1024) {
+    let want = limitBytes;
+    const parts = [];
+    for (let i = entry.buffers.length - 1;i >= 0 && want > 0; i--) {
+      const chunk = entry.buffers[i];
+      if (!chunk)
+        continue;
+      parts.unshift(chunk.subarray(Math.max(0, chunk.length - want)));
+      want -= chunk.length;
+    }
+    return Buffer.concat(parts).toString("utf8");
+  }
+  function enqueue(id, operation) {
+    const previous = operations.get(id) ?? Promise.resolve();
+    const next = previous.then(operation, operation);
+    operations.set(id, next);
+    next.finally(() => {
+      if (operations.get(id) === next)
+        operations.delete(id);
+    }).catch(() => {});
+    return next;
+  }
+  async function waitForOperations(id) {
+    await operations.get(id)?.catch(() => {});
+  }
+  async function persistOutput(directory, id, chunk) {
+    const entry = live.get(id);
+    if (entry) {
+      const bytes = Buffer.from(chunk);
+      entry.buffers.push(bytes);
+      entry.bufferedBytes += bytes.length;
+      while (entry.bufferedBytes > 128 * 1024 && entry.buffers.length > 1) {
+        const dropped = entry.buffers.shift();
+        entry.bufferedBytes -= dropped.length;
+      }
+    }
+    await appendCommandLog(directory, id, chunk);
+    let retainedBytes = 0;
+    let truncated = false;
+    const file = path3.join(loopCommandsDir(directory), `${id}.log`);
+    const stat = await fs3.stat(file);
+    retainedBytes = stat.size;
+    if (stat.size > MAX_COMMAND_OUTPUT_BYTES) {
+      const fh = await fs3.open(file, "r");
+      try {
+        const buf = Buffer.alloc(MAX_COMMAND_OUTPUT_BYTES);
+        await fh.read(buf, 0, buf.length, stat.size - buf.length);
+        await fs3.writeFile(file, buf);
+      } finally {
+        await fh.close();
+      }
+      retainedBytes = MAX_COMMAND_OUTPUT_BYTES;
+      truncated = true;
+    }
+    await mutateState(directory, `cmd.output:${id}`, async (s) => {
+      const c = (s.commands ?? []).find((x) => x.id === id);
+      if (!c)
+        return s;
+      c.outputBytes = retainedBytes;
+      if (truncated)
+        c.truncated = true;
+      c.updatedAt = new Date().toISOString();
+      return s;
+    });
+  }
+  async function persistExit(directory, id, info) {
+    live.delete(id);
+    await mutateState(directory, `cmd.exit:${id}`, async (s) => {
+      const c = (s.commands ?? []).find((x) => x.id === id);
+      if (!c || c.status !== "running")
+        return s;
+      c.exitCode = info.exitCode;
+      if (info.signal && (c.signal === "SIGKILL" || c.signal === "SIGTERM")) {
+        c.status = "terminated";
+      } else {
+        c.status = "exited";
+        if (info.signal)
+          c.signal = info.signal;
+      }
+      c.endedAt = new Date().toISOString();
+      c.updatedAt = c.endedAt;
+      return s;
+    }).catch(() => {});
+    await appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID6(),
+      commandID: id,
+      type: "command.exited",
+      exitCode: info.exitCode,
+      timestamp: new Date().toISOString(),
+      revision: 0
+    }).catch(() => {});
+  }
+  function owned(cmd, ownerSessionID) {
+    return !!cmd && cmd.ownerSessionID === ownerSessionID;
+  }
+  return {
+    async start(directory, input) {
+      const title = input.title.trim();
+      const command = input.command.trim();
+      if (!title)
+        throw new Error("title is required");
+      if (!command)
+        throw new Error("command is required");
+      if (!input.ownerSessionID || input.ownerSessionID === "main") {
+        throw new Error("A valid owner session is required. Run from an active OpenCode session.");
+      }
+      const id = randomUUID6();
+      const cwd = input.cwd || directory;
+      const pending = [];
+      let ready = false;
+      const handle = host.spawn({ command, args: input.args ?? [], cwd, cols: input.cols, rows: input.rows }, (chunk) => {
+        if (!ready)
+          pending.push({ type: "output", chunk });
+        else
+          enqueue(id, () => persistOutput(directory, id, chunk)).catch(() => {});
+      }, (info) => {
+        if (!ready)
+          pending.push({ type: "exit", info });
+        else
+          enqueue(id, () => persistExit(directory, id, info)).catch(() => {});
+      });
+      const session = createCommandSession({
+        id,
+        title,
+        command,
+        args: input.args ?? [],
+        cwd,
+        ownerSessionID: input.ownerSessionID,
+        goalID: input.goalID,
+        pid: handle.pid,
+        cols: input.cols,
+        rows: input.rows
+      });
+      try {
+        await mutateState(directory, `cmd.start:${id}`, async (s) => {
+          s.commands = [...s.commands ?? [], session];
+          return s;
+        });
+      } catch (error) {
+        handle.terminate();
+        const exited = await Promise.race([
+          handle.exited().then(() => true, () => true),
+          new Promise((resolve) => setTimeout(() => resolve(false), 1000))
+        ]);
+        if (!exited && handle.isAlive())
+          handle.kill();
+        throw error;
+      }
+      live.set(id, { handle, buffers: [], bufferedBytes: 0 });
+      await appendEvent(directory, {
+        version: 1,
+        eventID: randomUUID6(),
+        ...input.goalID ? { goalID: input.goalID } : {},
+        commandID: id,
+        type: "command.started",
+        title,
+        timestamp: new Date().toISOString(),
+        revision: 0
+      }).catch(() => {});
+      const initialEvents = pending.splice(0);
+      ready = true;
+      const initialOperations = [];
+      for (const event of initialEvents) {
+        initialOperations.push(event.type === "output" ? enqueue(id, () => persistOutput(directory, id, event.chunk)) : enqueue(id, () => persistExit(directory, id, event.info)));
+      }
+      await Promise.all(initialOperations);
+      return await this.get(directory, id, input.ownerSessionID) ?? session;
+    },
+    async list(directory, ownerSessionID) {
+      const s = await readState(directory);
+      return (s.commands ?? []).filter((c) => c.ownerSessionID === ownerSessionID);
+    },
+    async get(directory, id, ownerSessionID) {
+      const s = await readState(directory);
+      const c = (s.commands ?? []).find((x) => x.id === id);
+      return owned(c, ownerSessionID) ? c : undefined;
+    },
+    async read(directory, id, ownerSessionID, opts) {
+      await waitForOperations(id);
+      const session = await this.get(directory, id, ownerSessionID);
+      if (!session)
+        return;
+      const entry = live.get(id);
+      const offset = opts?.offsetBytes ?? 0;
+      const limit = Math.min(opts?.limitBytes ?? 64 * 1024, 256 * 1024);
+      if (entry && offset === 0) {
+        const mem = tailText(entry, limit);
+        if (entry.bufferedBytes <= limit) {
+          const file = await readCommandLog(directory, id, { offsetBytes: 0, limitBytes: 0 });
+          const memBytes = Buffer.byteLength(mem);
+          return { session, text: mem, totalBytes: session.outputBytes, startByte: Math.max(0, session.outputBytes - memBytes), live: session.status === "running" };
+        }
+      }
+      const file = await readCommandLog(directory, id, { offsetBytes: offset, limitBytes: limit });
+      return { session, text: file.text, totalBytes: session.outputBytes, startByte: file.startByte, live: session.status === "running" };
+    },
+    async write(directory, id, ownerSessionID, data) {
+      const session = await this.get(directory, id, ownerSessionID);
+      if (!session)
+        return { ok: false, message: "Command not found." };
+      if (session.status !== "running")
+        return { ok: false, message: `Command is ${session.status}; only running commands accept input.` };
+      const entry = live.get(id);
+      const ok = entry ? entry.handle.write(data) : false;
+      if (!ok)
+        return { ok: false, message: "Process input unavailable (no live handle \u2014 host may have restarted; reconcile marks it honestly)." };
+      return { ok: true, message: `Sent ${Buffer.byteLength(data)} byte(s) to "${session.title}".` };
+    },
+    async resize(directory, id, ownerSessionID, cols, rows) {
+      const session = await this.get(directory, id, ownerSessionID);
+      if (!session)
+        return { ok: false, message: "Command not found." };
+      await mutateState(directory, `cmd.resize:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id);
+        if (c && c.ownerSessionID === ownerSessionID) {
+          c.cols = cols;
+          c.rows = rows;
+          c.updatedAt = new Date().toISOString();
+        }
+        return s;
+      });
+      return { ok: false, unsupported: true, message: "Resize is not supported by the local-process host (pipes have no tty winsize). Size stored for a future PTY host; output remains a byte stream." };
+    },
+    async interrupt(directory, id, ownerSessionID) {
+      const session = await this.get(directory, id, ownerSessionID);
+      if (!session)
+        return { ok: false, message: "Command not found." };
+      if (session.status !== "running")
+        return { ok: false, message: `Command is ${session.status}; nothing to interrupt.` };
+      const entry = live.get(id);
+      if (!entry)
+        return { ok: false, message: "No live handle (host restarted?). Reconcile will mark it missing; use terminate/remove to clean up." };
+      const delivered = entry.handle.interrupt();
+      if (!delivered)
+        return { ok: false, message: "Failed to deliver SIGINT." };
+      await mutateState(directory, `cmd.interrupt:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id);
+        if (c && c.ownerSessionID === ownerSessionID) {
+          c.signal = "SIGINT";
+          c.updatedAt = new Date().toISOString();
+        }
+        return s;
+      });
+      return { ok: true, message: `SIGINT delivered to "${session.title}" (process may continue if it traps the signal).` };
+    },
+    async terminate(directory, id, ownerSessionID) {
+      const session = await this.get(directory, id, ownerSessionID);
+      if (!session)
+        return { ok: false, message: "Command not found." };
+      if (session.status !== "running")
+        return { ok: false, message: `Command is ${session.status}; nothing to terminate.` };
+      await mutateState(directory, `cmd.terminate-claim:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id);
+        if (c && c.ownerSessionID === ownerSessionID && c.status === "running") {
+          c.signal = "SIGTERM";
+          c.updatedAt = new Date().toISOString();
+        }
+        return s;
+      }).catch(() => {});
+      const entry = live.get(id);
+      let status = "terminated";
+      if (entry) {
+        const aliveBefore = entry.handle.isAlive();
+        if (!aliveBefore) {
+          status = "exited";
+        } else {
+          entry.handle.terminate();
+          const exited = await Promise.race([
+            entry.handle.exited().then(() => true),
+            new Promise((r) => setTimeout(() => r(false), 3000))
+          ]);
+          if (!exited && entry.handle.isAlive())
+            entry.handle.kill();
+          try {
+            await entry.handle.exited();
+          } catch {}
+        }
+        live.delete(id);
+      }
+      const exitCode = status === "terminated" ? 143 : undefined;
+      await mutateState(directory, `cmd.terminate:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id);
+        if (!c || c.ownerSessionID !== ownerSessionID)
+          return s;
+        if (c.status === "running") {
+          c.status = status;
+          if (exitCode !== undefined)
+            c.exitCode = c.exitCode ?? exitCode;
+          c.signal = c.signal ?? "SIGTERM";
+          c.endedAt = new Date().toISOString();
+          c.updatedAt = c.endedAt;
+        } else if (c.status === "terminated" && !c.endedAt) {
+          if (exitCode !== undefined)
+            c.exitCode = c.exitCode ?? exitCode;
+          c.endedAt = new Date().toISOString();
+          c.updatedAt = c.endedAt;
+        }
+        return s;
+      });
+      return { ok: true, message: `Command "${session.title}" ${status}.` };
+    },
+    async remove(directory, id, ownerSessionID) {
+      const session = await this.get(directory, id, ownerSessionID);
+      if (!session)
+        return { ok: false, message: "Command not found." };
+      if (session.status === "running") {
+        return { ok: false, message: `Command "${session.title}" is still running \u2014 terminate it first (terminate \u2260 remove).` };
+      }
+      await mutateState(directory, `cmd.remove:${id}`, async (s) => {
+        s.commands = (s.commands ?? []).filter((x) => !(x.id === id && x.ownerSessionID === ownerSessionID));
+        return s;
+      });
+      await removeCommandLog(directory, id);
+      return { ok: true, message: `Command "${session.title}" removed.` };
+    },
+    async reconcile(directory) {
+      const state = await readState(directory);
+      const cmds = state.commands ?? [];
+      let markedMissing = 0;
+      for (const c of cmds) {
+        if (c.status !== "running")
+          continue;
+        const entry = live.get(c.id);
+        if (entry) {
+          if (!entry.handle.isAlive()) {
+            live.delete(c.id);
+            await mutateState(directory, `cmd.reconcile-exit:${c.id}`, async (s) => {
+              const x = (s.commands ?? []).find((y) => y.id === c.id);
+              if (x && x.status === "running") {
+                x.status = "exited";
+                x.endedAt = new Date().toISOString();
+                x.updatedAt = x.endedAt;
+                x.lastError = x.lastError ?? "Process handle died without an exit event.";
+              }
+              return s;
+            }).catch(() => {});
+          }
+          continue;
+        }
+        await mutateState(directory, `cmd.reconcile-missing:${c.id}`, async (s) => {
+          const x = (s.commands ?? []).find((y) => y.id === c.id);
+          if (x && x.status === "running") {
+            x.status = "missing";
+            x.lastError = "Host restarted or handle lost \u2014 no live execution found. Output log retained; remove to clean up.";
+            x.updatedAt = new Date().toISOString();
+            markedMissing++;
+          }
+          return s;
+        }).catch(() => {});
+      }
+      return { markedMissing };
+    },
+    async dispose(directory) {
+      const state = await readState(directory);
+      const owned = new Map((state.commands ?? []).map((command) => [command.id, command.ownerSessionID]));
+      await Promise.all([...live.entries()].map(async ([id, entry]) => {
+        const owner = owned.get(id);
+        if (owner) {
+          await this.terminate(directory, id, owner).catch(() => {});
+          return;
+        }
+        entry.handle.terminate();
+        const exited = await Promise.race([
+          entry.handle.exited().then(() => true, () => true),
+          new Promise((resolve) => setTimeout(() => resolve(false), 1000))
+        ]);
+        if (!exited && entry.handle.isAlive())
+          entry.handle.kill();
+        live.delete(id);
+      }));
+    }
+  };
+}
+
 // src/server/goal-tools.ts
 init_state_repository();
-import { randomUUID as randomUUID6 } from "crypto";
+import { randomUUID as randomUUID7 } from "crypto";
 import { tool } from "@opencode-ai/plugin/tool";
 // src/domain/verification.ts
 var MAX_RECENT_ATTEMPTS = 10;
@@ -3548,7 +4183,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID6(),
+          eventID: randomUUID7(),
           goalID: goal.id,
           type: "goal.progress",
           summary: args.summary,
@@ -3613,7 +4248,7 @@ Exit code: ${f.exitCode}${stdoutSnippet}${stderrSnippet}`;
 Working directory: ${cwd}
 
 ${failureDetails}`;
-              attemptID = randomUUID6();
+              attemptID = randomUUID7();
               const verificationAttempt = {
                 id: attemptID,
                 sequence: runtime.evaluatorRejectionCount,
@@ -3658,7 +4293,7 @@ ${failureDetails.slice(0, 500)}`,
             if (attemptID) {
               await appendEvent(dir, {
                 version: 1,
-                eventID: randomUUID6(),
+                eventID: randomUUID7(),
                 goalID: goal.id,
                 type: "goal.completion_rejected",
                 attemptID,
@@ -3676,7 +4311,7 @@ ${failureDetails.slice(0, 500)}`,
             if (blocked && rejectedGoal?.blocker) {
               await appendEvent(dir, {
                 version: 1,
-                eventID: randomUUID6(),
+                eventID: randomUUID7(),
                 goalID: goal.id,
                 type: "goal.blocked",
                 reason: rejectedGoal.blocker.reason,
@@ -3736,7 +4371,7 @@ ${failureDetails.slice(0, 500)}`,
             }
             runtime.updatedAt = new Date().toISOString();
           }
-          const attemptID = randomUUID6();
+          const attemptID = randomUUID7();
           const cwd = goal.config.checkCwd || goal.config.artifactDir || dir;
           const checks = (goal.config.checks || []).map((cmd) => ({
             command: cmd,
@@ -3760,7 +4395,7 @@ ${failureDetails.slice(0, 500)}`,
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID6(),
+          eventID: randomUUID7(),
           goalID: goal.id,
           type: "goal.completed",
           summary: args.summary,
@@ -3820,7 +4455,7 @@ ${failureDetails.slice(0, 500)}`,
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID6(),
+          eventID: randomUUID7(),
           goalID: goal.id,
           type: "goal.blocked",
           reason: args.reason,
@@ -4000,7 +4635,7 @@ function describeGoalState(status, phase) {
 }
 
 // src/server/owner-tools.ts
-import { promises as fs3 } from "fs";
+import { promises as fs4 } from "fs";
 function withTimeout2(promise, ms) {
   return Promise.race([
     promise,
@@ -4113,7 +4748,7 @@ function ownerTools(options) {
             if (!dir)
               return;
             try {
-              const files = await fs3.readdir(dir);
+              const files = await fs4.readdir(dir);
               return files.length ? `${files.length} file(s): ${files.slice(0, 8).join(", ")}` : "no artifacts yet";
             } catch {
               return "no artifacts yet";
@@ -4583,6 +5218,200 @@ function ownerTools(options) {
   };
 }
 
+// src/server/command-tools.ts
+import { tool as tool3 } from "@opencode-ai/plugin/tool";
+function ownerID(context) {
+  const id = context?.sessionID;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+function denied() {
+  return {
+    title: "No session",
+    output: JSON.stringify({
+      ok: false,
+      message: "No session context available. Arbitrary commands require an owning session and are never auto-allowed.",
+      errorCode: "no_session"
+    })
+  };
+}
+function summarize(c) {
+  return {
+    id: c.id,
+    title: c.title,
+    argv: [c.command, ...c.args],
+    status: c.status,
+    exitCode: c.exitCode,
+    signal: c.signal,
+    outputBytes: c.outputBytes,
+    truncated: c.truncated,
+    goalID: c.goalID,
+    updatedAt: c.updatedAt
+  };
+}
+function commandTools(options) {
+  const { directory, commandService } = options;
+  return {
+    loopd_command_start: tool3({
+      description: "Start a standalone interactive command session (arbitrary shell command) in the background. Returns an ID for write/read/interrupt/terminate/remove. Independent from goals: linking a goalID is display-only and never couples lifecycles.",
+      args: {
+        title: tool3.schema.string().describe("Short human label for the session."),
+        command: tool3.schema.string().describe('Executable to spawn (e.g. "bun", "python3").'),
+        args: tool3.schema.array(tool3.schema.string()).optional().describe("Arguments for the command."),
+        cwd: tool3.schema.string().optional().describe("Working directory. Defaults to the project root."),
+        goal_id: tool3.schema.string().optional().describe("Optional goal linkage (display only \u2014 no lifecycle coupling)."),
+        cols: tool3.schema.number().optional().describe("Requested terminal width (stored; resize is unsupported by the pipe host)."),
+        rows: tool3.schema.number().optional().describe("Requested terminal height (stored; resize is unsupported by the pipe host).")
+      },
+      execute: async (args, context) => {
+        const owner = ownerID(context);
+        if (!owner)
+          return denied();
+        try {
+          const argv = [args.command, ...args.args ?? []];
+          await context.ask({
+            permission: "bash",
+            patterns: [argv.join(" ")],
+            always: [args.command],
+            metadata: { command: args.command, args: args.args ?? [], cwd: args.cwd ?? directory }
+          });
+          const session = await commandService.start(directory, {
+            title: args.title,
+            command: args.command,
+            args: args.args ?? [],
+            cwd: args.cwd,
+            ownerSessionID: owner,
+            goalID: args.goal_id,
+            cols: args.cols,
+            rows: args.rows
+          });
+          return {
+            title: "Command started",
+            output: JSON.stringify({ ok: true, command: summarize(session), capabilities: COMMAND_HOST_CAPABILITIES }, null, 2)
+          };
+        } catch (error) {
+          return {
+            title: "Command not started",
+            output: JSON.stringify({ ok: false, message: error instanceof Error ? error.message : String(error) })
+          };
+        }
+      }
+    }),
+    loopd_command_list: tool3({
+      description: "List standalone command sessions owned by this session.",
+      args: {},
+      execute: async (_args, context) => {
+        const owner = ownerID(context);
+        if (!owner)
+          return denied();
+        const sessions = await commandService.list(directory, owner);
+        return {
+          title: `${sessions.length} command session(s)`,
+          output: JSON.stringify({ ok: true, commands: sessions.map((c) => summarize(c)), capabilities: COMMAND_HOST_CAPABILITIES }, null, 2)
+        };
+      }
+    }),
+    loopd_command_get: tool3({
+      description: "Get a command session's metadata plus a bounded output snapshot. Closing a view detaches; it never terminates.",
+      args: {
+        command_id: tool3.schema.string().describe("Command session ID."),
+        offset_bytes: tool3.schema.number().optional().describe("Byte offset into the output log (paging)."),
+        limit_bytes: tool3.schema.number().optional().describe("Max bytes to return (default 64KB, cap 256KB).")
+      },
+      execute: async (args, context) => {
+        const owner = ownerID(context);
+        if (!owner)
+          return denied();
+        const result = await commandService.read(directory, args.command_id, owner, {
+          offsetBytes: args.offset_bytes,
+          limitBytes: args.limit_bytes
+        });
+        if (!result) {
+          return { title: "Not found", output: JSON.stringify({ ok: false, message: "Command not found for this session." }) };
+        }
+        return {
+          title: `Command: ${result.session.title}`,
+          output: JSON.stringify({
+            ok: true,
+            command: summarize(result.session),
+            output: result.text,
+            startByte: result.startByte,
+            totalBytes: result.totalBytes,
+            live: result.live
+          }, null, 2)
+        };
+      }
+    }),
+    loopd_command_write: tool3({
+      description: "Send raw input (stdin bytes) to a running command session.",
+      args: {
+        command_id: tool3.schema.string().describe("Command session ID."),
+        input: tool3.schema.string().describe("Raw text to write to stdin (include trailing newline for line-buffered programs).")
+      },
+      execute: async (args, context) => {
+        const owner = ownerID(context);
+        if (!owner)
+          return denied();
+        const result = await commandService.write(directory, args.command_id, owner, args.input);
+        return { title: result.ok ? "Input sent" : "Write failed", output: JSON.stringify({ ...result, command_id: args.command_id }) };
+      }
+    }),
+    loopd_command_interrupt: tool3({
+      description: "Deliver SIGINT (Ctrl+C) to a running command. The process may trap and continue \u2014 that is correct, not a failure. Never kills unconditionally.",
+      args: {
+        command_id: tool3.schema.string().describe("Command session ID.")
+      },
+      execute: async (args, context) => {
+        const owner = ownerID(context);
+        if (!owner)
+          return denied();
+        const result = await commandService.interrupt(directory, args.command_id, owner);
+        return { title: result.ok ? "Interrupted" : "Interrupt failed", output: JSON.stringify({ ...result, command_id: args.command_id }) };
+      }
+    }),
+    loopd_command_terminate: tool3({
+      description: "Terminate a running command (SIGTERM, escalates to SIGKILL). Stopping a command never pauses/blocks any goal.",
+      args: {
+        command_id: tool3.schema.string().describe("Command session ID.")
+      },
+      execute: async (args, context) => {
+        const owner = ownerID(context);
+        if (!owner)
+          return denied();
+        const result = await commandService.terminate(directory, args.command_id, owner);
+        return { title: result.ok ? "Terminated" : "Terminate failed", output: JSON.stringify({ ...result, command_id: args.command_id }) };
+      }
+    }),
+    loopd_command_remove: tool3({
+      description: "Remove a finished command session and its output log. Refuses while running (terminate \u2260 remove).",
+      args: {
+        command_id: tool3.schema.string().describe("Command session ID.")
+      },
+      execute: async (args, context) => {
+        const owner = ownerID(context);
+        if (!owner)
+          return denied();
+        const result = await commandService.remove(directory, args.command_id, owner);
+        return { title: result.ok ? "Removed" : "Remove failed", output: JSON.stringify({ ...result, command_id: args.command_id }) };
+      }
+    }),
+    loopd_command_resize: tool3({
+      description: "Request a terminal size for a command. Honestly unsupported by the pipe host: size is stored, never applied.",
+      args: {
+        command_id: tool3.schema.string().describe("Command session ID."),
+        cols: tool3.schema.number().describe("Requested width."),
+        rows: tool3.schema.number().describe("Requested height.")
+      },
+      execute: async (args, context) => {
+        const owner = ownerID(context);
+        if (!owner)
+          return denied();
+        const result = await commandService.resize(directory, args.command_id, owner, args.cols, args.rows);
+        return { title: "Resize", output: JSON.stringify({ ...result, command_id: args.command_id }) };
+      }
+    })
+  };
+}
+
 // src/server/plugin.ts
 init_state_repository();
 // package.json
@@ -4598,9 +5427,11 @@ var server = async ({ client, directory }, pluginOptions) => {
 };
 function createServerHooks(directory, host, defaults) {
   const goalService = createGoalService(host);
+  const commandService = createCommandService(createLocalProcessHost());
   const worker = createControlWorker({
     directory,
     goalService,
+    commandService,
     pollIntervalMs: 1000,
     defaults
   });
@@ -4630,7 +5461,7 @@ function createServerHooks(directory, host, defaults) {
       return;
     reconciliationStarted = true;
     logServerEvent(directory, "reconcile.started");
-    goalService.reconcile(directory).then(() => logServerEvent(directory, "reconcile.completed"), (error) => logServerEvent(directory, "reconcile.failed", { detail: describeError(error) }));
+    goalService.reconcile(directory).then(() => commandService.reconcile(directory), (error) => logServerEvent(directory, "reconcile.failed", { detail: describeError(error) })).then(() => logServerEvent(directory, "reconcile.completed"), (error) => logServerEvent(directory, "reconcile.failed", { detail: describeError(error) }));
   }
   return {
     event: async ({ event }) => {
@@ -4642,7 +5473,7 @@ function createServerHooks(directory, host, defaults) {
       if (type?.startsWith("session."))
         reconcileInBackground();
     },
-    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }) },
+    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }), ...commandTools({ directory, commandService }) },
     "tool.execute.before": async (input, _output) => {
       const activeWorkers = goalService.getActiveWorkers();
       let matchedGoalID;
@@ -4723,6 +5554,7 @@ function createServerHooks(directory, host, defaults) {
       engine.stop();
       await worker.stop();
       scheduleWorker.stop();
+      await commandService.dispose(directory);
     }
   };
 }
@@ -4802,6 +5634,7 @@ function toV2Tool(id, definition, directory) {
   return {
     name: id,
     description: definition.description,
+    ...id === "loopd_command_start" ? { permission: "bash" } : {},
     input: v1Tool.schema.object(definition.args),
     async execute(input, context) {
       const result = await definition.execute(input, {
