@@ -61,6 +61,7 @@ export type CommandPanelAction =
   | { kind: "terminate" }
   | { kind: "remove" }
   | { kind: "resize"; cols: number; rows: number }
+  | { kind: "await"; goalID?: string }
   | { kind: "refresh" }
   | { kind: "detach" }
 
@@ -82,6 +83,10 @@ export function commandPanelKey(key: string, state: CommandPanelState): CommandP
     case "write":
     case "input":
       return undefined // insert mode typing flows through write directly
+    case "await":
+      // Opt-in wake: the selected command's linked goal awaits its exit.
+      // An explicit ":await <goalID>" overrides the linked goal.
+      return state.selectedCommand ? { kind: "await", goalID: state.selectedCommand.goalID } : undefined
     case "open-cmd":
       return { kind: "refresh" }
     case "q":

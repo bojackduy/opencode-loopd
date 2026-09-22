@@ -27,6 +27,7 @@ import {
   type GoalCreationDefaults,
 } from "./goal-policy"
 import { describeError, logServerEvent, SERVER_LOG_FILE } from "../infrastructure/server-log"
+import { requestCommandAwait, wakeGoalForAwait } from "./command-await"
 
 const MAX_LEDGER_SIZE = 100
 const RESPONSE_CLEANUP_AGE_MS = 60 * 60 * 1000 // 1 hour
@@ -386,6 +387,40 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
           revision: state.revision,
         })
         response = { ...base, message: `goal "${goal.name}" blocked`, stateRevision: state.revision }
+        break
+      }
+
+      // ── Command await (explicit opt-in wake; the ONLY command→goal edge) ──
+      // A goal wakes on a command's exit ONLY after an explicit await. The
+      // display-only goalID linkage is unchanged: merely linked commands
+      // never wake. Delivery is inbox + the existing idle-continuation path.
+      case "cmd_await": {
+        const args = (request.args ?? {}) as Record<string, unknown>
+        const ownerSessionID = typeof args.ownerSessionID === "string" ? args.ownerSessionID : ""
+        if (!ownerSessionID || ownerSessionID === "main") {
+          response = { ...base, ok: false, message: "ownerSessionID is required for command operations", errorCode: "no_session" }
+          break
+        }
+        const goalID = typeof args.goalID === "string" ? args.goalID : ""
+        const commandID = typeof args.commandID === "string" && args.commandID
+          ? String(args.commandID)
+          : String(request.goalID || "")
+        if (!goalID || !commandID) {
+          response = { ...base, ok: false, message: "goalID and commandID are required", errorCode: "bad_request" }
+          break
+        }
+        const result = await requestCommandAwait(directory, { goalID, commandID, ownerSessionID })
+        if (result.ok && result.fired && result.active) {
+          await wakeGoalForAwait(directory, goalSvc, goalID as any).catch(() => {})
+        }
+        const state = await readState(directory)
+        response = {
+          ...base,
+          ok: result.ok,
+          message: result.message,
+          stateRevision: state.revision,
+          errorCode: result.ok ? undefined : "await_failed",
+        }
         break
       }
 

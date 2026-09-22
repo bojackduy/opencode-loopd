@@ -212,6 +212,19 @@ export const INTERACTIONS: InteractionDef[] = [
     needsGoal: false,
     transport: "both",
   },
+  // The ONLY command→goal edge, explicit opt-in: a goal wakes on a command's
+  // exit only after this await. Merely linking (goalID display metadata) never
+  // wakes. Exactly-once, terminal-status-only, 4KB-bounded evidence; pause /
+  // clear / remove cancel outstanding awaits.
+  {
+    command: "—",
+    agentTools: ["loopd_command_await"],
+    tuiKeys: ["await"],
+    label: "Await command exit",
+    description: "Opt-in one-shot wake: goal wakes once when the awaited command exits (terminal-only, bounded evidence)",
+    needsGoal: true,
+    transport: "both",
+  },
 ]
 
 // ── Helpers for codegen / validation ─────────────────────────────────

@@ -124,7 +124,7 @@ export function CommandPanel(props: Props) {
   const [outputMeta, setOutputMeta] = createSignal({ startByte: 0, totalBytes: 0, live: false })
   const [insertMode, setInsertMode] = createSignal(false)
   const [inputValue, setInputValue] = createSignal("")
-  const [statusText, setStatusText] = createSignal("commands: j/k move · enter write-mode · ctrl-c interrupt · :terminate :remove :resize · q detach")
+  const [statusText, setStatusText] = createSignal("commands: j/k move · enter write-mode · ctrl-c interrupt · :terminate :remove :resize :await · q detach")
   let inputEl: InputRenderable | undefined
   const client = createControlClient(props.directory)
   const ownerSessionID = props.ownerSessionID ?? routeOwnerSessionID(props.api)
@@ -480,6 +480,23 @@ export function CommandPanel(props: Props) {
     await sendRaw("cmd_remove", { commandID: id }, id)
   }
 
+  // "await": explicit opt-in wake — the goal wakes once when the selected
+  // command exits (terminal-only, 4KB-bounded evidence). Defaults to the
+  // selected command's linked goal; ":await <goalID>" overrides it.
+  async function awaitExit(goalID?: string) {
+    const sel = state().selectedCommand
+    if (!sel) {
+      setStatusText("No command selected.")
+      return
+    }
+    const target = (goalID || sel.goalID || "").trim()
+    if (!target) {
+      setStatusText("Usage: :await <goalID> (selected command has no linked goal to default to).")
+      return
+    }
+    await sendRaw("cmd_await", { commandID: sel.id, goalID: target }, sel.id)
+  }
+
   async function resize(cols: number, rows: number) {
     const id = selectedID()
     if (!id) {
@@ -531,6 +548,7 @@ export function CommandPanel(props: Props) {
   void remove
   void resize
   void startNew
+  void awaitExit
 
   async function executeColonCommand(raw: string) {
     const text = raw.startsWith(":") ? raw.slice(1) : raw
@@ -561,8 +579,11 @@ export function CommandPanel(props: Props) {
       case "open-cmd":
         await openCmd()
         break
+      case "await":
+        await awaitExit(rest[0])
+        break
       default:
-        setStatusText(`Unknown :${verb}. Try :new, :terminate, :remove, :interrupt, :resize, :open-cmd`)
+        setStatusText(`Unknown :${verb}. Try :new, :terminate, :remove, :interrupt, :resize, :open-cmd, :await <goalID>`)
     }
   }
 
@@ -768,7 +789,7 @@ export function CommandPanel(props: Props) {
               inputEl = el
             }}
             flexGrow={1}
-            placeholder={insertMode() ? "type stdin, Enter sends (:new/:terminate/:remove/:interrupt/:resize/:open-cmd)" : (statusText() || "Press : to type, q to detach")}
+            placeholder={insertMode() ? "type stdin, Enter sends (:new/:terminate/:remove/:interrupt/:resize/:open-cmd/:await)" : (statusText() || "Press : to type, q to detach")}
             placeholderColor={theme().textMuted}
             cursorColor={theme().primary}
             focusedTextColor={theme().text}

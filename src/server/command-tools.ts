@@ -6,6 +6,7 @@
 
 import { tool } from "@opencode-ai/plugin/tool"
 import type { CommandService } from "../application/command-service"
+import { requestCommandAwait, wakeGoalForAwait, type AwaitContinuation } from "../application/command-await"
 import { COMMAND_HOST_CAPABILITIES, type CommandHostCapabilities } from "./command-host"
 
 export interface CommandToolsOptions {
@@ -13,6 +14,13 @@ export interface CommandToolsOptions {
   commandService: CommandService
   /** Capabilities of the ACTIVE command host backend (PTY or pipe fallback). Defaults to the pipe caps so existing callers stay honest. */
   capabilities?: CommandHostCapabilities
+  /**
+   * Goal continuation seam for await wakes. When present, an await that fires
+   * immediately (command already terminal) on an active goal wakes it through
+   * the existing idle-continuation path; otherwise the evidence waits in
+   * pendingInbox. Terminal exits always wake via the command service hook.
+   */
+  goalService?: AwaitContinuation
 }
 
 function ownerID(context: unknown): string | undefined {
@@ -207,6 +215,31 @@ export function commandTools(options: CommandToolsOptions) {
         if (!owner) return denied()
         const result = await commandService.remove(directory, args.command_id, owner)
         return { title: result.ok ? "Removed" : "Remove failed", output: JSON.stringify({ ...result, command_id: args.command_id }) }
+      },
+    }),
+
+    loopd_command_await: tool({
+      description:
+        "Opt in to a one-shot wake-up: the given goal wakes when the given command reaches a terminal status (exited/terminated/missing) with the exit code, signal, and last 4KB of output as evidence. Explicit opt-in only — a merely linked command never wakes its goal. Exactly-once: the await is consumed on fire, output chunks never fire, pausing/clearing the goal or removing the command cancels it.",
+      args: {
+        command_id: tool.schema.string().describe("Command session ID to await."),
+        goal_id: tool.schema.string().describe("Goal ID to wake on exit. You must own both the goal and the command."),
+      },
+      execute: async (args, context) => {
+        const owner = ownerID(context)
+        if (!owner) return denied()
+        const result = await requestCommandAwait(directory, {
+          goalID: args.goal_id,
+          commandID: args.command_id,
+          ownerSessionID: owner,
+        })
+        if (result.ok && result.fired && result.active && options.goalService) {
+          await wakeGoalForAwait(directory, options.goalService, args.goal_id as never).catch(() => {})
+        }
+        return {
+          title: result.ok ? "Await registered" : "Await failed",
+          output: JSON.stringify({ ...result, command_id: args.command_id, goal_id: args.goal_id }),
+        }
       },
     }),
 

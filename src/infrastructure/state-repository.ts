@@ -9,8 +9,9 @@ import os from "os"
 import type { Goal, GoalID } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
 import type { CommandSession } from "../domain/command-session"
+import type { CommandAwait } from "../domain/command-await"
 
-const CURRENT_VERSION = 7
+const CURRENT_VERSION = 8
 
 export interface StoreState {
   version: number
@@ -21,6 +22,12 @@ export interface StoreState {
   commandLedger?: CommandLedgerEntry[]
   /** Standalone command sessions (metadata only — never handles/screens). */
   commands?: CommandSession[]
+  /**
+   * Outstanding opt-in goal awaits for command exits (IDs only — never output
+   * bytes). Consumed exactly once when the awaited command reaches a terminal
+   * status; cancelled when the goal pauses/clears or the command is removed.
+   */
+  commandAwaits?: CommandAwait[]
 }
 
 export interface CommandLedgerEntry {
@@ -274,6 +281,13 @@ function migrate(state: StoreState): StoreState {
     // Command sessions are new in v7. Never synthesize them: only ensure the
     // array exists so readers can treat it as authoritative.
     if (!Array.isArray((result as any).commands)) (result as any).commands = []
+  }
+
+  if (result.version < 8) {
+    result.version = 8
+    // Opt-in command awaits are new in v8. IDs only — never synthesize entries
+    // on migrate; only ensure the array exists.
+    if (!Array.isArray((result as any).commandAwaits)) (result as any).commandAwaits = []
   }
 
   return result

@@ -5613,7 +5613,7 @@ import { randomUUID } from "crypto";
 // src/infrastructure/state-repository.ts
 import { promises as fs } from "fs";
 import path from "path";
-var CURRENT_VERSION = 7;
+var CURRENT_VERSION = 8;
 function emptyState() {
   return { version: CURRENT_VERSION, revision: 0, goals: [], runtimes: [], commandLedger: [], commands: [] };
 }
@@ -5744,6 +5744,11 @@ function migrate(state) {
     result.version = 7;
     if (!Array.isArray(result.commands))
       result.commands = [];
+  }
+  if (result.version < 8) {
+    result.version = 8;
+    if (!Array.isArray(result.commandAwaits))
+      result.commandAwaits = [];
   }
   return result;
 }
@@ -8899,7 +8904,7 @@ function CommandPanel(props) {
   });
   const [insertMode, setInsertMode] = createSignal2(false);
   const [inputValue, setInputValue] = createSignal2("");
-  const [statusText, setStatusText] = createSignal2("commands: j/k move \xB7 enter write-mode \xB7 ctrl-c interrupt \xB7 :terminate :remove :resize \xB7 q detach");
+  const [statusText, setStatusText] = createSignal2("commands: j/k move \xB7 enter write-mode \xB7 ctrl-c interrupt \xB7 :terminate :remove :resize :await \xB7 q detach");
   let inputEl;
   const client = createControlClient(props.directory);
   const ownerSessionID = props.ownerSessionID ?? routeOwnerSessionID(props.api);
@@ -9256,6 +9261,22 @@ function CommandPanel(props) {
       commandID: id
     }, id);
   }
+  async function awaitExit(goalID) {
+    const sel = state().selectedCommand;
+    if (!sel) {
+      setStatusText("No command selected.");
+      return;
+    }
+    const target = (goalID || sel.goalID || "").trim();
+    if (!target) {
+      setStatusText("Usage: :await <goalID> (selected command has no linked goal to default to).");
+      return;
+    }
+    await sendRaw("cmd_await", {
+      commandID: sel.id,
+      goalID: target
+    }, sel.id);
+  }
   async function resize(cols, rows) {
     const id = selectedID();
     if (!id) {
@@ -9330,8 +9351,11 @@ function CommandPanel(props) {
       case "open-cmd":
         await openCmd();
         break;
+      case "await":
+        await awaitExit(rest[0]);
+        break;
       default:
-        setStatusText(`Unknown :${verb}. Try :new, :terminate, :remove, :interrupt, :resize, :open-cmd`);
+        setStatusText(`Unknown :${verb}. Try :new, :terminate, :remove, :interrupt, :resize, :open-cmd, :await <goalID>`);
     }
   }
   function focusInput() {
@@ -9665,7 +9689,7 @@ function CommandPanel(props) {
       }, _v$5 = insertMode() ? theme().warning : theme().border, _v$6 = {
         fg: insertMode() ? theme().warning : theme().success,
         bold: true
-      }, _v$7 = insertMode() ? "type stdin, Enter sends (:new/:terminate/:remove/:interrupt/:resize/:open-cmd)" : statusText() || "Press : to type, q to detach", _v$8 = theme().textMuted, _v$9 = theme().primary, _v$0 = theme().text, _v$1 = theme().background;
+      }, _v$7 = insertMode() ? "type stdin, Enter sends (:new/:terminate/:remove/:interrupt/:resize/:open-cmd/:await)" : statusText() || "Press : to type, q to detach", _v$8 = theme().textMuted, _v$9 = theme().primary, _v$0 = theme().text, _v$1 = theme().background;
       _v$ !== _p$.e && (_p$.e = _$setProp2(_el$2, "borderColor", _v$, _p$.e));
       _v$2 !== _p$.t && (_p$.t = _$setProp2(_el$5, "style", _v$2, _p$.t));
       _v$3 !== _p$.a && (_p$.a = _$setProp2(_el$7, "style", _v$3, _p$.a));

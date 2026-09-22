@@ -321,6 +321,11 @@ function migrate(state) {
     if (!Array.isArray(result.commands))
       result.commands = [];
   }
+  if (result.version < 8) {
+    result.version = 8;
+    if (!Array.isArray(result.commandAwaits))
+      result.commandAwaits = [];
+  }
   return result;
 }
 async function writeAtomic(target, contents) {
@@ -522,15 +527,285 @@ async function removeCommandLog(directory, commandID) {
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-var CURRENT_VERSION = 7, LOCK_STALE_MS = 1e4;
+var CURRENT_VERSION = 8, LOCK_STALE_MS = 1e4;
 var init_state_repository = () => {};
+
+// src/domain/command-await.ts
+function isTerminalCommandStatus(status) {
+  return TERMINAL_COMMAND_STATUSES.includes(status);
+}
+function tailLastBytes(text, maxBytes = MAX_AWAIT_TAIL_BYTES) {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= maxBytes)
+    return text;
+  return buf.subarray(buf.length - maxBytes).toString("utf8");
+}
+function formatAwaitEvidence(input) {
+  const short = input.commandID.slice(0, 8);
+  const header = `[command "${input.title}" (${input.argv.join(" ") || input.title}) ${input.status}` + ` ${short}... exitCode=${input.exitCode ?? "unknown"} signal=${input.signal ?? "none"}]`;
+  const tail = tailLastBytes(input.tail);
+  return tail ? `${header}
+${tail}` : header;
+}
+var TERMINAL_COMMAND_STATUSES, MAX_AWAIT_TAIL_BYTES;
+var init_command_await = __esm(() => {
+  TERMINAL_COMMAND_STATUSES = [
+    "exited",
+    "terminated",
+    "missing"
+  ];
+  MAX_AWAIT_TAIL_BYTES = 4 * 1024;
+});
+
+// src/application/command-await.ts
+import { randomUUID } from "crypto";
+function ledgerEvent(base) {
+  return {
+    version: 1,
+    eventID: randomUUID(),
+    timestamp: new Date().toISOString(),
+    revision: 0,
+    ...base
+  };
+}
+async function requestCommandAwait(directory, input) {
+  const snapshot = await readState(directory);
+  const goal = snapshot.goals.find((g) => g.id === input.goalID);
+  if (!goal)
+    return { ok: false, message: "Goal not found." };
+  const command = (snapshot.commands ?? []).find((c) => c.id === input.commandID);
+  if (!command)
+    return { ok: false, message: "Command not found." };
+  if (input.ownerSessionID !== goal.ownerSessionID || input.ownerSessionID !== command.ownerSessionID) {
+    return { ok: false, message: "Owner mismatch: the await requester must own both the goal and the command." };
+  }
+  if (goal.ownerSessionID !== command.ownerSessionID) {
+    return { ok: false, message: "Owner mismatch: goal and command are owned by different sessions." };
+  }
+  const existing = (snapshot.commandAwaits ?? []).some((a) => a.goalID === input.goalID && a.commandID === input.commandID);
+  if (existing) {
+    return { ok: true, message: `Already awaiting "${command.title}" for goal "${goal.name}".` };
+  }
+  if (isTerminalCommandStatus(command.status)) {
+    await mutateState(directory, `cmd.await-request:${input.goalID}:${input.commandID}`, async (s) => {
+      s.commandAwaits = [...s.commandAwaits ?? [], {
+        goalID: input.goalID,
+        commandID: input.commandID,
+        ownerSessionID: input.ownerSessionID,
+        createdAt: new Date().toISOString()
+      }];
+      return s;
+    });
+    const fired = await fireCommandAwaits(directory, input.commandID);
+    const mine = fired.find((f) => f.goalID === input.goalID);
+    return {
+      ok: true,
+      message: `Command "${command.title}" already ${command.status}; wake-up delivered to goal "${goal.name}".`,
+      fired: true,
+      active: mine?.active ?? goal.status === "active"
+    };
+  }
+  await mutateState(directory, `cmd.await-request:${input.goalID}:${input.commandID}`, async (s) => {
+    const dup = (s.commandAwaits ?? []).some((a) => a.goalID === input.goalID && a.commandID === input.commandID);
+    if (!dup) {
+      s.commandAwaits = [...s.commandAwaits ?? [], {
+        goalID: input.goalID,
+        commandID: input.commandID,
+        ownerSessionID: input.ownerSessionID,
+        createdAt: new Date().toISOString()
+      }];
+    }
+    return s;
+  });
+  await appendEvent(directory, ledgerEvent({
+    goalID: input.goalID,
+    commandID: input.commandID,
+    type: "command.await-requested"
+  })).catch(() => {});
+  return { ok: true, message: `Goal "${goal.name}" now awaits "${command.title}" (fires once on exit).` };
+}
+async function readBoundedTail(directory, commandID) {
+  try {
+    const probe = await readCommandLog(directory, commandID, { offsetBytes: 0, limitBytes: 0 });
+    if (probe.totalBytes <= MAX_AWAIT_TAIL_BYTES) {
+      const full = await readCommandLog(directory, commandID, {
+        offsetBytes: 0,
+        limitBytes: MAX_AWAIT_TAIL_BYTES
+      });
+      return full.text;
+    }
+    const tail = await readCommandLog(directory, commandID, {
+      offsetBytes: Math.max(0, probe.totalBytes - MAX_AWAIT_TAIL_BYTES),
+      limitBytes: MAX_AWAIT_TAIL_BYTES
+    });
+    return tail.text;
+  } catch {
+    return "";
+  }
+}
+async function fireCommandAwaits(directory, commandID) {
+  const snapshot = await readState(directory);
+  const outstanding = (snapshot.commandAwaits ?? []).filter((a) => a.commandID === commandID);
+  if (outstanding.length === 0)
+    return [];
+  const command = (snapshot.commands ?? []).find((c) => c.id === commandID);
+  if (!command) {
+    await mutateState(directory, `cmd.await-discard:${commandID}`, async (s) => {
+      s.commandAwaits = (s.commandAwaits ?? []).filter((a) => a.commandID !== commandID);
+      return s;
+    });
+    for (const a of outstanding) {
+      await appendEvent(directory, ledgerEvent({
+        goalID: a.goalID,
+        commandID,
+        type: "command.await-discarded",
+        reason: "command record gone"
+      })).catch(() => {});
+    }
+    return [];
+  }
+  if (!isTerminalCommandStatus(command.status))
+    return [];
+  await mutateState(directory, `cmd.await-consume:${commandID}`, async (s) => {
+    s.commandAwaits = (s.commandAwaits ?? []).filter((a) => a.commandID !== commandID);
+    return s;
+  });
+  const tail = await readBoundedTail(directory, commandID);
+  const fired = [];
+  for (const a of outstanding) {
+    const fresh = await readState(directory);
+    const goal = fresh.goals.find((g) => g.id === a.goalID);
+    if (!goal) {
+      await appendEvent(directory, ledgerEvent({
+        goalID: a.goalID,
+        commandID,
+        type: "command.await-discarded",
+        reason: "goal gone"
+      })).catch(() => {});
+      continue;
+    }
+    const evidence = formatAwaitEvidence({
+      title: command.title,
+      argv: [command.command, ...command.args],
+      commandID: command.id,
+      status: command.status,
+      exitCode: command.exitCode,
+      signal: command.signal,
+      tail
+    });
+    await appendGoalInbox(directory, a.goalID, "worker", evidence);
+    await appendEvent(directory, ledgerEvent({
+      goalID: a.goalID,
+      commandID,
+      type: "command.await-fired",
+      status: command.status,
+      exitCode: command.exitCode,
+      signal: command.signal
+    })).catch(() => {});
+    fired.push({ goalID: a.goalID, commandID, active: goal.status === "active" });
+  }
+  return fired;
+}
+async function cancelAwaitsForGoal(directory, goalID, reason) {
+  const snapshot = await readState(directory);
+  const doomed = (snapshot.commandAwaits ?? []).filter((a) => a.goalID === goalID);
+  if (doomed.length === 0)
+    return 0;
+  await mutateState(directory, `cmd.await-cancel-goal:${goalID}`, async (s) => {
+    s.commandAwaits = (s.commandAwaits ?? []).filter((a) => a.goalID !== goalID);
+    return s;
+  });
+  await appendEvent(directory, ledgerEvent({
+    goalID,
+    type: "command.await-cancelled",
+    reason,
+    count: doomed.length
+  })).catch(() => {});
+  return doomed.length;
+}
+async function clearAwaitsForCommand(directory, commandID, reason) {
+  const snapshot = await readState(directory);
+  const doomed = (snapshot.commandAwaits ?? []).filter((a) => a.commandID === commandID);
+  if (doomed.length === 0)
+    return 0;
+  await mutateState(directory, `cmd.await-clear-command:${commandID}`, async (s) => {
+    s.commandAwaits = (s.commandAwaits ?? []).filter((a) => a.commandID !== commandID);
+    return s;
+  });
+  for (const a of doomed) {
+    await appendEvent(directory, ledgerEvent({
+      goalID: a.goalID,
+      commandID,
+      type: "command.await-cancelled",
+      reason
+    })).catch(() => {});
+  }
+  return doomed.length;
+}
+async function reconcileCommandAwaits(directory) {
+  const snapshot = await readState(directory);
+  const outstanding = [...snapshot.commandAwaits ?? []];
+  const fired = [];
+  for (const a of outstanding) {
+    const fresh = await readState(directory);
+    const still = (fresh.commandAwaits ?? []).some((x) => x.goalID === a.goalID && x.commandID === a.commandID);
+    if (!still)
+      continue;
+    const command = (fresh.commands ?? []).find((c) => c.id === a.commandID);
+    if (!command) {
+      await mutateState(directory, `cmd.await-reconcile-discard:${a.commandID}`, async (s) => {
+        s.commandAwaits = (s.commandAwaits ?? []).filter((x) => !(x.goalID === a.goalID && x.commandID === a.commandID));
+        return s;
+      });
+      await appendEvent(directory, ledgerEvent({
+        goalID: a.goalID,
+        commandID: a.commandID,
+        type: "command.await-discarded",
+        reason: "command record gone at reconcile"
+      })).catch(() => {});
+      continue;
+    }
+    if (!isTerminalCommandStatus(command.status))
+      continue;
+    const now = await fireCommandAwaits(directory, a.commandID);
+    fired.push(...now.filter((f) => f.goalID === a.goalID));
+  }
+  return fired;
+}
+async function wakeGoalForAwait(directory, continuation, goalID) {
+  const snapshot = await readState(directory);
+  const goal = snapshot.goals.find((g) => g.id === goalID);
+  if (!goal)
+    return { woke: false, message: "Goal gone; wake skipped." };
+  if (goal.status !== "active") {
+    return { woke: false, message: `Goal is ${goal.status}; evidence waits in pendingInbox.` };
+  }
+  await mutateState(directory, `cmd.await-wake:${goalID}`, async (s) => {
+    const rt = s.runtimes.find((r) => r.goalID === goalID);
+    if (!rt)
+      return s;
+    rt.phase = "idle";
+    rt.activeRunID = undefined;
+    rt.idleCandidateAt = undefined;
+    rt.activePromptMessageID = undefined;
+    rt.activeToolCallIDs = [];
+    rt.updatedAt = new Date().toISOString();
+    return s;
+  });
+  await continuation.continueTurn(directory, goalID, { force: true });
+  return { woke: true, message: `Woke goal "${goal.name}" for command exit.` };
+}
+var init_command_await2 = __esm(() => {
+  init_command_await();
+  init_state_repository();
+});
 
 // src/server/plugin.ts
 import { tool as v1Tool } from "@opencode-ai/plugin/tool";
 
 // src/application/control-worker.ts
 init_state_repository();
-import { randomUUID } from "crypto";
+import { randomUUID as randomUUID2 } from "crypto";
 
 // src/application/goal-policy.ts
 function resolveGoalCreationConfig(input) {
@@ -639,6 +914,7 @@ function errorReplacer(_key, value) {
 }
 
 // src/application/control-worker.ts
+init_command_await2();
 var MAX_LEDGER_SIZE = 100;
 var RESPONSE_CLEANUP_AGE_MS = 60 * 60 * 1000;
 function createControlWorker(options) {
@@ -902,7 +1178,7 @@ function createControlWorker(options) {
         await writeState(directory, state);
         await appendEvent(directory, {
           version: 1,
-          eventID: randomUUID(),
+          eventID: randomUUID2(),
           goalID: goal.id,
           type: "goal.completed",
           summary: goal.completionEvidence.summary,
@@ -943,7 +1219,7 @@ function createControlWorker(options) {
         await writeState(directory, state);
         await appendEvent(directory, {
           version: 1,
-          eventID: randomUUID(),
+          eventID: randomUUID2(),
           goalID: goal.id,
           type: "goal.blocked",
           reason: goal.blocker.reason,
@@ -952,6 +1228,33 @@ function createControlWorker(options) {
           revision: state.revision
         });
         response = { ...base, message: `goal "${goal.name}" blocked`, stateRevision: state.revision };
+        break;
+      }
+      case "cmd_await": {
+        const args = request.args ?? {};
+        const ownerSessionID = typeof args.ownerSessionID === "string" ? args.ownerSessionID : "";
+        if (!ownerSessionID || ownerSessionID === "main") {
+          response = { ...base, ok: false, message: "ownerSessionID is required for command operations", errorCode: "no_session" };
+          break;
+        }
+        const goalID = typeof args.goalID === "string" ? args.goalID : "";
+        const commandID = typeof args.commandID === "string" && args.commandID ? String(args.commandID) : String(request.goalID || "");
+        if (!goalID || !commandID) {
+          response = { ...base, ok: false, message: "goalID and commandID are required", errorCode: "bad_request" };
+          break;
+        }
+        const result = await requestCommandAwait(directory, { goalID, commandID, ownerSessionID });
+        if (result.ok && result.fired && result.active) {
+          await wakeGoalForAwait(directory, goalSvc, goalID).catch(() => {});
+        }
+        const state = await readState(directory);
+        response = {
+          ...base,
+          ok: result.ok,
+          message: result.message,
+          stateRevision: state.revision,
+          errorCode: result.ok ? undefined : "await_failed"
+        };
         break;
       }
       case "cmd_start":
@@ -1063,7 +1366,7 @@ function createControlWorker(options) {
 
 // src/application/loop-engine.ts
 init_state_repository();
-import { randomUUID as randomUUID2 } from "crypto";
+import { randomUUID as randomUUID3 } from "crypto";
 
 // src/domain/goal.ts
 var MODEL_TRANSITIONS = {
@@ -1343,7 +1646,7 @@ function createLoopEngine(options) {
         if (newlyStamped) {
           await appendEvent(directory, {
             version: 1,
-            eventID: randomUUID2(),
+            eventID: randomUUID3(),
             goalID,
             type: "idle.confirm-failed",
             reason: failureReason,
@@ -1388,7 +1691,7 @@ function createLoopEngine(options) {
     if (completedRunID) {
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID2(),
+        eventID: randomUUID3(),
         goalID,
         type: "run.completed",
         runID: completedRunID,
@@ -1453,7 +1756,7 @@ function createLoopEngine(options) {
       });
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID2(),
+        eventID: randomUUID3(),
         goalID,
         type: "goal.blocked",
         reason: limitResult.reason + " (force-finish ignored)",
@@ -1477,7 +1780,7 @@ function createLoopEngine(options) {
       });
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID2(),
+        eventID: randomUUID3(),
         goalID,
         type: "goal.status_changed",
         from: "active",
@@ -1579,7 +1882,7 @@ function createLoopEngine(options) {
     });
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID3(),
       goalID: goal.id,
       type: "run.failed",
       runID: runtime.activeRunID || "unknown",
@@ -1592,7 +1895,7 @@ function createLoopEngine(options) {
     if (updatedGoal?.status === "blocked") {
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID2(),
+        eventID: randomUUID3(),
         goalID: goal.id,
         type: "goal.blocked",
         reason: `Failed ${runtime.consecutiveFailures + 1} times`,
@@ -1620,7 +1923,7 @@ function createLoopEngine(options) {
     });
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID3(),
       goalID: goal.id,
       type: "compaction.completed",
       timestamp: new Date().toISOString(),
@@ -1690,7 +1993,7 @@ function createLoopEngine(options) {
     });
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID3(),
       goalID: goal.id,
       type: "compaction.started",
       timestamp: new Date().toISOString(),
@@ -1748,7 +2051,7 @@ function createLoopEngine(options) {
       return false;
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID2(),
+      eventID: randomUUID3(),
       goalID: goal.id,
       type: "goal.status_changed",
       from: "active",
@@ -1924,7 +2227,7 @@ function createLoopEngine(options) {
             if (recovered) {
               await appendEvent(directory, {
                 version: 1,
-                eventID: randomUUID2(),
+                eventID: randomUUID3(),
                 goalID: goal.id,
                 type: "run.recovered",
                 runID: stalledRunID ?? "unknown",
@@ -1958,7 +2261,7 @@ function createLoopEngine(options) {
           const stuckSeconds = Math.floor((Date.now() - Date.parse(failedAt)) / 1000);
           await appendEvent(directory, {
             version: 1,
-            eventID: randomUUID2(),
+            eventID: randomUUID3(),
             goalID: goal.id,
             type: "run.stuck",
             runID: runtime.activeRunID ?? "unknown",
@@ -1998,7 +2301,7 @@ function createLoopEngine(options) {
             });
             await appendEvent(directory, {
               version: 1,
-              eventID: randomUUID2(),
+              eventID: randomUUID3(),
               goalID: goal.id,
               type: "run.stuck",
               runID: runtime.activeRunID,
@@ -2021,13 +2324,14 @@ function createLoopEngine(options) {
 }
 
 // src/application/goal-service.ts
-import { randomUUID as randomUUID4 } from "crypto";
+import { randomUUID as randomUUID5 } from "crypto";
 init_state_repository();
+init_command_await2();
 import * as path2 from "path";
 import { promises as fs2 } from "fs";
 
 // src/server/host-adapter.ts
-import { randomUUID as randomUUID3 } from "crypto";
+import { randomUUID as randomUUID4 } from "crypto";
 function parseModelRef(value) {
   if (value === undefined)
     return;
@@ -2046,7 +2350,7 @@ function parseModelRef(value) {
   return { providerID, modelID };
 }
 function newPromptMessageID() {
-  return `msg_${randomUUID3()}`;
+  return `msg_${randomUUID4()}`;
 }
 function isV2PromptMessageID(messageID) {
   return messageID.startsWith("msg_");
@@ -2586,7 +2890,7 @@ function createGoalService(host) {
     });
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID4(),
+      eventID: randomUUID5(),
       goalID,
       type: "run.failed",
       runID,
@@ -2598,7 +2902,7 @@ function createGoalService(host) {
     if (blocked) {
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID4(),
+        eventID: randomUUID5(),
         goalID,
         type: "goal.blocked",
         reason: `Worker prompt delivery failed: ${detail}`,
@@ -2632,7 +2936,7 @@ function createGoalService(host) {
     return session;
   }
   async function start(directory, input) {
-    const id = randomUUID4();
+    const id = randomUUID5();
     return withGoalOperation(id, () => startUnlocked(directory, input, id));
   }
   async function startUnlocked(directory, input, id) {
@@ -2712,7 +3016,7 @@ function createGoalService(host) {
       });
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID4(),
+        eventID: randomUUID5(),
         goalID: id,
         type: "goal.blocked",
         reason: detail,
@@ -2733,7 +3037,7 @@ function createGoalService(host) {
       const rt = state.runtimes.find((item) => item.goalID === id);
       if (rt) {
         Object.assign(rt, acquireLease(rt, g.config.timeoutMs || 300000));
-        rt.activeRunID = randomUUID4();
+        rt.activeRunID = randomUUID5();
         rt.activePromptMessageID = newPromptMessageID();
         rt.runCount = 1;
         rt.budgetTurnCount = 1;
@@ -2744,7 +3048,7 @@ function createGoalService(host) {
     runtime = state2.runtimes.find((r) => r.goalID === id);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID4(),
+      eventID: randomUUID5(),
       goalID: id,
       type: "goal.created",
       name: input.name,
@@ -2756,7 +3060,7 @@ function createGoalService(host) {
     if (runtime) {
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID4(),
+        eventID: randomUUID5(),
         goalID: id,
         type: "run.started",
         runID: runtime.activeRunID,
@@ -2869,7 +3173,7 @@ function createGoalService(host) {
         return s;
       const timeoutMs = g.config.timeoutMs || 300000;
       Object.assign(rt, acquireLease(rt, timeoutMs));
-      rt.activeRunID = randomUUID4();
+      rt.activeRunID = randomUUID5();
       rt.activePromptMessageID = newPromptMessageID();
       rt.runCount += 1;
       if (rt.freeRetryPending) {
@@ -2887,7 +3191,7 @@ function createGoalService(host) {
       return;
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID4(),
+      eventID: randomUUID5(),
       goalID,
       type: "run.started",
       runID: freshRuntime.activeRunID,
@@ -2988,9 +3292,10 @@ function createGoalService(host) {
       await workers.abortWorker(session.workerSessionID);
       sessions.delete(goalID);
     }
+    await cancelAwaitsForGoal(directory, goalID, "goal paused").catch(() => {});
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID4(),
+      eventID: randomUUID5(),
       goalID,
       type: "goal.status_changed",
       from: "active",
@@ -3029,7 +3334,7 @@ function createGoalService(host) {
     }
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID4(),
+      eventID: randomUUID5(),
       goalID,
       type: "goal.status_changed",
       from: "paused",
@@ -3081,7 +3386,7 @@ function createGoalService(host) {
     }
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID4(),
+      eventID: randomUUID5(),
       goalID,
       type: "goal.status_changed",
       from: "blocked",
@@ -3108,11 +3413,12 @@ function createGoalService(host) {
     await mutateState(directory, `goal.clear:${goalID}`, async (s) => {
       s.goals = s.goals.filter((g) => g.id !== goalID);
       s.runtimes = s.runtimes.filter((r) => r.goalID !== goalID);
+      s.commandAwaits = (s.commandAwaits ?? []).filter((a) => a.goalID !== goalID);
       return s;
     });
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID4(),
+      eventID: randomUUID5(),
       goalID,
       type: "goal.cleared",
       timestamp: new Date().toISOString(),
@@ -3320,7 +3626,7 @@ function createGoalService(host) {
 
 // src/application/schedule-worker.ts
 init_state_repository();
-import { randomUUID as randomUUID5 } from "crypto";
+import { randomUUID as randomUUID6 } from "crypto";
 function createScheduleWorker(options) {
   const { directory, goalService } = options;
   const intervalMs = options.intervalMs ?? 5000;
@@ -3408,7 +3714,7 @@ function createScheduleWorker(options) {
         continue;
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID5(),
+        eventID: randomUUID6(),
         goalID: goal.id,
         type: "schedule.tick",
         scheduleRunCount: count,
@@ -3683,7 +3989,7 @@ function createCommandHost(opts) {
 }
 
 // src/application/command-service.ts
-import { randomUUID as randomUUID6 } from "crypto";
+import { randomUUID as randomUUID7 } from "crypto";
 import { promises as fs3 } from "fs";
 import path3 from "path";
 
@@ -3879,6 +4185,7 @@ function validateCommandStreamMessage(value) {
 }
 
 // src/application/command-service.ts
+init_command_await2();
 init_state_repository();
 function loopCommandsDir(directory) {
   return path3.join(directory, ".opencode", "loopd", "commands");
@@ -3922,6 +4229,14 @@ function createCommandService(host, opts) {
   }
   function rememberDir(id, directory) {
     commandDirs.set(id, directory);
+  }
+  async function fireAwaits(directory, id) {
+    try {
+      const fired = await fireCommandAwaits(directory, id);
+      if (fired.length === 0)
+        return;
+      await opts?.onAwaitFired?.(directory, fired);
+    } catch {}
   }
   async function readBrokerSnapshot(commandID, ownerSessionID) {
     const directory = commandDirs.get(commandID);
@@ -4040,7 +4355,7 @@ function createCommandService(host, opts) {
     }).catch(() => {});
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID6(),
+      eventID: randomUUID7(),
       commandID: id,
       type: "command.exited",
       exitCode: info.exitCode,
@@ -4052,6 +4367,7 @@ function createCommandService(host, opts) {
       if (fresh)
         emitBroker(id, { type: "status", command: fresh });
     } catch {}
+    await fireAwaits(directory, id);
   }
   function owned(cmd, ownerSessionID) {
     return !!cmd && cmd.ownerSessionID === ownerSessionID;
@@ -4067,7 +4383,7 @@ function createCommandService(host, opts) {
       if (!input.ownerSessionID || input.ownerSessionID === "main") {
         throw new Error("A valid owner session is required. Run from an active OpenCode session.");
       }
-      const id = randomUUID6();
+      const id = randomUUID7();
       const cwd = input.cwd || directory;
       const pending = [];
       let ready = false;
@@ -4113,7 +4429,7 @@ function createCommandService(host, opts) {
       rememberDir(id, directory);
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID6(),
+        eventID: randomUUID7(),
         ...input.goalID ? { goalID: input.goalID } : {},
         commandID: id,
         type: "command.started",
@@ -4294,6 +4610,7 @@ function createCommandService(host, opts) {
         if (fresh)
           emitBroker(id, { type: "status", command: fresh });
       } catch {}
+      await fireAwaits(directory, id);
       return { ok: true, message: `Command "${session.title}" ${status}.` };
     },
     async remove(directory, id, ownerSessionID) {
@@ -4311,6 +4628,7 @@ function createCommandService(host, opts) {
       });
       await removeCommandLog(directory, id);
       emitBroker(id, { type: "status", command: lastKnown });
+      await clearAwaitsForCommand(directory, id, "command removed").catch(() => {});
       return { ok: true, message: `Command "${session.title}" removed.` };
     },
     async reconcile(directory) {
@@ -4341,6 +4659,7 @@ function createCommandService(host, opts) {
               if (fresh)
                 emitBroker(c.id, { type: "status", command: fresh });
             } catch {}
+            await fireAwaits(directory, c.id);
           }
           continue;
         }
@@ -4359,6 +4678,7 @@ function createCommandService(host, opts) {
           if (fresh && fresh.status === "missing")
             emitBroker(c.id, { type: "status", command: fresh });
         } catch {}
+        await fireAwaits(directory, c.id);
       }
       return { markedMissing };
     },
@@ -4385,7 +4705,7 @@ function createCommandService(host, opts) {
 }
 
 // src/application/command-event-broker.ts
-import { randomUUID as randomUUID7 } from "crypto";
+import { randomUUID as randomUUID8 } from "crypto";
 function safeDeliver(sink, msg) {
   try {
     sink(msg);
@@ -4428,7 +4748,7 @@ function createCommandEventBroker(resolver) {
         throw new Error("ownerSessionID is required.");
       if (typeof sink !== "function")
         throw new Error("sink must be a function.");
-      const sinkID = randomUUID7();
+      const sinkID = randomUUID8();
       const entry = { sinkID, sink, state: "subscribing", buffer: [] };
       entriesFor(commandID).set(sinkID, entry);
       try {
@@ -4517,7 +4837,7 @@ function createCommandEventBroker(resolver) {
 }
 
 // src/server/command-stream-server.ts
-import { randomBytes, randomUUID as randomUUID8, timingSafeEqual } from "crypto";
+import { randomBytes, randomUUID as randomUUID9, timingSafeEqual } from "crypto";
 import { promises as fs4 } from "fs";
 import path4 from "path";
 function streamEndpointPath(directory) {
@@ -4551,7 +4871,7 @@ var MAX_BUFFERED_BYTES = 512 * 1024;
 function createCommandStreamServer(directory, commandService, broker) {
   const endpointPath = streamEndpointPath(directory);
   const token = randomBytes(32).toString("hex");
-  const generation = randomUUID8();
+  const generation = randomUUID9();
   const startedAt = new Date().toISOString();
   let server;
   let serverURL;
@@ -4822,7 +5142,7 @@ function createCommandStreamServer(directory, commandService, broker) {
 
 // src/server/goal-tools.ts
 init_state_repository();
-import { randomUUID as randomUUID9 } from "crypto";
+import { randomUUID as randomUUID10 } from "crypto";
 import { tool } from "@opencode-ai/plugin/tool";
 // src/domain/verification.ts
 var MAX_RECENT_ATTEMPTS = 10;
@@ -5047,7 +5367,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID9(),
+          eventID: randomUUID10(),
           goalID: goal.id,
           type: "goal.progress",
           summary: args.summary,
@@ -5112,7 +5432,7 @@ Exit code: ${f.exitCode}${stdoutSnippet}${stderrSnippet}`;
 Working directory: ${cwd}
 
 ${failureDetails}`;
-              attemptID = randomUUID9();
+              attemptID = randomUUID10();
               const verificationAttempt = {
                 id: attemptID,
                 sequence: runtime.evaluatorRejectionCount,
@@ -5157,7 +5477,7 @@ ${failureDetails.slice(0, 500)}`,
             if (attemptID) {
               await appendEvent(dir, {
                 version: 1,
-                eventID: randomUUID9(),
+                eventID: randomUUID10(),
                 goalID: goal.id,
                 type: "goal.completion_rejected",
                 attemptID,
@@ -5175,7 +5495,7 @@ ${failureDetails.slice(0, 500)}`,
             if (blocked && rejectedGoal?.blocker) {
               await appendEvent(dir, {
                 version: 1,
-                eventID: randomUUID9(),
+                eventID: randomUUID10(),
                 goalID: goal.id,
                 type: "goal.blocked",
                 reason: rejectedGoal.blocker.reason,
@@ -5235,7 +5555,7 @@ ${failureDetails.slice(0, 500)}`,
             }
             runtime.updatedAt = new Date().toISOString();
           }
-          const attemptID = randomUUID9();
+          const attemptID = randomUUID10();
           const cwd = goal.config.checkCwd || goal.config.artifactDir || dir;
           const checks = (goal.config.checks || []).map((cmd) => ({
             command: cmd,
@@ -5259,7 +5579,7 @@ ${failureDetails.slice(0, 500)}`,
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID9(),
+          eventID: randomUUID10(),
           goalID: goal.id,
           type: "goal.completed",
           summary: args.summary,
@@ -5319,7 +5639,7 @@ ${failureDetails.slice(0, 500)}`,
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID9(),
+          eventID: randomUUID10(),
           goalID: goal.id,
           type: "goal.blocked",
           reason: args.reason,
@@ -6083,6 +6403,7 @@ function ownerTools(options) {
 }
 
 // src/server/command-tools.ts
+init_command_await2();
 import { tool as tool3 } from "@opencode-ai/plugin/tool";
 function ownerID(context) {
   const id = context?.sessionID;
@@ -6260,6 +6581,30 @@ function commandTools(options) {
         return { title: result.ok ? "Removed" : "Remove failed", output: JSON.stringify({ ...result, command_id: args.command_id }) };
       }
     }),
+    loopd_command_await: tool3({
+      description: "Opt in to a one-shot wake-up: the given goal wakes when the given command reaches a terminal status (exited/terminated/missing) with the exit code, signal, and last 4KB of output as evidence. Explicit opt-in only \u2014 a merely linked command never wakes its goal. Exactly-once: the await is consumed on fire, output chunks never fire, pausing/clearing the goal or removing the command cancels it.",
+      args: {
+        command_id: tool3.schema.string().describe("Command session ID to await."),
+        goal_id: tool3.schema.string().describe("Goal ID to wake on exit. You must own both the goal and the command.")
+      },
+      execute: async (args, context) => {
+        const owner = ownerID(context);
+        if (!owner)
+          return denied();
+        const result = await requestCommandAwait(directory, {
+          goalID: args.goal_id,
+          commandID: args.command_id,
+          ownerSessionID: owner
+        });
+        if (result.ok && result.fired && result.active && options.goalService) {
+          await wakeGoalForAwait(directory, options.goalService, args.goal_id).catch(() => {});
+        }
+        return {
+          title: result.ok ? "Await registered" : "Await failed",
+          output: JSON.stringify({ ...result, command_id: args.command_id, goal_id: args.goal_id })
+        };
+      }
+    }),
     loopd_command_resize: tool3({
       description: capabilities.resize ? "Apply a terminal size to a running command (live PTY winsize; the requested size is also stored)." : "Request a terminal size for a command. Honestly unsupported by the pipe host: size is stored, never applied.",
       args: {
@@ -6295,7 +6640,21 @@ function createServerHooks(directory, host, defaults) {
   const goalService = createGoalService(host);
   const commandBroker = createCommandEventBroker();
   const commandHost = createCommandHost();
-  const commandService = createCommandService(commandHost, { broker: commandBroker });
+  const commandService = createCommandService(commandHost, {
+    broker: commandBroker,
+    onAwaitFired: async (dir, fired) => {
+      await Promise.resolve().then(() => init_command_await2());
+      for (const f of fired) {
+        if (!f.active)
+          continue;
+        await wakeGoalForAwait(dir, goalService, f.goalID).catch((error) => logServerEvent(dir, "command.await-wake-failed", {
+          goalID: f.goalID,
+          commandID: f.commandID,
+          detail: describeError(error)
+        }));
+      }
+    }
+  });
   const commandStream = createCommandStreamServer(directory, commandService, commandBroker);
   const worker = createControlWorker({
     directory,
@@ -6331,7 +6690,19 @@ function createServerHooks(directory, host, defaults) {
       return;
     reconciliationStarted = true;
     logServerEvent(directory, "reconcile.started");
-    goalService.reconcile(directory).then(() => commandService.reconcile(directory), (error) => logServerEvent(directory, "reconcile.failed", { detail: describeError(error) })).then(() => logServerEvent(directory, "reconcile.completed"), (error) => logServerEvent(directory, "reconcile.failed", { detail: describeError(error) }));
+    goalService.reconcile(directory).then(() => commandService.reconcile(directory), (error) => logServerEvent(directory, "reconcile.failed", { detail: describeError(error) })).then(async () => {
+      await Promise.resolve().then(() => init_command_await2());
+      const fired = await reconcileCommandAwaits(directory);
+      for (const f of fired) {
+        if (!f.active)
+          continue;
+        await wakeGoalForAwait(directory, goalService, f.goalID).catch((error) => logServerEvent(directory, "command.await-wake-failed", {
+          goalID: f.goalID,
+          commandID: f.commandID,
+          detail: describeError(error)
+        }));
+      }
+    }, (error) => logServerEvent(directory, "reconcile.failed", { detail: describeError(error) })).then(() => logServerEvent(directory, "reconcile.completed"), (error) => logServerEvent(directory, "reconcile.failed", { detail: describeError(error) }));
   }
   return {
     event: async ({ event }) => {
@@ -6343,7 +6714,7 @@ function createServerHooks(directory, host, defaults) {
       if (type?.startsWith("session."))
         reconcileInBackground();
     },
-    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }), ...commandTools({ directory, commandService, capabilities: commandHost.capabilities }) },
+    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }), ...commandTools({ directory, commandService, capabilities: commandHost.capabilities, goalService }) },
     "tool.execute.before": async (input, _output) => {
       const activeWorkers = goalService.getActiveWorkers();
       let matchedGoalID;

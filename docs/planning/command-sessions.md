@@ -45,6 +45,33 @@ installed host APIs can and cannot do, with file/type evidence.
   touches commands; stopping a command never touches goals (separate service,
   no shared imports — enforced by construction and tested).
 
+## Await semantics (explicit opt-in wake)
+
+A goal wakes on a command's exit ONLY after an explicit await
+(`loopd_command_await`, TUI `:await <goalID>`, control bus `cmd_await`). A
+merely linked command never wakes its goal — the display-only linkage behavior
+is otherwise unchanged.
+
+- Exactly-once, terminal-only: when an awaited command reaches `exited`,
+  `terminated`, or `missing`, the await is consumed (removed first, so a
+  duplicate/late status event can never fire twice) and ONE wake-up is
+  delivered with the exit code, signal, and a bounded output tail (last 4 KB
+  of the retained log). Output chunks never wake, no matter how chatty.
+- Delivery rides the existing continuation machinery: a `pendingInbox` item
+  plus the idle-continuation path (same seam as send/nudge — never a second
+  parallel loop). If the goal is blocked when the exit lands, the evidence
+  waits in `pendingInbox` for the next explicit resume/retry; a non-active
+  goal is never auto-activated.
+- Lifecycle independence preserved: pausing or clearing a goal cancels its
+  outstanding awaits (an exit afterwards fires nothing); removing a finished
+  command clears awaits pointing at it; terminating an awaited command is
+  allowed and wakes normally; cross-owner awaits (requester must own both the
+  goal and the command) are rejected fail-closed.
+- Durable: awaits persist in the state repo (IDs only — never output bytes),
+  so they survive plugin restarts. Reconcile fires an await whose command is
+  already terminal exactly once, and discards (with a ledger note) an await
+  whose command record is gone.
+
 ## Permissions
 
 Every operation is owner-scoped (`ownerSessionID`): agent tools deny without

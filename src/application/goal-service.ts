@@ -12,6 +12,7 @@ import { readState, mutateState, appendEvent, appendGoalInbox, drainGoalInbox, r
 import * as path from "path"
 import { promises as fs } from "fs"
 import type { StoreState } from "../infrastructure/state-repository"
+import { cancelAwaitsForGoal } from "./command-await"
 import type { LoopHost, SessionMessage } from "../server/host-adapter"
 import { newPromptMessageID } from "../server/host-adapter"
 import { createWorkerManager, type WorkerManager, type WorkerSession, type ContinuationContext } from "../server/worker-session"
@@ -669,6 +670,10 @@ export function createGoalService(host: LoopHost): GoalService {
       sessions.delete(goalID)
     }
 
+    // Pausing cancels outstanding command awaits: an exit landing afterwards
+    // fires nothing (no orphan wakes for a parked goal).
+    await cancelAwaitsForGoal(directory, goalID, "goal paused").catch(() => {})
+
     await appendEvent(directory, {
       version: 1,
       eventID: randomUUID(),
@@ -797,6 +802,8 @@ export function createGoalService(host: LoopHost): GoalService {
     await mutateState(directory, `goal.clear:${goalID}`, async (s) => {
       s.goals = s.goals.filter((g) => g.id !== goalID)
       s.runtimes = s.runtimes.filter((r) => r.goalID !== goalID)
+      // Clearing cancels outstanding awaits: no orphan wakes after clear.
+      s.commandAwaits = (s.commandAwaits ?? []).filter((a) => a.goalID !== goalID)
       return s
     })
 

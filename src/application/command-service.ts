@@ -18,6 +18,7 @@ import {
 import type { CommandHost, CommandProcessHandle } from "../server/command-host"
 import { utf8ByteLength, type CommandStreamMessage } from "../domain/command-events"
 import type { CommandEventBroker } from "./command-event-broker"
+import { clearAwaitsForCommand, fireCommandAwaits, type FiredAwait } from "./command-await"
 import {
   appendCommandLog,
   appendEvent,
@@ -74,7 +75,17 @@ function loopCommandsDir(directory: string): string {
 
 export function createCommandService(
   host: CommandHost,
-  opts?: { broker?: CommandEventBroker },
+  opts?: {
+    broker?: CommandEventBroker
+    /**
+     * Called with exactly-once fired awaits after a command reaches a
+     * terminal status. The service itself never touches goals: the
+     * composition root wires this to inbox+continuation (see
+     * command-await.wakeGoalForAwait). Defaults to a no-op — firing still
+     * consumes the await and queues evidence in pendingInbox.
+     */
+    onAwaitFired?: (directory: string, fired: FiredAwait[]) => Promise<void>
+  },
 ): CommandService {
   type LiveEntry = { handle: CommandProcessHandle; buffers: Buffer[]; bufferedBytes: number }
   const live = new Map<string, LiveEntry>()
@@ -123,6 +134,22 @@ export function createCommandService(
 
   function rememberDir(id: string, directory: string): void {
     commandDirs.set(id, directory)
+  }
+
+  /**
+   * Fire outstanding opt-in awaits for a terminal command (exactly-once:
+   * the await is consumed before delivery, so duplicate/late status events
+   * are no-ops). Output chunks never reach here — callers are terminal
+   * paths only (exit, terminate-finalize, reconcile-missing).
+   */
+  async function fireAwaits(directory: string, id: string): Promise<void> {
+    try {
+      const fired = await fireCommandAwaits(directory, id)
+      if (fired.length === 0) return
+      await opts?.onAwaitFired?.(directory, fired)
+    } catch {
+      // Await delivery never breaks command persistence.
+    }
   }
 
   async function readBrokerSnapshot(commandID: string, ownerSessionID: string) {
@@ -271,6 +298,8 @@ export function createCommandService(
       )
       if (fresh) emitBroker(id, { type: "status", command: fresh })
     } catch {}
+    // Terminal-only wake: fires outstanding opt-in awaits exactly once.
+    await fireAwaits(directory, id)
   }
 
   function owned(cmd: CommandSession | undefined, ownerSessionID: string): cmd is CommandSession {
@@ -533,8 +562,10 @@ export function createCommandService(
         )
         if (fresh) emitBroker(id, { type: "status", command: fresh })
       } catch {}
-      // Stopping a command never touches goals — no goal import exists here
-      // by construction. Detach needs nothing: viewers simply stop reading.
+      // Terminating a command a goal awaits is allowed and wakes normally.
+      // Stopping a command otherwise never touches goals — no goal import
+      // exists here by construction. Detach needs nothing: viewers stop reading.
+      await fireAwaits(directory, id)
       return { ok: true, message: `Command "${session.title}" ${status}.` }
     },
 
@@ -553,6 +584,8 @@ export function createCommandService(
       })
       await removeCommandLog(directory, id)
       emitBroker(id, { type: "status", command: lastKnown })
+      // Removing a finished command clears awaits pointing at it.
+      await clearAwaitsForCommand(directory, id, "command removed").catch(() => {})
       return { ok: true, message: `Command "${session.title}" removed.` }
     },
 
@@ -586,6 +619,7 @@ export function createCommandService(
               )
               if (fresh) emitBroker(c.id, { type: "status", command: fresh })
             } catch {}
+            await fireAwaits(directory, c.id)
           }
           continue
         }
@@ -605,6 +639,8 @@ export function createCommandService(
           )
           if (fresh && fresh.status === "missing") emitBroker(c.id, { type: "status", command: fresh })
         } catch {}
+        // "missing" is terminal: outstanding awaits fire once on recovery.
+        await fireAwaits(directory, c.id)
       }
       return { markedMissing }
     },

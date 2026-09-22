@@ -46,7 +46,26 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
   // existing idempotent control bus — never move them to the socket.
   const commandBroker = createCommandEventBroker()
   const commandHost = createCommandHost()
-  const commandService = createCommandService(commandHost, { broker: commandBroker })
+  // The ONLY command→goal edge (explicit opt-in awaits): terminal exits fire
+  // consumed awaits into pendingInbox and wake active goals through the
+  // existing idle-continuation path. Nothing automatic — merely linked
+  // commands never wake.
+  const commandService = createCommandService(commandHost, {
+    broker: commandBroker,
+    onAwaitFired: async (dir, fired) => {
+      const { wakeGoalForAwait } = await import("../application/command-await")
+      for (const f of fired) {
+        if (!f.active) continue // evidence waits in pendingInbox; never auto-activate
+        await wakeGoalForAwait(dir, goalService, f.goalID as never).catch((error) =>
+          logServerEvent(dir, "command.await-wake-failed", {
+            goalID: f.goalID,
+            commandID: f.commandID,
+            detail: describeError(error),
+          }),
+        )
+      }
+    },
+  })
   const commandStream = createCommandStreamServer(directory, commandService, commandBroker)
 
   const worker = createControlWorker({
@@ -92,6 +111,24 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
       () => commandService.reconcile(directory),
       (error) => logServerEvent(directory, "reconcile.failed", { detail: describeError(error) }),
     ).then(
+      async () => {
+        // Awaits survive restart via the state repo: fire ones whose command
+        // is already terminal, discard ones whose command record is gone.
+        const { reconcileCommandAwaits, wakeGoalForAwait } = await import("../application/command-await")
+        const fired = await reconcileCommandAwaits(directory)
+        for (const f of fired) {
+          if (!f.active) continue
+          await wakeGoalForAwait(directory, goalService, f.goalID as never).catch((error) =>
+            logServerEvent(directory, "command.await-wake-failed", {
+              goalID: f.goalID,
+              commandID: f.commandID,
+              detail: describeError(error),
+            }),
+          )
+        }
+      },
+      (error) => logServerEvent(directory, "reconcile.failed", { detail: describeError(error) }),
+    ).then(
       () => logServerEvent(directory, "reconcile.completed"),
       (error) => logServerEvent(directory, "reconcile.failed", { detail: describeError(error) }),
     )
@@ -109,7 +146,7 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
       await engine.handleEvent(event)
       if (type?.startsWith("session.")) reconcileInBackground()
     },
-    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }), ...commandTools({ directory, commandService, capabilities: commandHost.capabilities }) },
+    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }), ...commandTools({ directory, commandService, capabilities: commandHost.capabilities, goalService }) },
     "tool.execute.before": async (input, _output) => {
       // Track tool call start for worker sessions only
       const activeWorkers = goalService.getActiveWorkers()
