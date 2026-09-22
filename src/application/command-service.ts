@@ -16,6 +16,8 @@ import {
   type CommandSessionStatus,
 } from "../domain/command-session"
 import type { CommandHost, CommandProcessHandle } from "../server/command-host"
+import { utf8ByteLength, type CommandStreamMessage } from "../domain/command-events"
+import type { CommandEventBroker } from "./command-event-broker"
 import {
   appendCommandLog,
   appendEvent,
@@ -70,10 +72,18 @@ function loopCommandsDir(directory: string): string {
   return path.join(directory, ".opencode", "loopd", "commands")
 }
 
-export function createCommandService(host: CommandHost): CommandService {
+export function createCommandService(
+  host: CommandHost,
+  opts?: { broker?: CommandEventBroker },
+): CommandService {
   type LiveEntry = { handle: CommandProcessHandle; buffers: Buffer[]; bufferedBytes: number }
   const live = new Map<string, LiveEntry>()
   const operations = new Map<string, Promise<void>>()
+  const broker = opts?.broker
+  // commandID -> owning directory (service methods are directory-scoped but
+  // the broker subscribe() contract is not; the resolver recovers the
+  // directory from recent service activity — single-project assumption).
+  const commandDirs = new Map<string, string>()
 
   function tailText(entry: LiveEntry, limitBytes = 64 * 1024): string {
     let want = limitBytes
@@ -101,7 +111,62 @@ export function createCommandService(host: CommandHost): CommandService {
     await operations.get(id)?.catch(() => {})
   }
 
+  /** Publish without ever throwing into the service (sink isolation lives in the broker). */
+  function emitBroker(commandID: string, message: CommandStreamMessage): void {
+    if (!broker) return
+    try {
+      broker.publish(commandID, message)
+    } catch {
+      // Broker never throws for sink errors by contract; defensive only.
+    }
+  }
+
+  function rememberDir(id: string, directory: string): void {
+    commandDirs.set(id, directory)
+  }
+
+  async function readBrokerSnapshot(commandID: string, ownerSessionID: string) {
+    const directory = commandDirs.get(commandID)
+    if (!directory) return undefined
+    const state = await readState(directory)
+    const session = (state.commands ?? []).find(
+      (x) => x.id === commandID && x.ownerSessionID === ownerSessionID,
+    )
+    if (!session) return undefined
+    const log = await readCommandLog(directory, commandID, {
+      offsetBytes: 0,
+      limitBytes: MAX_COMMAND_OUTPUT_BYTES,
+    })
+    const data = log.text
+    const byteLen = utf8ByteLength(data)
+    const lifetime = session.streamBytes ?? 0
+    // Retained bytes map to absolute lifetime offsets via streamBytes.
+    // Legacy records (streamBytes unset) fall back to retained-relative 0..len.
+    const endOffset = lifetime >= byteLen ? lifetime : byteLen
+    const startOffset = endOffset - byteLen
+    return { command: session, data, startOffset, endOffset }
+  }
+
+  if (broker) {
+    broker.setResolver({
+      async getSession(commandID, ownerSessionID) {
+        const directory = commandDirs.get(commandID)
+        if (!directory) return undefined
+        const s = await readState(directory)
+        const c = (s.commands ?? []).find((x) => x.id === commandID)
+        return c && c.ownerSessionID === ownerSessionID ? c : undefined
+      },
+      async waitForQuiesce(commandID) {
+        await waitForOperations(commandID)
+      },
+      async readSnapshot(commandID, ownerSessionID) {
+        return readBrokerSnapshot(commandID, ownerSessionID)
+      },
+    })
+  }
+
   async function persistOutput(directory: string, id: string, chunk: string): Promise<void> {
+    rememberDir(id, directory)
     const entry = live.get(id)
     if (entry) {
       const bytes = Buffer.from(chunk)
@@ -137,14 +202,41 @@ export function createCommandService(host: CommandHost): CommandService {
     await mutateState(directory, `cmd.output:${id}`, async (s) => {
       const c = (s.commands ?? []).find((x) => x.id === id)
       if (!c) return s
+      // Lifetime-monotonic streamBytes advances inside the same transaction
+      // as the retained-size bookkeeping, so offsets and files stay in sync.
+      const byteLen = utf8ByteLength(chunk)
+      const startOffset = c.streamBytes ?? 0
+      const endOffset = startOffset + byteLen
+      c.streamBytes = endOffset
       c.outputBytes = retainedBytes
       if (truncated) c.truncated = true
       c.updatedAt = new Date().toISOString()
       return s
     })
+    // Persist-first-then-emit: offsets are absolute lifetime bytes. Re-read
+    // the fresh counter so a concurrent legacy record cannot skew math.
+    try {
+      const fresh = await readState(directory).then(
+        (s) => (s.commands ?? []).find((x) => x.id === id),
+      )
+      const endOffset = fresh?.streamBytes ?? 0
+      const startOffset = endOffset - utf8ByteLength(chunk)
+      if (fresh && startOffset >= 0) {
+        emitBroker(id, {
+          type: "output",
+          commandID: id,
+          data: chunk,
+          startOffset,
+          endOffset,
+        })
+      }
+    } catch {
+      // Read-back is best-effort; persistence already succeeded.
+    }
   }
 
   async function persistExit(directory: string, id: string, info: { exitCode: number; signal?: string }): Promise<void> {
+    rememberDir(id, directory)
     live.delete(id)
     await mutateState(directory, `cmd.exit:${id}`, async (s) => {
       const c = (s.commands ?? []).find((x) => x.id === id)
@@ -172,6 +264,13 @@ export function createCommandService(host: CommandHost): CommandService {
       timestamp: new Date().toISOString(),
       revision: 0,
     }).catch(() => {})
+    // Ledger first (existing ordering), then broker status with fresh metadata.
+    try {
+      const fresh = await readState(directory).then(
+        (s) => (s.commands ?? []).find((x) => x.id === id),
+      )
+      if (fresh) emitBroker(id, { type: "status", command: fresh })
+    } catch {}
   }
 
   function owned(cmd: CommandSession | undefined, ownerSessionID: string): cmd is CommandSession {
@@ -230,6 +329,7 @@ export function createCommandService(host: CommandHost): CommandService {
         throw error
       }
       live.set(id, { handle, buffers: [], bufferedBytes: 0 })
+      rememberDir(id, directory)
       await appendEvent(directory, {
         version: 1,
         eventID: randomUUID(),
@@ -240,6 +340,16 @@ export function createCommandService(host: CommandHost): CommandService {
         timestamp: new Date().toISOString(),
         revision: 0,
       }).catch(() => {})
+      // Ledger first (existing ordering), then broker status with fresh
+      // metadata. Buffered pending[] replay flows through the same
+      // persist-then-emit path, so immediate-exit ordering (started before
+      // exited) holds for subscribers too.
+      try {
+        const fresh = await readState(directory).then(
+          (s) => (s.commands ?? []).find((x) => x.id === id),
+        )
+        if (fresh) emitBroker(id, { type: "status", command: fresh })
+      } catch {}
       // Release callbacks only after both metadata and the live handle exist.
       // Snapshot the pre-persistence events and switch new callbacks directly
       // to the queue first, so a chatty process cannot keep start() draining an
@@ -258,10 +368,12 @@ export function createCommandService(host: CommandHost): CommandService {
 
     async list(directory, ownerSessionID) {
       const s = await readState(directory)
+      for (const c of s.commands ?? []) rememberDir(c.id, directory)
       return (s.commands ?? []).filter((c) => c.ownerSessionID === ownerSessionID)
     },
 
     async get(directory, id, ownerSessionID) {
+      rememberDir(id, directory)
       const s = await readState(directory)
       const c = (s.commands ?? []).find((x) => x.id === id)
       return owned(c, ownerSessionID) ? c : undefined
@@ -336,6 +448,7 @@ export function createCommandService(host: CommandHost): CommandService {
     },
 
     async terminate(directory, id, ownerSessionID) {
+      rememberDir(id, directory)
       const session = await this.get(directory, id, ownerSessionID)
       if (!session) return { ok: false, message: "Command not found." }
       if (session.status !== "running") return { ok: false, message: `Command is ${session.status}; nothing to terminate.` }
@@ -350,6 +463,14 @@ export function createCommandService(host: CommandHost): CommandService {
         }
         return s
       }).catch(() => {})
+      // Claim persisted: emit intermediate status so subscribers see the
+      // SIGTERM claim even if the exit event races in.
+      try {
+        const claimed = await readState(directory).then(
+          (st) => (st.commands ?? []).find((x) => x.id === id),
+        )
+        if (claimed) emitBroker(id, { type: "status", command: claimed })
+      } catch {}
       const entry = live.get(id)
       let status: CommandSessionStatus = "terminated"
       if (entry) {
@@ -391,22 +512,33 @@ export function createCommandService(host: CommandHost): CommandService {
         // "exited" (natural death raced in) is left untouched — honest.
         return s
       })
+      // Terminal persistence done: emit fresh status (terminated or honest exited).
+      try {
+        const fresh = await readState(directory).then(
+          (st) => (st.commands ?? []).find((x) => x.id === id),
+        )
+        if (fresh) emitBroker(id, { type: "status", command: fresh })
+      } catch {}
       // Stopping a command never touches goals — no goal import exists here
       // by construction. Detach needs nothing: viewers simply stop reading.
       return { ok: true, message: `Command "${session.title}" ${status}.` }
     },
 
     async remove(directory, id, ownerSessionID) {
+      rememberDir(id, directory)
       const session = await this.get(directory, id, ownerSessionID)
       if (!session) return { ok: false, message: "Command not found." }
       if (session.status === "running") {
         return { ok: false, message: `Command "${session.title}" is still running — terminate it first (terminate ≠ remove).` }
       }
+      // Capture pre-delete metadata for the post-persistence status emit.
+      const lastKnown = { ...session }
       await mutateState(directory, `cmd.remove:${id}`, async (s) => {
         s.commands = (s.commands ?? []).filter((x) => !(x.id === id && x.ownerSessionID === ownerSessionID))
         return s
       })
       await removeCommandLog(directory, id)
+      emitBroker(id, { type: "status", command: lastKnown })
       return { ok: true, message: `Command "${session.title}" removed.` }
     },
 
@@ -416,6 +548,7 @@ export function createCommandService(host: CommandHost): CommandService {
       // process died are exited via onExit already; belt-and-braces check here.
       const state = await readState(directory)
       const cmds = state.commands ?? []
+      for (const c of cmds) rememberDir(c.id, directory)
       let markedMissing = 0
       for (const c of cmds) {
         if (c.status !== "running") continue
@@ -433,6 +566,12 @@ export function createCommandService(host: CommandHost): CommandService {
               }
               return s
             }).catch(() => {})
+            try {
+              const fresh = await readState(directory).then(
+                (st) => (st.commands ?? []).find((y) => y.id === c.id),
+              )
+              if (fresh) emitBroker(c.id, { type: "status", command: fresh })
+            } catch {}
           }
           continue
         }
@@ -446,6 +585,12 @@ export function createCommandService(host: CommandHost): CommandService {
           }
           return s
         }).catch(() => {})
+        try {
+          const fresh = await readState(directory).then(
+            (st) => (st.commands ?? []).find((y) => y.id === c.id),
+          )
+          if (fresh && fresh.status === "missing") emitBroker(c.id, { type: "status", command: fresh })
+        } catch {}
       }
       return { markedMissing }
     },

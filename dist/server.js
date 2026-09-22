@@ -3574,14 +3574,22 @@ function createCommandSession(input) {
 }
 var MAX_COMMAND_OUTPUT_BYTES = 512 * 1024;
 
+// src/domain/command-events.ts
+var _encoder = new TextEncoder;
+function utf8ByteLength(data) {
+  return _encoder.encode(data).length;
+}
+
 // src/application/command-service.ts
 init_state_repository();
 function loopCommandsDir(directory) {
   return path3.join(directory, ".opencode", "loopd", "commands");
 }
-function createCommandService(host) {
+function createCommandService(host, opts) {
   const live = new Map;
   const operations = new Map;
+  const broker = opts?.broker;
+  const commandDirs = new Map;
   function tailText(entry, limitBytes = 64 * 1024) {
     let want = limitBytes;
     const parts = [];
@@ -3607,7 +3615,55 @@ function createCommandService(host) {
   async function waitForOperations(id) {
     await operations.get(id)?.catch(() => {});
   }
+  function emitBroker(commandID, message) {
+    if (!broker)
+      return;
+    try {
+      broker.publish(commandID, message);
+    } catch {}
+  }
+  function rememberDir(id, directory) {
+    commandDirs.set(id, directory);
+  }
+  async function readBrokerSnapshot(commandID, ownerSessionID) {
+    const directory = commandDirs.get(commandID);
+    if (!directory)
+      return;
+    const state = await readState(directory);
+    const session = (state.commands ?? []).find((x) => x.id === commandID && x.ownerSessionID === ownerSessionID);
+    if (!session)
+      return;
+    const log = await readCommandLog(directory, commandID, {
+      offsetBytes: 0,
+      limitBytes: MAX_COMMAND_OUTPUT_BYTES
+    });
+    const data = log.text;
+    const byteLen = utf8ByteLength(data);
+    const lifetime = session.streamBytes ?? 0;
+    const endOffset = lifetime >= byteLen ? lifetime : byteLen;
+    const startOffset = endOffset - byteLen;
+    return { command: session, data, startOffset, endOffset };
+  }
+  if (broker) {
+    broker.setResolver({
+      async getSession(commandID, ownerSessionID) {
+        const directory = commandDirs.get(commandID);
+        if (!directory)
+          return;
+        const s = await readState(directory);
+        const c = (s.commands ?? []).find((x) => x.id === commandID);
+        return c && c.ownerSessionID === ownerSessionID ? c : undefined;
+      },
+      async waitForQuiesce(commandID) {
+        await waitForOperations(commandID);
+      },
+      async readSnapshot(commandID, ownerSessionID) {
+        return readBrokerSnapshot(commandID, ownerSessionID);
+      }
+    });
+  }
   async function persistOutput(directory, id, chunk) {
+    rememberDir(id, directory);
     const entry = live.get(id);
     if (entry) {
       const bytes = Buffer.from(chunk);
@@ -3640,14 +3696,33 @@ function createCommandService(host) {
       const c = (s.commands ?? []).find((x) => x.id === id);
       if (!c)
         return s;
+      const byteLen = utf8ByteLength(chunk);
+      const startOffset = c.streamBytes ?? 0;
+      const endOffset = startOffset + byteLen;
+      c.streamBytes = endOffset;
       c.outputBytes = retainedBytes;
       if (truncated)
         c.truncated = true;
       c.updatedAt = new Date().toISOString();
       return s;
     });
+    try {
+      const fresh = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
+      const endOffset = fresh?.streamBytes ?? 0;
+      const startOffset = endOffset - utf8ByteLength(chunk);
+      if (fresh && startOffset >= 0) {
+        emitBroker(id, {
+          type: "output",
+          commandID: id,
+          data: chunk,
+          startOffset,
+          endOffset
+        });
+      }
+    } catch {}
   }
   async function persistExit(directory, id, info) {
+    rememberDir(id, directory);
     live.delete(id);
     await mutateState(directory, `cmd.exit:${id}`, async (s) => {
       const c = (s.commands ?? []).find((x) => x.id === id);
@@ -3674,6 +3749,11 @@ function createCommandService(host) {
       timestamp: new Date().toISOString(),
       revision: 0
     }).catch(() => {});
+    try {
+      const fresh = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
+      if (fresh)
+        emitBroker(id, { type: "status", command: fresh });
+    } catch {}
   }
   function owned(cmd, ownerSessionID) {
     return !!cmd && cmd.ownerSessionID === ownerSessionID;
@@ -3732,6 +3812,7 @@ function createCommandService(host) {
         throw error;
       }
       live.set(id, { handle, buffers: [], bufferedBytes: 0 });
+      rememberDir(id, directory);
       await appendEvent(directory, {
         version: 1,
         eventID: randomUUID6(),
@@ -3742,6 +3823,11 @@ function createCommandService(host) {
         timestamp: new Date().toISOString(),
         revision: 0
       }).catch(() => {});
+      try {
+        const fresh = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
+        if (fresh)
+          emitBroker(id, { type: "status", command: fresh });
+      } catch {}
       const initialEvents = pending.splice(0);
       ready = true;
       const initialOperations = [];
@@ -3753,9 +3839,12 @@ function createCommandService(host) {
     },
     async list(directory, ownerSessionID) {
       const s = await readState(directory);
+      for (const c of s.commands ?? [])
+        rememberDir(c.id, directory);
       return (s.commands ?? []).filter((c) => c.ownerSessionID === ownerSessionID);
     },
     async get(directory, id, ownerSessionID) {
+      rememberDir(id, directory);
       const s = await readState(directory);
       const c = (s.commands ?? []).find((x) => x.id === id);
       return owned(c, ownerSessionID) ? c : undefined;
@@ -3829,6 +3918,7 @@ function createCommandService(host) {
       return { ok: true, message: `SIGINT delivered to "${session.title}" (process may continue if it traps the signal).` };
     },
     async terminate(directory, id, ownerSessionID) {
+      rememberDir(id, directory);
       const session = await this.get(directory, id, ownerSessionID);
       if (!session)
         return { ok: false, message: "Command not found." };
@@ -3842,6 +3932,11 @@ function createCommandService(host) {
         }
         return s;
       }).catch(() => {});
+      try {
+        const claimed = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
+        if (claimed)
+          emitBroker(id, { type: "status", command: claimed });
+      } catch {}
       const entry = live.get(id);
       let status = "terminated";
       if (entry) {
@@ -3882,25 +3977,35 @@ function createCommandService(host) {
         }
         return s;
       });
+      try {
+        const fresh = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
+        if (fresh)
+          emitBroker(id, { type: "status", command: fresh });
+      } catch {}
       return { ok: true, message: `Command "${session.title}" ${status}.` };
     },
     async remove(directory, id, ownerSessionID) {
+      rememberDir(id, directory);
       const session = await this.get(directory, id, ownerSessionID);
       if (!session)
         return { ok: false, message: "Command not found." };
       if (session.status === "running") {
         return { ok: false, message: `Command "${session.title}" is still running \u2014 terminate it first (terminate \u2260 remove).` };
       }
+      const lastKnown = { ...session };
       await mutateState(directory, `cmd.remove:${id}`, async (s) => {
         s.commands = (s.commands ?? []).filter((x) => !(x.id === id && x.ownerSessionID === ownerSessionID));
         return s;
       });
       await removeCommandLog(directory, id);
+      emitBroker(id, { type: "status", command: lastKnown });
       return { ok: true, message: `Command "${session.title}" removed.` };
     },
     async reconcile(directory) {
       const state = await readState(directory);
       const cmds = state.commands ?? [];
+      for (const c of cmds)
+        rememberDir(c.id, directory);
       let markedMissing = 0;
       for (const c of cmds) {
         if (c.status !== "running")
@@ -3919,6 +4024,11 @@ function createCommandService(host) {
               }
               return s;
             }).catch(() => {});
+            try {
+              const fresh = await readState(directory).then((st) => (st.commands ?? []).find((y) => y.id === c.id));
+              if (fresh)
+                emitBroker(c.id, { type: "status", command: fresh });
+            } catch {}
           }
           continue;
         }
@@ -3932,6 +4042,11 @@ function createCommandService(host) {
           }
           return s;
         }).catch(() => {});
+        try {
+          const fresh = await readState(directory).then((st) => (st.commands ?? []).find((y) => y.id === c.id));
+          if (fresh && fresh.status === "missing")
+            emitBroker(c.id, { type: "status", command: fresh });
+        } catch {}
       }
       return { markedMissing };
     },
