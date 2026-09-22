@@ -40,6 +40,8 @@ export interface CommandSession {
   rows?: number
   /** Total output bytes retained (bounded). */
   outputBytes: number
+  /** Lifetime output bytes ever produced (monotonic — never reset by truncation). */
+  streamBytes: number
   /** True when oldest output was dropped to stay within bounds. */
   truncated: boolean
   createdAt: string
@@ -108,6 +110,7 @@ export function createCommandSession(input: {
     cols: input.cols,
     rows: input.rows,
     outputBytes: 0,
+    streamBytes: 0,
     truncated: false,
     createdAt: now,
     updatedAt: now,

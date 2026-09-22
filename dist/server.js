@@ -3566,6 +3566,7 @@ function createCommandSession(input) {
     cols: input.cols,
     rows: input.rows,
     outputBytes: 0,
+    streamBytes: 0,
     truncated: false,
     createdAt: now,
     updatedAt: now
@@ -5415,7 +5416,7 @@ function commandTools(options) {
 // src/server/plugin.ts
 init_state_repository();
 // package.json
-var version = "1.10.1";
+var version = "1.10.2";
 
 // src/server/plugin.ts
 var PLUGIN_ID = "opencode-loopd.server";
