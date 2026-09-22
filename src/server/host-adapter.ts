@@ -2,6 +2,7 @@
 // Wraps the OpenCode SDK client behind a testable interface.
 // Production uses the real client; tests use a fake.
 
+import { randomUUID } from "crypto"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
 import type { Plugin as V2Plugin } from "@opencode/plugin"
 
@@ -57,6 +58,23 @@ export function parseModelRef(value?: string): ModelRef | undefined {
     throw new Error(`Invalid model "${value}". Use "providerID/modelID" (e.g. "openai/gpt-5.6-sol").`)
   }
   return { providerID, modelID }
+}
+
+/**
+ * Generate a worker-prompt message ID valid on BOTH hosts.
+ * v2 schema-validates `SessionMessage.ID` as a string starting with "msg_";
+ * v1 accepts any "msg" prefix and generates "msg_" itself. The underscore
+ * form is therefore the only spelling both hosts accept, and the engine
+ * persists exactly this value for prompt/assistant event correlation — the
+ * adapters must send it through unchanged (never rewrite the separator).
+ */
+export function newPromptMessageID(): string {
+  return `msg_${randomUUID()}`
+}
+
+/** True when a prompt ID is deliverable on the v2 host. */
+export function isV2PromptMessageID(messageID: string): boolean {
+  return messageID.startsWith("msg_")
 }
 
 export interface LoopHost {
@@ -134,9 +152,12 @@ export function createRealHost(client: any, directory: string): LoopHost {
         parts: [{ type: "text", text: prompt }],
       }
       if (messageID) {
-        // Normalize: ensure single "msg-" prefix, collapse duplicates from legacy persisted IDs
-        const collapsed = messageID.replace(/^(msg-)+/, "msg-")
-        body.messageID = collapsed.startsWith("msg-") ? collapsed : `msg-${messageID}`
+        // Preserve the persisted ID verbatim when it already carries a host
+        // prefix ("msg-" legacy or "msg_" current): the engine correlates
+        // worker events by exact equality with activePromptMessageID, so any
+        // rewrite here would deliver successfully yet break tracking. Only
+        // bare IDs (never persisted) get the dual-host "msg_" spelling.
+        body.messageID = /^msg[-_]/.test(messageID) ? messageID : `msg_${messageID}`
       }
       if (model) body.model = model
       if (agent) body.agent = agent
@@ -336,6 +357,16 @@ export function createV2Host(
           model: { id: model.modelID, providerID: model.providerID },
         })
       }
+      // v2 schema-validates the prompt id as SessionMessage.ID ("msg_"
+      // prefix). Fail fast with a loopd-scoped message instead of leaking the
+      // raw schema error, and never rewrite: the engine persists this exact
+      // value as activePromptMessageID for event correlation.
+      if (messageID !== undefined && !isV2PromptMessageID(messageID)) {
+        throw new Error(
+          `loopd prompt ID "${messageID}" is invalid for OpenCode v2: must start with "msg_". ` +
+          `Generate IDs with newPromptMessageID() so persisted, delivered, and correlated IDs agree.`,
+        )
+      }
       const result = await context.session.prompt({
         sessionID,
         id: messageID,
@@ -343,7 +374,7 @@ export function createV2Host(
       })
       statuses.set(sessionID, "busy")
       await logServerEvent(directory, "worker.prompted", { sessionID })
-      return { messageID: result.id }
+      return { messageID: (result as any)?.id }
     },
 
     async readSession(sessionID) {
@@ -496,8 +527,8 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
       ;(sessions as any).notifications.push({ ownerSessionID, message, agent })
     },
     async promptWorker({ sessionID, prompt, messageID, model, agent }) {
-      const rawID = messageID || `msg-${crypto.randomUUID().slice(0, 8)}`
-      const resolvedMessageID = rawID.replace(/^(msg-)+/, "msg-")
+      const rawID = messageID || newPromptMessageID()
+      const resolvedMessageID = /^msg[-_]/.test(rawID) ? rawID : `msg_${rawID}`
       const msgs = sessions.get(sessionID) || []
       msgs.push(prompt)
       sessions.set(sessionID, msgs)

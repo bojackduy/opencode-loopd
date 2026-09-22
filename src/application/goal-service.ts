@@ -13,9 +13,30 @@ import * as path from "path"
 import { promises as fs } from "fs"
 import type { StoreState } from "../infrastructure/state-repository"
 import type { LoopHost, SessionMessage } from "../server/host-adapter"
+import { newPromptMessageID } from "../server/host-adapter"
 import { createWorkerManager, type WorkerManager, type WorkerSession, type ContinuationContext } from "../server/worker-session"
 import type { LoopEvent } from "../domain/events"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
+
+/**
+ * Structured startup failure. start() persists the goal (and worker, when
+ * created) as blocked BEFORE throwing, so a failed creation is recoverable
+ * state — not "nothing happened". Carrying the IDs lets the tool response
+ * point at the persisted goal instead of inviting a duplicate creation.
+ */
+export type GoalStartStage = "worker_create" | "prompt_delivery"
+export class GoalStartError extends Error {
+  readonly goalID: GoalID
+  readonly workerSessionID?: string
+  readonly failedStage: GoalStartStage
+  constructor(message: string, info: { goalID: GoalID; workerSessionID?: string; failedStage: GoalStartStage }) {
+    super(message)
+    this.name = "GoalStartError"
+    this.goalID = info.goalID
+    this.workerSessionID = info.workerSessionID
+    this.failedStage = info.failedStage
+  }
+}
 
 export interface GoalService {
   /** Start a goal: create goal + worker session + first continuation. */
@@ -105,15 +126,21 @@ export function createGoalService(host: LoopHost): GoalService {
     }
   }
 
-  function assertWorkspaceWriteAvailable(state: StoreState, goal: Goal): void {
+  function assertWorkspaceWriteAvailable(state: StoreState, goal: Goal, requesterSessionID?: string): void {
     if (!goal.config.workspaceWrite) return
     const activeWriter = state.goals.find(
       (item) => item.id !== goal.id && item.status === "active" && item.config.workspaceWrite,
     )
     if (activeWriter) {
+      // The writer lock is workspace-wide but goal listing is owner-scoped,
+      // so the blocker can be invisible to this caller. Say so explicitly
+      // instead of letting the caller conclude the lock is stale.
+      const ownedElsewhere = requesterSessionID !== undefined && activeWriter.ownerSessionID !== requesterSessionID
       throw new Error(
-        `Workspace-writing goal "${activeWriter.name}" (${activeWriter.id}) is already active. ` +
-        "Pause, block, complete, or clear it before activating another workspace-writing goal.",
+        `Workspace-writing goal "${activeWriter.name}" (${activeWriter.id}) is already active` +
+        (ownedElsewhere ? ` (owned by session ${activeWriter.ownerSessionID}, not this session)` : "") +
+        ". Pause, block, complete, or clear it before activating another workspace-writing goal." +
+        (ownedElsewhere ? " Note: list_background_goals shows only this session's goals; clear/pause it from its owning session." : ""),
       )
     }
   }
@@ -272,7 +299,7 @@ export function createGoalService(host: LoopHost): GoalService {
 
     // Atomically persist goal and set queued phase
     const state1 = await mutateState(directory, `goal.create:${id}`, async (state) => {
-      assertWorkspaceWriteAvailable(state, goal)
+      assertWorkspaceWriteAvailable(state, goal, goal.ownerSessionID)
       state.goals.push(goal)
       const rt = createRuntimeState(id)
       // Initialize schedule counters (v6)
@@ -324,7 +351,7 @@ export function createGoalService(host: LoopHost): GoalService {
         revision: blockedState.revision,
       } satisfies LoopEvent)
       await logServerEvent(directory, "goal.start.failed", { goalID: id, ownerSessionID: input.ownerSessionID, detail })
-      throw error
+      throw new GoalStartError(detail, { goalID: id, failedStage: "worker_create" })
     }
     sessions.set(id, worker)
 
@@ -338,7 +365,9 @@ export function createGoalService(host: LoopHost): GoalService {
       if (rt) {
         Object.assign(rt, acquireLease(rt, g.config.timeoutMs || 300_000))
         rt.activeRunID = randomUUID() as RunID
-        rt.activePromptMessageID = `msg-${randomUUID()}`
+        // "msg_" spelling: valid on v1 ("msg" prefix) and required on v2
+        // (SessionMessage.ID schema). Persisted verbatim for correlation.
+        rt.activePromptMessageID = newPromptMessageID()
         rt.runCount = 1
         rt.budgetTurnCount = 1
         rt.lastRunAt = new Date().toISOString()
@@ -374,8 +403,14 @@ export function createGoalService(host: LoopHost): GoalService {
       try {
         await workers.continueWorker(worker, goal, runtime)
       } catch (error) {
+        // recordPromptFailure persists the blocked goal AND releases the run
+        // lease, so resume can reuse this same worker session afterwards.
         await recordPromptFailure(directory, id, error, true)
-        throw error
+        throw new GoalStartError(describeError(error), {
+          goalID: id,
+          workerSessionID: worker.workerSessionID,
+          failedStage: "prompt_delivery",
+        })
       }
     }
 
@@ -482,7 +517,9 @@ export function createGoalService(host: LoopHost): GoalService {
       const timeoutMs = g.config.timeoutMs || 300_000
       Object.assign(rt, acquireLease(rt, timeoutMs))
       rt.activeRunID = randomUUID() as RunID
-      rt.activePromptMessageID = `msg-${randomUUID()}`
+      // "msg_" spelling: valid on v1 ("msg" prefix) and required on v2
+      // (SessionMessage.ID schema). Persisted verbatim for correlation.
+      rt.activePromptMessageID = newPromptMessageID()
       rt.runCount += 1
       if (rt.freeRetryPending) {
         rt.freeRetryPending = false
@@ -610,7 +647,14 @@ export function createGoalService(host: LoopHost): GoalService {
       g.updatedAt = new Date().toISOString()
 
       const rt = s.runtimes.find((r) => r.goalID === goalID)
-      if (rt) Object.assign(rt, releaseLease(rt))
+      if (rt) {
+        Object.assign(rt, releaseLease(rt))
+        // releaseLease keeps activeRunID by design (other transitions clear
+        // it explicitly). Pause must too — otherwise maintenance logs a
+        // terminal-leak repair for a goal the owner just parked, which reads
+        // as the engine misclassifying a healthy pause.
+        rt.activeRunID = undefined
+      }
       return s
     })
 
@@ -643,7 +687,7 @@ export function createGoalService(host: LoopHost): GoalService {
       const goal = state.goals.find((g) => g.id === goalID)
       if (!goal) return state
       if (!canTransition(goal.status, "active", "user")) return state
-      assertWorkspaceWriteAvailable(state, goal)
+      assertWorkspaceWriteAvailable(state, goal, goal.ownerSessionID)
       goal.status = "active"
       goal.updatedAt = new Date().toISOString()
       resumed = true
@@ -685,7 +729,7 @@ export function createGoalService(host: LoopHost): GoalService {
     const state = await mutateState(directory, `goal.retry:${goalID}`, async (state) => {
       const goal = state.goals.find((g) => g.id === goalID)
       if (!goal || goal.status !== "blocked") return state
-      assertWorkspaceWriteAvailable(state, goal)
+      assertWorkspaceWriteAvailable(state, goal, goal.ownerSessionID)
       goal.status = "active"
       goal.updatedAt = new Date().toISOString()
       retried = true

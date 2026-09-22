@@ -28,6 +28,7 @@ const HANDLED_EVENT_TYPES = new Set([
   "session.status",
   "session.error",
   "session.compacted",
+  "session.execution.succeeded",
   "message.updated",
   "message.part.updated",
 ])
@@ -178,6 +179,8 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       case "message.updated":
       case "message.part.updated":
         return await handleMessageActivity(goal, event)
+      case "session.execution.succeeded":
+        return await handleExecutionSucceeded(goal)
       default:
         return false
     }
@@ -220,6 +223,26 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
           matched = true
         }
       }
+      return s
+    })
+    return matched
+  }
+
+  // Completion anchor for v2 worker turns. v2 emits no per-message
+  // "message.updated" events, so the transcript scan alone cannot anchor a
+  // turn. session.execution.succeeded fires when the worker's execution for
+  // the active prompt finishes; stamp it as the current generation's
+  // completion. The stamp is cleared on every new lease, so it always
+  // belongs to the current turn — exactly like the v1 assistant-complete
+  // branch in handleMessageActivity.
+  async function handleExecutionSucceeded(goal: any): Promise<boolean> {
+    let matched = false
+    await mutateState(directory, `execution-succeeded:${goal.id}`, async (s) => {
+      const rt = s.runtimes.find((r) => r.goalID === goal.id)
+      if (!rt || rt.phase !== "running" || !rt.activePromptMessageID) return s
+      Object.assign(rt, recordActivity(rt))
+      rt.activeAssistantCompletedAt = new Date().toISOString()
+      matched = true
       return s
     })
     return matched

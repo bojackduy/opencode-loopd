@@ -294,6 +294,23 @@ describe("Goal Service", () => {
       expect(state.goals[0].status).toBe("paused")
     })
 
+    it("pauses with no leaked run markers (no maintenance repair needed)", async () => {
+      const { goal } = await svc.start(dir, {
+        name: "clean-pause",
+        objective: "o",
+        ownerSessionID: "owner-1",
+      })
+      expect((await readState(dir)).runtimes[0].activeRunID).toBeDefined()
+
+      await svc.pause(dir, goal.id)
+
+      const runtime = (await readState(dir)).runtimes[0]
+      expect(runtime.phase).toBe("idle")
+      expect(runtime.activeRunID).toBeUndefined()
+      expect(runtime.leaseExpiresAt).toBeUndefined()
+      expect(runtime.activePromptMessageID).toBeUndefined()
+    })
+
     it("resumes a paused goal and recreates worker", async () => {
       const { goal } = await svc.start(dir, {
         name: "r",

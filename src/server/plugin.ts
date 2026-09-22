@@ -16,12 +16,17 @@ import { describeError, logServerEvent } from "../infrastructure/server-log"
 import { addToolCall, removeToolCall } from "../domain/runtime"
 import { readState, mutateState } from "../infrastructure/state-repository"
 import type { GoalToolDefaults } from "./goal-tools"
+import { version as PLUGIN_VERSION } from "../../package.json"
 
 const PLUGIN_ID = "opencode-loopd.server"
 
 const server: Plugin = async ({ client, directory }, pluginOptions) => {
   const defaults = parsePluginDefaults(pluginOptions)
   const host = createRealHost(client, directory)
+  // Staleness marker: an already-running host keeps old code after a rebuild,
+  // so log the loaded build at setup. If the live log shows an older version
+  // than the tree, restart/reload the host process before testing.
+  void logServerEvent(directory, "plugin.loaded", { pluginID: PLUGIN_ID, host: "v1", version: PLUGIN_VERSION })
   return createServerHooks(directory, host, defaults)
 }
 
@@ -189,6 +194,9 @@ const v2 = {
   id: PLUGIN_ID,
   async setup(context: V2Plugin.Context) {
     const directory = context.location.directory
+    // Same staleness marker as the v1 path above: proves the running v2 host
+    // actually loaded this build (rebuild alone never reloads a live process).
+    void logServerEvent(directory, "plugin.loaded", { pluginID: PLUGIN_ID, host: "v2", version: PLUGIN_VERSION })
     const statuses = new Map<string, SessionStatusType>()
     const host = createV2Host(context, statuses)
     const hooks = createServerHooks(directory, host, parsePluginDefaults(context.options))
@@ -295,10 +303,25 @@ async function consumeV2Events(
   }
 }
 
-function normalizeV2Event(event: any) {
+// Exported for tests: the v2→engine event contract is load-bearing for
+// worker correlation (delivery/completion anchors).
+export function normalizeV2Event(event: any) {
   const properties = event?.data && typeof event.data === "object" ? event.data : {}
   if (event?.type === "session.compaction.ended") return { type: "session.compacted", properties }
   if (event?.type === "session.execution.failed") return { type: "session.error", properties }
+  if (event?.type === "session.execution.succeeded") return { type: "session.execution.succeeded", properties }
+  if (event?.type === "session.inbox.delivered") {
+    // Delivery confirmation carries the prompt's message ID (inboxID).
+    // Shape it as an observed user prompt so the engine correlates it with
+    // the active turn exactly like a v1 message.updated event.
+    return {
+      type: "message.updated",
+      properties: {
+        sessionID: properties.sessionID,
+        info: { role: "user", id: properties.inboxID },
+      },
+    }
+  }
   if (event?.type === "session.message.content.updated") {
     return {
       type: "message.part.updated",

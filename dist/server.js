@@ -996,6 +996,7 @@ var HANDLED_EVENT_TYPES = new Set([
   "session.status",
   "session.error",
   "session.compacted",
+  "session.execution.succeeded",
   "message.updated",
   "message.part.updated"
 ]);
@@ -1100,6 +1101,8 @@ function createLoopEngine(options) {
       case "message.updated":
       case "message.part.updated":
         return await handleMessageActivity(goal, event);
+      case "session.execution.succeeded":
+        return await handleExecutionSucceeded(goal);
       default:
         return false;
     }
@@ -1136,6 +1139,19 @@ function createLoopEngine(options) {
           matched = true;
         }
       }
+      return s;
+    });
+    return matched;
+  }
+  async function handleExecutionSucceeded(goal) {
+    let matched = false;
+    await mutateState(directory, `execution-succeeded:${goal.id}`, async (s) => {
+      const rt = s.runtimes.find((r) => r.goalID === goal.id);
+      if (!rt || rt.phase !== "running" || !rt.activePromptMessageID)
+        return s;
+      Object.assign(rt, recordActivity(rt));
+      rt.activeAssistantCompletedAt = new Date().toISOString();
+      matched = true;
       return s;
     });
     return matched;
@@ -1893,12 +1909,13 @@ function createLoopEngine(options) {
 }
 
 // src/application/goal-service.ts
-import { randomUUID as randomUUID3 } from "crypto";
+import { randomUUID as randomUUID4 } from "crypto";
 init_state_repository();
 import * as path2 from "path";
 import { promises as fs2 } from "fs";
 
 // src/server/host-adapter.ts
+import { randomUUID as randomUUID3 } from "crypto";
 function parseModelRef(value) {
   if (value === undefined)
     return;
@@ -1915,6 +1932,12 @@ function parseModelRef(value) {
     throw new Error(`Invalid model "${value}". Use "providerID/modelID" (e.g. "openai/gpt-5.6-sol").`);
   }
   return { providerID, modelID };
+}
+function newPromptMessageID() {
+  return `msg_${randomUUID3()}`;
+}
+function isV2PromptMessageID(messageID) {
+  return messageID.startsWith("msg_");
 }
 var recentParentNotifies = new Map;
 function shouldDedupParentNotify(ownerSessionID, message) {
@@ -1962,8 +1985,7 @@ function createRealHost(client, directory) {
         parts: [{ type: "text", text: prompt }]
       };
       if (messageID) {
-        const collapsed = messageID.replace(/^(msg-)+/, "msg-");
-        body.messageID = collapsed.startsWith("msg-") ? collapsed : `msg-${messageID}`;
+        body.messageID = /^msg[-_]/.test(messageID) ? messageID : `msg_${messageID}`;
       }
       if (model)
         body.model = model;
@@ -2131,6 +2153,9 @@ function createV2Host(context, statuses) {
           model: { id: model.modelID, providerID: model.providerID }
         });
       }
+      if (messageID !== undefined && !isV2PromptMessageID(messageID)) {
+        throw new Error(`loopd prompt ID "${messageID}" is invalid for OpenCode v2: must start with "msg_". ` + `Generate IDs with newPromptMessageID() so persisted, delivered, and correlated IDs agree.`);
+      }
       const result = await context.session.prompt({
         sessionID,
         id: messageID,
@@ -2138,7 +2163,7 @@ function createV2Host(context, statuses) {
       });
       statuses.set(sessionID, "busy");
       await logServerEvent(directory, "worker.prompted", { sessionID });
-      return { messageID: result.id };
+      return { messageID: result?.id };
     },
     async readSession(sessionID) {
       try {
@@ -2370,6 +2395,18 @@ function buildContinuationSteering(goal, runtime, context) {
 }
 
 // src/application/goal-service.ts
+class GoalStartError extends Error {
+  goalID;
+  workerSessionID;
+  failedStage;
+  constructor(message, info) {
+    super(message);
+    this.name = "GoalStartError";
+    this.goalID = info.goalID;
+    this.workerSessionID = info.workerSessionID;
+    this.failedStage = info.failedStage;
+  }
+}
 function createGoalService(host) {
   const workers = createWorkerManager(host);
   const sessions = new Map;
@@ -2391,12 +2428,13 @@ function createGoalService(host) {
         goalOperations.delete(goalID);
     }
   }
-  function assertWorkspaceWriteAvailable(state, goal) {
+  function assertWorkspaceWriteAvailable(state, goal, requesterSessionID) {
     if (!goal.config.workspaceWrite)
       return;
     const activeWriter = state.goals.find((item) => item.id !== goal.id && item.status === "active" && item.config.workspaceWrite);
     if (activeWriter) {
-      throw new Error(`Workspace-writing goal "${activeWriter.name}" (${activeWriter.id}) is already active. ` + "Pause, block, complete, or clear it before activating another workspace-writing goal.");
+      const ownedElsewhere = requesterSessionID !== undefined && activeWriter.ownerSessionID !== requesterSessionID;
+      throw new Error(`Workspace-writing goal "${activeWriter.name}" (${activeWriter.id}) is already active` + (ownedElsewhere ? ` (owned by session ${activeWriter.ownerSessionID}, not this session)` : "") + ". Pause, block, complete, or clear it before activating another workspace-writing goal." + (ownedElsewhere ? " Note: list_background_goals shows only this session's goals; clear/pause it from its owning session." : ""));
     }
   }
   async function recordPromptFailure(directory, goalID, error, blockImmediately = false) {
@@ -2436,7 +2474,7 @@ function createGoalService(host) {
     });
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID3(),
+      eventID: randomUUID4(),
       goalID,
       type: "run.failed",
       runID,
@@ -2448,7 +2486,7 @@ function createGoalService(host) {
     if (blocked) {
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID3(),
+        eventID: randomUUID4(),
         goalID,
         type: "goal.blocked",
         reason: `Worker prompt delivery failed: ${detail}`,
@@ -2482,7 +2520,7 @@ function createGoalService(host) {
     return session;
   }
   async function start(directory, input) {
-    const id = randomUUID3();
+    const id = randomUUID4();
     return withGoalOperation(id, () => startUnlocked(directory, input, id));
   }
   async function startUnlocked(directory, input, id) {
@@ -2521,7 +2559,7 @@ function createGoalService(host) {
       goal.config.progressFile = path2.join(artifactDir, "progress.md");
     await ensureGoalArtifactDir(directory, id);
     const state1 = await mutateState(directory, `goal.create:${id}`, async (state) => {
-      assertWorkspaceWriteAvailable(state, goal);
+      assertWorkspaceWriteAvailable(state, goal, goal.ownerSessionID);
       state.goals.push(goal);
       const rt = createRuntimeState(id);
       if (goal.config.schedule) {
@@ -2562,7 +2600,7 @@ function createGoalService(host) {
       });
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID3(),
+        eventID: randomUUID4(),
         goalID: id,
         type: "goal.blocked",
         reason: detail,
@@ -2571,7 +2609,7 @@ function createGoalService(host) {
         revision: blockedState.revision
       });
       await logServerEvent(directory, "goal.start.failed", { goalID: id, ownerSessionID: input.ownerSessionID, detail });
-      throw error;
+      throw new GoalStartError(detail, { goalID: id, failedStage: "worker_create" });
     }
     sessions.set(id, worker);
     const state2 = await mutateState(directory, `goal.worker-assign:${id}`, async (state) => {
@@ -2583,8 +2621,8 @@ function createGoalService(host) {
       const rt = state.runtimes.find((item) => item.goalID === id);
       if (rt) {
         Object.assign(rt, acquireLease(rt, g.config.timeoutMs || 300000));
-        rt.activeRunID = randomUUID3();
-        rt.activePromptMessageID = `msg-${randomUUID3()}`;
+        rt.activeRunID = randomUUID4();
+        rt.activePromptMessageID = newPromptMessageID();
         rt.runCount = 1;
         rt.budgetTurnCount = 1;
         rt.lastRunAt = new Date().toISOString();
@@ -2594,7 +2632,7 @@ function createGoalService(host) {
     runtime = state2.runtimes.find((r) => r.goalID === id);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID3(),
+      eventID: randomUUID4(),
       goalID: id,
       type: "goal.created",
       name: input.name,
@@ -2606,7 +2644,7 @@ function createGoalService(host) {
     if (runtime) {
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID3(),
+        eventID: randomUUID4(),
         goalID: id,
         type: "run.started",
         runID: runtime.activeRunID,
@@ -2618,7 +2656,11 @@ function createGoalService(host) {
         await workers.continueWorker(worker, goal, runtime);
       } catch (error) {
         await recordPromptFailure(directory, id, error, true);
-        throw error;
+        throw new GoalStartError(describeError(error), {
+          goalID: id,
+          workerSessionID: worker.workerSessionID,
+          failedStage: "prompt_delivery"
+        });
       }
     }
     return { goal, worker };
@@ -2715,8 +2757,8 @@ function createGoalService(host) {
         return s;
       const timeoutMs = g.config.timeoutMs || 300000;
       Object.assign(rt, acquireLease(rt, timeoutMs));
-      rt.activeRunID = randomUUID3();
-      rt.activePromptMessageID = `msg-${randomUUID3()}`;
+      rt.activeRunID = randomUUID4();
+      rt.activePromptMessageID = newPromptMessageID();
       rt.runCount += 1;
       if (rt.freeRetryPending) {
         rt.freeRetryPending = false;
@@ -2733,7 +2775,7 @@ function createGoalService(host) {
       return;
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID3(),
+      eventID: randomUUID4(),
       goalID,
       type: "run.started",
       runID: freshRuntime.activeRunID,
@@ -2819,8 +2861,10 @@ function createGoalService(host) {
       g.status = "paused";
       g.updatedAt = new Date().toISOString();
       const rt = s.runtimes.find((r) => r.goalID === goalID);
-      if (rt)
+      if (rt) {
         Object.assign(rt, releaseLease(rt));
+        rt.activeRunID = undefined;
+      }
       return s;
     });
     const session = sessions.get(goalID) || (goal.workerSessionID ? {
@@ -2834,7 +2878,7 @@ function createGoalService(host) {
     }
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID3(),
+      eventID: randomUUID4(),
       goalID,
       type: "goal.status_changed",
       from: "active",
@@ -2851,7 +2895,7 @@ function createGoalService(host) {
         return state;
       if (!canTransition(goal.status, "active", "user"))
         return state;
-      assertWorkspaceWriteAvailable(state, goal);
+      assertWorkspaceWriteAvailable(state, goal, goal.ownerSessionID);
       goal.status = "active";
       goal.updatedAt = new Date().toISOString();
       resumed = true;
@@ -2873,7 +2917,7 @@ function createGoalService(host) {
     }
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID3(),
+      eventID: randomUUID4(),
       goalID,
       type: "goal.status_changed",
       from: "paused",
@@ -2889,7 +2933,7 @@ function createGoalService(host) {
       const goal = state.goals.find((g) => g.id === goalID);
       if (!goal || goal.status !== "blocked")
         return state;
-      assertWorkspaceWriteAvailable(state, goal);
+      assertWorkspaceWriteAvailable(state, goal, goal.ownerSessionID);
       goal.status = "active";
       goal.updatedAt = new Date().toISOString();
       retried = true;
@@ -2925,7 +2969,7 @@ function createGoalService(host) {
     }
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID3(),
+      eventID: randomUUID4(),
       goalID,
       type: "goal.status_changed",
       from: "blocked",
@@ -2956,7 +3000,7 @@ function createGoalService(host) {
     });
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID3(),
+      eventID: randomUUID4(),
       goalID,
       type: "goal.cleared",
       timestamp: new Date().toISOString(),
@@ -3164,7 +3208,7 @@ function createGoalService(host) {
 
 // src/application/schedule-worker.ts
 init_state_repository();
-import { randomUUID as randomUUID4 } from "crypto";
+import { randomUUID as randomUUID5 } from "crypto";
 function createScheduleWorker(options) {
   const { directory, goalService } = options;
   const intervalMs = options.intervalMs ?? 5000;
@@ -3252,7 +3296,7 @@ function createScheduleWorker(options) {
         continue;
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID4(),
+        eventID: randomUUID5(),
         goalID: goal.id,
         type: "schedule.tick",
         scheduleRunCount: count,
@@ -3279,7 +3323,7 @@ function createScheduleWorker(options) {
 
 // src/server/goal-tools.ts
 init_state_repository();
-import { randomUUID as randomUUID5 } from "crypto";
+import { randomUUID as randomUUID6 } from "crypto";
 import { tool } from "@opencode-ai/plugin/tool";
 // src/domain/verification.ts
 var MAX_RECENT_ATTEMPTS = 10;
@@ -3430,12 +3474,20 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
             })
           };
         } catch (error) {
+          const startFailure = error instanceof GoalStartError ? error : undefined;
           return {
             title: "Goal creation failed",
             output: JSON.stringify({
               ok: false,
               name: args.name,
               message: error instanceof Error ? error.message : String(error),
+              ...startFailure ? {
+                goalID: startFailure.goalID,
+                status: "blocked",
+                failedStage: startFailure.failedStage,
+                ...startFailure.workerSessionID ? { workerSessionID: startFailure.workerSessionID } : {},
+                nextAction: `Resume the persisted goal with resume_goal (goal_id "${startFailure.goalID}") after fixing the cause \u2014 do not create another goal for the same task.`
+              } : {},
               diagnostics: SERVER_LOG_FILE
             })
           };
@@ -3496,7 +3548,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID5(),
+          eventID: randomUUID6(),
           goalID: goal.id,
           type: "goal.progress",
           summary: args.summary,
@@ -3561,7 +3613,7 @@ Exit code: ${f.exitCode}${stdoutSnippet}${stderrSnippet}`;
 Working directory: ${cwd}
 
 ${failureDetails}`;
-              attemptID = randomUUID5();
+              attemptID = randomUUID6();
               const verificationAttempt = {
                 id: attemptID,
                 sequence: runtime.evaluatorRejectionCount,
@@ -3606,7 +3658,7 @@ ${failureDetails.slice(0, 500)}`,
             if (attemptID) {
               await appendEvent(dir, {
                 version: 1,
-                eventID: randomUUID5(),
+                eventID: randomUUID6(),
                 goalID: goal.id,
                 type: "goal.completion_rejected",
                 attemptID,
@@ -3624,7 +3676,7 @@ ${failureDetails.slice(0, 500)}`,
             if (blocked && rejectedGoal?.blocker) {
               await appendEvent(dir, {
                 version: 1,
-                eventID: randomUUID5(),
+                eventID: randomUUID6(),
                 goalID: goal.id,
                 type: "goal.blocked",
                 reason: rejectedGoal.blocker.reason,
@@ -3684,7 +3736,7 @@ ${failureDetails.slice(0, 500)}`,
             }
             runtime.updatedAt = new Date().toISOString();
           }
-          const attemptID = randomUUID5();
+          const attemptID = randomUUID6();
           const cwd = goal.config.checkCwd || goal.config.artifactDir || dir;
           const checks = (goal.config.checks || []).map((cmd) => ({
             command: cmd,
@@ -3708,7 +3760,7 @@ ${failureDetails.slice(0, 500)}`,
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID5(),
+          eventID: randomUUID6(),
           goalID: goal.id,
           type: "goal.completed",
           summary: args.summary,
@@ -3768,7 +3820,7 @@ ${failureDetails.slice(0, 500)}`,
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID5(),
+          eventID: randomUUID6(),
           goalID: goal.id,
           type: "goal.blocked",
           reason: args.reason,
@@ -4030,9 +4082,24 @@ function ownerTools(options) {
         const ownerID = context?.sessionID;
         const goal = args.goal_id ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID) : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete");
         if (!goal) {
+          if (!ownerID) {
+            return {
+              title: "No goal found",
+              output: JSON.stringify({ ok: false, message: "No session context available, so goal ownership cannot be matched." })
+            };
+          }
+          const ownedActive = state.goals.filter((g) => g.ownerSessionID === ownerID && g.status !== "complete");
+          const ownedComplete = state.goals.filter((g) => g.ownerSessionID === ownerID && g.status === "complete").length;
+          const othersActive = state.goals.filter((g) => g.ownerSessionID !== ownerID && g.status !== "complete").length;
+          const message = ownedActive.length > 0 ? `No goal matched (tried ${args.goal_id ? `ID ${args.goal_id}` : "first active goal"}). This session owns ${ownedActive.length} active goal(s) \u2014 pass its goal_id explicitly.` : othersActive > 0 ? `No matching active goal for this session. ${othersActive} active goal(s) exist, all owned by other sessions \u2014 inspect from the owning session.` : ownedComplete > 0 ? "No matching active goal for this session. Your goals are all complete." : "No matching active goal for this session. No goals exist yet \u2014 create one with /goal.";
           return {
             title: "No goal found",
-            output: JSON.stringify({ ok: false, message: "No matching active goal for this session." })
+            output: JSON.stringify({
+              ok: false,
+              message,
+              ownedGoals: ownedActive.map((g) => ({ id: g.id, name: g.name, status: g.status })),
+              ownedElsewhereActive: othersActive
+            })
           };
         }
         const runtime = state.runtimes.find((r) => r.goalID === goal.id);
@@ -4518,10 +4585,15 @@ function ownerTools(options) {
 
 // src/server/plugin.ts
 init_state_repository();
+// package.json
+var version = "1.10.1";
+
+// src/server/plugin.ts
 var PLUGIN_ID = "opencode-loopd.server";
 var server = async ({ client, directory }, pluginOptions) => {
   const defaults = parsePluginDefaults(pluginOptions);
   const host = createRealHost(client, directory);
+  logServerEvent(directory, "plugin.loaded", { pluginID: PLUGIN_ID, host: "v1", version });
   return createServerHooks(directory, host, defaults);
 };
 function createServerHooks(directory, host, defaults) {
@@ -4668,6 +4740,7 @@ var v2 = {
   id: PLUGIN_ID,
   async setup(context) {
     const directory = context.location.directory;
+    logServerEvent(directory, "plugin.loaded", { pluginID: PLUGIN_ID, host: "v2", version });
     const statuses = new Map;
     const host = createV2Host(context, statuses);
     const hooks = createServerHooks(directory, host, parsePluginDefaults(context.options));
@@ -4774,6 +4847,17 @@ function normalizeV2Event(event) {
     return { type: "session.compacted", properties };
   if (event?.type === "session.execution.failed")
     return { type: "session.error", properties };
+  if (event?.type === "session.execution.succeeded")
+    return { type: "session.execution.succeeded", properties };
+  if (event?.type === "session.inbox.delivered") {
+    return {
+      type: "message.updated",
+      properties: {
+        sessionID: properties.sessionID,
+        info: { role: "user", id: properties.inboxID }
+      }
+    };
+  }
   if (event?.type === "session.message.content.updated") {
     return {
       type: "message.part.updated",
@@ -4791,5 +4875,6 @@ var plugin_default = {
   setup: v2.setup
 };
 export {
-  plugin_default as default
+  plugin_default as default,
+  normalizeV2Event
 };

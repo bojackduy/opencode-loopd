@@ -111,9 +111,33 @@ export function ownerTools(options: OwnerToolsOptions) {
           : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete")
 
         if (!goal) {
+          if (!ownerID) {
+            return {
+              title: "No goal found",
+              output: JSON.stringify({ ok: false, message: "No session context available, so goal ownership cannot be matched." }),
+            }
+          }
+          // Bare "no matching goal" reads as a failure even when the session
+          // simply owns nothing (e.g. goals live under another session).
+          // Report what exists so the caller can tell those cases apart.
+          const ownedActive = state.goals.filter((g) => g.ownerSessionID === ownerID && g.status !== "complete")
+          const ownedComplete = state.goals.filter((g) => g.ownerSessionID === ownerID && g.status === "complete").length
+          const othersActive = state.goals.filter((g) => g.ownerSessionID !== ownerID && g.status !== "complete").length
+          const message = ownedActive.length > 0
+            ? `No goal matched (tried ${args.goal_id ? `ID ${args.goal_id}` : "first active goal"}). This session owns ${ownedActive.length} active goal(s) — pass its goal_id explicitly.`
+            : othersActive > 0
+              ? `No matching active goal for this session. ${othersActive} active goal(s) exist, all owned by other sessions — inspect from the owning session.`
+              : ownedComplete > 0
+                ? "No matching active goal for this session. Your goals are all complete."
+                : "No matching active goal for this session. No goals exist yet — create one with /goal."
           return {
             title: "No goal found",
-            output: JSON.stringify({ ok: false, message: "No matching active goal for this session." }),
+            output: JSON.stringify({
+              ok: false,
+              message,
+              ownedGoals: ownedActive.map((g) => ({ id: g.id, name: g.name, status: g.status })),
+              ownedElsewhereActive: othersActive,
+            }),
           }
         }
 

@@ -15,6 +15,7 @@ import { appendVerificationAttempt } from "../domain/verification"
 import { exec as execChild } from "child_process"
 import { promisify } from "util"
 import type { GoalService } from "../application/goal-service"
+import { GoalStartError } from "../application/goal-service"
 import type { LoopHost } from "./host-adapter"
 import {
   resolveGoalCreationConfig,
@@ -166,12 +167,23 @@ export function goalTools(
             }),
           }
         } catch (error) {
+          // A GoalStartError means the goal WAS persisted (blocked) along
+          // with its worker session when one was created. Report the IDs so
+          // the caller resumes that goal instead of creating a duplicate.
+          const startFailure = error instanceof GoalStartError ? error : undefined
           return {
             title: "Goal creation failed",
             output: JSON.stringify({
               ok: false,
               name: args.name,
               message: error instanceof Error ? error.message : String(error),
+              ...(startFailure ? {
+                goalID: startFailure.goalID,
+                status: "blocked",
+                failedStage: startFailure.failedStage,
+                ...(startFailure.workerSessionID ? { workerSessionID: startFailure.workerSessionID } : {}),
+                nextAction: `Resume the persisted goal with resume_goal (goal_id "${startFailure.goalID}") after fixing the cause — do not create another goal for the same task.`,
+              } : {}),
               diagnostics: SERVER_LOG_FILE,
             }),
           }
