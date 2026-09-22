@@ -10,7 +10,7 @@ import { createLoopEngine } from "../application/loop-engine"
 import { createGoalService } from "../application/goal-service"
 import { createScheduleWorker } from "../application/schedule-worker"
 import { createRealHost, createV2Host, type LoopHost, type SessionStatusType } from "./host-adapter"
-import { createLocalProcessHost } from "./command-host"
+import { createCommandHost } from "./command-host"
 import { createCommandService } from "../application/command-service"
 import { createCommandEventBroker } from "../application/command-event-broker"
 import { createCommandStreamServer } from "./command-stream-server"
@@ -38,13 +38,15 @@ const server: Plugin = async ({ client, directory }, pluginOptions) => {
 function createServerHooks(directory: string, host: LoopHost, defaults: GoalToolDefaults): Hooks {
   const goalService = createGoalService(host)
   // Command sessions are standalone (no goal coupling): their own host
-  // (local child processes — see command-host.ts + capability matrix) and
-  // their own service. Never share the AI worker host methods.
+  // (real PTY via bun-pty with automatic pipe fallback — see command-host.ts
+  // + capability matrix) and their own service. Never share the AI worker
+  // host methods.
   // The event broker + private loopback stream transport (Milestone 2/3)
   // publish validated events; start/terminate/remove/resize stay on the
   // existing idempotent control bus — never move them to the socket.
   const commandBroker = createCommandEventBroker()
-  const commandService = createCommandService(createLocalProcessHost(), { broker: commandBroker })
+  const commandHost = createCommandHost()
+  const commandService = createCommandService(commandHost, { broker: commandBroker })
   const commandStream = createCommandStreamServer(directory, commandService, commandBroker)
 
   const worker = createControlWorker({
@@ -107,7 +109,7 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
       await engine.handleEvent(event)
       if (type?.startsWith("session.")) reconcileInBackground()
     },
-    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }), ...commandTools({ directory, commandService }) },
+    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }), ...commandTools({ directory, commandService, capabilities: commandHost.capabilities }) },
     "tool.execute.before": async (input, _output) => {
       // Track tool call start for worker sessions only
       const activeWorkers = goalService.getActiveWorkers()

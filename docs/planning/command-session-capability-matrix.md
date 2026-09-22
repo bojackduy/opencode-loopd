@@ -80,17 +80,23 @@ separate questions per API: (a) does it exist, (b) is it reachable from the
 - Not copied: global in-memory singleton, browser/web server, prompt-based exit
   notifications, default-allow, missing resize/restart semantics.
 
-## Decision for this slice
+## Decision for this slice (Milestone 5: real PTY backend)
 
-- Server execution backend (v1 + v2): local child process via `Bun.spawn`
-  with pipes (`src/server/command-host.ts`, `createLocalProcessHost`). No new
-  native dependency (`bun-pty` deliberately **not** added). Rationale, from the
-  matrix above: no HTTP write/read exists for ordinary PTYs in either version;
-  the only I/O path is a WS upgrade whose plugin-process viability is unproven
-  (zero in-repo callers); v2 server context cannot even do lifecycle. Pipes give
-  a complete honest slice (spawn/write/read-paged/interrupt-as-SIGINT/
-  terminate-escalating/remove) with two labeled gaps: `resize: false` (no tty
-  winsize on pipes) and `terminalEmulation: false` (byte stream, not a screen).
+- Server execution backend (v1 + v2): real PTY via the `bun-pty` native
+  package (`src/server/command-host.ts`, `createPtyHost` — same
+  spawn/onData/onExit/write/resize/kill pattern as the reference above), with
+  the pipe host (`createLocalProcessHost`) as an AUTOMATIC fallback when the
+  native module cannot be loaded (tried once at host construction, never per
+  command; `createCommandHost()` selects, `.backend` reports which is active).
+  Rationale, from the matrix above: no HTTP write/read exists for ordinary
+  PTYs in either version; the only I/O path is a WS upgrade whose
+  plugin-process viability is unproven (zero in-repo callers); v2 server
+  context cannot even do lifecycle. The PTY backend closes the old gaps:
+  `resize: true` (real winsize, applied live), interrupt as line-discipline
+  `^C` (foreground-group SIGINT, trappable/ignorable). One labeled gap
+  remains: `terminalEmulation: false` (real PTY bytes — cursor addressing and
+  alt-screen pass through untouched — but still a byte stream, not a screen;
+  the emulator is Milestone 6).
 - Host-owned swap follow-up (needs live-host proof before claiming):
   1. v1 server: replace spawn/status/remove with `client.pty.*` once a
      plugin-process WS `connect` round-trip (write + output frames) is

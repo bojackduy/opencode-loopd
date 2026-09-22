@@ -6,11 +6,13 @@
 
 import { tool } from "@opencode-ai/plugin/tool"
 import type { CommandService } from "../application/command-service"
-import { COMMAND_HOST_CAPABILITIES } from "./command-host"
+import { COMMAND_HOST_CAPABILITIES, type CommandHostCapabilities } from "./command-host"
 
 export interface CommandToolsOptions {
   directory: string
   commandService: CommandService
+  /** Capabilities of the ACTIVE command host backend (PTY or pipe fallback). Defaults to the pipe caps so existing callers stay honest. */
+  capabilities?: CommandHostCapabilities
 }
 
 function ownerID(context: unknown): string | undefined {
@@ -58,6 +60,10 @@ function summarize(c: {
 
 export function commandTools(options: CommandToolsOptions) {
   const { directory, commandService } = options
+  const capabilities = options.capabilities ?? COMMAND_HOST_CAPABILITIES
+  const sizeNote = capabilities.resize
+    ? "applied live to the PTY winsize"
+    : "stored; resize is unsupported by the pipe host"
 
   return {
     loopd_command_start: tool({
@@ -69,8 +75,8 @@ export function commandTools(options: CommandToolsOptions) {
         args: tool.schema.array(tool.schema.string()).optional().describe("Arguments for the command."),
         cwd: tool.schema.string().optional().describe("Working directory. Defaults to the project root."),
         goal_id: tool.schema.string().optional().describe("Optional goal linkage (display only — no lifecycle coupling)."),
-        cols: tool.schema.number().optional().describe("Requested terminal width (stored; resize is unsupported by the pipe host)."),
-        rows: tool.schema.number().optional().describe("Requested terminal height (stored; resize is unsupported by the pipe host)."),
+        cols: tool.schema.number().optional().describe(`Requested terminal width (${sizeNote}).`),
+        rows: tool.schema.number().optional().describe(`Requested terminal height (${sizeNote}).`),
       },
       execute: async (args, context) => {
         const owner = ownerID(context)
@@ -95,7 +101,7 @@ export function commandTools(options: CommandToolsOptions) {
           })
           return {
             title: "Command started",
-            output: JSON.stringify({ ok: true, command: summarize(session as never), capabilities: COMMAND_HOST_CAPABILITIES }, null, 2),
+            output: JSON.stringify({ ok: true, command: summarize(session as never), capabilities }, null, 2),
           }
         } catch (error) {
           return {
@@ -115,7 +121,7 @@ export function commandTools(options: CommandToolsOptions) {
         const sessions = await commandService.list(directory, owner)
         return {
           title: `${sessions.length} command session(s)`,
-          output: JSON.stringify({ ok: true, commands: sessions.map((c) => summarize(c as never)), capabilities: COMMAND_HOST_CAPABILITIES }, null, 2),
+          output: JSON.stringify({ ok: true, commands: sessions.map((c) => summarize(c as never)), capabilities }, null, 2),
         }
       },
     }),
@@ -205,7 +211,9 @@ export function commandTools(options: CommandToolsOptions) {
     }),
 
     loopd_command_resize: tool({
-      description: "Request a terminal size for a command. Honestly unsupported by the pipe host: size is stored, never applied.",
+      description: capabilities.resize
+        ? "Apply a terminal size to a running command (live PTY winsize; the requested size is also stored)."
+        : "Request a terminal size for a command. Honestly unsupported by the pipe host: size is stored, never applied.",
       args: {
         command_id: tool.schema.string().describe("Command session ID."),
         cols: tool.schema.number().describe("Requested width."),

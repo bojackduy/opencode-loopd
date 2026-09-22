@@ -3434,12 +3434,21 @@ function createScheduleWorker(options) {
 }
 
 // src/server/command-host.ts
+import { createRequire } from "module";
 var COMMAND_HOST_CAPABILITIES = {
   spawn: true,
   write: true,
   interruptSignal: true,
   terminate: true,
   resize: false,
+  terminalEmulation: false
+};
+var PTY_HOST_CAPABILITIES = {
+  spawn: true,
+  write: true,
+  interruptSignal: true,
+  terminate: true,
+  resize: true,
   terminalEmulation: false
 };
 function createLocalProcessHost() {
@@ -3502,6 +3511,9 @@ function createLocalProcessHost() {
             return false;
           }
         },
+        resize() {
+          return false;
+        },
         isAlive() {
           if (settled)
             return false;
@@ -3542,6 +3554,131 @@ async function pumpStream(stream, onOutput) {
     try {
       reader.releaseLock();
     } catch {}
+  }
+}
+function loadBunPty() {
+  return createRequire(import.meta.url)("bun-pty");
+}
+function asBunPtyModule(loaded) {
+  const spawn = loaded?.spawn;
+  if (typeof spawn !== "function")
+    throw new Error("bun-pty module has no spawn() export");
+  return { spawn };
+}
+function createPtyHost(load = loadBunPty) {
+  const { spawn } = asBunPtyModule(load());
+  return {
+    capabilities: PTY_HOST_CAPABILITIES,
+    spawn(opts, onOutput, onExit) {
+      const pty = spawn(opts.command, opts.args ?? [], {
+        name: "xterm-256color",
+        cols: opts.cols ?? 80,
+        rows: opts.rows ?? 24,
+        cwd: opts.cwd,
+        env: { ...process.env, ...opts.env ?? {}, TERM: "xterm-256color" }
+      });
+      let settled = false;
+      let killedSignal;
+      let resolveExit;
+      const exitPromise = new Promise((r) => {
+        resolveExit = r;
+      });
+      pty.onData((data) => {
+        onOutput(data);
+      });
+      pty.onExit((event) => {
+        if (settled)
+          return;
+        settled = true;
+        const raw = event?.signal;
+        const info = {
+          exitCode: event?.exitCode ?? 0,
+          signal: typeof raw === "string" ? raw : raw == null ? killedSignal : String(raw)
+        };
+        onExit(info);
+        resolveExit(info);
+      });
+      return {
+        pid: pty.pid,
+        write(data) {
+          if (settled)
+            return false;
+          try {
+            pty.write(data);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        interrupt() {
+          if (settled)
+            return false;
+          try {
+            pty.write("\x03");
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        terminate() {
+          if (settled)
+            return false;
+          try {
+            killedSignal ??= "SIGTERM";
+            pty.kill();
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        kill() {
+          if (settled)
+            return false;
+          try {
+            killedSignal = "SIGKILL";
+            pty.kill("SIGKILL");
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        resize(cols, rows) {
+          if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0)
+            return false;
+          if (settled)
+            return false;
+          try {
+            pty.resize(cols, rows);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        isAlive() {
+          if (settled)
+            return false;
+          try {
+            process.kill(pty.pid, 0);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        exited() {
+          return exitPromise;
+        }
+      };
+    },
+    livePids() {
+      return new Set;
+    }
+  };
+}
+function createCommandHost(opts) {
+  try {
+    return Object.assign(createPtyHost(opts?.load ?? loadBunPty), { backend: "pty" });
+  } catch {
+    return Object.assign(createLocalProcessHost(), { backend: "pipe" });
   }
 }
 
@@ -4045,6 +4182,18 @@ function createCommandService(host, opts) {
       const session = await this.get(directory, id, ownerSessionID);
       if (!session)
         return { ok: false, message: "Command not found." };
+      if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0) {
+        return { ok: false, message: `Invalid size ${cols}x${rows}: cols and rows must be positive integers.` };
+      }
+      const entry = live.get(id);
+      let applied = false;
+      if (entry) {
+        try {
+          applied = entry.handle.resize(cols, rows);
+        } catch {
+          applied = false;
+        }
+      }
       await mutateState(directory, `cmd.resize:${id}`, async (s) => {
         const c = (s.commands ?? []).find((x) => x.id === id);
         if (c && c.ownerSessionID === ownerSessionID) {
@@ -4054,7 +4203,9 @@ function createCommandService(host, opts) {
         }
         return s;
       });
-      return { ok: false, unsupported: true, message: "Resize is not supported by the local-process host (pipes have no tty winsize). Size stored for a future PTY host; output remains a byte stream." };
+      if (applied)
+        return { ok: true, message: `Terminal resized to ${cols}x${rows} for "${session.title}".` };
+      return { ok: false, unsupported: true, message: "Resize is not supported by the active pipe host (pipes have no tty winsize; the PTY backend was unavailable). Size stored; output remains a byte stream." };
     },
     async interrupt(directory, id, ownerSessionID) {
       const session = await this.get(directory, id, ownerSessionID);
@@ -5963,6 +6114,8 @@ function summarize(c) {
 }
 function commandTools(options) {
   const { directory, commandService } = options;
+  const capabilities = options.capabilities ?? COMMAND_HOST_CAPABILITIES;
+  const sizeNote = capabilities.resize ? "applied live to the PTY winsize" : "stored; resize is unsupported by the pipe host";
   return {
     loopd_command_start: tool3({
       description: "Start a standalone interactive command session (arbitrary shell command) in the background. Returns an ID for write/read/interrupt/terminate/remove. Independent from goals: linking a goalID is display-only and never couples lifecycles.",
@@ -5972,8 +6125,8 @@ function commandTools(options) {
         args: tool3.schema.array(tool3.schema.string()).optional().describe("Arguments for the command."),
         cwd: tool3.schema.string().optional().describe("Working directory. Defaults to the project root."),
         goal_id: tool3.schema.string().optional().describe("Optional goal linkage (display only \u2014 no lifecycle coupling)."),
-        cols: tool3.schema.number().optional().describe("Requested terminal width (stored; resize is unsupported by the pipe host)."),
-        rows: tool3.schema.number().optional().describe("Requested terminal height (stored; resize is unsupported by the pipe host).")
+        cols: tool3.schema.number().optional().describe(`Requested terminal width (${sizeNote}).`),
+        rows: tool3.schema.number().optional().describe(`Requested terminal height (${sizeNote}).`)
       },
       execute: async (args, context) => {
         const owner = ownerID(context);
@@ -5999,7 +6152,7 @@ function commandTools(options) {
           });
           return {
             title: "Command started",
-            output: JSON.stringify({ ok: true, command: summarize(session), capabilities: COMMAND_HOST_CAPABILITIES }, null, 2)
+            output: JSON.stringify({ ok: true, command: summarize(session), capabilities }, null, 2)
           };
         } catch (error) {
           return {
@@ -6019,7 +6172,7 @@ function commandTools(options) {
         const sessions = await commandService.list(directory, owner);
         return {
           title: `${sessions.length} command session(s)`,
-          output: JSON.stringify({ ok: true, commands: sessions.map((c) => summarize(c)), capabilities: COMMAND_HOST_CAPABILITIES }, null, 2)
+          output: JSON.stringify({ ok: true, commands: sessions.map((c) => summarize(c)), capabilities }, null, 2)
         };
       }
     }),
@@ -6108,7 +6261,7 @@ function commandTools(options) {
       }
     }),
     loopd_command_resize: tool3({
-      description: "Request a terminal size for a command. Honestly unsupported by the pipe host: size is stored, never applied.",
+      description: capabilities.resize ? "Apply a terminal size to a running command (live PTY winsize; the requested size is also stored)." : "Request a terminal size for a command. Honestly unsupported by the pipe host: size is stored, never applied.",
       args: {
         command_id: tool3.schema.string().describe("Command session ID."),
         cols: tool3.schema.number().describe("Requested width."),
@@ -6141,7 +6294,8 @@ var server = async ({ client, directory }, pluginOptions) => {
 function createServerHooks(directory, host, defaults) {
   const goalService = createGoalService(host);
   const commandBroker = createCommandEventBroker();
-  const commandService = createCommandService(createLocalProcessHost(), { broker: commandBroker });
+  const commandHost = createCommandHost();
+  const commandService = createCommandService(commandHost, { broker: commandBroker });
   const commandStream = createCommandStreamServer(directory, commandService, commandBroker);
   const worker = createControlWorker({
     directory,
@@ -6189,7 +6343,7 @@ function createServerHooks(directory, host, defaults) {
       if (type?.startsWith("session."))
         reconcileInBackground();
     },
-    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }), ...commandTools({ directory, commandService }) },
+    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }), ...commandTools({ directory, commandService, capabilities: commandHost.capabilities }) },
     "tool.execute.before": async (input, _output) => {
       const activeWorkers = goalService.getActiveWorkers();
       let matchedGoalID;

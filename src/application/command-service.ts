@@ -413,7 +413,20 @@ export function createCommandService(
     async resize(directory, id, ownerSessionID, cols, rows) {
       const session = await this.get(directory, id, ownerSessionID)
       if (!session) return { ok: false, message: "Command not found." }
-      // Capability is honestly unsupported: store the request, do not claim it.
+      if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0) {
+        return { ok: false, message: `Invalid size ${cols}x${rows}: cols and rows must be positive integers.` }
+      }
+      // Apply to the live handle when the active backend supports it (PTY
+      // winsize); otherwise store the request and report honestly.
+      const entry = live.get(id)
+      let applied = false
+      if (entry) {
+        try {
+          applied = entry.handle.resize(cols, rows)
+        } catch {
+          applied = false
+        }
+      }
       await mutateState(directory, `cmd.resize:${id}`, async (s) => {
         const c = (s.commands ?? []).find((x) => x.id === id)
         if (c && c.ownerSessionID === ownerSessionID) {
@@ -423,7 +436,8 @@ export function createCommandService(
         }
         return s
       })
-      return { ok: false, unsupported: true, message: "Resize is not supported by the local-process host (pipes have no tty winsize). Size stored for a future PTY host; output remains a byte stream." }
+      if (applied) return { ok: true, message: `Terminal resized to ${cols}x${rows} for "${session.title}".` }
+      return { ok: false, unsupported: true, message: "Resize is not supported by the active pipe host (pipes have no tty winsize; the PTY backend was unavailable). Size stored; output remains a byte stream." }
     },
 
     async interrupt(directory, id, ownerSessionID) {

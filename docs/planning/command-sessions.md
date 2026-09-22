@@ -12,15 +12,17 @@ installed host APIs can and cannot do, with file/type evidence.
   `loopd_command_get` (metadata + bounded output snapshot) →
   `loopd_command_write` (raw stdin) → `loopd_command_interrupt` (SIGINT) →
   `loopd_command_terminate` (SIGTERM→SIGKILL) → `loopd_command_remove`.
-  `loopd_command_resize` stores the requested size and reports unsupported.
+   `loopd_command_resize` applies the size live to the PTY winsize (pipe
+   fallback: stores the requested size and reports unsupported).
 - TUI: `/commands` opens a host-owned fullscreen session panel on v2 and an
   xlarge compatibility dialog on v1. `j/k`
   move, `:` types (`:new <cmd> [args]`, `:terminate`, `:remove`,
   `:interrupt`, `:resize <cols> <rows>`, `:open-cmd` refresh), Enter in
   insert mode sends raw stdin (newline appended), `ctrl-c` interrupts,
   `q` detaches. The overlay labels output as a byte stream, never a terminal.
-- Every response carries the host capability flags
-  (`resize: false`, `terminalEmulation: false`), so callers never have to
+- Every response carries the host capability flags of the ACTIVE backend
+  (`resize: true` on the PTY backend, `false` on the pipe fallback;
+  `terminalEmulation: false` always), so callers never have to
   guess what the backend can do.
 
 ## Lifecycle semantics
@@ -55,7 +57,11 @@ agent actions. Missing session ownership fails closed.
 - Output is an interleaved stdout+stderr byte stream (arrival order), bounded
   at 512 KB retained per command (oldest bytes dropped at the bound, flagged
   `truncated`); reads page by byte offset (default 64 KB, cap 256 KB).
-- No tty: no cursor addressing, no alt-screen, no resize.
+- Real PTY bytes (`bun-pty`, TERM=xterm-256color, default 80x24): cursor
+  addressing and alt-screen sequences pass through output untouched, `stty
+  size` reflects spawn/resize winsize, Ctrl+C is line-discipline SIGINT
+  (trappable/ignorable). Still no screen emulation: output stays a byte
+  stream, never a terminal grid (Milestone 6).
 - v2 server plugins cannot drive host-owned PTYs at all (context exposes
   `terminal.read` only); both TUI clients could attach natively later via
   `pty.connectToken` + `connect` — recorded as follow-up, not implemented.
