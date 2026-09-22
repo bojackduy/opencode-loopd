@@ -3097,7 +3097,7 @@ function adaptThemeV2(theme) {
   const text = t.text ?? {};
   const fb = text.feedback ?? {};
   const bg = t.background ?? {};
-  const surface = bg.surface ?? {};
+  const raised = bg.raised ?? bg.surface ?? {};
   const diff = t.diff ?? {};
   const diffText = diff.text ?? {};
   const diffBg = diff.background ?? {};
@@ -3105,50 +3105,67 @@ function adaptThemeV2(theme) {
   const diffLn = diff.lineNumber ?? {};
   const syntax = t.syntax ?? {};
   const md = t.markdown ?? {};
-  const dv = (v, fallback) => typeof v === "string" ? v : fallback;
-  const base = dv(text.default, "#ffffff");
-  const muted = dv(text.subdued, "#888888");
+  const pick = (...values) => values.find((value) => value !== undefined && value !== null);
+  const base = pick(text.base, text.default, "#ffffff");
+  const muted = pick(text.muted, text.subdued, "#888888");
+  const primary = pick(t.hue?.interactive?.[200], text.formfield?.focused, text.action?.primary?.selected, base);
+  const accent = pick(t.hue?.accent?.[200], text.action?.primary?.focused, primary);
+  const background = pick(bg.base, bg.default, "#000000");
   return {
     text: base,
     textMuted: muted,
-    primary: base,
-    accent: base,
-    success: dv(fb.success?.default, "#22c55e"),
-    warning: dv(fb.warning?.default, "#eab308"),
-    error: dv(fb.error?.default, "#ef4444"),
-    info: dv(fb.info?.default, base),
-    background: dv(bg.default, "#000000"),
-    backgroundPanel: dv(surface.overlay, dv(bg.default, "#000000")),
-    backgroundElement: dv(surface.offset, dv(bg.default, "#000000")),
-    diffAdded: dv(diffText.added, base),
-    diffRemoved: dv(diffText.removed, base),
-    diffContext: dv(diffText.context, muted),
-    diffAddedBg: dv(diffBg.added, dv(bg.default, "#000000")),
-    diffRemovedBg: dv(diffBg.removed, dv(bg.default, "#000000")),
-    diffContextBg: dv(diffBg.context, dv(bg.default, "#000000")),
-    diffHighlightAdded: dv(diffHi.added, base),
-    diffHighlightRemoved: dv(diffHi.removed, base),
-    diffLineNumber: dv(diffLn.text, muted),
-    diffAddedLineNumberBg: dv(diffLn.background?.added, dv(bg.default, "#000000")),
-    diffRemovedLineNumberBg: dv(diffLn.background?.removed, dv(bg.default, "#000000")),
-    syntaxComment: dv(syntax.comment, muted),
-    syntaxKeyword: dv(syntax.keyword, base),
-    syntaxFunction: dv(syntax.function, base),
-    syntaxVariable: dv(syntax.variable, base),
-    syntaxString: dv(syntax.string, base),
-    syntaxNumber: dv(syntax.number, base),
-    syntaxType: dv(syntax.type, base),
-    syntaxOperator: dv(syntax.operator, base),
-    syntaxPunctuation: dv(syntax.punctuation, muted),
-    markdownText: dv(md.text, base),
-    markdownHeading: dv(md.heading, base),
-    markdownLink: dv(md.link, base),
-    markdownLinkText: dv(md.linkText, base),
-    markdownCode: dv(md.code, base),
-    markdownBlockQuote: dv(md.blockQuote, muted),
-    markdownEmph: dv(md.emphasis, base),
-    markdownStrong: dv(md.strong, base),
-    markdownListItem: dv(md.listItem, base)
+    primary,
+    secondary: pick(t.hue?.accent?.[300], accent),
+    accent,
+    success: pick(fb.success?.base, fb.success?.default, "#22c55e"),
+    warning: pick(fb.warning?.base, fb.warning?.default, "#eab308"),
+    error: pick(fb.error?.base, fb.error?.default, "#ef4444"),
+    info: pick(fb.info?.base, fb.info?.default, accent),
+    selectedListItemText: pick(text.action?.primary?.focused, base),
+    background,
+    backgroundPanel: pick(raised.base, raised.overlay, background),
+    backgroundElement: pick(raised.high, raised.offset, background),
+    backgroundMenu: pick(raised.max, raised.high, background),
+    border: pick(t.border?.base, muted),
+    borderActive: pick(t.scrollbar?.base, primary),
+    borderSubtle: pick(t.border?.base, muted),
+    diffAdded: pick(diffText.added, base),
+    diffRemoved: pick(diffText.removed, base),
+    diffContext: pick(diffText.context, muted),
+    diffHunkHeader: pick(diffText.hunkHeader, accent),
+    diffAddedBg: pick(diffBg.added, background),
+    diffRemovedBg: pick(diffBg.removed, background),
+    diffContextBg: pick(diffBg.context, background),
+    diffHighlightAdded: pick(diffHi.added, base),
+    diffHighlightRemoved: pick(diffHi.removed, base),
+    diffLineNumber: pick(diffLn.text, muted),
+    diffAddedLineNumberBg: pick(diffLn.background?.added, background),
+    diffRemovedLineNumberBg: pick(diffLn.background?.removed, background),
+    syntaxComment: pick(syntax.comment, muted),
+    syntaxKeyword: pick(syntax.keyword, base),
+    syntaxFunction: pick(syntax.function, base),
+    syntaxVariable: pick(syntax.variable, base),
+    syntaxString: pick(syntax.string, base),
+    syntaxNumber: pick(syntax.number, base),
+    syntaxType: pick(syntax.type, base),
+    syntaxOperator: pick(syntax.operator, base),
+    syntaxPunctuation: pick(syntax.punctuation, muted),
+    markdownText: pick(md.text, base),
+    markdownHeading: pick(md.heading, primary),
+    markdownLink: pick(md.link, accent),
+    markdownLinkText: pick(md.linkText, accent),
+    markdownCode: pick(md.code, base),
+    markdownBlockQuote: pick(md.blockQuote, muted),
+    markdownEmph: pick(md.emphasis, base),
+    markdownStrong: pick(md.strong, base),
+    markdownHorizontalRule: pick(md.horizontalRule, muted),
+    markdownListItem: pick(md.listItem, accent),
+    markdownListEnumeration: pick(md.listEnumeration, accent),
+    markdownImage: pick(md.image, accent),
+    markdownImageText: pick(md.imageText, base),
+    markdownCodeBlock: pick(md.codeBlock, base),
+    thinkingOpacity: 0.6,
+    _hasSelectedListItemText: true
   };
 }
 var v2setup = (ctx) => {
@@ -3316,5 +3333,6 @@ var plugin_default = {
   setup: v2setup
 };
 export {
+  adaptThemeV2,
   plugin_default as default
 };
