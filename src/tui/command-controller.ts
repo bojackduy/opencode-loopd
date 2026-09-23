@@ -157,3 +157,33 @@ export function formatCommandRow(c: CommandSession): string {
   const tail = c.status === "running" ? "running" : `${c.status}${c.exitCode !== undefined ? ` (${c.exitCode})` : ""}`
   return `${c.title} — ${argv} — ${tail}`
 }
+
+/**
+ * Parse the `:new` command tail (everything after the `new` verb) into an
+ * argv with quoted/escaped boundaries preserved. The dashboard's
+ * parseCommand already tokenized the line once (and routes `--flags` into
+ * args), so re-splitting its positional values would lose boundaries such
+ * as `:new bash -c "echo hi"` → ["bash","-c","echo hi"]. Parsing the raw
+ * tail directly keeps `echo hi` as one argument. Returns undefined for
+ * missing/empty tails and unbalanced quotes/escapes.
+ */
+export function parseNewCommandTail(raw: string): string[] | undefined {
+  const match = /^(?::?\s*new)(?:\s+(.*))?\s*$/s.exec(raw.trim())
+  if (!match) return undefined
+  const tail = (match[1] ?? "").trim()
+  if (!tail) return undefined
+  return parseCommandLine(tail)
+}
+
+/**
+ * Split a `:new` line into spawn argv: the first tail token is the command,
+ * the rest are its args. Quoted boundaries survive (`:new bash -c "echo hi"`
+ * → `{ command: "bash", cmdArgs: ["-c", "echo hi"] }`). Undefined when the
+ * tail is missing or unbalanced.
+ */
+export function parseNewCommand(raw: string): { command: string; cmdArgs: string[] } | undefined {
+  const parts = parseNewCommandTail(raw)
+  if (!parts || parts.length === 0) return undefined
+  const [command, ...cmdArgs] = parts as [string, ...string[]]
+  return { command, cmdArgs }
+}

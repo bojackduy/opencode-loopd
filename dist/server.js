@@ -503,21 +503,49 @@ async function readCommandLog(directory, commandID, opts) {
   try {
     const stat = await fs.stat(file);
     const totalBytes = stat.size;
-    const startByte = Math.max(0, opts?.offsetBytes ?? 0);
-    if (startByte >= totalBytes)
-      return { text: "", totalBytes, startByte };
+    const requestedStart = Math.max(0, opts?.offsetBytes ?? 0);
+    if (requestedStart >= totalBytes)
+      return { text: "", totalBytes, startByte: requestedStart };
     const fh = await fs.open(file, "r");
     try {
-      const want = Math.min(opts?.limitBytes ?? 64 * 1024, totalBytes - startByte);
+      const want = Math.min(opts?.limitBytes ?? 64 * 1024, totalBytes - requestedStart);
       const buf = Buffer.alloc(want);
-      await fh.read(buf, 0, want, startByte);
-      return { text: buf.toString("utf8"), totalBytes, startByte };
+      await fh.read(buf, 0, want, requestedStart);
+      const { text, startByte, endByte } = decodeUtf8Window(buf, requestedStart);
+      return { text, totalBytes, startByte };
     } finally {
       await fh.close();
     }
   } catch {
     return { text: "", totalBytes: 0, startByte: 0 };
   }
+}
+function decodeUtf8Window(buf, windowStart) {
+  let start = 0;
+  while (start < buf.length && (buf[start] & 192) === 128 && start < 4)
+    start++;
+  let end = buf.length;
+  let leadIndex = end;
+  while (leadIndex > start && (buf[leadIndex - 1] & 192) === 128)
+    leadIndex--;
+  if (leadIndex > start) {
+    const lead = buf[leadIndex - 1];
+    let expected = 1;
+    if ((lead & 128) === 0)
+      expected = 1;
+    else if ((lead & 224) === 192)
+      expected = 2;
+    else if ((lead & 240) === 224)
+      expected = 3;
+    else if ((lead & 248) === 240)
+      expected = 4;
+    if (end - (leadIndex - 1) < expected)
+      end = leadIndex - 1;
+  } else if (leadIndex === start && start > 0 && end > start) {
+    end = start;
+  }
+  const slice = buf.subarray(start, end);
+  return { text: slice.toString("utf8"), startByte: windowStart + start, endByte: windowStart + end };
 }
 async function removeCommandLog(directory, commandID) {
   try {
@@ -605,6 +633,7 @@ async function requestCommandAwait(directory, input) {
       active: mine?.active ?? goal.status === "active"
     };
   }
+  let becameTerminal = false;
   await mutateState(directory, `cmd.await-request:${input.goalID}:${input.commandID}`, async (s) => {
     const dup = (s.commandAwaits ?? []).some((a) => a.goalID === input.goalID && a.commandID === input.commandID);
     if (!dup) {
@@ -615,8 +644,22 @@ async function requestCommandAwait(directory, input) {
         createdAt: new Date().toISOString()
       }];
     }
+    const current = (s.commands ?? []).find((c) => c.id === input.commandID);
+    if (current && isTerminalCommandStatus(current.status)) {
+      becameTerminal = true;
+    }
     return s;
   });
+  if (becameTerminal) {
+    const fired = await fireCommandAwaits(directory, input.commandID);
+    const mine = fired.find((f) => f.goalID === input.goalID);
+    return {
+      ok: true,
+      message: `Command "${command.title}" exited while registering; wake-up delivered to goal "${goal.name}".`,
+      fired: true,
+      active: mine?.active ?? goal.status === "active"
+    };
+  }
   await appendEvent(directory, ledgerEvent({
     goalID: input.goalID,
     commandID: input.commandID,
@@ -644,17 +687,31 @@ async function readBoundedTail(directory, commandID) {
   }
 }
 async function fireCommandAwaits(directory, commandID) {
-  const snapshot = await readState(directory);
-  const outstanding = (snapshot.commandAwaits ?? []).filter((a) => a.commandID === commandID);
-  if (outstanding.length === 0)
-    return [];
-  const command = (snapshot.commands ?? []).find((c) => c.id === commandID);
-  if (!command) {
-    await mutateState(directory, `cmd.await-discard:${commandID}`, async (s) => {
+  let consumed = [];
+  let command;
+  let commandGone = false;
+  await mutateState(directory, `cmd.await-consume:${commandID}`, async (s) => {
+    const outstanding = (s.commandAwaits ?? []).filter((a) => a.commandID === commandID);
+    if (outstanding.length === 0)
+      return s;
+    const current = (s.commands ?? []).find((c) => c.id === commandID);
+    if (!current) {
+      commandGone = true;
+      consumed = outstanding;
       s.commandAwaits = (s.commandAwaits ?? []).filter((a) => a.commandID !== commandID);
       return s;
-    });
-    for (const a of outstanding) {
+    }
+    if (!isTerminalCommandStatus(current.status))
+      return s;
+    command = current;
+    consumed = outstanding;
+    s.commandAwaits = (s.commandAwaits ?? []).filter((a) => a.commandID !== commandID);
+    return s;
+  });
+  if (consumed.length === 0)
+    return [];
+  if (commandGone || !command) {
+    for (const a of consumed) {
       await appendEvent(directory, ledgerEvent({
         goalID: a.goalID,
         commandID,
@@ -664,15 +721,9 @@ async function fireCommandAwaits(directory, commandID) {
     }
     return [];
   }
-  if (!isTerminalCommandStatus(command.status))
-    return [];
-  await mutateState(directory, `cmd.await-consume:${commandID}`, async (s) => {
-    s.commandAwaits = (s.commandAwaits ?? []).filter((a) => a.commandID !== commandID);
-    return s;
-  });
   const tail = await readBoundedTail(directory, commandID);
   const fired = [];
-  for (const a of outstanding) {
+  for (const a of consumed) {
     const fresh = await readState(directory);
     const goal = fresh.goals.find((g) => g.id === a.goalID);
     if (!goal) {
@@ -4166,6 +4217,11 @@ function validateCommandStreamMessage(value) {
           return { ok: false, error: "resync.commandID must be a non-empty string" };
         return { ok: true, message: { type: "resync", commandID: value["commandID"] } };
       }
+      case "unsubscribe": {
+        if (!isNonEmptyString(value["commandID"]))
+          return { ok: false, error: "unsubscribe.commandID must be a non-empty string" };
+        return { ok: true, message: { type: "unsubscribe", commandID: value["commandID"] } };
+      }
       case "error": {
         if (!isNonEmptyString(value["code"]))
           return { ok: false, error: "error.code must be a non-empty string" };
@@ -4879,6 +4935,27 @@ function createCommandStreamServer(directory, commandService, broker) {
   let stopped = false;
   const sockets = new Set;
   const subsBySocket = new Map;
+  const handshakeBySocket = new Map;
+  function nextHandshake(ws, commandID) {
+    let m = handshakeBySocket.get(ws);
+    if (!m) {
+      m = new Map;
+      handshakeBySocket.set(ws, m);
+    }
+    const next = (m.get(commandID) ?? 0) + 1;
+    m.set(commandID, next);
+    return next;
+  }
+  function currentHandshake(ws, commandID) {
+    return handshakeBySocket.get(ws)?.get(commandID);
+  }
+  function clearHandshake(ws, commandID, generation) {
+    const m = handshakeBySocket.get(ws);
+    if (m?.get(commandID) === generation)
+      m.delete(commandID);
+    if (m && m.size === 0)
+      handshakeBySocket.delete(ws);
+  }
   function sendError(ws, code, message) {
     try {
       ws.send(JSON.stringify({ type: "error", code, message }));
@@ -4924,9 +5001,11 @@ function createCommandStreamServer(directory, commandService, broker) {
       }
       subsBySocket.delete(ws);
     }
+    handshakeBySocket.delete(ws);
     sockets.delete(ws);
   }
   async function handleSubscribe(ws, commandID, ownerSessionID) {
+    const generation = nextHandshake(ws, commandID);
     const subs = subsFor(ws);
     const previous = subs.get(commandID);
     if (previous) {
@@ -4940,9 +5019,19 @@ function createCommandStreamServer(directory, commandService, broker) {
     try {
       sinkID = await broker.subscribe(commandID, ownerSessionID, sink);
     } catch (error) {
+      if (currentHandshake(ws, commandID) !== generation)
+        return;
+      clearHandshake(ws, commandID, generation);
       sendError(ws, "subscribe-failed", error instanceof Error ? error.message : String(error));
       return;
     }
+    if (currentHandshake(ws, commandID) !== generation) {
+      try {
+        broker.unsubscribe(commandID, sinkID);
+      } catch {}
+      return;
+    }
+    clearHandshake(ws, commandID, generation);
     if (!sockets.has(ws)) {
       try {
         broker.unsubscribe(commandID, sinkID);
@@ -4959,6 +5048,18 @@ function createCommandStreamServer(directory, commandService, broker) {
       return;
     }
     await handleSubscribe(ws, commandID, previous.ownerSessionID);
+  }
+  function handleUnsubscribe(ws, commandID) {
+    if (handshakeBySocket.get(ws)?.has(commandID))
+      nextHandshake(ws, commandID);
+    const subs = subsFor(ws);
+    const previous = subs.get(commandID);
+    if (previous) {
+      try {
+        broker.unsubscribe(commandID, previous.sinkID);
+      } catch {}
+      subs.delete(commandID);
+    }
   }
   async function handleInput(ws, commandID, data) {
     const owner = subsFor(ws).get(commandID)?.ownerSessionID;
@@ -5016,6 +5117,9 @@ function createCommandStreamServer(directory, commandService, broker) {
           break;
         case "resync":
           await handleResync(ws, msg.commandID);
+          break;
+        case "unsubscribe":
+          handleUnsubscribe(ws, msg.commandID);
           break;
         case "input":
           await handleInput(ws, msg.commandID, msg.data);
@@ -5119,6 +5223,7 @@ function createCommandStreamServer(directory, commandService, broker) {
       }
       sockets.clear();
       subsBySocket.clear();
+      handshakeBySocket.clear();
       try {
         server?.stop(true);
       } catch {}

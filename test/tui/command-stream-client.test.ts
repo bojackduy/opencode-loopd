@@ -169,6 +169,9 @@ describe("Command stream client", () => {
     await client.connect(dir)
     sockets[0]!.open()
     client.subscribe("cmd-1", "owner-1", {})
+    // Gated: input is rejected before the snapshot/ack confirms the sub.
+    expect(client.sendInput("cmd-1", "early").ok).toBe(false)
+    sockets[0]!.deliver({ type: "snapshot", command: session("cmd-1"), data: "", startOffset: 0, endOffset: 0 })
     sockets[0]!.sent.length = 0 // drop the subscribe handshake
     expect(client.sendInput("cmd-1", "ls\n")).toEqual({ ok: true })
     expect(client.sendInterrupt("cmd-1")).toEqual({ ok: true })

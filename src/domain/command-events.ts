@@ -61,6 +61,11 @@ export interface ResyncMessage {
   commandID: string
 }
 
+export interface UnsubscribeMessage {
+  type: "unsubscribe"
+  commandID: string
+}
+
 export interface ErrorMessage {
   type: "error"
   code: string
@@ -75,6 +80,7 @@ export type CommandStreamMessage =
   | InputMessage
   | InterruptMessage
   | ResyncMessage
+  | UnsubscribeMessage
   | ErrorMessage
 
 export type ValidateResult =
@@ -241,6 +247,11 @@ export function validateCommandStreamMessage(value: unknown): ValidateResult {
         if (!isNonEmptyString(value["commandID"]))
           return { ok: false, error: "resync.commandID must be a non-empty string" }
         return { ok: true, message: { type: "resync", commandID: value["commandID"] } }
+      }
+      case "unsubscribe": {
+        if (!isNonEmptyString(value["commandID"]))
+          return { ok: false, error: "unsubscribe.commandID must be a non-empty string" }
+        return { ok: true, message: { type: "unsubscribe", commandID: value["commandID"] } }
       }
       case "error": {
         if (!isNonEmptyString(value["code"]))

@@ -25,6 +25,20 @@ export interface ScreenCell {
   underline?: boolean
   /** Raw attribute flag; fg/bg above are already inverse-resolved. */
   inverse?: boolean
+  /**
+   * Cell width from the emulator: 1 for normal cells, 2 for a wide glyph
+   * (CJK/emoji lead cell), 0 for the continuation cell after a wide glyph.
+   * Renderers must preserve continuation cells (never collapse them) so
+   * wide text keeps its column alignment.
+   */
+  width?: number
+}
+
+export interface CursorState {
+  x: number
+  y: number
+  /** False after DECTCEM hide (CSI ? 25 l); true after show / reset. */
+  visible: boolean
 }
 
 export interface TerminalScreen {
@@ -32,6 +46,8 @@ export interface TerminalScreen {
   readonly rows: number
   /** "alternate" while a fullscreen app (vim/less/htop) owns the screen. */
   readonly activeBuffer: "normal" | "alternate"
+  /** Cursor position + DECTCEM visibility on the ACTIVE buffer. */
+  readonly cursor: CursorState
   /** Feed raw PTY bytes. Async-parsed; call flush() before readScreen in tests. */
   write(data: string): void
   /** Resolve when all bytes written so far are parsed. */
@@ -41,6 +57,8 @@ export interface TerminalScreen {
   reset(): void
   /** ACTIVE screen cells in row-major order (cols*rows entries). */
   readScreen(): ScreenCell[]
+  /** Serialize the ACTIVE viewport to plain text rows (trailing spaces kept). */
+  serialize(): string[]
   dispose(): void
 }
 
@@ -64,7 +82,8 @@ function paletteToHex(index: number): string | undefined {
     const r = Math.floor(i / 36)
     const g = Math.floor((i % 36) / 6)
     const b = i % 6
-    const v = (c: number) => (c === 0 ? 0 : 95 + c * 40)
+    // xterm 256-color cube: 0 → 0, else 55 + 40*c (max 255).
+    const v = (c: number) => (c === 0 ? 0 : 55 + c * 40)
     return toHex((v(r) << 16) | (v(g) << 8) | v(b))
   }
   const g = 8 + (index - 232) * 10
@@ -74,13 +93,50 @@ function paletteToHex(index: number): string | undefined {
 export function createTerminalScreen(cols: number, rows: number): TerminalScreen {
   // allowProposedApi unlocks the buffer namespace (cell/cursor/alt-screen
   // readout) — verified against @xterm/headless 6.0.0 types + probe script.
-  const term = new Terminal({
-    cols,
-    rows,
-    scrollback: 0,
-    allowProposedApi: true,
-  } as unknown as Record<string, unknown> as never)
+  function makeTerm(nextCols: number, nextRows: number): InstanceType<typeof Terminal> {
+    return new Terminal({
+      cols: nextCols,
+      rows: nextRows,
+      scrollback: 0,
+      allowProposedApi: true,
+    } as unknown as Record<string, unknown> as never)
+  }
+  let term = makeTerm(cols, rows)
   let disposed = false
+  // Reset invalidates pending old writes by disposing the parser: bytes
+  // written before the reset parse into the DISPOSED instance and can never
+  // repaint the new grid. Pending flush waiters resolve immediately on reset
+  // (stale waiter, never a fresh paint — session-side revision fencing drops
+  // their emission).
+  let pendingFlushes: Array<() => void> = []
+  // DECTCEM cursor visibility tracked view-side: hide on CSI ? 25 l, show on
+  // CSI ? 25 h, reset to visible on full reset. Defaults to visible.
+  let cursorVisible = true
+
+  function trackCursorVisibility(data: string): void {
+    if (!data) return
+    // Scan for DECTCEM show/hide; last occurrence wins.
+    const re = /\x1b\[\?25([lh])/g
+    let m: RegExpExecArray | null
+    while ((m = re.exec(data)) !== null) {
+      cursorVisible = m[1] === "h"
+    }
+  }
+
+  function readCursor(): CursorState {
+    try {
+      const buf = term.buffer.active as unknown as { cursorX?: number; cursorY?: number }
+      const x = typeof buf.cursorX === "number" ? buf.cursorX : 0
+      const y = typeof buf.cursorY === "number" ? buf.cursorY : 0
+      return {
+        x: Math.max(0, Math.min(term.cols - 1, x)),
+        y: Math.max(0, Math.min(term.rows - 1, y)),
+        visible: cursorVisible,
+      }
+    } catch {
+      return { x: 0, y: 0, visible: cursorVisible }
+    }
+  }
 
   return {
     get cols() {
@@ -96,19 +152,32 @@ export function createTerminalScreen(cols: number, rows: number): TerminalScreen
         return "normal"
       }
     },
+    get cursor() {
+      return readCursor()
+    },
     write(data: string): void {
       if (disposed || !data) return
+      trackCursorVisibility(data)
       term.write(data)
     },
     flush(): Promise<void> {
       if (disposed) return Promise.resolve()
-      // An empty write still schedules (and fires) the parse callback —
-      // verified by probe — so this resolves after all prior bytes parsed.
+      const myTerm = term
       return new Promise<void>((resolve) => {
-        try {
-          term.write("", () => resolve())
-        } catch {
+        let done = false
+        const finish = () => {
+          if (done) return
+          done = true
+          pendingFlushes = pendingFlushes.filter((f) => f !== finish)
           resolve()
+        }
+        pendingFlushes.push(finish)
+        try {
+          // An empty write still schedules (and fires) the parse callback —
+          // verified by probe — so this resolves after all prior bytes parsed.
+          myTerm.write("", finish)
+        } catch {
+          finish()
         }
       })
     },
@@ -125,11 +194,33 @@ export function createTerminalScreen(cols: number, rows: number): TerminalScreen
     },
     reset(): void {
       if (disposed) return
+      cursorVisible = true
+      let nextCols = 80
+      let nextRows = 24
       try {
-        term.reset()
+        nextCols = term.cols
+        nextRows = term.rows
+      } catch {
+        // Fall through to the fallback size.
+      }
+      const stale = term
+      try {
+        stale.dispose()
       } catch {
         // Best-effort view only.
       }
+      // Stale flush waiters resolve without effect: the parser they waited
+      // on is gone, and session-side revision fencing drops their emission.
+      const waiters = pendingFlushes
+      pendingFlushes = []
+      for (const w of waiters) {
+        try {
+          w()
+        } catch {
+          // Never throw from reset.
+        }
+      }
+      term = makeTerm(nextCols, nextRows)
     },
     readScreen(): ScreenCell[] {
       const out: ScreenCell[] = []
@@ -164,6 +255,12 @@ export function createTerminalScreen(cols: number, rows: number): TerminalScreen
           }
           const text = cell.getChars() || " "
           const entry: ScreenCell = { text }
+          try {
+            const w = cell.getWidth()
+            if (w === 0 || w === 2) entry.width = w
+          } catch {
+            // Width readout is decorative — text still renders.
+          }
           // Foreground.
           try {
             if (!cell.isFgDefault()) {
@@ -193,8 +290,32 @@ export function createTerminalScreen(cols: number, rows: number): TerminalScreen
       }
       return out
     },
+    serialize(): string[] {
+      if (disposed) return []
+      const cells = this.readScreen()
+      const rows: string[] = []
+      const c = term.cols
+      const r = term.rows
+      // Every viewport row is serialized (blank rows preserved as spaces) so
+      // a full-screen renderer can repaint without stale-row artifacts.
+      for (let y = 0; y < r; y++) {
+        let row = ""
+        for (let x = 0; x < c; x++) {
+          row += cells[y * c + x]?.text ?? " "
+        }
+        rows.push(row)
+      }
+      return rows
+    },
     dispose(): void {
       disposed = true
+      const waiters = pendingFlushes
+      pendingFlushes = []
+      for (const w of waiters) {
+        try {
+          w()
+        } catch {}
+      }
       try {
         term.dispose()
       } catch {

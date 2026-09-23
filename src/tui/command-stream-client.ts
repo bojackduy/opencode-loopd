@@ -4,11 +4,16 @@
 // fake socket. Transport/server/broker/PTY are untouched.
 //
 // Wire contract (see src/domain/command-events.ts + command-stream-server.ts):
-//   client → server: subscribe {commandID, ownerSessionID}, input, interrupt,
-//     resync-equivalent (fresh subscribe handshake)
+//   client → server: subscribe {commandID, ownerSessionID}, unsubscribe,
+//     input, interrupt, resync-equivalent (fresh subscribe handshake)
 //   server → client: snapshot {command, data, startOffset, endOffset},
 //     output {commandID, data, startOffset, endOffset},
 //     status {command}, error {code, message}
+// Subscription is live only after a valid snapshot/ack (isLive + input gated
+// on hasSnapshot). Absent snapshot within snapshotTimeoutMs surfaces a
+// polling-fallback error. Callbacks are fenced by connection generation so
+// stale sockets cannot clear new state. Endpoint metadata is re-read on
+// reconnect; pre-snapshot deltas are bounded and never applied.
 // Offsets are absolute UTF-8 lifetime byte offsets; exact-continue appends,
 // gap OR overlap triggers exactly one resync per episode (fresh subscribe).
 // Resync-loop guard: per-subscription counter + cooldown.
@@ -68,6 +73,10 @@ export interface CommandStreamClientOptions {
   maxResyncsPerWindow?: number
   /** Resync counting window (default 30_000ms). */
   resyncWindowMs?: number
+  /** Snapshot wait before polling-fallback error (default 8000ms). */
+  snapshotTimeoutMs?: number
+  /** Max output frames held pre-snapshot before dropping (default 32). */
+  maxPreSnapshotBuffered?: number
 }
 
 export type ConnectResult = { ok: true } | { ok: false; reason: string }
@@ -80,9 +89,14 @@ interface SubState {
   /** Absolute end offset of the last applied bytes (undefined until snapshot). */
   endOffset: number | undefined
   startOffset: number | undefined
+  /** True only after a valid snapshot/ack — gates isLive + input. */
+  hasSnapshot: boolean
   /** True while a fresh-subscribe resync is in flight (snapshot pending). */
   resyncPending: boolean
   resyncTimes: number[]
+  /** Pre-snapshot output frames seen (bounded; excess dropped, never applied). */
+  preSnapshotDropped: number
+  snapshotTimer: ReturnType<typeof setTimeout> | undefined
 }
 
 function defaultEndpointPath(directory: string): string {
@@ -149,11 +163,15 @@ export function createCommandStreamClient(options: CommandStreamClientOptions = 
   const maxBackoffMs = options.maxBackoffMs ?? 8000
   const maxResyncsPerWindow = options.maxResyncsPerWindow ?? 5
   const resyncWindowMs = options.resyncWindowMs ?? 30_000
+  const snapshotTimeoutMs = options.snapshotTimeoutMs ?? 8000
+  const maxPreSnapshotBuffered = options.maxPreSnapshotBuffered ?? 32
 
   let state: StreamConnectionState = "disconnected"
   let directory = ""
   let endpointURL = ""
   let socket: StreamSocket | undefined
+  /** Connection generation: stale-socket callbacks cannot clear new state. */
+  let generation = 0
   let closedIntentionally = false
   let reconnectAttempt = 0
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined
@@ -184,6 +202,33 @@ export function createCommandStreamClient(options: CommandStreamClientOptions = 
 
   function sendSubscribe(sub: SubState): boolean {
     return sendWire({ type: "subscribe", commandID: sub.commandID, ownerSessionID: sub.ownerSessionID })
+  }
+
+  function clearSnapshotTimer(sub: SubState): void {
+    if (sub.snapshotTimer) {
+      clearTimeout(sub.snapshotTimer)
+      sub.snapshotTimer = undefined
+    }
+  }
+
+  /** Arm the absent-snapshot timeout → polling-fallback signal. */
+  function armSnapshotTimer(sub: SubState): void {
+    clearSnapshotTimer(sub)
+    if (sub.hasSnapshot) return
+    sub.snapshotTimer = setTimeout(() => {
+      sub.snapshotTimer = undefined
+      if (sub.hasSnapshot || !subs.has(sub.commandID)) return
+      sub.resyncPending = false
+      try {
+        sub.handlers.onError?.(
+          `snapshot-timeout: no snapshot for ${sub.commandID} within ${snapshotTimeoutMs}ms — using polling fallback`,
+        )
+      } catch {}
+    }, snapshotTimeoutMs)
+    const t = sub.snapshotTimer as unknown as { unref?: () => void }
+    try {
+      t.unref?.()
+    } catch {}
   }
 
   function pruneResyncTimes(sub: SubState, now: number): void {
@@ -234,6 +279,9 @@ export function createCommandStreamClient(options: CommandStreamClientOptions = 
         sub.startOffset = msg.startOffset
         sub.endOffset = msg.endOffset
         sub.resyncPending = false
+        sub.hasSnapshot = true
+        sub.preSnapshotDropped = 0
+        clearSnapshotTimer(sub)
         try {
           sub.handlers.onSnapshot?.({
             command: msg.command as CommandSessionShape,
@@ -247,9 +295,13 @@ export function createCommandStreamClient(options: CommandStreamClientOptions = 
       case "output": {
         const sub = subs.get(msg.commandID)
         if (!sub) return
-        if (sub.endOffset === undefined) {
-          // No baseline yet — ask for a snapshot instead of guessing.
-          requestResync(sub, "no-baseline")
+        if (sub.endOffset === undefined || !sub.hasSnapshot) {
+          // No baseline yet — bound pre-snapshot deltas (never apply), ask
+          // once for a snapshot instead of guessing.
+          sub.preSnapshotDropped += 1
+          if (sub.preSnapshotDropped <= maxPreSnapshotBuffered) {
+            requestResync(sub, "no-baseline")
+          }
           return
         }
         if (offsetsContinuous(sub.endOffset, msg.startOffset)) {
@@ -296,6 +348,8 @@ export function createCommandStreamClient(options: CommandStreamClientOptions = 
   function openSocket(): boolean {
     if (!endpointURL) return false
     closedIntentionally = false
+    generation += 1
+    const myGeneration = generation
     emitConnection("connecting")
     let next: StreamSocket
     try {
@@ -306,17 +360,49 @@ export function createCommandStreamClient(options: CommandStreamClientOptions = 
     }
     socket = next
     socket.onopen = () => {
+      // Fence: a stale socket opening late must not clear newer state.
+      if (myGeneration !== generation || socket !== next) return
       reconnectAttempt = 0
       emitConnection("connected")
-      // Auto-resubscribe all prior subscriptions after (re)connect.
+      // Re-read endpoint metadata on reconnect (server may have restarted
+      // with a new generation); the next reconnect tick picks it up.
+      if (directory) {
+        void readEndpoint(directory).then(
+          (ep) => {
+            if (myGeneration !== generation) return
+            if (ep && typeof ep.url === "string" && ep.url.length > 0) endpointURL = ep.url
+          },
+          () => {},
+        )
+      }
+      // Auto-resubscribe all prior subscriptions after (re)connect. Offsets
+      // re-baseline: the fresh snapshot replaces, never appends.
       for (const sub of subs.values()) {
         sub.resyncPending = false
+        sub.hasSnapshot = false
+        sub.endOffset = undefined
+        sub.startOffset = undefined
+        sub.preSnapshotDropped = 0
         sendSubscribe(sub)
+        armSnapshotTimer(sub)
       }
     }
-    socket.onmessage = (data) => handleMessage(data)
+    socket.onmessage = (data) => {
+      if (myGeneration !== generation || socket !== next) return
+      handleMessage(data)
+    }
     socket.onclose = () => {
+      // Fence: a stale socket closing must not tear down the new connection.
+      if (myGeneration !== generation || socket !== next) return
       socket = undefined
+      // Subscriptions go stale on close: liveness requires a fresh snapshot.
+      for (const sub of subs.values()) {
+        sub.hasSnapshot = false
+        sub.endOffset = undefined
+        sub.startOffset = undefined
+        sub.resyncPending = false
+        clearSnapshotTimer(sub)
+      }
       if (closedIntentionally) {
         emitConnection("disconnected")
         return
@@ -338,8 +424,27 @@ export function createCommandStreamClient(options: CommandStreamClientOptions = 
     emitConnection("connecting")
     reconnectTimer = setTimeout(() => {
       reconnectTimer = undefined
-      if (closedIntentionally || !endpointURL || !directory) return
-      openSocket()
+      if (closedIntentionally || !directory) return
+      // Re-read endpoint metadata before reopening so a restarted server
+      // (new generation/port) is picked up without a manual reconnect.
+      void readEndpoint(directory).then(
+        (ep) => {
+          if (closedIntentionally || !directory) return
+          if (ep && typeof ep.url === "string" && ep.url.length > 0) endpointURL = ep.url
+          if (!endpointURL) {
+            scheduleReconnect()
+            return
+          }
+          openSocket()
+        },
+        () => {
+          if (!endpointURL) {
+            scheduleReconnect()
+            return
+          }
+          openSocket()
+        },
+      )
     }, delay)
     // Don't hold the process open for reconnect backoff alone.
     const t = reconnectTimer as unknown as { unref?: () => void }
@@ -394,8 +499,11 @@ export function createCommandStreamClient(options: CommandStreamClientOptions = 
           handlers,
           endOffset: undefined,
           startOffset: undefined,
+          hasSnapshot: false,
           resyncPending: false,
           resyncTimes: [],
+          preSnapshotDropped: 0,
+          snapshotTimer: undefined,
         }
         subs.set(commandID, sub)
       } else {
@@ -404,45 +512,68 @@ export function createCommandStreamClient(options: CommandStreamClientOptions = 
         // Fresh selection re-baselines offsets; the new snapshot replaces.
         sub.endOffset = undefined
         sub.startOffset = undefined
+        sub.hasSnapshot = false
         sub.resyncPending = false
+        sub.preSnapshotDropped = 0
+        clearSnapshotTimer(sub)
       }
       if (!socket || state !== "connected") {
         // Recorded for auto-resubscribe on open; handshake goes out then.
         return { ok: true }
       }
-      return sendSubscribe(sub) ? { ok: true } : { ok: false, reason: "send-failed" }
+      const sent = sendSubscribe(sub)
+      if (sent) armSnapshotTimer(sub)
+      return sent ? { ok: true } : { ok: false, reason: "send-failed" }
     },
 
     unsubscribe(commandID: string): void {
+      const sub = subs.get(commandID)
+      if (sub) clearSnapshotTimer(sub)
       subs.delete(commandID)
-      // No server-side unsubscribe verb: the broker entry is per-socket and
-      // is replaced on the next subscribe for the same commandID, or dropped
-      // when the socket closes. Local removal stops applying its messages.
+      // Real server-side unsubscribe: drops the broker entry so deltas stop.
+      // Best-effort (socket may be down); local removal always stops applying.
+      if (sub && socket && state === "connected") {
+        try {
+          socket.send(JSON.stringify({ type: "unsubscribe", commandID }))
+        } catch {}
+      }
     },
 
     sendInput(commandID: string, data: string): SendResult {
-      if (!socket || state !== "connected" || !subs.has(commandID)) {
+      const sub = subs.get(commandID)
+      // Rejected before ownership/subscription confirmation (no snapshot yet).
+      if (!socket || state !== "connected" || !sub || !sub.hasSnapshot) {
         return { ok: false, reason: "not-subscribed" }
       }
       return sendWire({ type: "input", commandID, data }) ? { ok: true } : { ok: false, reason: "send-failed" }
     },
 
     sendInterrupt(commandID: string): SendResult {
-      if (!socket || state !== "connected" || !subs.has(commandID)) {
+      const sub = subs.get(commandID)
+      if (!socket || state !== "connected" || !sub || !sub.hasSnapshot) {
         return { ok: false, reason: "not-subscribed" }
       }
       return sendWire({ type: "interrupt", commandID }) ? { ok: true } : { ok: false, reason: "send-failed" }
     },
 
     isLive(commandID: string): boolean {
-      return state === "connected" && subs.has(commandID)
+      // Live only after a valid snapshot/ack — never on subscribe-alone.
+      return state === "connected" && (subs.get(commandID)?.hasSnapshot === true)
     },
 
     disconnect(): void {
       closedIntentionally = true
+      generation += 1
       if (reconnectTimer) {
         clearTimeout(reconnectTimer)
         reconnectTimer = undefined
+      }
+      for (const sub of subs.values()) {
+        clearSnapshotTimer(sub)
+        sub.hasSnapshot = false
+        sub.endOffset = undefined
+        sub.startOffset = undefined
+        sub.resyncPending = false
       }
       try {
         socket?.close(1000, "client disconnect")
@@ -452,12 +583,14 @@ export function createCommandStreamClient(options: CommandStreamClientOptions = 
     },
 
     dispose(): void {
+      for (const sub of subs.values()) clearSnapshotTimer(sub)
       subs.clear()
       if (reconnectTimer) {
         clearTimeout(reconnectTimer)
         reconnectTimer = undefined
       }
       closedIntentionally = true
+      generation += 1
       try {
         socket?.close(1000, "client dispose")
       } catch {}

@@ -14,15 +14,31 @@ installed host APIs can and cannot do, with file/type evidence.
   `loopd_command_terminate` (SIGTERM→SIGKILL) → `loopd_command_remove`.
    `loopd_command_resize` applies the size live to the PTY winsize (pipe
    fallback: stores the requested size and reports unsupported).
-- TUI: `/commands` opens a host-owned fullscreen session panel on v2 and an
-  xlarge compatibility dialog on v1. `j/k`
-  move, `:` types (`:new <cmd> [args]`, `:terminate`, `:remove`,
-  `:interrupt`, `:resize <cols> <rows>`, `:open-cmd` refresh), Enter in
-  insert mode sends raw stdin (newline appended), `ctrl-c` interrupts,
-  `q` detaches. Commands confirmed on the PTY backend render an emulated
-  terminal screen (headless `@xterm/headless` view over the byte stream —
-  cursor addressing, SGR colors, alt-screen, scroll regions); pipe-backend
-  sessions keep the raw-text view. The panel header says which view is shown.
+- TUI: `/loop` and `/commands` open the SAME shared dashboard (Goals and
+  Commands tabs; `Tab`/`h`/`l` switch, `j`/`k`/`g`/`G` select). `/loop`
+  focuses Goals, `/commands` focuses Commands (owner-scoped — only the
+  current session's commands). On a goal, `o` opens the native worker
+  session as before; on a command, `o` closes the popup and navigates to
+  the plugin-owned fullscreen terminal page (route `opencode.loopd.terminal`,
+  registered on both the v1 `api.route` and v2 `ctx.ui.router` contracts).
+  The Commands tab also offers `:new <cmd> [args]`, `:interrupt`,
+  `:terminate`, `:remove`, and bare-text stdin. Goal controls (`p`/`r`/`R`/
+  `x`/`A`/`N`) never fire on the Commands tab.
+- Fullscreen terminal page (primary monitor — no browser involved, no chat
+  session, no dialog/panel): compact header (command metadata + connection
+  status), viewport flexes to all remaining space, footer (controls +
+  dimensions). Raw keypresses forward immediately (never a line-submit
+  input); `Ctrl+C` is interrupt input to the PTY (never closes OpenCode);
+  `Ctrl+]` detaches back to the return session; paste forwards raw bytes
+  immediately. The measured viewport (renderable ref + onSizeChange, 75ms
+  debounce, 80x24 fallback-only) resizes both the headless emulator and the
+  real PTY winsize. Invalid/missing/cross-owner route data renders a safe
+  error and can never subscribe or write. Unmount unsubscribes and frees
+  everything, but NEVER terminates the command — detach (closing the page
+  or panel) is a client-side no-op: the command keeps running. Termination
+  is explicit-only (`:terminate`, agent tools).
+- Compatibility fallback: hosts that truly lack route support keep the old
+  clipped CommandPanel monitor dialog. It is not used on normal v1/v2 hosts.
 - Every response carries the host capability flags of the ACTIVE backend
   (`resize: true` on the PTY backend, `false` on the pipe fallback;
   `terminalEmulation: false` always), so callers never have to
@@ -107,12 +123,32 @@ agent actions. Missing session ownership fails closed.
 - v2 server plugins cannot drive host-owned PTYs at all (context exposes
   `terminal.read` only); both TUI clients could attach natively later via
   `pty.connectToken` + `connect` — recorded as follow-up, not implemented.
-- Live output in the panel is stream-primary with a poll fallback: when the
-  command stream socket is connected and subscribed, deltas append
-  immediately (2 s output poller gated off, 30 s metadata safety refresh);
-  when disconnected or before the server starts, the panel falls back to the
-  2 s pollers and resumes the stream on reconnect. Closing/reopening
-  replays from the retained log (detach/reopen safe).
+- Live output in the terminal page is stream-primary with a poll fallback:
+  when the command stream socket is connected and subscribed, deltas append
+  immediately (2 s output poller gated off); when disconnected or before the
+  server starts, the page falls back to 2 s polls and resumes the stream on
+  reconnect. A subscription counts as live only after a valid snapshot/ack;
+  input before that is rejected (control-bus fallback applies); an absent
+  snapshot times out into the polling fallback. Closing/reopening replays
+  from the retained log (detach/reopen safe).
+
+## Live-only verification (not covered by automated tests)
+
+Automated tests cover the route contract, key encoding, screen emulation,
+stream lifecycle, session driver, mounted layout/input via the OpenTUI test
+renderer, and both contracts' registration/payload shapes. The following
+still needs live dogfooding in a real OpenCode host (parent will do this
+after review — no live v1/v2 proof is claimed here):
+
+- v1 host: `/loop` + `/commands` dialogs, `o` on a command navigates to the
+  fullscreen page, `Ctrl+]` returns to the originating session.
+- v2 host: session.panel dashboard (fullscreen presentation), same `o` flow
+  via `ctx.ui.router`, detach back to the session.
+- Real PTY winsize follows the measured viewport (`stty size` inside the
+  command matches the page); interactive apps (vim/htop) usable via the
+  alt-screen path.
+- Stream-primary behavior under load (chatty `yes`), reconnect resync, and
+  the 2 s polling fallback with the server stopped.
 
 ## Evidence owed before the v2 AI-worker migration
 

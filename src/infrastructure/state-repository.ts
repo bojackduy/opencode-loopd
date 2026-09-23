@@ -613,20 +613,66 @@ export async function readCommandLog(
   try {
     const stat = await fs.stat(file)
     const totalBytes = stat.size
-    const startByte = Math.max(0, opts?.offsetBytes ?? 0)
-    if (startByte >= totalBytes) return { text: "", totalBytes, startByte }
+    const requestedStart = Math.max(0, opts?.offsetBytes ?? 0)
+    if (requestedStart >= totalBytes) return { text: "", totalBytes, startByte: requestedStart }
     const fh = await fs.open(file, "r")
     try {
-      const want = Math.min(opts?.limitBytes ?? 64 * 1024, totalBytes - startByte)
+      const want = Math.min(opts?.limitBytes ?? 64 * 1024, totalBytes - requestedStart)
       const buf = Buffer.alloc(want)
-      await fh.read(buf, 0, want, startByte)
-      return { text: buf.toString("utf8"), totalBytes, startByte }
+      await fh.read(buf, 0, want, requestedStart)
+      // UTF-8 boundary safety: an arbitrary byte window may split a
+      // multi-byte sequence at either edge. buf.toString("utf8") would then
+      // emit U+FFFD replacements whose re-encoded byte length differs from
+      // the bytes consumed — breaking lifetime offset arithmetic downstream.
+      // Trim to complete sequences so the invariant
+      // utf8ByteLength(text) === (endByte - startByte) always holds.
+      const { text, startByte, endByte } = decodeUtf8Window(buf, requestedStart)
+      void endByte
+      return { text, totalBytes, startByte }
     } finally {
       await fh.close()
     }
   } catch {
     return { text: "", totalBytes: 0, startByte: 0 }
   }
+}
+
+/**
+ * Decode a raw byte window to a string containing only complete UTF-8
+ * sequences. Leading bytes that continue a sequence started before the
+ * window are skipped (startByte advances); a trailing incomplete sequence
+ * is trimmed. Returned startByte is the file offset of the first decoded
+ * byte, so callers can compute absolute offsets as
+ * startByte + utf8ByteLength(text).
+ */
+export function decodeUtf8Window(
+  buf: Buffer,
+  windowStart: number,
+): { text: string; startByte: number; endByte: number } {
+  let start = 0
+  // Skip leading continuation bytes (10xxxxxx): they belong to a character
+  // that starts before this window. At most 3 can lead a window.
+  while (start < buf.length && (buf[start]! & 0xc0) === 0x80 && start < 4) start++
+  let end = buf.length
+  // Trim a trailing incomplete sequence: scan back over continuation bytes
+  // to the lead byte, then check whether the sequence is complete.
+  let leadIndex = end
+  while (leadIndex > start && (buf[leadIndex - 1]! & 0xc0) === 0x80) leadIndex--
+  if (leadIndex > start) {
+    const lead = buf[leadIndex - 1]!
+    let expected = 1
+    if ((lead & 0x80) === 0) expected = 1
+    else if ((lead & 0xe0) === 0xc0) expected = 2
+    else if ((lead & 0xf0) === 0xe0) expected = 3
+    else if ((lead & 0xf8) === 0xf0) expected = 4
+    if (end - (leadIndex - 1) < expected) end = leadIndex - 1
+  } else if (leadIndex === start && start > 0 && end > start) {
+    // Window is all continuation bytes with no lead: nothing decodable.
+    // (start > 0 means we already skipped leading continuations.)
+    end = start
+  }
+  const slice = buf.subarray(start, end)
+  return { text: slice.toString("utf8"), startByte: windowStart + start, endByte: windowStart + end }
 }
 
 export async function removeCommandLog(directory: string, commandID: string): Promise<void> {

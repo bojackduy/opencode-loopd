@@ -63,6 +63,7 @@ describe("command-events protocol", () => {
 
     expect(validateCommandStreamMessage({ type: "interrupt", commandID: "cmd-1" }).ok).toBe(true)
     expect(validateCommandStreamMessage({ type: "resync", commandID: "cmd-1" }).ok).toBe(true)
+    expect(validateCommandStreamMessage({ type: "unsubscribe", commandID: "cmd-1" }).ok).toBe(true)
     expect(
       validateCommandStreamMessage({ type: "error", code: "NOT_FOUND", message: "gone" }).ok,
     ).toBe(true)
@@ -89,6 +90,8 @@ describe("command-events protocol", () => {
       { type: "input", commandID: "cmd-1", data: 7 },
       { type: "interrupt", commandID: 7 },
       { type: "resync" },
+      { type: "unsubscribe" },
+      { type: "unsubscribe", commandID: "" },
       { type: "error", code: "", message: "m" },
       { type: "error", code: "E", message: 7 },
       { type: "subscribe", commandID: "cmd-1" }, // missing owner

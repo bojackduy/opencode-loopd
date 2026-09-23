@@ -8,6 +8,8 @@ import {
   commandPanelKey,
   parseResizeArgs,
   parseCommandLine,
+  parseNewCommandTail,
+  parseNewCommand,
   formatCommandRow,
 } from "../../src/tui/command-controller"
 import { createCommandSession } from "../../src/domain/command-session"
@@ -72,5 +74,28 @@ describe("Command panel controller", () => {
       "done now",
     ])
     expect(parseCommandLine(`echo "unterminated`)).toBeUndefined()
+  })
+
+  it("parses the :new tail with quoted boundaries preserved", () => {
+    // The reported defect: `:new bash -c "echo hi"` must spawn bash with
+    // argv ["-c", "echo hi"] — never ["-c", "echo", "hi"].
+    expect(parseNewCommandTail(`new bash -c "echo hi"`)).toEqual(["bash", "-c", "echo hi"])
+    expect(parseNewCommandTail(`:new bash -c "echo hi"`)).toEqual(["bash", "-c", "echo hi"])
+    expect(parseNewCommandTail(`new printf '%s %s' 'hello world'`)).toEqual(["printf", "%s %s", "hello world"])
+    expect(parseNewCommandTail(`new ls --color=always`)).toEqual(["ls", "--color=always"])
+    expect(parseNewCommandTail(`new echo done\\ now`)).toEqual(["echo", "done now"])
+    // Missing/empty tails and unbalanced quotes fail closed (usage text).
+    expect(parseNewCommandTail(`new`)).toBeUndefined()
+    expect(parseNewCommandTail(`:new   `)).toBeUndefined()
+    expect(parseNewCommandTail(`new echo "unterminated`)).toBeUndefined()
+    expect(parseNewCommandTail(`open something`)).toBeUndefined()
+  })
+
+  it("splits :new lines into spawn argv with quoting intact", () => {
+    expect(parseNewCommand(`new bash -c "echo hi"`)).toEqual({ command: "bash", cmdArgs: ["-c", "echo hi"] })
+    expect(parseNewCommand(`:new bash -c "echo hi"`)).toEqual({ command: "bash", cmdArgs: ["-c", "echo hi"] })
+    expect(parseNewCommand(`new sh`)).toEqual({ command: "sh", cmdArgs: [] })
+    expect(parseNewCommand(`new`)).toBeUndefined()
+    expect(parseNewCommand(`new echo "unterminated`)).toBeUndefined()
   })
 })

@@ -93,6 +93,37 @@ export function createCommandStreamServer(
   // One socket may hold multiple command subscriptions.
   const sockets = new Set<ServerWebSocket<unknown>>()
   const subsBySocket = new Map<ServerWebSocket<unknown>, Map<string, SocketSub>>()
+  /**
+   * Subscribe handshake generation per socket+command. handleSubscribe
+   * awaits the broker, so two overlapping subscribes for the same
+   * socket+command would both see "no previous", both broker.subscribe, and
+   * the later map write would leak the first sink until socket close. Each
+   * handshake takes a generation; only the latest may install its
+   * subscription — a stale completed handshake unsubscribes its own sink
+   * immediately and never overwrites the map.
+   */
+  const handshakeBySocket = new Map<ServerWebSocket<unknown>, Map<string, number>>()
+
+  function nextHandshake(ws: ServerWebSocket<unknown>, commandID: string): number {
+    let m = handshakeBySocket.get(ws)
+    if (!m) {
+      m = new Map()
+      handshakeBySocket.set(ws, m)
+    }
+    const next = (m.get(commandID) ?? 0) + 1
+    m.set(commandID, next)
+    return next
+  }
+
+  function currentHandshake(ws: ServerWebSocket<unknown>, commandID: string): number | undefined {
+    return handshakeBySocket.get(ws)?.get(commandID)
+  }
+
+  function clearHandshake(ws: ServerWebSocket<unknown>, commandID: string, generation: number): void {
+    const m = handshakeBySocket.get(ws)
+    if (m?.get(commandID) === generation) m.delete(commandID)
+    if (m && m.size === 0) handshakeBySocket.delete(ws)
+  }
 
   function sendError(ws: ServerWebSocket<unknown>, code: string, message: string): void {
     try {
@@ -146,10 +177,15 @@ export function createCommandStreamServer(
       }
       subsBySocket.delete(ws)
     }
+    // A close during a handshake invalidates it: the post-await check below
+    // sees the socket is gone and unsubscribes the orphaned sink. Dropping
+    // the generations here additionally guards against map resurrection.
+    handshakeBySocket.delete(ws)
     sockets.delete(ws)
   }
 
   async function handleSubscribe(ws: ServerWebSocket<unknown>, commandID: string, ownerSessionID: string): Promise<void> {
+    const generation = nextHandshake(ws, commandID)
     const subs = subsFor(ws)
     const previous = subs.get(commandID)
     if (previous) {
@@ -163,9 +199,21 @@ export function createCommandStreamServer(
     try {
       sinkID = await broker.subscribe(commandID, ownerSessionID, sink)
     } catch (error) {
+      // A superseded handshake reports nothing: the winner owns the reply.
+      if (currentHandshake(ws, commandID) !== generation) return
+      clearHandshake(ws, commandID, generation)
       sendError(ws, "subscribe-failed", error instanceof Error ? error.message : String(error))
       return
     }
+    // Stale handshake (a newer subscribe/resync superseded us): drop our
+    // sink immediately and never touch the latest subscription.
+    if (currentHandshake(ws, commandID) !== generation) {
+      try {
+        broker.unsubscribe(commandID, sinkID)
+      } catch {}
+      return
+    }
+    clearHandshake(ws, commandID, generation)
     // Socket may have closed during the handshake — do not leak the entry.
     if (!sockets.has(ws)) {
       try {
@@ -185,6 +233,22 @@ export function createCommandStreamServer(
       return
     }
     await handleSubscribe(ws, commandID, previous.ownerSessionID)
+  }
+
+  function handleUnsubscribe(ws: ServerWebSocket<unknown>, commandID: string): void {
+    // Invalidate an in-flight handshake (if any): a subscribe that completes
+    // after this unsubscribe must drop its sink, never resurrect the entry.
+    // No entry means no handshake is running — nothing to invalidate.
+    if (handshakeBySocket.get(ws)?.has(commandID)) nextHandshake(ws, commandID)
+    const subs = subsFor(ws)
+    const previous = subs.get(commandID)
+    if (previous) {
+      try {
+        broker.unsubscribe(commandID, previous.sinkID)
+      } catch {}
+      subs.delete(commandID)
+    }
+    // Idempotent: unknown commandIDs are a no-op (client detach races).
   }
 
   async function handleInput(ws: ServerWebSocket<unknown>, commandID: string, data: string): Promise<void> {
@@ -245,6 +309,9 @@ export function createCommandStreamServer(
         case "resync":
           await handleResync(ws, msg.commandID)
           break
+        case "unsubscribe":
+          handleUnsubscribe(ws, msg.commandID)
+          break
         case "input":
           await handleInput(ws, msg.commandID, msg.data)
           break
@@ -255,8 +322,7 @@ export function createCommandStreamServer(
           // snapshot/output/status/error are server→client only; anything
           // else inbound is a protocol violation, never acted on.
           sendError(ws, "invalid-message", `Message type "${(msg as { type: string }).type}" is not accepted inbound.`)
-          break
-      }
+          break      }
     } catch (error) {
       sendError(ws, "internal-error", error instanceof Error ? error.message : String(error))
     }
@@ -359,6 +425,7 @@ export function createCommandStreamServer(
       }
       sockets.clear()
       subsBySocket.clear()
+      handshakeBySocket.clear()
       try {
         server?.stop(true)
       } catch {}

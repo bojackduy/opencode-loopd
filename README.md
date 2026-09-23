@@ -144,18 +144,25 @@ The agent will clarify (what/where/how to verify) and then call `loopd_create_go
 
 Press **`<leader>o`** or open the command palette → **"Loop Dashboard"** (also `/loop`).
 
-Dashboard (NORMAL / INSERT `:`):
+Dashboard (NORMAL / INSERT `:`) — shared Goals/Commands tabs:
 
-- `j/k` — move selection
-- `g/G` — top / bottom
-- `o` — open child session (full transcript, native OpenCode view)
-- `p/r/R/x` — pause / resume / retry / clear selected goal
+- `Tab` — toggle Goals / Commands · `h` Goals · `l` Commands (`/commands` opens on Commands)
+- `j/k` — move selection · `g/G` — top / bottom (active tab only)
+- `o` — goals: open child session (native OpenCode view) · commands: close
+  popup, open fullscreen terminal page (route `opencode.loopd.terminal`)
+- `p/r/R/x` — pause / resume / retry / clear selected goal (Goals tab only)
+- Commands tab: `:new <command> [args...]` launch · `:interrupt` ·
+  `:terminate` · `:remove` · bare text + Enter writes stdin (owner-scoped)
 - `:` — insert mode → `:send <message>` to steer, `:force` / `:block` to finish manually
 - `?` — toggle help — help stays open while you type
 - `Ctrl+N` — back to NORMAL
 - `q` — close
 
 > The dashboard traps all keys — even when open via the palette, the chat input cursor won't blink underneath.
+
+Fullscreen terminal page: raw typing goes straight to the PTY, `Ctrl+C`
+interrupts (never closes OpenCode), `Ctrl+]` detaches back to your session
+(the command keeps running — termination is explicit-only), paste is instant.
 
 ### 3. Inspect from the main agent (owner tools)
 

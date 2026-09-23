@@ -31,6 +31,7 @@ import {
   type CommandPanelState,
 } from "./command-controller"
 import { createCommandStreamClient } from "./command-stream-client"
+import { resolveOpenTarget, TERMINAL_ROUTE_NAME, terminalRoutePayload, currentRouteSessionID } from "./terminal-route"
 import {
   createCommandScreenFeed,
   createTerminalScreen,
@@ -45,6 +46,8 @@ interface Props {
   directory: string
   ownerSessionID?: string
   onDetach?: () => void
+  /** Fullscreen open. Default: route-navigate + close popup (fallback: stay). */
+  onOpenCommand?: (payload: { commandID: string; ownerSessionID: string; returnSessionID: string }) => void
 }
 
 function prevent(evt: ParsedKey) {
@@ -53,11 +56,8 @@ function prevent(evt: ParsedKey) {
   e.stopPropagation?.()
 }
 
-function routeOwnerSessionID(api: TuiPluginApi): string | undefined {  try {
-    const current = (api as unknown as { route?: { current?: { name?: string; params?: { sessionID?: string } } } }).route?.current
-    if (current?.name === "session" && current.params?.sessionID) return current.params.sessionID
-  } catch {}
-  return undefined
+function routeOwnerSessionID(api: TuiPluginApi): string | undefined {
+  return currentRouteSessionID(api)
 }
 
 // ─── Emulated screen rows (PTY view) ─────────────────────────────────────────
@@ -124,7 +124,7 @@ export function CommandPanel(props: Props) {
   const [outputMeta, setOutputMeta] = createSignal({ startByte: 0, totalBytes: 0, live: false })
   const [insertMode, setInsertMode] = createSignal(false)
   const [inputValue, setInputValue] = createSignal("")
-  const [statusText, setStatusText] = createSignal("commands: j/k move · enter write-mode · ctrl-c interrupt · :terminate :remove :resize :await · q detach")
+  const [statusText, setStatusText] = createSignal("commands: j/k move · o fullscreen · enter write-mode · ctrl-c interrupt · :terminate :remove :resize :await · q detach")
   let inputEl: InputRenderable | undefined
   const client = createControlClient(props.directory)
   const ownerSessionID = props.ownerSessionID ?? routeOwnerSessionID(props.api)
@@ -686,6 +686,45 @@ export function CommandPanel(props: Props) {
       prevent(evt)
       setState(selectCommandLast)
       selectChanged()
+      return
+    }
+    // "o": fullscreen terminal page for the selected command. Closes the
+    // popup and navigates to the plugin-owned route (detach-safe: the
+    // command keeps running). Goal selections never reach this path.
+    if (key === "o") {
+      prevent(evt)
+      const selCmd = state().selectedCommand
+      const returnSessionID = routeOwnerSessionID(props.api)
+      const target = resolveOpenTarget({
+        selection: selCmd ? { kind: "command", commandID: selCmd.id } : null,
+        ownerSessionID,
+        returnSessionID,
+      })
+      if (target.kind === "none") {
+        setStatusText(
+          target.reason === "no-command"
+            ? "No command selected."
+            : target.reason === "owner-required"
+              ? "No owning session (open from a session view) — open disabled."
+              : "No return session — open disabled.",
+        )
+        return
+      }
+      if (target.kind !== "command") return
+      if (props.onOpenCommand) {
+        props.onOpenCommand(target.data)
+        return
+      }
+      try {
+        ;(props.api.route as unknown as { navigate(name: string, params?: Record<string, unknown>): void }).navigate(
+          TERMINAL_ROUTE_NAME,
+          terminalRoutePayload(target.data.commandID, target.data.ownerSessionID, target.data.returnSessionID),
+        )
+        if (props.onDetach) props.onDetach()
+        else props.api.ui.dialog.clear()
+      } catch {
+        setStatusText("Fullscreen route unavailable on this host — staying in the monitor.")
+      }
       return
     }
     // Detach: "q"/close only clears the view — the command keeps running.

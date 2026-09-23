@@ -13,8 +13,21 @@ import type { StoreState } from "../infrastructure/state-repository"
 import type { Goal, GoalStatus } from "../domain/goal"
 import type { GoalRuntimeState, RuntimePhase } from "../domain/runtime"
 import { parseCommand, commandHelp } from "./command-parser"
+import { parseNewCommand } from "./command-controller"
 import { goalStatusLabel, phaseLabel, describeGoalState } from "../domain/status-labels"
 import { bugReportUrl, openBrowserUrl } from "../browser"
+import {
+  initialDashboardSelection,
+  moveDashboardSelection,
+  resolveDashboardOpen,
+  toggleDashboardView,
+  dashboardViewForKey,
+  visibleOwnerCommands,
+  type DashboardSelection,
+  type DashboardView,
+} from "./dashboard-view"
+import { TERMINAL_ROUTE_NAME, currentRouteSessionID, terminalRoutePayload } from "./terminal-route"
+import type { CommandSession } from "../domain/command-session"
 import { randomUUID } from "crypto"
 
 const LOG_FILE = "/tmp/loopd-tui.log"
@@ -60,6 +73,14 @@ type Mode = "normal" | "insert"
 interface Props {
   api: TuiPluginApi
   directory: string
+  /** Which tab opens focused (`/loop` → goals, `/commands` → commands). */
+  initialView?: DashboardView
+  /** Owner scope for the Commands view. Defaults to the current session. */
+  ownerSessionID?: string
+  /** Fullscreen open for commands. Default: route-navigate + close popup. */
+  onOpenCommand?: (payload: { commandID: string; ownerSessionID: string; returnSessionID: string }) => void
+  /** Keyboard-active gate. Default: the popup dialog is open. */
+  isActive?: () => boolean
 }
 
 function statusColor(status: GoalStatus, theme: TuiThemeCurrent) {
@@ -120,6 +141,37 @@ function statusIcon(status: GoalStatus): string {
     case "usage_limited": return "⏰"
     default: return "○"
   }
+}
+
+function commandStatusColor(status: CommandSession["status"], theme: TuiThemeCurrent) {
+  switch (status) {
+    case "running": return theme.success
+    case "exited": return theme.info
+    case "terminated": return theme.warning
+    case "missing": return theme.error
+    default: return theme.text
+  }
+}
+function commandStatusIcon(status: CommandSession["status"]): string {
+  switch (status) {
+    case "running": return "▶"
+    case "exited": return "✓"
+    case "terminated": return "■"
+    case "missing": return "?"
+    default: return "○"
+  }
+}
+function commandStatusLabel(status: CommandSession["status"]): { short: string; hint: string } {
+  switch (status) {
+    case "running": return { short: "RUNNING", hint: "process is executing" }
+    case "exited": return { short: "EXITED", hint: "process ended on its own" }
+    case "terminated": return { short: "TERMINATED", hint: "stopped via interrupt/terminate" }
+    case "missing": return { short: "MISSING", hint: "no live execution found — reconcile" }
+    default: return { short: String(status).toUpperCase(), hint: "" }
+  }
+}
+function commandBorderColor(status: CommandSession["status"], theme: TuiThemeCurrent): string {
+  return commandStatusColor(status, theme) as unknown as string
 }
 
 function ageLabel(timestamp: string | undefined, now: number): string {
@@ -198,7 +250,14 @@ export function LoopDashboard(props: Props) {
   const [mode, setMode] = createSignal<Mode>("normal")
   const [selected, setSelected] = createSignal(0)
   const [commandInput, setCommandInput] = createSignal("")
-  const [statusText, setStatusText] = createSignal("Press : to send/command, ? help, c toggle done, o open, q close")
+  const [statusText, setStatusText] = createSignal("Tab goals/commands · : send/command · ? help · c toggle done · o open · q close")
+  // Shared Goals/Commands tabs (`/loop` opens goals, `/commands` opens
+  // commands). Goal indexes stay on the legacy `selected` signal; command
+  // selection lives on `cmdSelected` so the two never cross-apply.
+  const [tab, setTab] = createSignal<DashboardView>(props.initialView ?? "goals")
+  const [cmdSelected, setCmdSelected] = createSignal(0)
+  const ownerSessionID = () => props.ownerSessionID ?? currentRouteSessionID(props.api)
+  const ownerCommands = () => visibleOwnerCommands(state()?.commands, ownerSessionID())
   const [state, setState] = createSignal<StoreState | null>(null)
   const [events, setEvents] = createSignal<Record<string, unknown>[]>([])
   const [selectedGoal, setSelectedGoal] = createSignal<Goal | null>(null)
@@ -229,6 +288,8 @@ export function LoopDashboard(props: Props) {
       const goals = s.goals.filter((g) => showCompleted() || g.status !== "complete")
       if (goals.length > 0 && selected() >= goals.length) setSelected(goals.length - 1)
       setSelectedGoal(goals[selected()] || null)
+      const cmds = visibleOwnerCommands(s.commands, ownerSessionID())
+      if (cmds.length > 0 && cmdSelected() >= cmds.length) setCmdSelected(cmds.length - 1)
       setEvents(await client.getEvents(20))
     } catch (e) {
       setStatusText(`Error: ${e instanceof Error ? e.message : String(e)}`)
@@ -284,6 +345,14 @@ export function LoopDashboard(props: Props) {
     const raw = (evt as unknown as { raw?: string }).raw || ""
     debugLog("useKeyboard", `name=${name} seq=${JSON.stringify(seq)} raw=${JSON.stringify(raw)} shift=${(evt as unknown as { shift?: boolean }).shift} ctrl=${evt.ctrl} mode=${mode()} dialogOpen=${props.api.ui.dialog.open}`)
     if (!props.api.ui.dialog.open) return
+    const active = (() => {
+      try {
+        return props.isActive?.() ?? props.api.ui.dialog.open
+      } catch {
+        return props.api.ui.dialog.open
+      }
+    })()
+    if (!active) return
     const isColon = name === ":" || seq === ":" || raw === ":" || seq.includes(":") || raw.includes(":") || name === ";" || name === "colon"
     const isQuestion = name === "?" || seq === "?" || raw === "?" || seq.includes("?") || raw.includes("?")
     debugLog("isColon", isColon, "isQuestion", isQuestion, "modeBefore", mode())
@@ -307,10 +376,42 @@ export function LoopDashboard(props: Props) {
     const key = raw || seq || name
     if (key === "c") { prevent(evt); setShowCompleted((v) => !v); debugLog("toggle completed"); return }
     const currentGoals = state()?.goals.filter((goal) => showCompleted() || goal.status !== "complete") || []
-    if (name === "down" || key === "j") { prevent(evt); setSelected((index) => Math.min(currentGoals.length - 1, index + 1)); return }
-    if (name === "up" || key === "k") { prevent(evt); setSelected((index) => Math.max(0, index - 1)); return }
-    if (key === "g") { prevent(evt); setSelected(0); return }
-    if (key === "G") { prevent(evt); setSelected(Math.max(0, currentGoals.length - 1)); return }
+    const currentCommands = ownerCommands()
+    // Tab toggles the Goals/Commands tabs; h selects Goals and l selects
+    // Commands directionally. j/k/g/G select within the active tab only
+    // (headless logic in dashboard-view.ts).
+    if (name === "tab") {
+      prevent(evt)
+      setTab((v) => toggleDashboardView(v))
+      debugLog("switch tab ->", tab())
+      return
+    }
+    const directionalView = dashboardViewForKey(key)
+    if (directionalView !== undefined) {
+      prevent(evt)
+      setTab(directionalView)
+      debugLog("select tab ->", tab())
+      return
+    }
+    function dashboardSelection(): DashboardSelection {
+      return { view: tab(), goalIndex: selected(), commandIndex: cmdSelected() }
+    }
+    function applyMove(move: "down" | "up" | "first" | "last") {
+      const next = moveDashboardSelection(dashboardSelection(), move, currentGoals.length, currentCommands.length)
+      setSelected(next.goalIndex)
+      setCmdSelected(next.commandIndex)
+    }
+    if (name === "down" || key === "j") { prevent(evt); applyMove("down"); return }
+    if (name === "up" || key === "k") { prevent(evt); applyMove("up"); return }
+    if (key === "g") { prevent(evt); applyMove("first"); return }
+    if (key === "G") { prevent(evt); applyMove("last"); return }
+    // Goal controls apply to goals only — never to a command selection.
+    const needsGoalsTab = ["p", "r", "R", "x", "A", "N"].includes(key)
+    if (needsGoalsTab && tab() !== "goals") {
+      prevent(evt)
+      setStatusText("Goal controls need the Goals tab (Tab to switch).")
+      return
+    }
     if (key === "p") { prevent(evt); void executeCommand("pause"); return }
     if (key === "r") { prevent(evt); void executeCommand("resume"); return }
     if (key === "R") { prevent(evt); void executeCommand("retry"); return }
@@ -320,10 +421,44 @@ export function LoopDashboard(props: Props) {
     if (key === "L") { prevent(evt); setShowLogs((value) => !value); return }
     if (key === "o") {
       prevent(evt)
-      const goal = selectedGoal()
-      if (goal?.workerSessionID) {
-        props.api.route.navigate("session", { sessionID: goal.workerSessionID })
+      // `o` dispatches by active selection type: goals open their native
+      // worker session; commands close the popup and open the fullscreen
+      // terminal route. Never cross-applies.
+      const target = resolveDashboardOpen(
+        { goals: currentGoals, commands: state()?.commands ?? [] },
+        dashboardSelection(),
+        ownerSessionID(),
+        currentRouteSessionID(props.api),
+      )
+      if (target.kind === "goal") {
+        props.api.route.navigate("session", { sessionID: target.workerSessionID })
         props.api.ui.dialog.clear()
+      } else if (target.kind === "command") {
+        if (props.onOpenCommand) {
+          props.onOpenCommand(target.data)
+        } else {
+          try {
+            props.api.route.navigate(
+              TERMINAL_ROUTE_NAME,
+              terminalRoutePayload(target.data.commandID, target.data.ownerSessionID, target.data.returnSessionID),
+            )
+            props.api.ui.dialog.clear()
+          } catch {
+            setStatusText("Fullscreen route unavailable on this host.")
+          }
+        }
+      } else {
+        setStatusText(
+          target.reason === "no-worker-session"
+            ? "No worker session"
+            : target.reason === "no-command"
+              ? "No command selected."
+              : target.reason === "owner-required"
+                ? "No owning session — open disabled."
+                : target.reason === "return-required"
+                  ? "No return session — open disabled."
+                  : "Nothing to open.",
+        )
       }
       return
     }
@@ -337,11 +472,84 @@ export function LoopDashboard(props: Props) {
 
   const goals = () => state()?.goals.filter((g) => showCompleted() || g.status !== "complete") || []
 
+  /** Raw control-bus send for the Commands tab (owner-scoped, fail closed). */
+  async function executeCommandRaw(command: string, args: Record<string, unknown>, commandID?: string) {
+    const owner = ownerSessionID()
+    if (!owner) {
+      setStatusText("No owning session (open from a session view) — mutations disabled.")
+      return
+    }
+    setStatusText(`sending ${command}…`)
+    try {
+      const r = await client.executeRaw({ command, goalID: commandID, args: { ...args, ownerSessionID: owner } })
+      setStatusText(r.ok ? r.message : `Error: ${r.message}`)
+      if (r.ok) await refresh()
+    } catch (e) {
+      setStatusText(`Error: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  function selectedCommand(): CommandSession | null {
+    return ownerCommands()[cmdSelected()] ?? null
+  }
+
+  /** Commands-tab colon commands: launch/open/interrupt/remove/write. */
+  async function executeCommandTabCommand(verb: string, positional: string[], raw: string) {
+    debugLog("commands-tab command", verb)
+    switch (verb) {
+      case "new": {
+        // Parse the raw tail after `new` (not the re-joined positionals) so
+        // quoted/escaped boundaries survive: :new bash -c "echo hi" spawns
+        // bash with argv ["-c", "echo hi"].
+        const argv = parseNewCommand(raw)
+        if (!argv) {
+          setStatusText("Usage: :new <command> [args...]")
+          return
+        }
+        const { command, cmdArgs } = argv
+        await executeCommandRaw("cmd_start", { title: command, command, cmdArgs })
+        return
+      }
+      case "interrupt":
+        if (!selectedCommand()) { setStatusText("No command selected."); return }
+        await executeCommandRaw("cmd_interrupt", { commandID: selectedCommand()!.id }, selectedCommand()!.id)
+        return
+      case "terminate":
+        if (!selectedCommand()) { setStatusText("No command selected."); return }
+        await executeCommandRaw("cmd_terminate", { commandID: selectedCommand()!.id }, selectedCommand()!.id)
+        return
+      case "remove":
+        if (!selectedCommand()) { setStatusText("No command selected."); return }
+        await executeCommandRaw("cmd_remove", { commandID: selectedCommand()!.id }, selectedCommand()!.id)
+        return
+      case "logs":
+        setShowLogs(!showLogs())
+        return
+      case "help":
+        setShowHelp(true)
+        return
+      default: {
+        // Bare text → stdin of the selected command (newline-terminated).
+        if (selectedCommand()) {
+          const payload = raw.endsWith("\n") ? raw : `${raw}\n`
+          await executeCommandRaw("cmd_write", { commandID: selectedCommand()!.id, input: payload }, selectedCommand()!.id)
+        } else setStatusText(`Unknown: ${verb}. ? for help`)
+      }
+    }
+  }
+
   async function executeCommand(cmd: string) {
     debugLog("executeCommand raw=", JSON.stringify(cmd))
     const parsed = parseCommand(cmd)
     debugLog("parsed", parsed)
     if (!parsed) { setStatusText("Empty command"); debugLog("empty command"); return }
+    // Commands tab: launch/open/interrupt/remove/write on the selected
+    // command — goal actions never run here.
+    if (tab() === "commands" && !["q", "close"].includes(parsed.command)) {
+      await executeCommandTabCommand(parsed.command, parsed.positional, parsed.raw)
+      returnToNormalMode()
+      return
+    }
     // Immediate feedback: the control round-trip can take seconds (or time
     // out at 30s), and silence until then reads as "keys do nothing".
     if (!["help", "logs", "q", "close"].includes(parsed.command)) {
@@ -460,6 +668,11 @@ export function LoopDashboard(props: Props) {
             <span style={{ fg: theme().textMuted }}> │ </span>
             <span style={{ fg: theme().info, bold: true }}>{state()?.goals.filter((g) => g.status === "complete").length || 0}</span>
             <span style={{ fg: theme().textMuted }}> done</span>
+            <span style={{ fg: theme().textMuted }}> │ </span>
+            <span style={{ fg: tab() === "goals" ? theme().primary : theme().textMuted, bold: tab() === "goals" }}>[Goals]</span>
+            <span style={{ fg: theme().textMuted }}> </span>
+            <span style={{ fg: tab() === "commands" ? theme().primary : theme().textMuted, bold: tab() === "commands" }}>[Commands]</span>
+            <span style={{ fg: theme().textMuted }}> (Tab)</span>
           </text>
           <box
             flexDirection="row"
@@ -546,10 +759,11 @@ export function LoopDashboard(props: Props) {
             </box>
           </Show>
 
-          {/* Goal list — scrollable, sized to content up to a cap (~10 rows).
+          {/* Goal list — goals tab only (commands tab renders below).
               Short lists sit compact with no void below; long lists cap out
               and scroll with selection following via scrollChildIntoView.
               Detail + input stay pinned below in both cases. */}
+          <Show when={tab() === "goals"}>
           <Show when={activeGoals().length > 0} fallback={
             <box flexDirection="column" gap={1} padding={1}>
               <text><span style={{ fg: theme().textMuted }}>No active goals.</span><span style={{ fg: theme().accent }}> /goal</span><span style={{ fg: theme().textMuted }}> in parent chat to create one.</span></text>
@@ -661,6 +875,74 @@ export function LoopDashboard(props: Props) {
                 </box>
               )
             }}
+          </Show>
+          </Show>
+
+          {/* Commands tab — owner-scoped sessions. `o` opens the fullscreen
+              terminal route; goal controls never apply here. */}
+          <Show when={tab() === "commands"}>
+            <Show when={ownerCommands().length > 0} fallback={
+              <box flexDirection="column" gap={1} padding={1}>
+                <text><span style={{ fg: theme().textMuted }}>No command sessions owned by this session. </span><span style={{ fg: theme().warning }}>:new &lt;command&gt;</span><span style={{ fg: theme().textMuted }}> to start one.</span></text>
+                <text><span style={{ fg: theme().textMuted }}>Tip: </span><span style={{ fg: theme().warning }}>o</span><span style={{ fg: theme().textMuted }}> fullscreen · </span><span style={{ fg: theme().warning }}>:interrupt :terminate :remove</span><span style={{ fg: theme().textMuted }}> manage · text + Enter writes stdin.</span></text>
+              </box>
+            }>
+              <scrollbox height={Math.min(ownerCommands().length, 10)}>
+                <For each={ownerCommands()}>
+                  {(cmd, i) => {
+                    const isActive = () => i() === cmdSelected()
+                    return (
+                      <box flexDirection="row" paddingLeft={1} paddingRight={1} backgroundColor={isActive() ? theme().backgroundElement : undefined}>
+                        {/* Single-line row mirrors the Goals row: icon+bold name,
+                            status-colored badge, accent executable, muted args. */}
+                        <text wrapMode="none" truncate={true}>
+                          <span style={{ fg: commandStatusColor(cmd.status, theme()), bold: isActive() }}>{isActive() ? `▶ ${commandStatusIcon(cmd.status)} ${cmd.title}` : `  ${commandStatusIcon(cmd.status)} ${cmd.title}`}</span>
+                          <span style={{ fg: theme().textMuted }}> │ </span>
+                          <span style={{ fg: theme().textMuted }}>Cmd </span>
+                          <span style={{ fg: commandStatusColor(cmd.status, theme()), bold: true }}>{commandStatusLabel(cmd.status).short}</span>
+                          <span style={{ fg: theme().textMuted }}> │ </span>
+                          <span style={{ fg: theme().accent, bold: true }}>{cmd.command}</span>
+                          {cmd.args.length > 0 && <span style={{ fg: theme().textMuted }}> {cmd.args.join(" ").slice(0, 40)}</span>}
+                          {cmd.exitCode !== undefined && <span style={{ fg: cmd.exitCode === 0 ? theme().success : theme().error }}> │ exit {cmd.exitCode}</span>}
+                          {cmd.signal && <span style={{ fg: theme().warning }}> │ {cmd.signal}</span>}
+                          <span style={{ fg: theme().textMuted }}> │ {ageLabel(cmd.updatedAt, clock())}</span>
+                          {cmd.truncated && <span style={{ fg: theme().warning, bold: true }}> │ ⚠ truncated</span>}
+                        </text>
+                      </box>
+                    )
+                  }}
+                </For>
+              </scrollbox>
+            </Show>
+            <Show when={selectedCommand()}>
+              {(cmd) => (
+                <box flexDirection="column" border={true} borderColor={commandBorderColor(cmd().status, theme())} padding={1} flexShrink={0} maxHeight={8}>
+                  <text>
+                    <span style={{ fg: commandStatusColor(cmd().status, theme()), bold: true }}>{commandStatusIcon(cmd().status)} {cmd().title}</span>
+                    <span style={{ fg: theme().textMuted }}> Cmd </span>
+                    <span style={{ fg: commandStatusColor(cmd().status, theme()) }}>{commandStatusLabel(cmd().status).short} — {commandStatusLabel(cmd().status).hint}</span>
+                    {"\n"}
+                    <span style={{ fg: theme().primary, bold: true }}>⬢ Spawn: </span>
+                    <span style={{ fg: theme().accent, bold: true }}>{cmd().command}</span>
+                    {cmd().args.length > 0 && <span style={{ fg: theme().text }}> {cmd().args.join(" ")}</span>}
+                    {"\n"}
+                    <span style={{ fg: theme().textMuted }}>📁 </span>
+                    <span style={{ fg: theme().accent, bold: true }}>Cwd: </span>
+                    <span style={{ fg: theme().textMuted }}>{cmd().cwd.replace(String(props.directory), ".")}</span>
+                    {cmd().goalID && <><span style={{ fg: theme().textMuted }}> │ 🔗 linked goal </span><span style={{ fg: theme().text }}>{cmd().goalID!.slice(0, 8)}</span></>}
+                    {"\n"}
+                    <span style={{ fg: theme().warning, bold: true }}>💾 </span>
+                    <span style={{ fg: theme().warning, bold: true }}>Output: </span>
+                    <span style={{ fg: theme().text }}>{cmd().outputBytes} bytes</span>
+                    {cmd().truncated && <span style={{ fg: theme().warning, bold: true }}> · ⚠ truncated</span>}
+                    <span style={{ fg: theme().textMuted }}> │ updated {ageLabel(cmd().updatedAt, clock())}</span>
+                    {cmd().lastError && <><span style={{ fg: theme().error, bold: true }}>{"\n"}⚠ Error: </span><span style={{ fg: theme().error }}>{cmd().lastError!.slice(0, 120)}</span></>}
+                    {"\n"}
+                    <span style={{ fg: theme().textMuted }}>o fullscreen · :interrupt :terminate :remove · text + Enter writes stdin</span>
+                  </text>
+                </box>
+              )}
+            </Show>
           </Show>
 
           {/* Logs — bounded, clipped, per-event coloring */}

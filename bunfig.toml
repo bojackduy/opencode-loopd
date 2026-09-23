@@ -1,0 +1,5 @@
+# Bun test preload: use the Solid client runtime (not the SSR server build)
+# and the Solid JSX transform so mounted OpenTUI component tests
+# (testRender) exercise real reactivity. See @opentui/solid/preload.
+[test]
+preload = ["@opentui/solid/preload"]

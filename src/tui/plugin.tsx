@@ -6,11 +6,67 @@ import type { TuiPlugin, TuiPluginApi, TuiPluginModule, TuiThemeCurrent } from "
 import type { Plugin as TuiV2 } from "@opencode/plugin/tui"
 import { LoopDashboard } from "./dashboard"
 import { CommandPanel } from "./command-panel"
+import { TerminalView } from "./terminal-view"
+import { TERMINAL_ROUTE_NAME, currentRouteSessionID, terminalRoutePayload } from "./terminal-route"
 
 const PLUGIN_ID = "opencode-loopd.tui"
 
+/**
+ * Open the plugin-owned fullscreen terminal page for a command. Returns true
+ * when the host accepted route navigation; false when the host truly lacks
+ * route support (caller renders the CommandPanel compatibility fallback).
+ */
+export function navigateToTerminalV1(
+  api: Pick<TuiPluginApi, "route" | "ui">,
+  commandID: string,
+  ownerSessionID: string,
+  returnSessionID: string,
+): boolean {
+  const payload = terminalRoutePayload(commandID, ownerSessionID, returnSessionID)
+  try {
+    api.route.navigate(TERMINAL_ROUTE_NAME, payload)
+    api.ui.dialog.clear()
+    return true
+  } catch {
+    return false
+  }
+}
+
 const tui: TuiPlugin = async (api) => {
   const directory = api.state.path.directory
+
+  // Full-screen terminal route (custom OpenCode page — not a dialog, panel,
+  // or chat session). Hosts that truly lack route support get the CommandPanel
+  // compatibility fallback instead.
+  let terminalRouteAvailable = false
+  let unregisterTerminalRoute: (() => void) | undefined
+  try {
+    unregisterTerminalRoute = api.route.register([
+      {
+        name: TERMINAL_ROUTE_NAME,
+        render: ({ params }) => <TerminalView api={api} directory={directory} data={params} />,
+      },
+    ])
+    terminalRouteAvailable = true
+  } catch {
+    terminalRouteAvailable = false
+  }
+
+  const openTerminal = (commandID: string, ownerSessionID: string, returnSessionID: string) => {
+    if (terminalRouteAvailable && navigateToTerminalV1(api, commandID, ownerSessionID, returnSessionID)) return
+    // Compatibility fallback: clipped monitor dialog (route-less hosts only).
+    const previousFocus = api.renderer.currentFocusedRenderable
+    api.ui.dialog.replace(() => (
+      <CommandPanel
+        api={api}
+        directory={directory}
+        ownerSessionID={ownerSessionID}
+        onOpenCommand={(payload) => openTerminal(payload.commandID, payload.ownerSessionID, payload.returnSessionID)}
+      />
+    ))
+    api.ui.dialog.setSize("xlarge")
+    previousFocus?.blur()
+  }
 
   const open = () => {
     const previousFocus = api.renderer.currentFocusedRenderable
@@ -20,8 +76,18 @@ const tui: TuiPlugin = async (api) => {
   }
 
   const openCommands = () => {
+    // Same shared dashboard as /loop, focused on Commands — never the
+    // separate clipped terminal monitor.
     const previousFocus = api.renderer.currentFocusedRenderable
-    api.ui.dialog.replace(() => <CommandPanel api={api} directory={directory} />)
+    api.ui.dialog.replace(() => (
+      <LoopDashboard
+        api={api}
+        directory={directory}
+        initialView="commands"
+        ownerSessionID={currentRouteSessionID(api)}
+        onOpenCommand={(payload) => openTerminal(payload.commandID, payload.ownerSessionID, payload.returnSessionID)}
+      />
+    ))
     api.ui.dialog.setSize("xlarge")
     previousFocus?.blur()
   }
@@ -50,7 +116,11 @@ const tui: TuiPlugin = async (api) => {
     ],
   })
 
-  api.lifecycle.onDispose(() => {})
+  api.lifecycle.onDispose(() => {
+    try {
+      unregisterTerminalRoute?.()
+    } catch {}
+  })
 }
 
 // ─── V2 (opencode v2 TUI) ───────────────────────────────────────────────────
@@ -145,6 +215,28 @@ export function adaptThemeV2(theme: TuiV2.Context["theme"]): TuiThemeCurrent {
   } as unknown as TuiThemeCurrent
 }
 
+/**
+ * v2 navigation to the fullscreen terminal page.
+ * Returns true when the host accepted it, false for route-less hosts.
+ */
+export function navigateToTerminalV2(
+  router: { navigate(destination: unknown): void },
+  commandID: string,
+  ownerSessionID: string,
+  returnSessionID: string,
+): boolean {
+  try {
+    router.navigate({
+      type: "plugin",
+      name: TERMINAL_ROUTE_NAME,
+      data: terminalRoutePayload(commandID, ownerSessionID, returnSessionID),
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
 // v1 dashboard refresh triggers → closest v2 events ("something changed").
 const REFRESH_EVENTS = [
   "session.idle",
@@ -216,6 +308,32 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
     },
   } as unknown as TuiPluginApi
 
+  // Full-screen terminal route (custom OpenCode page — not a dialog, panel,
+  // or chat session). Route-less hosts fall back to the CommandPanel monitor.
+  let terminalRouteAvailable = false
+  let unregisterTerminalRoute: (() => void) | undefined
+  try {
+    unregisterTerminalRoute = ctx.ui.router.register({
+      name: TERMINAL_ROUTE_NAME,
+      render: ({ data }) => <TerminalView api={facade} directory={directory} data={data} />,
+    })
+    terminalRouteAvailable = true
+  } catch {
+    terminalRouteAvailable = false
+  }
+
+  const openTerminal = (commandID: string, ownerSessionID: string, returnSessionID: string): boolean => {
+    if (!terminalRouteAvailable) return false
+    const ok = navigateToTerminalV2(ctx.ui.router, commandID, ownerSessionID, returnSessionID)
+    if (ok) {
+      try {
+        ctx.ui.panel.close()
+      } catch {}
+      closeDialog()
+    }
+    return ok
+  }
+
   const open = () => {
     const previousFocus = (ctx.renderer as unknown as { currentFocusedRenderable?: { blur(): void } })
       .currentFocusedRenderable
@@ -228,10 +346,21 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
   }
 
   const openCommands = () => {
+    // Same shared dashboard as /loop, focused on Commands.
     const previousFocus = (ctx.renderer as unknown as { currentFocusedRenderable?: { blur(): void } })
       .currentFocusedRenderable
     dialogOpen = true
-    ctx.ui.dialog.show(() => <CommandPanel api={facade} directory={directory} />, () => {
+    ctx.ui.dialog.show(() => (
+      <LoopDashboard
+        api={facade}
+        directory={directory}
+        initialView="commands"
+        ownerSessionID={undefined}
+        onOpenCommand={(payload) => {
+          openTerminal(payload.commandID, payload.ownerSessionID, payload.returnSessionID)
+        }}
+      />
+    ), () => {
       dialogOpen = false
     })
     ctx.ui.dialog.set({ size: "xlarge" })
@@ -247,12 +376,19 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
   const commandsPanel = "opencode.loopd.commands"
   const unclaimCommandPanel = ctx.ui.slot({
     append: "session.panel",
+    // The shared dashboard focused on Commands (same component as /loop).
+    // Fullscreen presentation from the host; `o` navigates to the terminal
+    // route. CommandPanel remains only as the route-less compat fallback.
     render: (input) => input.name === commandsPanel
-      ? <CommandPanel
+      ? <LoopDashboard
           api={facade}
           directory={directory}
+          initialView="commands"
           ownerSessionID={input.sessionID}
-          onDetach={input.close}
+          onOpenCommand={(payload) => {
+            openTerminal(payload.commandID, payload.ownerSessionID, payload.returnSessionID)
+          }}
+          isActive={() => input.focused !== false}
         />
       : null,
   })
@@ -294,6 +430,9 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
   return () => {
     closeDialog()
     ctx.ui.panel.close()
+    try {
+      unregisterTerminalRoute?.()
+    } catch {}
     unclaimCommandPanel()
     unclaimSlot()
   }

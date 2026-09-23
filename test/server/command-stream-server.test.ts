@@ -307,6 +307,29 @@ describe("CommandStreamServer", () => {
     await expectConnectFails(url)
   })
 
+  it("unsubscribe stops live deltas (detach, never terminate)", async () => {
+    const s = await svc.start(dir, { title: "unsub", command: "cat", ownerSessionID: "owner-1" })
+    const proc = [...host.procs.values()].at(-1)!
+    proc.emitOutput("one\n")
+    await waitFor(async () => (await svc.get(dir, s.id, "owner-1"))?.streamBytes === utf8ByteLength("one\n"))
+
+    const sock = await connect()
+    sock.send({ type: "subscribe", commandID: s.id, ownerSessionID: "owner-1" })
+    await sock.waitForMessage((m) => m.type === "snapshot")
+    expect(broker.subscriberCount(s.id)).toBe(1)
+    // Command keeps running after unsubscribe — detach never terminates.
+    sock.send({ type: "unsubscribe", commandID: s.id })
+    await waitFor(() => broker.subscriberCount(s.id) === 0)
+    const seen = sock.received.length
+    proc.emitOutput("after-unsub\n")
+    await new Promise((r) => setTimeout(r, 100))
+    expect(sock.received.slice(seen).filter((m) => m.type === "output" && String(m.data).includes("after-unsub"))).toEqual([])
+    expect((await svc.get(dir, s.id, "owner-1"))?.status).toBe("running")
+    // Idempotent: second unsubscribe is a no-op, never an error storm.
+    sock.send({ type: "unsubscribe", commandID: s.id })
+    await new Promise((r) => setTimeout(r, 50))
+  })
+
   it("stale endpoint file (dead pid) is replaced on start", async () => {
     await server!.stop()
     server = undefined
@@ -332,5 +355,51 @@ describe("CommandStreamServer", () => {
     const sock = await TestSocket.connect(ep.url)
     sockets.push(sock)
     sock.close()
+  })
+
+  it("overlapping subscribes leave exactly one subscriber and clean up to zero", async () => {
+    await server!.stop()
+    server = undefined
+    // Deferred broker so both subscribe handshakes overlap in flight: each
+    // sees "no previous subscription" before either completes.
+    const sinks = new Map<string, (msg: never) => void>()
+    let sinkSeq = 0
+    let releaseGate!: () => void
+    const gate = new Promise<void>((r) => {
+      releaseGate = r
+    })
+    const fakeBroker = {
+      subscribe: async (commandID: string, _owner: string, sink: (msg: never) => void) => {
+        await gate
+        sinkSeq += 1
+        const id = `sink-${sinkSeq}`
+        sinks.set(`${commandID}:${id}`, sink)
+        return id
+      },
+      unsubscribe: (commandID: string, sinkID: string) => {
+        sinks.delete(`${commandID}:${sinkID}`)
+      },
+      subscriberCount: (commandID: string) =>
+        [...sinks.keys()].filter((k) => k.startsWith(`${commandID}:`)).length,
+    }
+    const stubService = {
+      write: async () => ({ ok: true as const, message: "ok" }),
+      interrupt: async () => ({ ok: true as const, message: "ok" }),
+    }
+    server = createCommandStreamServer(dir, stubService as never, fakeBroker as never)
+    await server.start()
+    const sock = await connect()
+    // Two overlapping subscribes for the same socket+command.
+    sock.send({ type: "subscribe", commandID: "cmd-x", ownerSessionID: "owner-1" })
+    sock.send({ type: "subscribe", commandID: "cmd-x", ownerSessionID: "owner-1" })
+    // Let both handshakes reach the gate before either completes.
+    await new Promise((r) => setTimeout(r, 150))
+    releaseGate()
+    // The stale handshake drops its sink; only the latest subscribes.
+    await waitFor(() => fakeBroker.subscriberCount("cmd-x") === 1)
+    expect(fakeBroker.subscriberCount("cmd-x")).toBe(1)
+    // Socket close during/after the handshake cleans up to zero.
+    sock.close()
+    await waitFor(() => fakeBroker.subscriberCount("cmd-x") === 0)
   })
 })
