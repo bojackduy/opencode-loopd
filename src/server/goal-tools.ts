@@ -37,13 +37,16 @@ export function goalTools(
   return {
     loopd_create_goal: tool({
       description:
-        "Create a new background loop goal (contract: objective + checks + agent/model + workspaceWrite). " +
+        "Create a new background loop GOAL: an autonomous AI worker that loops turn-by-turn on a multi-step objective until deterministic checks pass or it needs you (contract: objective + checks + agent/model + workspaceWrite). " +
         "The engine spawns a dedicated worker session that does the work autonomously — it never runs in this chat. " +
+        "Use this for AI reasoning work spanning multiple turns (implement a feature, fix a failing suite, research and write a report) — NOT for running a single process you just want to start, watch, and type into. " +
+        "For that (dev servers, `npm test --watch`, REPLs, log tails, one-off scripts, interactive shells with a fullscreen terminal UI), use loopd_command_start instead: it is lighter-weight, has no agent/checks/turn loop, and is a raw OS process, not an AI worker. " +
         "Call this after clarifying the contract with the user. " +
         "Worker identity is free-form: agent is any OpenCode agent name (built-in, ~/.config/opencode/agents/*.md, or opencode.jsonc agent.* — discover with `opencode agent list`), " +
         "model is any \"providerID/modelID\" (discover with `opencode models [provider]`). When omitted, both inherit the CALLING session's live agent/model (read at creation), then plugin defaultAgent/defaultModel. " +
         "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " +
-        "Workspace-writing goals are serialized (only one active writer) and require checks.",
+        "Workspace-writing goals are serialized (only one active writer) and require checks. " +
+        "Monitor with the /loop dashboard's Goals tab (Tab/h to switch there if Commands is focused).",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),

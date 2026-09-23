@@ -1,30 +1,44 @@
 ---
 name: loopd
-description: "Agent skill for loopd background goals. Teaches when to create goals, how to inspect/steer/pause them, and how to send instructions to workers."
+description: "Agent skill for loopd: background AI goals (multi-turn autonomous workers with checks) AND standalone command sessions (raw interactive processes with a fullscreen terminal UI). Teaches which one to use, how to create/inspect/steer them, and the dashboard that shows both."
 metadata:
-  version: "1.2.0"
+  version: "1.3.0"
   status: active
-  tags: [opencode, loop, goal, background, automation]
+  tags: [opencode, loop, goal, background, automation, command, terminal, pty]
 ---
 
-# Loopd Background Goals
+# Loopd: Background Goals & Command Sessions
 
-Loopd runs long-running or autonomous tasks as background goals, each with a dedicated worker session. The parent chat stays interactive while work happens behind the scenes.
+Loopd gives OpenCode two independent background primitives that share one dashboard:
 
-## When to Use Loopd
+| | **Goal** | **Command Session** |
+|---|---|---|
+| What it is | An autonomous AI worker looping turns | A raw OS process (no AI) |
+| Use for | Multi-step AI work: implement, fix, research, write | Run/watch/type into one process: dev server, `test --watch`, REPL, log tail, build, script |
+| Created with | `loopd_create_goal` | `loopd_command_start` |
+| Finishes via | `complete_goal` after deterministic `checks` pass | Process exits, or `loopd_command_terminate` |
+| Has | objective, checks, agent, model, budgets, turns | argv, cwd, stdin/stdout, exit code |
+| Monitor in | `/loop` dashboard, **Goals** tab | `/loop` or `/commands`, **Commands** tab → `o` for fullscreen terminal |
+| Link between them | — | optional `goal_id` (display only) + `loopd_command_await` (explicit wake) |
 
-Use loopd when:
+**Pick a Goal** when the user wants something *figured out or built* across many turns with a definition of done.
+**Pick a Command Session** when the user wants to *run and watch/interact with a process* — no AI reasoning loop needed, just stdin/stdout.
+
+## When to Use Loopd (Goals)
+
+Use a goal when:
 
 - A task takes many turns and would block the main chat
-- You want autonomous work that continues while the user does other things
+- You want autonomous AI work that continues while the user does other things
 - A task needs progress tracking, completion checks, or blocking
 - You want a dashboard to monitor and steer background work
 
-Do not use loopd when:
+Do not use a goal when:
 
 - The task is trivial (1-3 turns)
 - The user needs to answer questions at every step
 - The task modifies production systems without review gates
+- The user just wants to run/watch/type into a process — use a **Command Session** (below) instead; it has no agent overhead
 
 ## Goal Lifecycle
 
@@ -188,17 +202,98 @@ Abort the worker *session only* (`A` / `:abort` in TUI). Keeps goal+transcript+s
 
 Owner-side equivalents of TUI `:force` / `:block`. Bypass checks — use only when you have verified manually that the artifact is correct or that the blocker is real.
 
+## Command Sessions (Standalone Interactive Processes)
+
+A **command session** is a raw OS process (spawned via `bun-pty`, falling back to a plain pipe) — no agent, no turns, no checks. It is completely independent from goals: starting/stopping one never pauses, blocks, or completes any goal, and vice versa. Use it whenever the request is "run X and let me watch/type into it" rather than "figure out/build X".
+
+Typical uses: dev servers (`npm run dev`), watch mode (`npm test -- --watch`), REPLs (`python3`, `node`), log tails (`tail -f`), one-off scripts, interactive shells.
+
+### Agent Tools
+
+| Tool | Purpose |
+|------|---------|
+| `loopd_command_start` | Spawn `{title, command, args, cwd?, goal_id?, cols?, rows?}`. Requests OpenCode's `bash` permission first. Returns `command_id` + host `capabilities` (`spawn`/`write`/`interruptSignal`/`terminate`/`resize`/`terminalEmulation`). |
+| `loopd_command_list` | List commands owned by the calling session. |
+| `loopd_command_get` | Read status + a bounded output snapshot (`offset_bytes` to page, default 64KB/cap 256KB). |
+| `loopd_command_write` | Send raw stdin bytes (include your own trailing `\n` for line-buffered programs). |
+| `loopd_command_interrupt` | Deliver SIGINT (Ctrl+C as a signal). A process that traps it may keep running — that's correct, not a failure. |
+| `loopd_command_terminate` | SIGTERM, escalating to SIGKILL. The only way a command actually stops (closing a view never does). |
+| `loopd_command_remove` | Delete a finished command's record + log. Refuses while `running` (terminate first). |
+| `loopd_command_resize` | Set terminal size. Applied live to the real PTY winsize when the host supports it; stored-only (never applied) on the pipe fallback — check `capabilities.resize`. |
+| `loopd_command_await` | **The only command→goal edge.** Explicit opt-in: makes `goal_id` wake up exactly once when `command_id` reaches a terminal state (`exited`/`terminated`/`missing`), with exit code/signal/last-4KB output as evidence. Merely passing `goal_id` to `loopd_command_start` links for *display only* — it never wakes anything by itself. |
+
+### Lifecycle
+
+```
+running → exited      (process ended on its own; exit code kept)
+running → terminated  (explicit terminate/kill; signal kept)
+running → missing     (plugin restart found no live execution — log retained)
+```
+
+- **Detach ≠ terminate.** Closing the fullscreen terminal page, switching tabs, or the TUI restarting never stops the process. Only `loopd_command_terminate` (or the process exiting on its own) does.
+- **`terminate ≠ remove`.** `remove` deletes the record + log and refuses while `running`.
+- Every response carries the active backend's `capabilities` so you never have to guess (`terminalEmulation` is always `false` — the host captures a byte stream; the TUI's terminal page emulates a screen client-side from it).
+
+### Monitoring in the Dashboard
+
+`/loop` and `/commands` open the **same** shared dashboard — `/loop` focuses the Goals tab, `/commands` focuses Commands. Switch with `Tab` (toggle) or directionally `h` (Goals) / `l` (Commands); `j`/`k`/`g`/`G` select within the active tab. The Commands tab is owner-scoped (only the current session's commands).
+
+On the Commands tab, `o` **never** opens a chat session or a dialog — it closes the popup and navigates to a dedicated fullscreen terminal page inside OpenCode (route `opencode.loopd.terminal`). There:
+
+- Keystrokes forward immediately as raw input — no line-submit box.
+- `Ctrl+C` is interrupt input to the *process* (never closes OpenCode).
+- `Ctrl+]` detaches back to where you came from — the process keeps running.
+- Paste forwards raw bytes immediately.
+- The viewport is measured and resizes both the emulator and the real PTY.
+
+Colon commands available directly on the Commands tab (before opening fullscreen): `:new <command> [args...]` (quoted args preserved, e.g. `:new bash -c "echo hi"`), `:interrupt`, `:terminate`, `:remove`, and bare text + Enter writes stdin to the selected command. Goal controls (`p`/`r`/`R`/`x`/`A`/`N`) never fire on the Commands tab.
+
+### Example: Watching a Dev Server
+
+```
+User: Start the dev server and let me see the logs.
+
+Agent: loopd_command_start({ title: "dev-server", command: "npm", args: ["run", "dev"] })
+# → {ok:true, command:{id:"...", status:"running", ...}, capabilities:{...}}
+Agent: "Started — open /loop, Tab to Commands, press o to watch live, or I can poll it for you."
+
+# Later, to check on it without opening the TUI:
+loopd_command_get({ command_id: "..." })
+# → status + latest output
+```
+
+### Example: A Goal That Waits On a Background Build
+
+```
+# Inside a goal worker:
+loopd_command_start({ title: "full-build", command: "npm", args: ["run", "build"] })
+# → command_id: "abc123"
+loopd_command_await({ command_id: "abc123", goal_id: <this goal's id> })
+# The worker can now idle; the engine wakes it exactly once when the build
+# finishes, with exit code + last 4KB of output as evidence — no polling.
+```
+
 ## Dashboard Commands
 
-Open the dashboard with `/loop` or <leader>o.
+Open the shared dashboard with `/loop` (or `<leader>o`) — focuses the **Goals** tab — or `/commands` — focuses the **Commands** tab. Same popup, same component, two entry points.
 
-### Keyboard Shortcuts (Normal Mode)
+### Switching Tabs
+
+| Key | Action |
+|-----|--------|
+| `Tab` | Toggle Goals ↔ Commands |
+| `h` | Select Goals directionally |
+| `l` | Select Commands directionally |
+
+`j`/`k`/`g`/`G` select within whichever tab is active. Goal controls (`p`/`r`/`R`/`x`/`A`/`N`) only fire on the Goals tab and are refused with a hint on Commands.
+
+### Goals Tab — Keyboard Shortcuts (Normal Mode)
 
 | Key | Action | Agent equivalent |
 |-----|--------|-----------------|
 | `j` / `k` | Move selection down / up | — (UI only) |
 | `g` / `G` | Jump to top / bottom | — |
-| `o` | Open child (view details) | `read_goal_transcript` / `inspect_background_goal` |
+| `o` | Open the selected goal's native worker session | `read_goal_transcript` / `inspect_background_goal` |
 | `L` | Toggle log view | — |
 | `?` | Toggle help | — |
 | `c` | Toggle done (show/hide completed) | — |
@@ -208,7 +303,7 @@ Open the dashboard with `/loop` or <leader>o.
 | `Ctrl+N` | Switch to normal mode | — |
 | `:` | Enter command mode | — |
 
-### Command Mode (`:` prefix)
+### Goals Tab — Command Mode (`:` prefix)
 
 | Command | Description | Agent equivalent |
 |---------|-------------|-----------------|
@@ -223,7 +318,23 @@ Open the dashboard with `/loop` or <leader>o.
 
 > Goal creation (`:goal start`) was removed from the dashboard — create goals via `/goal` in the parent chat so the agent can clarify the objective first.
 
-**Scrolling:** the goal list is a `<scrollbox>` capped at 10 rows — short lists sit compact with no gap, long lists scroll and follow `j`/`k`/`g`/`G` via `scrollChildIntoView`. Detail + input stay pinned below in both cases. Empty list shows the fallback tip.
+### Commands Tab — Keyboard & Command Mode
+
+| Key / Command | Action | Agent equivalent |
+|-----|--------|-----------------|
+| `j` / `k` / `g` / `G` | Select a command session | — |
+| `o` | Close the popup, open the selected command in the **fullscreen terminal page** | — |
+| `Ctrl+C` | Interrupt (SIGINT) the selected command | `loopd_command_interrupt` |
+| `:new <command> [args...]` | Start a new command (quoted args preserved) | `loopd_command_start` |
+| `:interrupt` | SIGINT the selected command | `loopd_command_interrupt` |
+| `:terminate` | SIGTERM→SIGKILL the selected command | `loopd_command_terminate` |
+| `:remove` | Delete a finished command's record + log | `loopd_command_remove` |
+| bare text + Enter | Write that line as stdin to the selected command | `loopd_command_write` |
+| `q` | Detach (view closes; command keeps running) | — |
+
+Inside the **fullscreen terminal page** (reached via `o`): every keystroke forwards immediately as raw input (no line-submit box), `Ctrl+C` is interrupt input to the process, `Ctrl+]` detaches back to where you came from without stopping the process.
+
+**Scrolling:** both lists are a `<scrollbox>` capped at 10 rows — short lists sit compact with no gap, long lists scroll and follow `j`/`k`/`g`/`G` via `scrollChildIntoView`. Detail + input stay pinned below in both cases. Empty list shows the fallback tip.
 
 ## Safety Patterns
 
@@ -238,6 +349,7 @@ Open the dashboard with `/loop` or <leader>o.
 9. **Recover stuck workers explicitly** — If `inspect` shows `phase=running` with `unknownStatusCount ≥3` or `lastActivityAt` far in the past, use `nudge_goal` (full steering) for a healthy-but-stuck worker or `abort_goal_worker` for a spinning/burning one. `send_goal_input` alone is now immediate for active goals, but it is still bare words, not steering.
 10. **One writer, one check suite** — Don’t run concurrent `start` calls that touch the same files from parallel chats; chain them sequentially or mark the second as `workspaceWrite:false`.
 11. **Registry is the source of truth** — `src/domain/interaction-registry.ts` lists every `LoopCommand` with its TUI and agent bindings. `test/domain/parity.test.ts` fails CI if they drift. When adding an interaction: add one row to `INTERACTIONS`, one handler in `control-worker.ts`, and both surfaces light up.
+12. **Goal vs Command Session — pick by shape of the task, not by habit** — "Run/watch/type into a process" (dev server, test watch, REPL, log tail, one-off script) is a `loopd_command_start` job with zero agent overhead, even if it will run a long time. Reach for `loopd_create_goal` only when the task genuinely needs multi-turn AI reasoning against a checkable definition of done. Don't spin up a goal just to babysit a process — use `loopd_command_await` if a goal needs to *wait* on one.
 
 ## Example: Creating and Monitoring a Goal
 

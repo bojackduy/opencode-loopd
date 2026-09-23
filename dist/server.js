@@ -5266,7 +5266,7 @@ var execAsync = promisify(execChild);
 function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
   return {
     loopd_create_goal: tool({
-      description: "Create a new background loop goal (contract: objective + checks + agent/model + workspaceWrite). " + "The engine spawns a dedicated worker session that does the work autonomously \u2014 it never runs in this chat. " + "Call this after clarifying the contract with the user. " + "Worker identity is free-form: agent is any OpenCode agent name (built-in, ~/.config/opencode/agents/*.md, or opencode.jsonc agent.* \u2014 discover with `opencode agent list`), " + 'model is any "providerID/modelID" (discover with `opencode models [provider]`). When omitted, both inherit the CALLING session\'s live agent/model (read at creation), then plugin defaultAgent/defaultModel. ' + "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " + "Workspace-writing goals are serialized (only one active writer) and require checks.",
+      description: "Create a new background loop GOAL: an autonomous AI worker that loops turn-by-turn on a multi-step objective until deterministic checks pass or it needs you (contract: objective + checks + agent/model + workspaceWrite). " + "The engine spawns a dedicated worker session that does the work autonomously \u2014 it never runs in this chat. " + "Use this for AI reasoning work spanning multiple turns (implement a feature, fix a failing suite, research and write a report) \u2014 NOT for running a single process you just want to start, watch, and type into. " + "For that (dev servers, `npm test --watch`, REPLs, log tails, one-off scripts, interactive shells with a fullscreen terminal UI), use loopd_command_start instead: it is lighter-weight, has no agent/checks/turn loop, and is a raw OS process, not an AI worker. " + "Call this after clarifying the contract with the user. " + "Worker identity is free-form: agent is any OpenCode agent name (built-in, ~/.config/opencode/agents/*.md, or opencode.jsonc agent.* \u2014 discover with `opencode agent list`), " + 'model is any "providerID/modelID" (discover with `opencode models [provider]`). When omitted, both inherit the CALLING session\'s live agent/model (read at creation), then plugin defaultAgent/defaultModel. ' + "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " + "Workspace-writing goals are serialized (only one active writer) and require checks. " + "Monitor with the /loop dashboard's Goals tab (Tab/h to switch there if Commands is focused).",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
@@ -6544,7 +6544,7 @@ function commandTools(options) {
   const sizeNote = capabilities.resize ? "applied live to the PTY winsize" : "stored; resize is unsupported by the pipe host";
   return {
     loopd_command_start: tool3({
-      description: "Start a standalone interactive command session (arbitrary shell command) in the background. Returns an ID for write/read/interrupt/terminate/remove. Independent from goals: linking a goalID is display-only and never couples lifecycles.",
+      description: "Start a standalone interactive OS process (arbitrary shell command) in the background \u2014 a dev server, `npm test --watch`, a REPL, a log tail, a build, or a one-off script. This is a raw process, NOT an AI worker: no agent, no checks, no turn loop. For multi-turn autonomous AI work with completion criteria, use loopd_create_goal instead. " + "Returns a command_id for loopd_command_get (read output)/loopd_command_write (send stdin)/loopd_command_interrupt (Ctrl+C)/loopd_command_terminate (kill)/loopd_command_remove (delete). " + "The user can also open it live: /loop or /commands \u2192 Tab/l to the Commands tab \u2192 select it \u2192 `o` opens a fullscreen interactive terminal page (type directly, Ctrl+C interrupts, Ctrl+] detaches without stopping it). " + "Independent from goals: an optional goal_id is display-only metadata and never couples lifecycles \u2014 pausing/clearing a goal never touches the command, and terminating a command never touches the goal. " + "To make a specific goal wake up when this command finishes, call loopd_command_await separately after starting it (linking alone does not wake anything).",
       args: {
         title: tool3.schema.string().describe("Short human label for the session."),
         command: tool3.schema.string().describe('Executable to spawn (e.g. "bun", "python3").'),
@@ -6589,7 +6589,7 @@ function commandTools(options) {
       }
     }),
     loopd_command_list: tool3({
-      description: "List standalone command sessions owned by this session.",
+      description: "List standalone command sessions owned by this session (same set the TUI Commands tab shows for this session). Use before reading/writing to find a command's ID, or to check if a dev server/watcher you started earlier is still running.",
       args: {},
       execute: async (_args, context) => {
         const owner = ownerID(context);
@@ -6603,7 +6603,7 @@ function commandTools(options) {
       }
     }),
     loopd_command_get: tool3({
-      description: "Get a command session's metadata plus a bounded output snapshot. Closing a view detaches; it never terminates.",
+      description: "Read a command session's status plus its output so far (bounded snapshot; page with offset_bytes for more). This is how you check on a background process \u2014 poll it after starting a build/test-watch/server to see progress or a result. Never terminates the command; detach/inspect is always read-only.",
       args: {
         command_id: tool3.schema.string().describe("Command session ID."),
         offset_bytes: tool3.schema.number().optional().describe("Byte offset into the output log (paging)."),
@@ -6634,7 +6634,7 @@ function commandTools(options) {
       }
     }),
     loopd_command_write: tool3({
-      description: "Send raw input (stdin bytes) to a running command session.",
+      description: "Send raw input (stdin bytes) to a running command session \u2014 e.g. answer a REPL prompt, confirm a y/n, or type a command into an interactive shell you started. Include a trailing newline yourself if the program is line-buffered.",
       args: {
         command_id: tool3.schema.string().describe("Command session ID."),
         input: tool3.schema.string().describe("Raw text to write to stdin (include trailing newline for line-buffered programs).")
@@ -6687,7 +6687,7 @@ function commandTools(options) {
       }
     }),
     loopd_command_await: tool3({
-      description: "Opt in to a one-shot wake-up: the given goal wakes when the given command reaches a terminal status (exited/terminated/missing) with the exit code, signal, and last 4KB of output as evidence. Explicit opt-in only \u2014 a merely linked command never wakes its goal. Exactly-once: the await is consumed on fire, output chunks never fire, pausing/clearing the goal or removing the command cancels it.",
+      description: "Opt in to a one-shot wake-up: the given goal wakes when the given command reaches a terminal status (exited/terminated/missing) with the exit code, signal, and last 4KB of output as evidence. Use this to have a GOAL worker block on a background process it started (e.g. 'wait for this build/test run to finish, then check the result') without polling. Explicit opt-in only \u2014 a merely linked command (goal_id passed to loopd_command_start) never wakes its goal on its own; this call is required. Exactly-once: the await is consumed on fire, output chunks never fire, pausing/clearing the goal or removing the command cancels it.",
       args: {
         command_id: tool3.schema.string().describe("Command session ID to await."),
         goal_id: tool3.schema.string().describe("Goal ID to wake on exit. You must own both the goal and the command.")
@@ -6731,7 +6731,7 @@ function commandTools(options) {
 // src/server/plugin.ts
 init_state_repository();
 // package.json
-var version = "1.10.2";
+var version = "1.10.3";
 
 // src/server/plugin.ts
 var PLUGIN_ID = "opencode-loopd.server";

@@ -76,7 +76,11 @@ export function commandTools(options: CommandToolsOptions) {
   return {
     loopd_command_start: tool({
       description:
-        "Start a standalone interactive command session (arbitrary shell command) in the background. Returns an ID for write/read/interrupt/terminate/remove. Independent from goals: linking a goalID is display-only and never couples lifecycles.",
+        "Start a standalone interactive OS process (arbitrary shell command) in the background — a dev server, `npm test --watch`, a REPL, a log tail, a build, or a one-off script. This is a raw process, NOT an AI worker: no agent, no checks, no turn loop. For multi-turn autonomous AI work with completion criteria, use loopd_create_goal instead. " +
+        "Returns a command_id for loopd_command_get (read output)/loopd_command_write (send stdin)/loopd_command_interrupt (Ctrl+C)/loopd_command_terminate (kill)/loopd_command_remove (delete). " +
+        "The user can also open it live: /loop or /commands → Tab/l to the Commands tab → select it → `o` opens a fullscreen interactive terminal page (type directly, Ctrl+C interrupts, Ctrl+] detaches without stopping it). " +
+        "Independent from goals: an optional goal_id is display-only metadata and never couples lifecycles — pausing/clearing a goal never touches the command, and terminating a command never touches the goal. " +
+        "To make a specific goal wake up when this command finishes, call loopd_command_await separately after starting it (linking alone does not wake anything).",
       args: {
         title: tool.schema.string().describe("Short human label for the session."),
         command: tool.schema.string().describe("Executable to spawn (e.g. \"bun\", \"python3\")."),
@@ -121,7 +125,7 @@ export function commandTools(options: CommandToolsOptions) {
     }),
 
     loopd_command_list: tool({
-      description: "List standalone command sessions owned by this session.",
+      description: "List standalone command sessions owned by this session (same set the TUI Commands tab shows for this session). Use before reading/writing to find a command's ID, or to check if a dev server/watcher you started earlier is still running.",
       args: {},
       execute: async (_args, context) => {
         const owner = ownerID(context)
@@ -135,7 +139,7 @@ export function commandTools(options: CommandToolsOptions) {
     }),
 
     loopd_command_get: tool({
-      description: "Get a command session's metadata plus a bounded output snapshot. Closing a view detaches; it never terminates.",
+      description: "Read a command session's status plus its output so far (bounded snapshot; page with offset_bytes for more). This is how you check on a background process — poll it after starting a build/test-watch/server to see progress or a result. Never terminates the command; detach/inspect is always read-only.",
       args: {
         command_id: tool.schema.string().describe("Command session ID."),
         offset_bytes: tool.schema.number().optional().describe("Byte offset into the output log (paging)."),
@@ -166,7 +170,7 @@ export function commandTools(options: CommandToolsOptions) {
     }),
 
     loopd_command_write: tool({
-      description: "Send raw input (stdin bytes) to a running command session.",
+      description: "Send raw input (stdin bytes) to a running command session — e.g. answer a REPL prompt, confirm a y/n, or type a command into an interactive shell you started. Include a trailing newline yourself if the program is line-buffered.",
       args: {
         command_id: tool.schema.string().describe("Command session ID."),
         input: tool.schema.string().describe("Raw text to write to stdin (include trailing newline for line-buffered programs)."),
@@ -220,7 +224,7 @@ export function commandTools(options: CommandToolsOptions) {
 
     loopd_command_await: tool({
       description:
-        "Opt in to a one-shot wake-up: the given goal wakes when the given command reaches a terminal status (exited/terminated/missing) with the exit code, signal, and last 4KB of output as evidence. Explicit opt-in only — a merely linked command never wakes its goal. Exactly-once: the await is consumed on fire, output chunks never fire, pausing/clearing the goal or removing the command cancels it.",
+        "Opt in to a one-shot wake-up: the given goal wakes when the given command reaches a terminal status (exited/terminated/missing) with the exit code, signal, and last 4KB of output as evidence. Use this to have a GOAL worker block on a background process it started (e.g. 'wait for this build/test run to finish, then check the result') without polling. Explicit opt-in only — a merely linked command (goal_id passed to loopd_command_start) never wakes its goal on its own; this call is required. Exactly-once: the await is consumed on fire, output chunks never fire, pausing/clearing the goal or removing the command cancels it.",
       args: {
         command_id: tool.schema.string().describe("Command session ID to await."),
         goal_id: tool.schema.string().describe("Goal ID to wake on exit. You must own both the goal and the command."),

@@ -6,6 +6,8 @@ Create a new background loop goal using the `loopd_create_goal` tool.
 
 A goal is a **contract**: `objective` (semantic requirements) + `checks` (deterministic host acceptance) + `agent`/`model`/`workspaceWrite`/`checkCwd`/`limits`. The host is the acceptance authority; the worker proposes completion and the host rejects it if `checks` fail (free retry <3, `blocked` after 3).
 
+If the user just wants to **run and watch/interact with a single process** (dev server, `test --watch`, REPL, log tail, one-off script) with no multi-turn AI reasoning involved, that's a `loopd_command_start` command session instead — lighter weight, no agent/checks/turns. Only proceed with this command when the request genuinely needs an autonomous AI worker.
+
 First, gather what you need to craft a good contract:
 - If the user gave a vague objective, ask 1–3 short clarifying questions (what to accomplish, where, and how they'll verify it — i.e., what `checks` should be).
 - If the user was specific, skip straight to creating it.
