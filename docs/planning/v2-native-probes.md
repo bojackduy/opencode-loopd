@@ -148,3 +148,52 @@ restart v2, create a throwaway goal from the session, and require all three —
 state `v2-native-child`, `nativeParentID` == owner, worker visible under the
 native session arrow — plus a `native-worker request=… outcome={…completed}`
 line in `/tmp/loopd-tui.log`.
+
+## LIVE E2E 2026-09-25 — worker bridge VERIFIED (host 0.0.0-beta-19271)
+
+Harness `/tmp/v2probe/e2e-bridge.ts` (scratch, not committed): real beta
+service (isolated HOME, scratch dir) + real loopd `dist` plugin; goal via
+control-bus file (no LLM); claimant emulated over HTTP (SSE `/api/event` +
+`POST /api/rpc/loopd.native/*` + fork). Only the claimant is emulated —
+server, plugin, and fork are real.
+
+**PASS**: emit (~150ms after goal start) → claim won → fork →
+`fork.sessionID` verified → rename ok → complete → goal persisted
+`active` / `v2-native-child` / `nativeParentID` == owner; server log
+`worker.created topology v2-native-child`. Fix commit: this change.
+
+Live findings (all fixed or pinned here):
+1. **parentID omitted on fork children** → `resolveNativeParentID`
+   (`fork.sessionID` primary, legacy `parentID` fallback). Without this,
+   every native creation failed post-creation on this host.
+2. **Empty-session fork rejected** (`empty_session`) → pre-creation
+   failure → root fallback (was already the code path; now test-pinned).
+   A goal created as the first action in a fresh session degrades safely.
+3. **Server SessionDomain has no `update`** → guarded (TUI sets the title
+   at fork time; server re-apply is best-effort).
+4. **`session.create` rejects `agent: undefined`** → root fallback omits
+   unset optionals instead of passing them through.
+5. Claimed-timeout path observed live (harness bug let a claim lapse):
+   server failed startup with "claimant vanished", no duplicate. Correct.
+
+Raw API facts (beta-19271): fork requires
+`boundary: {type:"before",messageID} | {type:"through"}`; persistentPty
+full lifecycle proven (create/list/snapshot/read/delete, screen text
+readable); create body is flat `{command,args,cwd,title,env,size}`. RPC
+wire: body envelope `{input:{…}}`, result envelope `{output:{…}}`,
+location via `?location[directory]=` deepObject query; auth is HTTP Basic
+`opencode:<service password>`.
+
+Host floor: the June `tui-v2` snapshot
+(`0.0.0-tui-v2-202606261840`) has NO fork/persistentPty/rpc endpoints —
+the bridge cannot work there. Minimum host is a current beta.
+
+Residual risks (need a real attached TUI, not verifiable headlessly):
+(a) the real TUI client's fork input encoding (`{sessionID,before}` →
+boundary mapping) — assumed host-matched since the native fork button
+works; loopd delegates encoding to that client, so unaffected.
+(b) whether the native TUI renders fork children + session PTYs in the
+down-arrow tree — the API linkage is proven, the rendering is not.
+(c) the 2.0.11 client lib's flat `session.fork({before})` shape is
+rejected by this host ("Missing key at boundary") — do not use that lib
+directly against this host for fork; loopd never does (uses ctx.client).

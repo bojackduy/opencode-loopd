@@ -45,11 +45,36 @@ export interface WorkerClaimResult {
 
 export interface WorkerCreateResult {
   requestID: string
-  /** Native child session ID; caller MUST verify child.parentID === parent. */
+  /** Native child session ID; caller MUST verify resolveNativeParentID(child) === parent. */
   childSessionID: string
   parentSessionID: string
   /** Topology actually used — surfaced in loopd_create_goal + diagnostics. */
   topology: "v2-native-child"
+}
+
+/**
+ * What a fork call returns. LIVE PROBE 2026-09-25 (host 0.0.0-beta-19271):
+ * the host declares `parentID` on Session.Info but leaves it null on fork
+ * children, carrying parentage in `fork.sessionID` instead (verified: fork
+ * child lists `fork: {sessionID: <parent>, boundary}` and no parentID).
+ * Older/newer hosts may populate `parentID` — accept either shape.
+ */
+export interface NativeForkChild {
+  id: string
+  /** Legacy/populated-by-some-hosts field. Absent (null) on current hosts. */
+  parentID?: string | null
+  /** Current field: fork linkage; fork.sessionID IS the parent session. */
+  fork?: { sessionID: string; boundary?: unknown } | null
+}
+
+/**
+ * Resolve the verified parent of a fork child. Prefers `fork.sessionID`
+ * (the live shape); falls back to legacy `parentID`. Returns undefined
+ * when neither is present — the caller must treat that as a mismatch
+ * (post-creation failure, never use the child).
+ */
+export function resolveNativeParentID(child: NativeForkChild): string | undefined {
+  return child.fork?.sessionID ?? child.parentID ?? undefined
 }
 
 export interface WorkerCreateFailure {

@@ -6,7 +6,8 @@ import { randomUUID } from "crypto"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
 import type { Plugin as V2Plugin } from "@opencode/plugin"
 import type { BridgeOutcome } from "../v2/native-bridge"
-import type { WorkerTopology } from "../v2/native-rpc"
+import type { NativeForkChild, WorkerTopology } from "../v2/native-rpc"
+import { resolveNativeParentID } from "../v2/native-rpc"
 
 export interface ModelRef {
   providerID: string
@@ -408,14 +409,20 @@ export function createV2Host(
           // before trusting the child: a mismatch means the TUI forked the
           // wrong session, and using it would corrupt goal linkage.
           const child = await context.session.get({ sessionID: childID })
-          const actualParent = (child as { parentID?: unknown }).parentID
+          // Live hosts carry parentage as fork.sessionID (parentID often
+          // null) — resolve either shape before trusting the child.
+          const actualParent = resolveNativeParentID(child as NativeForkChild)
           if (actualParent !== parentID) {
-            const detail = `child.parentID=${JSON.stringify(actualParent)} expected=${JSON.stringify(parentID)}`
+            const detail = `resolved-parent=${JSON.stringify(actualParent)} expected=${JSON.stringify(parentID)}`
             await logServerEvent(directory, "worker.create.parent-mismatch", { parentID, workerSessionID: childID, detail })
             throw new Error(`loopd native worker creation failed for parent "${parentID}" (parent-mismatch): ${detail}`)
           }
           // Configure through the supported SessionDomain (the TUI already
           // applied these at fork time; re-applying is idempotent).
+          // LIVE PROBE 2026-09-25 (host 0.0.0-beta-19271): the server
+          // SessionDomain has NO update method (title rename exists only on
+          // the full TUI client) — the TUI-side title already covers it, so
+          // re-applying is best-effort and must never fail creation.
           if (agent) await context.session.switchAgent({ sessionID: childID, agent })
           if (model) {
             await context.session.switchModel({
@@ -423,7 +430,10 @@ export function createV2Host(
               model: { id: model.modelID, providerID: model.providerID },
             })
           }
-          await context.session.update({ sessionID: childID, title })
+          const rename = (context.session as {
+            update?: (input: { sessionID: string; title: string }) => Promise<unknown>
+          }).update
+          if (rename) await rename({ sessionID: childID, title })
           statuses.set(childID, "idle")
           await logServerEvent(directory, "worker.created", {
             parentID,
@@ -440,10 +450,13 @@ export function createV2Host(
           reason: outcome.kind === "fallback-safe" ? outcome.reason : "unclaimed",
         })
       }
+      // LIVE PROBE 2026-09-25 (host 0.0.0-beta-19271): session.create
+      // rejects explicit undefined for agent ("Expected string | null").
+      // Omit unset optionals instead of passing them through.
       const session = await context.session.create({
         title,
-        agent,
-        model: model ? { id: model.modelID, providerID: model.providerID } : undefined,
+        ...(agent !== undefined ? { agent } : {}),
+        ...(model !== undefined ? { model: { id: model.modelID, providerID: model.providerID } } : {}),
         location: { directory },
         metadata: { "loopd.parentID": parentID },
       })

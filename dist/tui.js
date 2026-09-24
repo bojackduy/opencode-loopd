@@ -11763,6 +11763,9 @@ Press Ctrl+] to go back. Nothing was subscribed or written.`);
 
 // src/v2/native-rpc.ts
 var NATIVE_RPC_ID = "loopd.native";
+function resolveNativeParentID(child) {
+  return child.fork?.sessionID ?? child.parentID ?? undefined;
+}
 var requestSchema = {
   type: "object",
   properties: {
@@ -11905,8 +11908,9 @@ async function handleWorkerCreateRequest(request, deps) {
   } catch (error) {
     return fail("fork-failed", true, error instanceof Error ? error.message : String(error));
   }
-  if (child.parentID !== request.parentSessionID) {
-    return fail("parent-mismatch", false, `child.parentID=${JSON.stringify(child.parentID)} expected=${JSON.stringify(request.parentSessionID)}`);
+  const actualParent = resolveNativeParentID(child);
+  if (actualParent !== request.parentSessionID) {
+    return fail("parent-mismatch", false, `resolved-parent=${JSON.stringify(actualParent)} expected=${JSON.stringify(request.parentSessionID)}`);
   }
   try {
     if (request.agent && deps.client.session.switchAgent) {

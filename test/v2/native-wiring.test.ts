@@ -164,7 +164,7 @@ describe("native TUI subscriber", () => {
           session: {
             fork: async (input: { sessionID: string; before?: string }) => {
               forks.push(input)
-              return { id: "child-1", parentID: "parent-1" }
+              return { id: "child-1", fork: { sessionID: "parent-1" } }
             },
             switchAgent: async () => {},
             switchModel: async () => {},

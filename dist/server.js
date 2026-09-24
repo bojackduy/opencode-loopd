@@ -2391,6 +2391,108 @@ import { promises as fs2 } from "fs";
 
 // src/server/host-adapter.ts
 import { randomUUID as randomUUID4 } from "crypto";
+
+// src/v2/native-rpc.ts
+var NATIVE_RPC_ID = "loopd.native";
+var CLAIM_TIMEOUT_MS = 3000;
+var CLAIMED_TIMEOUT_MS = 15000;
+function resolveNativeParentID(child) {
+  return child.fork?.sessionID ?? child.parentID ?? undefined;
+}
+var requestSchema = {
+  type: "object",
+  properties: {
+    requestID: { type: "string" },
+    goalID: { type: "string" },
+    parentSessionID: { type: "string" },
+    title: { type: "string" },
+    agent: { type: "string" },
+    model: {
+      type: "object",
+      properties: {
+        id: { type: "string" },
+        providerID: { type: "string" }
+      },
+      required: ["id", "providerID"],
+      additionalProperties: false
+    },
+    permissions: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          action: { type: "string" },
+          resource: { type: "string" },
+          effect: { type: "string", enum: ["allow", "deny", "ask"] }
+        },
+        required: ["action", "resource", "effect"],
+        additionalProperties: false
+      }
+    },
+    directory: { type: "string" }
+  },
+  required: ["requestID", "goalID", "parentSessionID", "title"],
+  additionalProperties: false
+};
+var claimResultSchema = {
+  type: "object",
+  properties: {
+    requestID: { type: "string" },
+    claimantID: { type: "string" }
+  },
+  required: ["requestID", "claimantID"],
+  additionalProperties: false
+};
+var claimAckSchema = {
+  type: "object",
+  properties: {
+    requestID: { type: "string" },
+    claimantID: { type: "string" },
+    won: { type: "boolean" }
+  },
+  required: ["requestID", "claimantID", "won"],
+  additionalProperties: false
+};
+var createResultSchema = {
+  type: "object",
+  properties: {
+    requestID: { type: "string" },
+    childSessionID: { type: "string" },
+    parentSessionID: { type: "string" },
+    topology: { type: "string", const: "v2-native-child" }
+  },
+  required: ["requestID", "childSessionID", "parentSessionID", "topology"],
+  additionalProperties: false
+};
+var failureSchema = {
+  type: "object",
+  properties: {
+    requestID: { type: "string" },
+    reason: { type: "string" },
+    detail: { type: "string" },
+    preCreation: { type: "boolean" }
+  },
+  required: ["requestID", "reason", "preCreation"],
+  additionalProperties: false
+};
+var emptySchema = {
+  type: "object",
+  properties: {},
+  additionalProperties: false
+};
+var nativeRpcDefinition = {
+  id: NATIVE_RPC_ID,
+  methods: {
+    claimRequest: { input: claimResultSchema, output: claimAckSchema, errors: {} },
+    completeWorkerCreate: { input: createResultSchema, output: emptySchema, errors: {} },
+    failRequest: { input: failureSchema, output: emptySchema, errors: {} }
+  },
+  events: {
+    workerCreateRequested: { schema: requestSchema }
+  }
+};
+
+// src/server/host-adapter.ts
 function parseModelRef(value) {
   if (value === undefined)
     return;
@@ -2633,9 +2735,9 @@ function createV2Host(context, statuses, options = {}) {
         if (outcome.kind === "native-child") {
           const childID = outcome.childSessionID;
           const child = await context.session.get({ sessionID: childID });
-          const actualParent = child.parentID;
+          const actualParent = resolveNativeParentID(child);
           if (actualParent !== parentID) {
-            const detail = `child.parentID=${JSON.stringify(actualParent)} expected=${JSON.stringify(parentID)}`;
+            const detail = `resolved-parent=${JSON.stringify(actualParent)} expected=${JSON.stringify(parentID)}`;
             await logServerEvent(directory, "worker.create.parent-mismatch", { parentID, workerSessionID: childID, detail });
             throw new Error(`loopd native worker creation failed for parent "${parentID}" (parent-mismatch): ${detail}`);
           }
@@ -2647,7 +2749,9 @@ function createV2Host(context, statuses, options = {}) {
               model: { id: model.modelID, providerID: model.providerID }
             });
           }
-          await context.session.update({ sessionID: childID, title });
+          const rename = context.session.update;
+          if (rename)
+            await rename({ sessionID: childID, title });
           statuses.set(childID, "idle");
           await logServerEvent(directory, "worker.created", {
             parentID,
@@ -2666,8 +2770,8 @@ function createV2Host(context, statuses, options = {}) {
       }
       const session = await context.session.create({
         title,
-        agent,
-        model: model ? { id: model.modelID, providerID: model.providerID } : undefined,
+        ...agent !== undefined ? { agent } : {},
+        ...model !== undefined ? { model: { id: model.modelID, providerID: model.providerID } } : {},
         location: { directory },
         metadata: { "loopd.parentID": parentID }
       });
@@ -3878,103 +3982,6 @@ function createScheduleWorker(options) {
 
 // src/v2/native-server.ts
 import { randomUUID as randomUUID7 } from "crypto";
-
-// src/v2/native-rpc.ts
-var NATIVE_RPC_ID = "loopd.native";
-var CLAIM_TIMEOUT_MS = 3000;
-var CLAIMED_TIMEOUT_MS = 15000;
-var requestSchema = {
-  type: "object",
-  properties: {
-    requestID: { type: "string" },
-    goalID: { type: "string" },
-    parentSessionID: { type: "string" },
-    title: { type: "string" },
-    agent: { type: "string" },
-    model: {
-      type: "object",
-      properties: {
-        id: { type: "string" },
-        providerID: { type: "string" }
-      },
-      required: ["id", "providerID"],
-      additionalProperties: false
-    },
-    permissions: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          action: { type: "string" },
-          resource: { type: "string" },
-          effect: { type: "string", enum: ["allow", "deny", "ask"] }
-        },
-        required: ["action", "resource", "effect"],
-        additionalProperties: false
-      }
-    },
-    directory: { type: "string" }
-  },
-  required: ["requestID", "goalID", "parentSessionID", "title"],
-  additionalProperties: false
-};
-var claimResultSchema = {
-  type: "object",
-  properties: {
-    requestID: { type: "string" },
-    claimantID: { type: "string" }
-  },
-  required: ["requestID", "claimantID"],
-  additionalProperties: false
-};
-var claimAckSchema = {
-  type: "object",
-  properties: {
-    requestID: { type: "string" },
-    claimantID: { type: "string" },
-    won: { type: "boolean" }
-  },
-  required: ["requestID", "claimantID", "won"],
-  additionalProperties: false
-};
-var createResultSchema = {
-  type: "object",
-  properties: {
-    requestID: { type: "string" },
-    childSessionID: { type: "string" },
-    parentSessionID: { type: "string" },
-    topology: { type: "string", const: "v2-native-child" }
-  },
-  required: ["requestID", "childSessionID", "parentSessionID", "topology"],
-  additionalProperties: false
-};
-var failureSchema = {
-  type: "object",
-  properties: {
-    requestID: { type: "string" },
-    reason: { type: "string" },
-    detail: { type: "string" },
-    preCreation: { type: "boolean" }
-  },
-  required: ["requestID", "reason", "preCreation"],
-  additionalProperties: false
-};
-var emptySchema = {
-  type: "object",
-  properties: {},
-  additionalProperties: false
-};
-var nativeRpcDefinition = {
-  id: NATIVE_RPC_ID,
-  methods: {
-    claimRequest: { input: claimResultSchema, output: claimAckSchema, errors: {} },
-    completeWorkerCreate: { input: createResultSchema, output: emptySchema, errors: {} },
-    failRequest: { input: failureSchema, output: emptySchema, errors: {} }
-  },
-  events: {
-    workerCreateRequested: { schema: requestSchema }
-  }
-};
 
 // src/v2/native-bridge.ts
 class NativeBridgeError extends Error {

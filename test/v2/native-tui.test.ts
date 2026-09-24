@@ -6,7 +6,7 @@ import {
   type NativeRpcClient,
   type RpcCallOptions,
 } from "../../src/v2/native-tui"
-import type { WorkerCreateRequest } from "../../src/v2/native-rpc"
+import type { NativeForkChild, WorkerCreateRequest } from "../../src/v2/native-rpc"
 
 function request(): WorkerCreateRequest {
   return {
@@ -32,14 +32,14 @@ function deps(overrides: Partial<{
   parentExists: boolean
   messages: Array<{ id: string }>
   claimWon: boolean
-  forkResult: { id: string; parentID?: string | null } | Error
+  forkResult: NativeForkChild | Error
   switchAgentThrows: boolean
 }> = {}): { deps: ForkHandlerDeps; seen: FakeConduct } {
   const {
     parentExists = true,
     messages = [{ id: "msg_first" }, { id: "msg_second" }],
     claimWon = true,
-    forkResult = { id: "child-1", parentID: "parent-1" },
+    forkResult = { id: "child-1", fork: { sessionID: "parent-1" } },
     switchAgentThrows = false,
   } = overrides
   const seen: FakeConduct = {
@@ -159,11 +159,46 @@ describe("tui fork handler (Probe B executable spec)", () => {
   })
 
   it("parent mismatch reports post-creation failure (never fallback)", async () => {
-    const { deps: d, seen } = deps({ forkResult: { id: "child-1", parentID: "someone-else" } })
+    const { deps: d, seen } = deps({ forkResult: { id: "child-1", fork: { sessionID: "someone-else" } } })
     const outcome = await handleWorkerCreateRequest(request(), d)
     expect(outcome).toEqual({ handled: "failed", reason: "parent-mismatch", preCreation: false })
     expect(seen.completed).toEqual([])
     expect(seen.failed).toHaveLength(1)
+  })
+
+  it("legacy parentID-only child verifies (hosts that populate parentID)", async () => {
+    const { deps: d } = deps({ forkResult: { id: "child-1", parentID: "parent-1" } })
+    const outcome = await handleWorkerCreateRequest(request(), d)
+    expect(outcome).toEqual({
+      handled: "completed",
+      childSessionID: "child-1",
+      forkInput: { sessionID: "parent-1", before: "msg_first" },
+    })
+  })
+
+  it("child with neither fork nor parentID is a mismatch (never use it)", async () => {
+    const { deps: d, seen } = deps({ forkResult: { id: "child-1", parentID: null, fork: null } })
+    const outcome = await handleWorkerCreateRequest(request(), d)
+    expect(outcome).toEqual({ handled: "failed", reason: "parent-mismatch", preCreation: false })
+    expect(seen.completed).toEqual([])
+  })
+
+  it("empty-session fork rejection is pre-creation (falls back safely)", async () => {
+    // Live hosts reject forking a parent with zero messages
+    // ("Cannot fork empty session") — a goal created as the first action in
+    // a fresh session must degrade to the root fallback, not fail startup.
+    const { deps: d, seen } = deps({
+      messages: [],
+      forkResult: new Error("Cannot fork empty session: parent-1"),
+    })
+    const outcome = await handleWorkerCreateRequest(request(), d)
+    expect(outcome).toEqual({ handled: "failed", reason: "fork-failed", preCreation: true })
+    expect(seen.failed).toEqual([{
+      requestID: "req-1",
+      reason: "fork-failed",
+      preCreation: true,
+      detail: "Cannot fork empty session: parent-1",
+    }])
   })
 
   it("configure failure after creation is post-creation (no fallback)", async () => {
@@ -229,7 +264,7 @@ describe("subscribeNativeRequests location routing (live v2 regression)", () => 
     return {
       client: {
         session: {
-          fork: async () => ({ id: "child-1", parentID: "parent-1" }),
+          fork: async () => ({ id: "child-1", fork: { sessionID: "parent-1" } }),
           switchAgent: async () => {},
           switchModel: async () => {},
           update: async () => {},

@@ -8,21 +8,26 @@
 //    Unknown parent → silently ignore (never claim someone else's session).
 // 2. Atomic claim via claimRequest. Lost race → return quietly.
 // 3. Load first message ID; fork({sessionID: parent, before?: firstID}).
-//    No messages → fork({sessionID: parent}) with no `before`.
-// 4. Verify child.parentID === parent; mismatch → failRequest preCreation:false.
+//    No messages → fork({sessionID: parent}) with no `before` (hosts that
+//    reject empty-session forks throw → pre-creation failure, fallback safe).
+// 4. Verify resolveNativeParentID(child) === parent (live hosts carry
+//    fork.sessionID; parentID may be null); mismatch → failRequest
+//    preCreation:false.
 // 5. Configure agent/model/title through the supported SessionDomain surface.
 // 6. completeWorkerCreate with the native child ID.
 // Fork throws → failRequest preCreation:true (root fallback safe).
 
 import type {
+  NativeForkChild,
   WorkerCreateFailure,
   WorkerCreateRequest,
   WorkerCreateResult,
 } from "./native-rpc"
+import { resolveNativeParentID } from "./native-rpc"
 
 export interface ForkClient {
   session: {
-    fork: (input: { sessionID: string; before?: string }) => Promise<{ id: string; parentID?: string | null }>
+    fork: (input: { sessionID: string; before?: string }) => Promise<NativeForkChild>
     switchAgent?: (input: { sessionID: string; agent: string }) => Promise<unknown>
     switchModel?: (input: { sessionID: string; model: { id: string; providerID: string } }) => Promise<unknown>
     update?: (input: { sessionID: string; title?: string }) => Promise<unknown>
@@ -163,20 +168,21 @@ export async function handleWorkerCreateRequest(
     return fail("message-list-failed", true, error instanceof Error ? error.message : String(error))
   }
 
-  let child: { id: string; parentID?: string | null }
+  let child: NativeForkChild
   try {
     child = await deps.client.session.fork(forkInput)
   } catch (error) {
     return fail("fork-failed", true, error instanceof Error ? error.message : String(error))
   }
 
-  // 4. Verify native parentage. A child whose parentID disagrees is a real
-  // session that already exists → NEVER fall back (would duplicate).
-  if (child.parentID !== request.parentSessionID) {
+  // 4. Verify native parentage. A child whose resolved parent disagrees is a
+  // real session that already exists → NEVER fall back (would duplicate).
+  const actualParent = resolveNativeParentID(child)
+  if (actualParent !== request.parentSessionID) {
     return fail(
       "parent-mismatch",
       false,
-      `child.parentID=${JSON.stringify(child.parentID)} expected=${JSON.stringify(request.parentSessionID)}`,
+      `resolved-parent=${JSON.stringify(actualParent)} expected=${JSON.stringify(request.parentSessionID)}`,
     )
   }
 

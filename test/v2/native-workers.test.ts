@@ -36,7 +36,8 @@ function fakeV2(childParentID: string | undefined = "parent-1"): FakeV2Session {
           return { id: "root-worker-1" }
         },
         get: async ({ sessionID }: any) => {
-          if (sessionID === "child-1") return { id: "child-1", parentID: childParentID }
+          // Live host shape (beta-19271): parentage in fork.sessionID.
+          if (sessionID === "child-1") return { id: "child-1", fork: { sessionID: childParentID } }
           return { id: sessionID }
         },
         switchAgent: async (input: any) => {
@@ -83,6 +84,27 @@ describe("v2 native workers (Phase 3)", () => {
     expect(fake.calls.update).toEqual([{ sessionID: "child-1", title: "loopd: test" }])
     expect(fake.calls.create).toEqual([])
     expect(statuses.get("child-1")).toBe("idle")
+  })
+
+  it("accepts legacy parentID-only children (hosts that populate parentID)", async () => {
+    const fake = fakeV2()
+    const ctx = fake.makeContext("/tmp/x") as any
+    ctx.session.get = async ({ sessionID }: any) => {
+      if (sessionID === "child-1") return { id: "child-1", parentID: "parent-1" }
+      return { id: sessionID }
+    }
+    const host = createV2Host(ctx, new Map<string, SessionStatusType>(), {
+      native: {
+        requestWorker: async () => ({
+          kind: "native-child",
+          childSessionID: "child-1",
+          parentSessionID: "parent-1",
+          topology: "v2-native-child",
+        } satisfies BridgeOutcome),
+      },
+    })
+    const result = await host.createWorker({ parentID: "parent-1", title: "loopd: test" })
+    expect(result).toEqual({ sessionID: "child-1", topology: "v2-native-child", nativeParentID: "parent-1" })
   })
 
   it("throws on parent mismatch (never uses the wrong session)", async () => {
