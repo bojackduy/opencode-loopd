@@ -10,6 +10,7 @@ import { createLoopEngine } from "../application/loop-engine"
 import { createGoalService } from "../application/goal-service"
 import { createScheduleWorker } from "../application/schedule-worker"
 import { createRealHost, createV2Host, type LoopHost, type SessionStatusType } from "./host-adapter"
+import { setupNativeServer, type NativeServerHostContext } from "../v2/native-server"
 import { createCommandHost } from "./command-host"
 import { createCommandService } from "../application/command-service"
 import { createCommandEventBroker } from "../application/command-event-broker"
@@ -261,9 +262,19 @@ const v2 = {
     // actually loaded this build (rebuild alone never reloads a live process).
     void logServerEvent(directory, "plugin.loaded", { pluginID: PLUGIN_ID, host: "v2", version: PLUGIN_VERSION })
     const statuses = new Map<string, SessionStatusType>()
-    const host = createV2Host(context, statuses)
+    // Native-child bridge (v2 only): registers loopd.native RPC + emits
+    // workerCreateRequested for attached TUIs. Undefined when the host has
+    // no RPC domain — createV2Host then uses the flagged root fallback.
+    const native = await setupNativeServer(context as unknown as NativeServerHostContext)
+    if (native) {
+      void logServerEvent(directory, "native-bridge.ready", { pluginID: PLUGIN_ID })
+    } else {
+      void logServerEvent(directory, "native-bridge.unsupported", { pluginID: PLUGIN_ID })
+    }
+    const host = createV2Host(context, statuses, native ? { native } : undefined)
     const hooks = createServerHooks(directory, host, parsePluginDefaults(context.options))
     const registrations: Array<{ dispose(): Promise<void> }> = []
+    if (native) registrations.push({ dispose: () => native.dispose() })
     const eventController = new AbortController()
     let eventTask = Promise.resolve()
     let disposed = false

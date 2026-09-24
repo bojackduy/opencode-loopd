@@ -39,7 +39,7 @@ describe("State Repository", () => {
   describe("readState / writeState", () => {
     it("returns empty state for nonexistent directory", async () => {
       const state = await readState(path.join(dir, "nonexistent"))
-      expect(state.version).toBe(8)
+      expect(state.version).toBe(9)
       expect(state.revision).toBe(0)
       expect(state.goals).toEqual([])
       expect(state.runtimes).toEqual([])
@@ -91,7 +91,7 @@ describe("State Repository", () => {
       await fs.writeFile(tempFile, JSON.stringify(v1State), "utf8")
 
       const loaded = await readState(dir)
-      expect(loaded.version).toBe(8)
+      expect(loaded.version).toBe(9)
       expect(loaded.commandLedger).toEqual([])
       expect(loaded.commandAwaits).toEqual([])
     })
@@ -128,7 +128,7 @@ describe("State Repository", () => {
       await fs.writeFile(tempFile, JSON.stringify(v1State), "utf8")
 
       const loaded = await readState(dir)
-      expect(loaded.version).toBe(8)
+      expect(loaded.version).toBe(9)
       expect(loaded.commandAwaits).toEqual([])
       expect(loaded.goals).toHaveLength(1)
       expect(loaded.goals[0].name).toBe("test")
@@ -138,6 +138,9 @@ describe("State Repository", () => {
       // v3 migration: turnCount -> budgetTurnCount
       expect(loaded.runtimes[0].budgetTurnCount).toBe(10)
       expect(loaded.runtimes[0].runGeneration).toBe(0)
+      // v9 migration: topology fields stay absent for legacy goals
+      expect(loaded.goals[0].workerTopology).toBeUndefined()
+      expect(loaded.goals[0].nativeParentID).toBeUndefined()
     })
   })
 

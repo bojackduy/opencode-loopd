@@ -1,4 +1,4 @@
-export type { GoalStatus, GoalID, Goal, GoalConfig } from "./goal"
+export type { GoalStatus, GoalID, Goal, GoalConfig, WorkerTopology } from "./goal"
 export { createGoal, canTransition, MODEL_TRANSITIONS, USER_TRANSITIONS, SYSTEM_TRANSITIONS } from "./goal"
 export type { RuntimePhase, RunID, GoalRuntimeState } from "./runtime"
 export { createRuntimeState, acquireLease, releaseLease, leaseIsValid, markProgress } from "./runtime"

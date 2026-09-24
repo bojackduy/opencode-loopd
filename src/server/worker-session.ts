@@ -3,16 +3,19 @@
 // Continuation steering provides accumulated context so the child knows
 // what it already did, what's left, and verifies completion carefully.
 
-import type { GoalID, Goal } from "../domain/goal"
+import type { GoalID, Goal, WorkerTopology } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
 import { acquireLease, releaseLease } from "../domain/runtime"
 import type { LoopHost, SessionMessage } from "./host-adapter"
-import { parseModelRef } from "./host-adapter"
+import { parseModelRef, toWorkerCreation } from "./host-adapter"
 
 export interface WorkerSession {
   goalID: GoalID
   workerSessionID: string
   startedAt: string
+  /** v2 topology metadata (absent for v1 / legacy workers). */
+  topology?: WorkerTopology
+  nativeParentID?: string
 }
 
 /** Accumulated context passed to the child each continuation turn. */
@@ -62,17 +65,19 @@ export interface WorkerManager {
 export function createWorkerManager(host: LoopHost): WorkerManager {
   return {
     async createWorker(goal: Goal) {
-      const workerSessionID = await host.createWorker({
+      const created = toWorkerCreation(await host.createWorker({
         parentID: goal.ownerSessionID,
         title: `loopd: ${goal.name}`,
         agent: goal.config.agent,
         model: parseModelRef(goal.config.model),
-      })
+        goalID: goal.id,
+      }))
 
       return {
         goalID: goal.id,
-        workerSessionID,
+        workerSessionID: created.sessionID,
         startedAt: new Date().toISOString(),
+        ...(created.topology ? { topology: created.topology, nativeParentID: created.nativeParentID } : {}),
       }
     },
 

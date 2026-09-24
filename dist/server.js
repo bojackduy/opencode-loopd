@@ -326,6 +326,14 @@ function migrate(state) {
     if (!Array.isArray(result.commandAwaits))
       result.commandAwaits = [];
   }
+  if (result.version < 9) {
+    result.version = 9;
+    result.goals = result.goals.map((goal) => ({
+      ...goal,
+      workerTopology: goal.workerTopology ?? undefined,
+      nativeParentID: goal.nativeParentID ?? undefined
+    }));
+  }
   return result;
 }
 async function writeAtomic(target, contents) {
@@ -555,7 +563,7 @@ async function removeCommandLog(directory, commandID) {
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-var CURRENT_VERSION = 8, LOCK_STALE_MS = 1e4;
+var CURRENT_VERSION = 9, LOCK_STALE_MS = 1e4;
 var init_state_repository = () => {};
 
 // src/domain/command-await.ts
@@ -2596,10 +2604,66 @@ function createRealHost(client, directory) {
     }
   };
 }
-function createV2Host(context, statuses) {
+function toWorkerCreation(result) {
+  return typeof result === "string" ? { sessionID: result } : result;
+}
+function createV2Host(context, statuses, options = {}) {
   const directory = context.location.directory;
   return {
-    async createWorker({ parentID, title, agent, model }) {
+    async createWorker({ parentID, title, agent, model, goalID }) {
+      if (options.native) {
+        let outcome;
+        try {
+          outcome = await options.native.requestWorker({
+            goalID,
+            parentSessionID: parentID,
+            title,
+            agent,
+            model,
+            directory
+          });
+        } catch (error) {
+          await logServerEvent(directory, "worker.create.native-failed", {
+            parentID,
+            title,
+            detail: describeError(error)
+          });
+          throw error;
+        }
+        if (outcome.kind === "native-child") {
+          const childID = outcome.childSessionID;
+          const child = await context.session.get({ sessionID: childID });
+          const actualParent = child.parentID;
+          if (actualParent !== parentID) {
+            const detail = `child.parentID=${JSON.stringify(actualParent)} expected=${JSON.stringify(parentID)}`;
+            await logServerEvent(directory, "worker.create.parent-mismatch", { parentID, workerSessionID: childID, detail });
+            throw new Error(`loopd native worker creation failed for parent "${parentID}" (parent-mismatch): ${detail}`);
+          }
+          if (agent)
+            await context.session.switchAgent({ sessionID: childID, agent });
+          if (model) {
+            await context.session.switchModel({
+              sessionID: childID,
+              model: { id: model.modelID, providerID: model.providerID }
+            });
+          }
+          await context.session.update({ sessionID: childID, title });
+          statuses.set(childID, "idle");
+          await logServerEvent(directory, "worker.created", {
+            parentID,
+            workerSessionID: childID,
+            title,
+            topology: "v2-native-child",
+            nativeParentID: parentID
+          });
+          return { sessionID: childID, topology: "v2-native-child", nativeParentID: parentID };
+        }
+        await logServerEvent(directory, "worker.create.native-fallback", {
+          parentID,
+          title,
+          reason: outcome.kind === "fallback-safe" ? outcome.reason : "unclaimed"
+        });
+      }
       const session = await context.session.create({
         title,
         agent,
@@ -2608,8 +2672,13 @@ function createV2Host(context, statuses) {
         metadata: { "loopd.parentID": parentID }
       });
       statuses.set(session.id, "idle");
-      await logServerEvent(directory, "worker.created", { parentID, workerSessionID: session.id, title });
-      return session.id;
+      await logServerEvent(directory, "worker.created", {
+        parentID,
+        workerSessionID: session.id,
+        title,
+        topology: "v2-root-fallback"
+      });
+      return { sessionID: session.id, topology: "v2-root-fallback" };
     },
     async promptWorker({ sessionID, prompt, messageID, model, agent }) {
       if (agent)
@@ -2727,16 +2796,18 @@ async function withTimeout(promise, timeoutMs, operation) {
 function createWorkerManager(host) {
   return {
     async createWorker(goal) {
-      const workerSessionID = await host.createWorker({
+      const created = toWorkerCreation(await host.createWorker({
         parentID: goal.ownerSessionID,
         title: `loopd: ${goal.name}`,
         agent: goal.config.agent,
-        model: parseModelRef(goal.config.model)
-      });
+        model: parseModelRef(goal.config.model),
+        goalID: goal.id
+      }));
       return {
         goalID: goal.id,
-        workerSessionID,
-        startedAt: new Date().toISOString()
+        workerSessionID: created.sessionID,
+        startedAt: new Date().toISOString(),
+        ...created.topology ? { topology: created.topology, nativeParentID: created.nativeParentID } : {}
       };
     },
     async continueWorker(worker, goal, runtime, context) {
@@ -2980,8 +3051,13 @@ function createGoalService(host) {
     sessions.set(goal.id, session);
     await mutateState(directory, `goal.set-worker:${goal.id}`, async (s) => {
       const persisted = s.goals.find((item) => item.id === goal.id);
-      if (persisted)
+      if (persisted) {
         persisted.workerSessionID = session.workerSessionID;
+        if (session.topology) {
+          persisted.workerTopology = session.topology;
+          persisted.nativeParentID = session.nativeParentID;
+        }
+      }
       return s;
     });
     return session;
@@ -3085,6 +3161,12 @@ function createGoalService(host) {
         return state;
       g.workerSessionID = worker.workerSessionID;
       goal.workerSessionID = worker.workerSessionID;
+      if (worker.topology) {
+        g.workerTopology = worker.topology;
+        g.nativeParentID = worker.nativeParentID;
+        goal.workerTopology = worker.topology;
+        goal.nativeParentID = worker.nativeParentID;
+      }
       const rt = state.runtimes.find((item) => item.goalID === id);
       if (rt) {
         Object.assign(rt, acquireLease(rt, g.config.timeoutMs || 300000));
@@ -3522,6 +3604,10 @@ function createGoalService(host) {
           const g = s.goals.find((item) => item.id === goal.id);
           if (g) {
             g.workerSessionID = worker.workerSessionID;
+            if (worker.topology) {
+              g.workerTopology = worker.topology;
+              g.nativeParentID = worker.nativeParentID;
+            }
             g.updatedAt = new Date().toISOString();
           }
           return s;
@@ -3790,6 +3876,265 @@ function createScheduleWorker(options) {
   return { start, stop, isRunning, tick };
 }
 
+// src/v2/native-server.ts
+import { randomUUID as randomUUID7 } from "crypto";
+
+// src/v2/native-rpc.ts
+var NATIVE_RPC_ID = "loopd.native";
+var CLAIM_TIMEOUT_MS = 3000;
+var CLAIMED_TIMEOUT_MS = 15000;
+var requestSchema = {
+  type: "object",
+  properties: {
+    requestID: { type: "string" },
+    goalID: { type: "string" },
+    parentSessionID: { type: "string" },
+    title: { type: "string" },
+    agent: { type: "string" },
+    model: {
+      type: "object",
+      properties: {
+        id: { type: "string" },
+        providerID: { type: "string" }
+      },
+      required: ["id", "providerID"],
+      additionalProperties: false
+    },
+    permissions: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          action: { type: "string" },
+          resource: { type: "string" },
+          effect: { type: "string", enum: ["allow", "deny", "ask"] }
+        },
+        required: ["action", "resource", "effect"],
+        additionalProperties: false
+      }
+    },
+    directory: { type: "string" }
+  },
+  required: ["requestID", "goalID", "parentSessionID", "title"],
+  additionalProperties: false
+};
+var claimResultSchema = {
+  type: "object",
+  properties: {
+    requestID: { type: "string" },
+    claimantID: { type: "string" }
+  },
+  required: ["requestID", "claimantID"],
+  additionalProperties: false
+};
+var claimAckSchema = {
+  type: "object",
+  properties: {
+    requestID: { type: "string" },
+    claimantID: { type: "string" },
+    won: { type: "boolean" }
+  },
+  required: ["requestID", "claimantID", "won"],
+  additionalProperties: false
+};
+var createResultSchema = {
+  type: "object",
+  properties: {
+    requestID: { type: "string" },
+    childSessionID: { type: "string" },
+    parentSessionID: { type: "string" },
+    topology: { type: "string", const: "v2-native-child" }
+  },
+  required: ["requestID", "childSessionID", "parentSessionID", "topology"],
+  additionalProperties: false
+};
+var failureSchema = {
+  type: "object",
+  properties: {
+    requestID: { type: "string" },
+    reason: { type: "string" },
+    detail: { type: "string" },
+    preCreation: { type: "boolean" }
+  },
+  required: ["requestID", "reason", "preCreation"],
+  additionalProperties: false
+};
+var emptySchema = {
+  type: "object",
+  properties: {},
+  additionalProperties: false
+};
+var nativeRpcDefinition = {
+  id: NATIVE_RPC_ID,
+  methods: {
+    claimRequest: { input: claimResultSchema, output: claimAckSchema, errors: {} },
+    completeWorkerCreate: { input: createResultSchema, output: emptySchema, errors: {} },
+    failRequest: { input: failureSchema, output: emptySchema, errors: {} }
+  },
+  events: {
+    workerCreateRequested: { schema: requestSchema }
+  }
+};
+
+// src/v2/native-bridge.ts
+class NativeBridgeError extends Error {
+  code;
+  requestID;
+  constructor(code, requestID, message) {
+    super(message);
+    this.name = "NativeBridgeError";
+    this.code = code;
+    this.requestID = requestID;
+  }
+}
+function createNativeBridge(options = {}) {
+  const claimTimeoutMs = options.claimTimeoutMs ?? CLAIM_TIMEOUT_MS;
+  const claimedTimeoutMs = options.claimedTimeoutMs ?? CLAIMED_TIMEOUT_MS;
+  const pending = new Map;
+  let disposed = false;
+  function settle(requestID, settleFn) {
+    const entry = pending.get(requestID);
+    if (!entry || entry.state === "settled")
+      return false;
+    entry.state = "settled";
+    if (entry.claimTimer)
+      clearTimeout(entry.claimTimer);
+    if (entry.claimedTimer)
+      clearTimeout(entry.claimedTimer);
+    pending.delete(requestID);
+    settleFn(entry);
+    return true;
+  }
+  return {
+    pendingCount: () => pending.size,
+    isDisposed: () => disposed,
+    requestWorker(request, emit) {
+      if (disposed) {
+        return Promise.reject(new NativeBridgeError("disposed", request.requestID, "native bridge is disposed"));
+      }
+      return new Promise((resolve, reject) => {
+        const entry = { state: "awaiting-claim", resolve, reject };
+        pending.set(request.requestID, entry);
+        let emitResult;
+        try {
+          emitResult = emit(request);
+        } catch {
+          settle(request.requestID, (e) => e.resolve({ kind: "unclaimed" }));
+          return;
+        }
+        const afterEmit = () => {
+          const live = pending.get(request.requestID);
+          if (!live || live.state !== "awaiting-claim")
+            return;
+          live.claimTimer = setTimeout(() => {
+            settle(request.requestID, (e) => e.resolve({ kind: "unclaimed" }));
+          }, claimTimeoutMs);
+          if (typeof live.claimTimer?.unref === "function")
+            live.claimTimer.unref();
+        };
+        if (emitResult && typeof emitResult.then === "function") {
+          emitResult.then(afterEmit, () => {
+            settle(request.requestID, (e) => e.resolve({ kind: "unclaimed" }));
+          });
+        } else {
+          afterEmit();
+        }
+      });
+    },
+    handleClaim(claim) {
+      const entry = pending.get(claim.requestID);
+      if (!entry || entry.state !== "awaiting-claim")
+        return { won: false };
+      entry.state = "claimed";
+      entry.claimantID = claim.claimantID;
+      if (entry.claimTimer)
+        clearTimeout(entry.claimTimer);
+      entry.claimedTimer = setTimeout(() => {
+        settle(claim.requestID, (e) => e.reject(new NativeBridgeError("claimed-timeout", claim.requestID, `claimant "${claim.claimantID}" vanished before completing worker creation; failing startup rather than duplicating`)));
+      }, claimedTimeoutMs);
+      if (typeof entry.claimedTimer?.unref === "function")
+        entry.claimedTimer.unref();
+      return { won: true };
+    },
+    handleComplete(result) {
+      return settle(result.requestID, (entry) => entry.resolve({
+        kind: "native-child",
+        childSessionID: result.childSessionID,
+        parentSessionID: result.parentSessionID,
+        topology: "v2-native-child"
+      }));
+    },
+    handleFailure(failure) {
+      if (failure.preCreation) {
+        return settle(failure.requestID, (entry) => entry.resolve({ kind: "fallback-safe", reason: failure.reason, detail: failure.detail }));
+      }
+      return settle(failure.requestID, (entry) => entry.reject(new NativeBridgeError(failure.reason === "parent-mismatch" ? "parent-mismatch" : "fork-failed", failure.requestID, `native worker creation failed post-creation (${failure.reason}): ${failure.detail ?? "no detail"}`)));
+    },
+    dispose() {
+      disposed = true;
+      const ids = [...pending.keys()];
+      for (const id of ids) {
+        settle(id, (entry) => entry.reject(new NativeBridgeError("disposed", id, "native bridge disposed with request pending")));
+      }
+    }
+  };
+}
+
+// src/v2/native-server.ts
+async function setupNativeServer(context) {
+  if (!context || !context.rpc || typeof context.rpc.register !== "function")
+    return;
+  const bridge = createNativeBridge();
+  let registration;
+  try {
+    registration = await context.rpc.register(nativeRpcDefinition, {
+      claimRequest: async (input) => {
+        const { won } = bridge.handleClaim(input);
+        return { requestID: input.requestID, claimantID: input.claimantID, won };
+      },
+      completeWorkerCreate: async (input) => {
+        bridge.handleComplete(input);
+        return {};
+      },
+      failRequest: async (input) => {
+        bridge.handleFailure(input);
+        return {};
+      }
+    });
+  } catch {
+    bridge.dispose();
+    return;
+  }
+  if (!registration || !registration.events || typeof registration.events.emit !== "function") {
+    bridge.dispose();
+    try {
+      await registration?.dispose();
+    } catch {}
+    return;
+  }
+  return {
+    bridge,
+    requestWorker: async (input) => {
+      const request = {
+        requestID: `req_${randomUUID7()}`,
+        goalID: input.goalID ?? "",
+        parentSessionID: input.parentSessionID,
+        title: input.title,
+        ...input.agent ? { agent: input.agent } : {},
+        ...input.model ? { model: { id: input.model.modelID, providerID: input.model.providerID } } : {},
+        directory: input.directory
+      };
+      return bridge.requestWorker(request, (req) => registration.events.emit("workerCreateRequested", req));
+    },
+    dispose: async () => {
+      bridge.dispose();
+      try {
+        await registration.dispose();
+      } catch {}
+    }
+  };
+}
+
 // src/server/command-host.ts
 import { createRequire } from "module";
 var COMMAND_HOST_CAPABILITIES = {
@@ -4040,7 +4385,7 @@ function createCommandHost(opts) {
 }
 
 // src/application/command-service.ts
-import { randomUUID as randomUUID7 } from "crypto";
+import { randomUUID as randomUUID8 } from "crypto";
 import { promises as fs3 } from "fs";
 import path3 from "path";
 
@@ -4411,7 +4756,7 @@ function createCommandService(host, opts) {
     }).catch(() => {});
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID7(),
+      eventID: randomUUID8(),
       commandID: id,
       type: "command.exited",
       exitCode: info.exitCode,
@@ -4439,7 +4784,7 @@ function createCommandService(host, opts) {
       if (!input.ownerSessionID || input.ownerSessionID === "main") {
         throw new Error("A valid owner session is required. Run from an active OpenCode session.");
       }
-      const id = randomUUID7();
+      const id = randomUUID8();
       const cwd = input.cwd || directory;
       const pending = [];
       let ready = false;
@@ -4485,7 +4830,7 @@ function createCommandService(host, opts) {
       rememberDir(id, directory);
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID7(),
+        eventID: randomUUID8(),
         ...input.goalID ? { goalID: input.goalID } : {},
         commandID: id,
         type: "command.started",
@@ -4761,7 +5106,7 @@ function createCommandService(host, opts) {
 }
 
 // src/application/command-event-broker.ts
-import { randomUUID as randomUUID8 } from "crypto";
+import { randomUUID as randomUUID9 } from "crypto";
 function safeDeliver(sink, msg) {
   try {
     sink(msg);
@@ -4804,7 +5149,7 @@ function createCommandEventBroker(resolver) {
         throw new Error("ownerSessionID is required.");
       if (typeof sink !== "function")
         throw new Error("sink must be a function.");
-      const sinkID = randomUUID8();
+      const sinkID = randomUUID9();
       const entry = { sinkID, sink, state: "subscribing", buffer: [] };
       entriesFor(commandID).set(sinkID, entry);
       try {
@@ -4893,7 +5238,7 @@ function createCommandEventBroker(resolver) {
 }
 
 // src/server/command-stream-server.ts
-import { randomBytes, randomUUID as randomUUID9, timingSafeEqual } from "crypto";
+import { randomBytes, randomUUID as randomUUID10, timingSafeEqual } from "crypto";
 import { promises as fs4 } from "fs";
 import path4 from "path";
 function streamEndpointPath(directory) {
@@ -4927,7 +5272,7 @@ var MAX_BUFFERED_BYTES = 512 * 1024;
 function createCommandStreamServer(directory, commandService, broker) {
   const endpointPath = streamEndpointPath(directory);
   const token = randomBytes(32).toString("hex");
-  const generation = randomUUID9();
+  const generation = randomUUID10();
   const startedAt = new Date().toISOString();
   let server;
   let serverURL;
@@ -5247,7 +5592,7 @@ function createCommandStreamServer(directory, commandService, broker) {
 
 // src/server/goal-tools.ts
 init_state_repository();
-import { randomUUID as randomUUID10 } from "crypto";
+import { randomUUID as randomUUID11 } from "crypto";
 import { tool } from "@opencode-ai/plugin/tool";
 // src/domain/verification.ts
 var MAX_RECENT_ATTEMPTS = 10;
@@ -5386,6 +5731,8 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
               ok: true,
               goalID: goal.id,
               workerSessionID: worker.workerSessionID,
+              workerTopology: worker.topology,
+              ...worker.nativeParentID ? { nativeParentID: worker.nativeParentID } : {},
               artifactDir: goal.config.artifactDir,
               agent: resolution.config.agent,
               model: resolution.config.model,
@@ -5472,7 +5819,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID10(),
+          eventID: randomUUID11(),
           goalID: goal.id,
           type: "goal.progress",
           summary: args.summary,
@@ -5537,7 +5884,7 @@ Exit code: ${f.exitCode}${stdoutSnippet}${stderrSnippet}`;
 Working directory: ${cwd}
 
 ${failureDetails}`;
-              attemptID = randomUUID10();
+              attemptID = randomUUID11();
               const verificationAttempt = {
                 id: attemptID,
                 sequence: runtime.evaluatorRejectionCount,
@@ -5582,7 +5929,7 @@ ${failureDetails.slice(0, 500)}`,
             if (attemptID) {
               await appendEvent(dir, {
                 version: 1,
-                eventID: randomUUID10(),
+                eventID: randomUUID11(),
                 goalID: goal.id,
                 type: "goal.completion_rejected",
                 attemptID,
@@ -5600,7 +5947,7 @@ ${failureDetails.slice(0, 500)}`,
             if (blocked && rejectedGoal?.blocker) {
               await appendEvent(dir, {
                 version: 1,
-                eventID: randomUUID10(),
+                eventID: randomUUID11(),
                 goalID: goal.id,
                 type: "goal.blocked",
                 reason: rejectedGoal.blocker.reason,
@@ -5660,7 +6007,7 @@ ${failureDetails.slice(0, 500)}`,
             }
             runtime.updatedAt = new Date().toISOString();
           }
-          const attemptID = randomUUID10();
+          const attemptID = randomUUID11();
           const cwd = goal.config.checkCwd || goal.config.artifactDir || dir;
           const checks = (goal.config.checks || []).map((cmd) => ({
             command: cmd,
@@ -5684,7 +6031,7 @@ ${failureDetails.slice(0, 500)}`,
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID10(),
+          eventID: randomUUID11(),
           goalID: goal.id,
           type: "goal.completed",
           summary: args.summary,
@@ -5744,7 +6091,7 @@ ${failureDetails.slice(0, 500)}`,
         await writeState(dir, state);
         const event = {
           version: 1,
-          eventID: randomUUID10(),
+          eventID: randomUUID11(),
           goalID: goal.id,
           type: "goal.blocked",
           reason: args.reason,
@@ -6059,6 +6406,8 @@ function ownerTools(options) {
             stateSummary: describeGoalState(goal.status, runtime?.phase),
             ownerSessionID: goal.ownerSessionID,
             workerSessionID: goal.workerSessionID,
+            workerTopology: goal.workerTopology,
+            ...goal.nativeParentID ? { nativeParentID: goal.nativeParentID } : {},
             config: {
               maxTurns: goal.config.maxTurns,
               maxFailures: goal.config.maxFailures,
@@ -6921,9 +7270,17 @@ var v2 = {
     const directory = context.location.directory;
     logServerEvent(directory, "plugin.loaded", { pluginID: PLUGIN_ID, host: "v2", version });
     const statuses = new Map;
-    const host = createV2Host(context, statuses);
+    const native = await setupNativeServer(context);
+    if (native) {
+      logServerEvent(directory, "native-bridge.ready", { pluginID: PLUGIN_ID });
+    } else {
+      logServerEvent(directory, "native-bridge.unsupported", { pluginID: PLUGIN_ID });
+    }
+    const host = createV2Host(context, statuses, native ? { native } : undefined);
     const hooks = createServerHooks(directory, host, parsePluginDefaults(context.options));
     const registrations = [];
+    if (native)
+      registrations.push({ dispose: () => native.dispose() });
     const eventController = new AbortController;
     let eventTask = Promise.resolve();
     let disposed = false;

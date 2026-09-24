@@ -11,7 +11,7 @@ import type { GoalRuntimeState } from "../domain/runtime"
 import type { CommandSession } from "../domain/command-session"
 import type { CommandAwait } from "../domain/command-await"
 
-const CURRENT_VERSION = 8
+const CURRENT_VERSION = 9
 
 export interface StoreState {
   version: number
@@ -288,6 +288,18 @@ function migrate(state: StoreState): StoreState {
     // Opt-in command awaits are new in v8. IDs only — never synthesize entries
     // on migrate; only ensure the array exists.
     if (!Array.isArray((result as any).commandAwaits)) (result as any).commandAwaits = []
+  }
+
+  if (result.version < 9) {
+    result.version = 9
+    // v2-native worker topology is new in v9. Additive optionals only: leave
+    // existing goals without topology metadata (absent = legacy / unknown),
+    // so reconcile/restart keeps prior behavior for pre-bridge goals.
+    result.goals = result.goals.map((goal: any) => ({
+      ...goal,
+      workerTopology: goal.workerTopology ?? undefined,
+      nativeParentID: goal.nativeParentID ?? undefined,
+    }))
   }
 
   return result

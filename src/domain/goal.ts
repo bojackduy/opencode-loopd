@@ -11,6 +11,14 @@ export type GoalStatus =
 
 export type GoalID = string & { readonly __brand: "GoalID" }
 
+/**
+ * How a goal's worker session is topologically attached.
+ * - "v1-child": legacy v1 host child (parentID-native).
+ * - "v2-native-child": forked native child of the owner session (v2 bridge).
+ * - "v2-root-fallback": separate root session carrying loopd.parentID metadata.
+ */
+export type WorkerTopology = "v1-child" | "v2-native-child" | "v2-root-fallback"
+
 export interface Goal {
   id: GoalID
   name: string
@@ -22,6 +30,18 @@ export interface Goal {
 
   /** Worker session doing the actual work. Created on start. */
   workerSessionID?: string
+
+  /**
+   * How the worker session is topologically attached (v2-native bridge).
+   * Additive optional: absent = legacy / unknown (v1 child or pre-bridge).
+   */
+  workerTopology?: WorkerTopology
+
+  /**
+   * For v2-native-child workers: the parent session the child was forked
+   * from (verified child.parentID === nativeParentID at creation).
+   */
+  nativeParentID?: string
 
   /** Token budget. undefined = unlimited. */
   tokenBudget?: number

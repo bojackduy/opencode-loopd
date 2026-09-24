@@ -8,6 +8,8 @@ import { LoopDashboard } from "./dashboard"
 import { CommandPanel } from "./command-panel"
 import { TerminalView } from "./terminal-view"
 import { TERMINAL_ROUTE_NAME, currentRouteSessionID, terminalRoutePayload } from "./terminal-route"
+import { nativeRpcDefinition } from "../v2/native-rpc"
+import { subscribeNativeRequests, type NativeRpcClient } from "../v2/native-tui"
 
 const PLUGIN_ID = "opencode-loopd.tui"
 
@@ -249,6 +251,61 @@ const REFRESH_EVENTS = [
 const v2setup: TuiV2.Definition["setup"] = (ctx) => {
   const directory = ctx.location?.directory ?? ctx.data.location.default().directory
 
+  // Native-worker bridge (v2 only): subscribe to the server's
+  // workerCreateRequested events and fork real children via the full client.
+  // Unsupported hosts (no client.rpc) simply never claim; the server takes
+  // its flagged root fallback. Never touches command/PTY state.
+  const claimantID = `tui-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`
+  let unsubscribeNative: (() => void) | undefined
+  try {
+    const rpcClient = (ctx.client as unknown as {
+      rpc: (definition: unknown) => NativeRpcClient
+    }).rpc(nativeRpcDefinition) as NativeRpcClient
+    unsubscribeNative = subscribeNativeRequests(rpcClient, {
+      client: {
+        session: {
+          fork: (input) => ctx.client.session.fork(input),
+          switchAgent: (input) => ctx.client.session.switchAgent(input),
+          switchModel: (input) => ctx.client.session.switchModel(input),
+          update: (input) => ctx.client.session.update(input),
+        },
+      },
+      data: {
+        session: {
+          get: (sessionID) => {
+            const session = ctx.data.session.get(sessionID)
+            return session ? { id: session.id } : undefined
+          },
+          message: {
+            list: (sessionID) =>
+              ctx.data.session.message.list(sessionID).map((message) => ({ id: (message as { id: string }).id })),
+          },
+        },
+      },
+      claimantID,
+      onOutcome: (outcome, requestID) => {
+        try {
+          const { appendFileSync } = require("node:fs") as typeof import("node:fs")
+          appendFileSync(
+            "/tmp/loopd-tui.log",
+            `[${new Date().toISOString()}] native-worker request=${requestID} outcome=${JSON.stringify(outcome)}\n`,
+          )
+        } catch {}
+      },
+      isKnownParent: (parentSessionID) => {
+        const parent = ctx.data.session.get(parentSessionID) as
+          | { location?: { directory?: string } }
+          | undefined
+        if (!parent) return false
+        const parentDirectory = parent.location?.directory
+        if (!parentDirectory) return true
+        return parentDirectory === directory
+      },
+    })
+  } catch {
+    unsubscribeNative = undefined
+  }
+
   let dialogOpen = false
   const closeDialog = () => {
     dialogOpen = false
@@ -430,6 +487,9 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
   return () => {
     closeDialog()
     ctx.ui.panel.close()
+    try {
+      unsubscribeNative?.()
+    } catch {}
     try {
       unregisterTerminalRoute?.()
     } catch {}

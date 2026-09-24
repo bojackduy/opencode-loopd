@@ -5,6 +5,8 @@
 import { randomUUID } from "crypto"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
 import type { Plugin as V2Plugin } from "@opencode/plugin"
+import type { BridgeOutcome } from "../v2/native-bridge"
+import type { WorkerTopology } from "../v2/native-rpc"
 
 export interface ModelRef {
   providerID: string
@@ -78,7 +80,12 @@ export function isV2PromptMessageID(messageID: string): boolean {
 }
 
 export interface LoopHost {
-  createWorker(input: { parentID: string; title: string; agent?: string; model?: ModelRef }): Promise<string>
+  /**
+   * Create a worker session. Returns the session ID (v1 + legacy callers) or
+   * a WorkerCreation carrying the ID plus v2 topology metadata. v1 and fake
+   * hosts return the bare string; only the v2 host returns the object form.
+   */
+  createWorker(input: { parentID: string; title: string; agent?: string; model?: ModelRef; goalID?: string }): Promise<string | WorkerCreation>
   promptWorker(input: {
     sessionID: string
     prompt: string
@@ -329,14 +336,110 @@ export function createRealHost(client: any, directory: string): LoopHost {
 
 // ─── V2 Host ────────────────────────────────────────────────────────────────
 
+/**
+ * Rich worker-creation result. Only the v2 host produces the object form;
+ * v1 and fake hosts keep returning the bare session-ID string.
+ */
+export interface WorkerCreation {
+  sessionID: string
+  topology?: WorkerTopology
+  nativeParentID?: string
+}
+
+/** Normalize any host's createWorker result to the rich form. */
+export function toWorkerCreation(result: string | WorkerCreation): WorkerCreation {
+  return typeof result === "string" ? { sessionID: result } : result
+}
+
+export interface NativeWorkerDependency {
+  requestWorker: (input: {
+    goalID?: string
+    parentSessionID: string
+    title: string
+    agent?: string
+    model?: ModelRef
+    directory: string
+  }) => Promise<BridgeOutcome>
+}
+
+export interface CreateV2HostOptions {
+  /**
+   * Native-child bridge (Phase 2 wiring). Absent = bridge unsupported:
+   * createWorker takes the flagged root fallback directly.
+   */
+  native?: NativeWorkerDependency
+}
+
 export function createV2Host(
   context: V2Plugin.Context,
   statuses: Map<string, SessionStatusType>,
+  options: CreateV2HostOptions = {},
 ): LoopHost {
   const directory = context.location.directory
 
   return {
-    async createWorker({ parentID, title, agent, model }) {
+    async createWorker({ parentID, title, agent, model, goalID }) {
+      // Native path: ask exactly one attached TUI to fork a real child of
+      // the parent session. Unclaimed / pre-creation-failed requests fall
+      // through to the flagged root fallback below. Claimed-timeout and
+      // post-creation failures propagate (fail startup, never duplicate).
+      if (options.native) {
+        let outcome: BridgeOutcome
+        try {
+          outcome = await options.native.requestWorker({
+            goalID,
+            parentSessionID: parentID,
+            title,
+            agent,
+            model,
+            directory,
+          })
+        } catch (error) {
+          await logServerEvent(directory, "worker.create.native-failed", {
+            parentID,
+            title,
+            detail: describeError(error),
+          })
+          throw error
+        }
+        if (outcome.kind === "native-child") {
+          const childID = outcome.childSessionID
+          // Verify native parentage through the supported SessionDomain
+          // before trusting the child: a mismatch means the TUI forked the
+          // wrong session, and using it would corrupt goal linkage.
+          const child = await context.session.get({ sessionID: childID })
+          const actualParent = (child as { parentID?: unknown }).parentID
+          if (actualParent !== parentID) {
+            const detail = `child.parentID=${JSON.stringify(actualParent)} expected=${JSON.stringify(parentID)}`
+            await logServerEvent(directory, "worker.create.parent-mismatch", { parentID, workerSessionID: childID, detail })
+            throw new Error(`loopd native worker creation failed for parent "${parentID}" (parent-mismatch): ${detail}`)
+          }
+          // Configure through the supported SessionDomain (the TUI already
+          // applied these at fork time; re-applying is idempotent).
+          if (agent) await context.session.switchAgent({ sessionID: childID, agent })
+          if (model) {
+            await context.session.switchModel({
+              sessionID: childID,
+              model: { id: model.modelID, providerID: model.providerID },
+            })
+          }
+          await context.session.update({ sessionID: childID, title })
+          statuses.set(childID, "idle")
+          await logServerEvent(directory, "worker.created", {
+            parentID,
+            workerSessionID: childID,
+            title,
+            topology: "v2-native-child",
+            nativeParentID: parentID,
+          })
+          return { sessionID: childID, topology: "v2-native-child", nativeParentID: parentID } satisfies WorkerCreation
+        }
+        await logServerEvent(directory, "worker.create.native-fallback", {
+          parentID,
+          title,
+          reason: outcome.kind === "fallback-safe" ? outcome.reason : "unclaimed",
+        })
+      }
       const session = await context.session.create({
         title,
         agent,
@@ -345,8 +448,13 @@ export function createV2Host(
         metadata: { "loopd.parentID": parentID },
       })
       statuses.set(session.id, "idle")
-      await logServerEvent(directory, "worker.created", { parentID, workerSessionID: session.id, title })
-      return session.id
+      await logServerEvent(directory, "worker.created", {
+        parentID,
+        workerSessionID: session.id,
+        title,
+        topology: "v2-root-fallback",
+      })
+      return { sessionID: session.id, topology: "v2-root-fallback" } satisfies WorkerCreation
     },
 
     async promptWorker({ sessionID, prompt, messageID, model, agent }) {

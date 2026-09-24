@@ -234,7 +234,13 @@ export function createGoalService(host: LoopHost): GoalService {
     sessions.set(goal.id, session)
     await mutateState(directory, `goal.set-worker:${goal.id}`, async (s) => {
       const persisted = s.goals.find((item) => item.id === goal.id)
-      if (persisted) persisted.workerSessionID = session!.workerSessionID
+      if (persisted) {
+        persisted.workerSessionID = session!.workerSessionID
+        if (session!.topology) {
+          persisted.workerTopology = session!.topology
+          persisted.nativeParentID = session!.nativeParentID
+        }
+      }
       return s
     })
     return session
@@ -362,6 +368,12 @@ export function createGoalService(host: LoopHost): GoalService {
       if (!g) return state
       g.workerSessionID = worker.workerSessionID
       goal.workerSessionID = worker.workerSessionID
+      if (worker.topology) {
+        g.workerTopology = worker.topology
+        g.nativeParentID = worker.nativeParentID
+        goal.workerTopology = worker.topology
+        goal.nativeParentID = worker.nativeParentID
+      }
       const rt = state.runtimes.find((item) => item.goalID === id)
       if (rt) {
         Object.assign(rt, acquireLease(rt, g.config.timeoutMs || 300_000))
@@ -865,6 +877,10 @@ export function createGoalService(host: LoopHost): GoalService {
           const g = s.goals.find((item) => item.id === goal.id)
           if (g) {
             g.workerSessionID = worker!.workerSessionID
+            if (worker!.topology) {
+              g.workerTopology = worker!.topology
+              g.nativeParentID = worker!.nativeParentID
+            }
             g.updatedAt = new Date().toISOString()
           }
           return s

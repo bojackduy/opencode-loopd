@@ -158,6 +158,8 @@ export function goalTools(
               ok: true,
               goalID: goal.id,
               workerSessionID: worker.workerSessionID,
+              workerTopology: worker.topology,
+              ...(worker.nativeParentID ? { nativeParentID: worker.nativeParentID } : {}),
               artifactDir: goal.config.artifactDir,
               agent: resolution.config.agent,
               model: resolution.config.model,

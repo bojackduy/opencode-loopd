@@ -181,6 +181,8 @@ export function ownerTools(options: OwnerToolsOptions) {
             stateSummary: describeGoalState(goal.status, runtime?.phase),
             ownerSessionID: goal.ownerSessionID,
             workerSessionID: goal.workerSessionID,
+            workerTopology: goal.workerTopology,
+            ...(goal.nativeParentID ? { nativeParentID: goal.nativeParentID } : {}),
             config: {
               maxTurns: goal.config.maxTurns,
               maxFailures: goal.config.maxFailures,
