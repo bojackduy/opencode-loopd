@@ -171,3 +171,95 @@ describe("CommandService", () => {
     expect(blob).not.toMatch(/handle|screen|stdin|stdout/i)
   })
 })
+
+describe("CommandService owner-exit notification (the missing hop: no goal/await needed)", () => {
+  let dir: string
+  let host: ReturnType<typeof createFakeCommandHost>
+
+  beforeEach(async () => {
+    dir = tmpDir()
+    await fs.mkdir(dir, { recursive: true })
+    host = createFakeCommandHost()
+  })
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true })
+  })
+
+  function svcWithNotify() {
+    const calls: Array<{ ownerSessionID: string; message: string }> = []
+    const svc = createCommandService(host, {
+      onOwnerNotify: async (_dir, ownerSessionID, message) => {
+        calls.push({ ownerSessionID, message })
+      },
+    })
+    return { svc, calls }
+  }
+
+  it("auto: a failing command with NO goal and NO await still reaches the owner", async () => {
+    const { svc, calls } = svcWithNotify()
+    const s = await svc.start(dir, { title: "build", command: "false", ownerSessionID: "owner-1" })
+    const proc = [...host.procs.values()].at(-1)!
+    proc.emitExit({ exitCode: 1 })
+    await new Promise((r) => setTimeout(r, 25))
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.ownerSessionID).toBe("owner-1")
+    expect(calls[0]!.message).toContain("build")
+    expect(calls[0]!.message).toContain("exitCode=1")
+    const after = await svc.get(dir, s.id, "owner-1")
+    expect(after!.ownerNotifiedAt).toBeDefined()
+  })
+
+  it("auto: a quick zero-exit success stays silent", async () => {
+    const { svc, calls } = svcWithNotify()
+    await svc.start(dir, { title: "quick", command: "true", ownerSessionID: "owner-1" })
+    const proc = [...host.procs.values()].at(-1)!
+    proc.emitExit({ exitCode: 0 })
+    await new Promise((r) => setTimeout(r, 25))
+    expect(calls).toHaveLength(0)
+  })
+
+  it("notify_on_exit: true overrides auto and always notifies, even a quick success", async () => {
+    const { svc, calls } = svcWithNotify()
+    await svc.start(dir, { title: "opt-in", command: "true", ownerSessionID: "owner-1", notifyOnExit: true })
+    const proc = [...host.procs.values()].at(-1)!
+    proc.emitExit({ exitCode: 0 })
+    await new Promise((r) => setTimeout(r, 25))
+    expect(calls).toHaveLength(1)
+  })
+
+  it("notify_on_exit: false overrides auto and suppresses even a failure", async () => {
+    const { svc, calls } = svcWithNotify()
+    await svc.start(dir, { title: "silenced", command: "false", ownerSessionID: "owner-1", notifyOnExit: false })
+    const proc = [...host.procs.values()].at(-1)!
+    proc.emitExit({ exitCode: 1 })
+    await new Promise((r) => setTimeout(r, 25))
+    expect(calls).toHaveLength(0)
+  })
+
+  it("auto: explicit terminate never notifies (owner already has the synchronous result)", async () => {
+    const { svc, calls } = svcWithNotify()
+    const s = await svc.start(dir, { title: "server", command: "sleep", ownerSessionID: "owner-1" })
+    await svc.terminate(dir, s.id, "owner-1")
+    expect(calls).toHaveLength(0)
+  })
+
+  it("auto: reconcile-missing (lost host — genuinely surprising) always notifies", async () => {
+    const { svc: svc1 } = svcWithNotify()
+    await svc1.start(dir, { title: "orphan", command: "sleep", ownerSessionID: "owner-1" })
+    const { svc: svc2, calls } = svcWithNotify()
+    const { markedMissing } = await svc2.reconcile(dir)
+    expect(markedMissing).toBe(1)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.message).toContain("missing")
+  })
+
+  it("exactly-once: a redundant reconcile pass never double-notifies", async () => {
+    const { svc: svc1 } = svcWithNotify()
+    await svc1.start(dir, { title: "orphan", command: "sleep", ownerSessionID: "owner-1" })
+    const { svc: svc2, calls } = svcWithNotify()
+    await svc2.reconcile(dir)
+    await svc2.reconcile(dir) // second pass: status is already "missing", not "running" — no-op by construction
+    expect(calls).toHaveLength(1)
+  })
+})

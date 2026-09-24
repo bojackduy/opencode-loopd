@@ -66,6 +66,18 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
         )
       }
     },
+    // The missing hop: a command with no goal/await linkage still reaches
+    // its owner session here (a real prompt-injected message, same channel
+    // as goal complete/blocked notifications) instead of dying silently at
+    // the dashboard-only status update.
+    onOwnerNotify: async (dir, ownerSessionID, message) => {
+      await host.notifyOwner(ownerSessionID, message).catch((error) =>
+        logServerEvent(dir, "command.owner-notify-failed", {
+          ownerSessionID,
+          detail: describeError(error),
+        }),
+      )
+    },
   })
   const commandStream = createCommandStreamServer(directory, commandService, commandBroker)
 

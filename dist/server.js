@@ -4400,6 +4400,7 @@ function createCommandSession(input) {
     cwd: input.cwd,
     ownerSessionID: input.ownerSessionID,
     goalID: input.goalID,
+    notifyOnExit: input.notifyOnExit,
     status: "running",
     pid: input.pid,
     cols: input.cols,
@@ -4412,6 +4413,29 @@ function createCommandSession(input) {
   };
 }
 var MAX_COMMAND_OUTPUT_BYTES = 512 * 1024;
+var NOTIFY_LONG_RUNNING_MS = 2 * 60 * 1000;
+function shouldNotifyOwnerOnExit(session) {
+  if (session.notifyOnExit === false)
+    return false;
+  if (session.notifyOnExit === true)
+    return true;
+  if (session.status === "missing")
+    return true;
+  if (session.status === "terminated")
+    return false;
+  if (session.status !== "exited")
+    return false;
+  if (session.exitCode !== undefined && session.exitCode !== 0)
+    return true;
+  const started = Date.parse(session.createdAt);
+  const ended = session.endedAt ? Date.parse(session.endedAt) : Date.now();
+  if (!Number.isFinite(started) || !Number.isFinite(ended))
+    return false;
+  return ended - started >= NOTIFY_LONG_RUNNING_MS;
+}
+
+// src/application/command-service.ts
+init_command_await();
 
 // src/domain/command-events.ts
 var _encoder = new TextEncoder;
@@ -4639,6 +4663,38 @@ function createCommandService(host, opts) {
       await opts?.onAwaitFired?.(directory, fired);
     } catch {}
   }
+  async function notifyOwnerIfNeeded(directory, id) {
+    try {
+      let target;
+      await mutateState(directory, `cmd.notify-claim:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id);
+        if (!c)
+          return s;
+        if (c.ownerNotifiedAt)
+          return s;
+        if (!isTerminalCommandStatus(c.status))
+          return s;
+        if (!shouldNotifyOwnerOnExit(c))
+          return s;
+        c.ownerNotifiedAt = new Date().toISOString();
+        target = { ...c };
+        return s;
+      });
+      if (!target)
+        return;
+      const tail = await readBoundedTail(directory, id);
+      const message = formatAwaitEvidence({
+        title: target.title,
+        argv: [target.command, ...target.args],
+        commandID: target.id,
+        status: target.status,
+        exitCode: target.exitCode,
+        signal: target.signal,
+        tail
+      });
+      await opts?.onOwnerNotify?.(directory, target.ownerSessionID, message);
+    } catch {}
+  }
   async function readBrokerSnapshot(commandID, ownerSessionID) {
     const directory = commandDirs.get(commandID);
     if (!directory)
@@ -4769,6 +4825,7 @@ function createCommandService(host, opts) {
         emitBroker(id, { type: "status", command: fresh });
     } catch {}
     await fireAwaits(directory, id);
+    await notifyOwnerIfNeeded(directory, id);
   }
   function owned(cmd, ownerSessionID) {
     return !!cmd && cmd.ownerSessionID === ownerSessionID;
@@ -4807,6 +4864,7 @@ function createCommandService(host, opts) {
         cwd,
         ownerSessionID: input.ownerSessionID,
         goalID: input.goalID,
+        notifyOnExit: input.notifyOnExit,
         pid: handle.pid,
         cols: input.cols,
         rows: input.rows
@@ -5012,6 +5070,7 @@ function createCommandService(host, opts) {
           emitBroker(id, { type: "status", command: fresh });
       } catch {}
       await fireAwaits(directory, id);
+      await notifyOwnerIfNeeded(directory, id);
       return { ok: true, message: `Command "${session.title}" ${status}.` };
     },
     async remove(directory, id, ownerSessionID) {
@@ -5061,6 +5120,7 @@ function createCommandService(host, opts) {
                 emitBroker(c.id, { type: "status", command: fresh });
             } catch {}
             await fireAwaits(directory, c.id);
+            await notifyOwnerIfNeeded(directory, c.id);
           }
           continue;
         }
@@ -5080,6 +5140,7 @@ function createCommandService(host, opts) {
             emitBroker(c.id, { type: "status", command: fresh });
         } catch {}
         await fireAwaits(directory, c.id);
+        await notifyOwnerIfNeeded(directory, c.id);
       }
       return { markedMissing };
     },
@@ -6884,6 +6945,7 @@ function summarize(c) {
     outputBytes: c.outputBytes,
     truncated: c.truncated,
     goalID: c.goalID,
+    notifyOnExit: c.notifyOnExit,
     updatedAt: c.updatedAt
   };
 }
@@ -6893,13 +6955,14 @@ function commandTools(options) {
   const sizeNote = capabilities.resize ? "applied live to the PTY winsize" : "stored; resize is unsupported by the pipe host";
   return {
     loopd_command_start: tool3({
-      description: "Start a standalone interactive OS process (arbitrary shell command) in the background \u2014 a dev server, `npm test --watch`, a REPL, a log tail, a build, or a one-off script. This is a raw process, NOT an AI worker: no agent, no checks, no turn loop. For multi-turn autonomous AI work with completion criteria, use loopd_create_goal instead. " + "Returns a command_id for loopd_command_get (read output)/loopd_command_write (send stdin)/loopd_command_interrupt (Ctrl+C)/loopd_command_terminate (kill)/loopd_command_remove (delete). " + "The user can also open it live: /loop or /commands \u2192 Tab/l to the Commands tab \u2192 select it \u2192 `o` opens a fullscreen interactive terminal page (type directly, Ctrl+C interrupts, Ctrl+] detaches without stopping it). " + "Independent from goals: an optional goal_id is display-only metadata and never couples lifecycles \u2014 pausing/clearing a goal never touches the command, and terminating a command never touches the goal. " + "To make a specific goal wake up when this command finishes, call loopd_command_await separately after starting it (linking alone does not wake anything).",
+      description: "Start a standalone interactive OS process (arbitrary shell command) in the background \u2014 a dev server, `npm test --watch`, a REPL, a log tail, a build, or a one-off script. This is a raw process, NOT an AI worker: no agent, no checks, no turn loop. For multi-turn autonomous AI work with completion criteria, use loopd_create_goal instead. " + "Returns a command_id for loopd_command_get (read output)/loopd_command_write (send stdin)/loopd_command_interrupt (Ctrl+C)/loopd_command_terminate (kill)/loopd_command_remove (delete). " + "The user can also open it live: /loop or /commands \u2192 Tab/l to the Commands tab \u2192 select it \u2192 `o` opens a fullscreen interactive terminal page (type directly, Ctrl+C interrupts, Ctrl+] detaches without stopping it). " + "Independent from goals: an optional goal_id is display-only metadata and never couples lifecycles \u2014 pausing/clearing a goal never touches the command, and terminating a command never touches the goal. " + "To make a specific goal wake up when this command finishes, call loopd_command_await separately after starting it (linking alone does not wake anything). " + "The OWNER session (you) gets pushed a real message when the command reaches a terminal status \u2014 no polling required to find out: by default (auto) that fires on a non-zero exit, on 'missing' (host restarted mid-run), or once total runtime crosses ~2 minutes (the long-running/monitor case); quick successful commands stay silent. Override with notify_on_exit.",
       args: {
         title: tool3.schema.string().describe("Short human label for the session."),
         command: tool3.schema.string().describe('Executable to spawn (e.g. "bun", "python3").'),
         args: tool3.schema.array(tool3.schema.string()).optional().describe("Arguments for the command."),
         cwd: tool3.schema.string().optional().describe("Working directory. Defaults to the project root."),
         goal_id: tool3.schema.string().optional().describe("Optional goal linkage (display only \u2014 no lifecycle coupling)."),
+        notify_on_exit: tool3.schema.boolean().optional().describe("Owner-exit-notification override. true = always push a message to you when this command finishes. false = never (dashboard/loopd_command_get only). Omit for auto (failure, lost-host, or long-running success)."),
         cols: tool3.schema.number().optional().describe(`Requested terminal width (${sizeNote}).`),
         rows: tool3.schema.number().optional().describe(`Requested terminal height (${sizeNote}).`)
       },
@@ -6922,6 +6985,7 @@ function commandTools(options) {
             cwd: args.cwd,
             ownerSessionID: owner,
             goalID: args.goal_id,
+            notifyOnExit: args.notify_on_exit,
             cols: args.cols,
             rows: args.rows
           });
@@ -7107,6 +7171,12 @@ function createServerHooks(directory, host, defaults) {
           detail: describeError(error)
         }));
       }
+    },
+    onOwnerNotify: async (dir, ownerSessionID, message) => {
+      await host.notifyOwner(ownerSessionID, message).catch((error) => logServerEvent(dir, "command.owner-notify-failed", {
+        ownerSessionID,
+        detail: describeError(error)
+      }));
     }
   });
   const commandStream = createCommandStreamServer(directory, commandService, commandBroker);

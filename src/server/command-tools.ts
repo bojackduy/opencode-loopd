@@ -50,6 +50,7 @@ function summarize(c: {
   outputBytes: number
   truncated: boolean
   goalID?: string
+  notifyOnExit?: boolean
   updatedAt: string
 }) {
   return {
@@ -62,6 +63,7 @@ function summarize(c: {
     outputBytes: c.outputBytes,
     truncated: c.truncated,
     goalID: c.goalID,
+    notifyOnExit: c.notifyOnExit,
     updatedAt: c.updatedAt,
   }
 }
@@ -80,13 +82,15 @@ export function commandTools(options: CommandToolsOptions) {
         "Returns a command_id for loopd_command_get (read output)/loopd_command_write (send stdin)/loopd_command_interrupt (Ctrl+C)/loopd_command_terminate (kill)/loopd_command_remove (delete). " +
         "The user can also open it live: /loop or /commands → Tab/l to the Commands tab → select it → `o` opens a fullscreen interactive terminal page (type directly, Ctrl+C interrupts, Ctrl+] detaches without stopping it). " +
         "Independent from goals: an optional goal_id is display-only metadata and never couples lifecycles — pausing/clearing a goal never touches the command, and terminating a command never touches the goal. " +
-        "To make a specific goal wake up when this command finishes, call loopd_command_await separately after starting it (linking alone does not wake anything).",
+        "To make a specific goal wake up when this command finishes, call loopd_command_await separately after starting it (linking alone does not wake anything). " +
+        "The OWNER session (you) gets pushed a real message when the command reaches a terminal status — no polling required to find out: by default (auto) that fires on a non-zero exit, on 'missing' (host restarted mid-run), or once total runtime crosses ~2 minutes (the long-running/monitor case); quick successful commands stay silent. Override with notify_on_exit.",
       args: {
         title: tool.schema.string().describe("Short human label for the session."),
         command: tool.schema.string().describe("Executable to spawn (e.g. \"bun\", \"python3\")."),
         args: tool.schema.array(tool.schema.string()).optional().describe("Arguments for the command."),
         cwd: tool.schema.string().optional().describe("Working directory. Defaults to the project root."),
         goal_id: tool.schema.string().optional().describe("Optional goal linkage (display only — no lifecycle coupling)."),
+        notify_on_exit: tool.schema.boolean().optional().describe("Owner-exit-notification override. true = always push a message to you when this command finishes. false = never (dashboard/loopd_command_get only). Omit for auto (failure, lost-host, or long-running success)."),
         cols: tool.schema.number().optional().describe(`Requested terminal width (${sizeNote}).`),
         rows: tool.schema.number().optional().describe(`Requested terminal height (${sizeNote}).`),
       },
@@ -108,6 +112,7 @@ export function commandTools(options: CommandToolsOptions) {
             cwd: args.cwd,
             ownerSessionID: owner,
             goalID: args.goal_id,
+            notifyOnExit: args.notify_on_exit,
             cols: args.cols,
             rows: args.rows,
           })

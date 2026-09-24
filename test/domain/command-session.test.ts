@@ -3,8 +3,29 @@ import {
   createCommandSession,
   canTransitionCommand,
   isLiveCommand,
+  shouldNotifyOwnerOnExit,
   MAX_COMMAND_OUTPUT_BYTES,
+  NOTIFY_LONG_RUNNING_MS,
+  type CommandSession,
 } from "../../src/domain/command-session"
+
+function terminalSession(overrides: Partial<CommandSession> = {}): CommandSession {
+  const base = createCommandSession({
+    id: "cmd-x",
+    title: "t",
+    command: "echo",
+    cwd: "/tmp",
+    ownerSessionID: "owner-1",
+  })
+  return {
+    ...base,
+    status: "exited",
+    exitCode: 0,
+    createdAt: "2024-01-01T00:00:00.000Z",
+    endedAt: "2024-01-01T00:00:01.000Z", // 1s: well under the long-running threshold
+    ...overrides,
+  }
+}
 
 describe("CommandSession domain", () => {
   it("starts running with bounded-output defaults", () => {
@@ -67,5 +88,48 @@ describe("CommandSession domain", () => {
     expect(linked.goalID).toBe("goal-1")
     expect(standalone.goalID).toBeUndefined()
     expect(linked.status).toBe(standalone.status)
+  })
+})
+
+describe("shouldNotifyOwnerOnExit (owner-exit-notification policy)", () => {
+  it("explicit false always wins, even on failure or missing", () => {
+    expect(shouldNotifyOwnerOnExit(terminalSession({ notifyOnExit: false, exitCode: 1 }))).toBe(false)
+    expect(shouldNotifyOwnerOnExit(terminalSession({ notifyOnExit: false, status: "missing", exitCode: undefined }))).toBe(false)
+  })
+
+  it("explicit true always wins, even a quick zero-exit success", () => {
+    expect(shouldNotifyOwnerOnExit(terminalSession({ notifyOnExit: true, exitCode: 0 }))).toBe(true)
+  })
+
+  it("auto: quick zero-exit success stays silent (no spam for fast commands)", () => {
+    expect(shouldNotifyOwnerOnExit(terminalSession({ exitCode: 0 }))).toBe(false)
+  })
+
+  it("auto: non-zero exit always notifies regardless of duration", () => {
+    expect(shouldNotifyOwnerOnExit(terminalSession({ exitCode: 1 }))).toBe(true)
+  })
+
+  it("auto: missing (lost host) always notifies — the surprising case", () => {
+    expect(shouldNotifyOwnerOnExit(terminalSession({ status: "missing", exitCode: undefined }))).toBe(true)
+  })
+
+  it("auto: terminated (caller-initiated, synchronous result already returned) never notifies", () => {
+    expect(shouldNotifyOwnerOnExit(terminalSession({ status: "terminated", exitCode: undefined, signal: "SIGTERM" }))).toBe(false)
+  })
+
+  it("auto: long-running success (the monitor/CI-watch case) notifies once past the threshold", () => {
+    const started = new Date("2024-01-01T00:00:00.000Z")
+    const justUnder = new Date(started.getTime() + NOTIFY_LONG_RUNNING_MS - 1000)
+    const atOrOver = new Date(started.getTime() + NOTIFY_LONG_RUNNING_MS)
+    expect(shouldNotifyOwnerOnExit(terminalSession({
+      exitCode: 0,
+      createdAt: started.toISOString(),
+      endedAt: justUnder.toISOString(),
+    }))).toBe(false)
+    expect(shouldNotifyOwnerOnExit(terminalSession({
+      exitCode: 0,
+      createdAt: started.toISOString(),
+      endedAt: atOrOver.toISOString(),
+    }))).toBe(true)
   })
 })

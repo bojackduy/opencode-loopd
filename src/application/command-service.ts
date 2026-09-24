@@ -10,15 +10,17 @@ import { promises as fs } from "fs"
 import path from "path"
 import {
   createCommandSession,
+  shouldNotifyOwnerOnExit,
   MAX_COMMAND_OUTPUT_BYTES,
   type CommandSession,
   type CommandSessionID,
   type CommandSessionStatus,
 } from "../domain/command-session"
+import { isTerminalCommandStatus, formatAwaitEvidence } from "../domain/command-await"
 import type { CommandHost, CommandProcessHandle } from "../server/command-host"
 import { utf8ByteLength, type CommandStreamMessage } from "../domain/command-events"
 import type { CommandEventBroker } from "./command-event-broker"
-import { clearAwaitsForCommand, fireCommandAwaits, type FiredAwait } from "./command-await"
+import { clearAwaitsForCommand, fireCommandAwaits, readBoundedTail, type FiredAwait } from "./command-await"
 import {
   appendCommandLog,
   appendEvent,
@@ -35,6 +37,8 @@ export interface CommandStartInput {
   cwd?: string
   ownerSessionID: string
   goalID?: string
+  /** Owner-exit-notification policy. Undefined = auto (see shouldNotifyOwnerOnExit). */
+  notifyOnExit?: boolean
   cols?: number
   rows?: number
 }
@@ -85,6 +89,14 @@ export function createCommandService(
      * consumes the await and queues evidence in pendingInbox.
      */
     onAwaitFired?: (directory: string, fired: FiredAwait[]) => Promise<void>
+    /**
+     * Called at most once per command with a ready-to-send message when a
+     * terminal command's exit is worth pinging the OWNER session about
+     * (see shouldNotifyOwnerOnExit) — independent of awaits: a command with
+     * no linked goal and no await still reaches the owner here. Defaults to
+     * a no-op — the exactly-once marker is still set either way.
+     */
+    onOwnerNotify?: (directory: string, ownerSessionID: string, message: string) => Promise<void>
   },
 ): CommandService {
   type LiveEntry = { handle: CommandProcessHandle; buffers: Buffer[]; bufferedBytes: number }
@@ -149,6 +161,43 @@ export function createCommandService(
       await opts?.onAwaitFired?.(directory, fired)
     } catch {
       // Await delivery never breaks command persistence.
+    }
+  }
+
+  /**
+   * Owner-exit notification: independent of awaits/goal-linkage. Claims the
+   * exactly-once `ownerNotifiedAt` marker atomically (same terminal-claim
+   * pattern as terminate()), then delivers a bounded-tail evidence message.
+   * A command with zero awaits and no goal still reaches the owner here —
+   * this is the edge that was previously silent (dashboard-only).
+   */
+  async function notifyOwnerIfNeeded(directory: string, id: string): Promise<void> {
+    try {
+      let target: CommandSession | undefined
+      await mutateState(directory, `cmd.notify-claim:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id)
+        if (!c) return s
+        if (c.ownerNotifiedAt) return s
+        if (!isTerminalCommandStatus(c.status)) return s
+        if (!shouldNotifyOwnerOnExit(c)) return s
+        c.ownerNotifiedAt = new Date().toISOString()
+        target = { ...c }
+        return s
+      })
+      if (!target) return
+      const tail = await readBoundedTail(directory, id)
+      const message = formatAwaitEvidence({
+        title: target.title,
+        argv: [target.command, ...target.args],
+        commandID: target.id,
+        status: target.status,
+        exitCode: target.exitCode,
+        signal: target.signal,
+        tail,
+      })
+      await opts?.onOwnerNotify?.(directory, target.ownerSessionID, message)
+    } catch {
+      // Notify delivery never breaks command persistence.
     }
   }
 
@@ -300,6 +349,7 @@ export function createCommandService(
     } catch {}
     // Terminal-only wake: fires outstanding opt-in awaits exactly once.
     await fireAwaits(directory, id)
+    await notifyOwnerIfNeeded(directory, id)
   }
 
   function owned(cmd: CommandSession | undefined, ownerSessionID: string): cmd is CommandSession {
@@ -339,6 +389,7 @@ export function createCommandService(
         cwd,
         ownerSessionID: input.ownerSessionID,
         goalID: input.goalID,
+        notifyOnExit: input.notifyOnExit,
         pid: handle.pid,
         cols: input.cols,
         rows: input.rows,
@@ -566,6 +617,10 @@ export function createCommandService(
       // Stopping a command otherwise never touches goals — no goal import
       // exists here by construction. Detach needs nothing: viewers stop reading.
       await fireAwaits(directory, id)
+      // Auto policy stays silent for "terminated" (caller already has this
+      // synchronous result) — notifyOwnerIfNeeded only fires here when the
+      // command opted in with notifyOnExit: true.
+      await notifyOwnerIfNeeded(directory, id)
       return { ok: true, message: `Command "${session.title}" ${status}.` }
     },
 
@@ -620,6 +675,7 @@ export function createCommandService(
               if (fresh) emitBroker(c.id, { type: "status", command: fresh })
             } catch {}
             await fireAwaits(directory, c.id)
+            await notifyOwnerIfNeeded(directory, c.id)
           }
           continue
         }
@@ -641,6 +697,7 @@ export function createCommandService(
         } catch {}
         // "missing" is terminal: outstanding awaits fire once on recovery.
         await fireAwaits(directory, c.id)
+        await notifyOwnerIfNeeded(directory, c.id)
       }
       return { markedMissing }
     },

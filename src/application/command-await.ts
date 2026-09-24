@@ -160,7 +160,8 @@ export async function requestCommandAwait(
   return { ok: true, message: `Goal "${goal.name}" now awaits "${command.title}" (fires once on exit).` }
 }
 
-async function readBoundedTail(directory: string, commandID: string): Promise<string> {
+/** Exported for command-service's owner-exit-notification path (same bounded-tail contract). */
+export async function readBoundedTail(directory: string, commandID: string): Promise<string> {
   try {
     // Probe total size first (zero-byte read), then fetch only the last 4KB —
     // never pull the whole retained log for evidence.
