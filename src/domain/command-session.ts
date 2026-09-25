@@ -6,6 +6,8 @@
 // implicitly pause/block a goal. Closing a UI view detaches; it never
 // terminates — termination is an explicit action only.
 
+import type { WatchState, WatchUntilAction } from "./command-watch"
+
 export type CommandSessionID = string & { readonly __brand: "CommandSessionID" }
 
 export type CommandSessionStatus =
@@ -48,6 +50,19 @@ export interface CommandSession {
   notifyOnExit?: boolean
   /** Set once the owner has been pinged for this command's terminal status (exactly-once marker). */
   ownerNotifiedAt?: string
+  // ─── M2 watch (line-level filter/until notifications) ────────────────────
+  // Persisted spec + state snapshot only — watcher runtimes stay in-memory
+  // (commands don't survive restart anyway; reconcile leaves these as-is).
+  /** Watch line filter (regex source; matched against ANSI-stripped lines). */
+  watchFilter?: string
+  /** Watch until pattern (regex source; evaluated on the filter-surviving stream). */
+  watchUntil?: string
+  /** Case-insensitive watch matching. */
+  watchIgnoreCase?: boolean
+  /** Until action: "stop" (default) terminates on match, "keep" keeps running. */
+  watchUntilAction?: WatchUntilAction
+  /** Last persisted watcher snapshot (live counters live in the in-memory watcher). */
+  watchState?: WatchState
   status: CommandSessionStatus
   /** Process exit code when known (exited or terminated-after-exit). */
   exitCode?: number
@@ -133,6 +148,11 @@ export function createCommandSession(input: {
   deadlineAt?: string
   envKeys?: string[]
   endReason?: CommandEndReason
+  watchFilter?: string
+  watchUntil?: string
+  watchIgnoreCase?: boolean
+  watchUntilAction?: WatchUntilAction
+  watchState?: WatchState
 }): CommandSession {
   const now = new Date().toISOString()
   const timeout = normalizeTimeoutSeconds(input.timeoutSeconds)
@@ -146,6 +166,11 @@ export function createCommandSession(input: {
     timeoutSeconds: timeout,
     deadlineAt: input.deadlineAt ?? (timeout !== undefined ? computeDeadlineAt(new Date(now), timeout) : undefined),
     envKeys: input.envKeys,
+    watchFilter: input.watchFilter,
+    watchUntil: input.watchUntil,
+    watchIgnoreCase: input.watchIgnoreCase,
+    watchUntilAction: input.watchUntilAction,
+    watchState: input.watchState,
     cwd: input.cwd,
     ownerSessionID: input.ownerSessionID,
     goalID: input.goalID,
@@ -191,6 +216,11 @@ export const NOTIFY_LONG_RUNNING_MS = 2 * 60 * 1000
  *     when total runtime reached NOTIFY_LONG_RUNNING_MS.
  */
 export function shouldNotifyOwnerOnExit(session: CommandSession): boolean {
+  // Until-stop already delivered its watch notice at match time (the
+  // exactly-once marker was claimed then): the standard exit ping stays
+  // silent so the owner gets exactly one message total — even with
+  // notifyOnExit: true.
+  if (session.endReason === "until") return false
   if (session.notifyOnExit === false) return false
   if (session.notifyOnExit === true) return true
   // Timeout was never caller-initiated (in-memory timer killed it): always

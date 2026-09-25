@@ -18,8 +18,10 @@ import {
   MAX_AWAIT_TAIL_BYTES,
   formatAwaitEvidence,
   isTerminalCommandStatus,
+  tailLastBytes,
   type CommandAwait,
 } from "../domain/command-await"
+import { compileWatchPattern } from "../domain/command-watch"
 import {
   appendEvent,
   appendGoalInbox,
@@ -37,6 +39,13 @@ export interface AwaitRequest {
   goalID: string
   commandID: string
   ownerSessionID: string
+  /**
+   * M2: when set, wake the goal ONCE on the first output line matching this
+   * regex (instead of on terminal status). The command keeps running.
+   * Validated at the boundary; invalid patterns fail closed.
+   */
+  until?: string
+  ignoreCase?: boolean
 }
 
 export interface AwaitResult {
@@ -88,6 +97,20 @@ export async function requestCommandAwait(
     return { ok: false, message: "Owner mismatch: goal and command are owned by different sessions." }
   }
 
+  // M2 until-await: reuse the watcher matcher; fail closed at the boundary.
+  const until = input.until !== undefined && input.until !== "" ? input.until : undefined
+  const ignoreCase = input.ignoreCase === true
+  if (input.until !== undefined && until === undefined) {
+    return { ok: false, message: "Await 'until' must be a non-empty regex." }
+  }
+  if (until !== undefined) {
+    try {
+      compileWatchPattern("until", until, ignoreCase)
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e) }
+    }
+  }
+
   const existing = (snapshot.commandAwaits ?? []).some(
     (a) => a.goalID === input.goalID && a.commandID === input.commandID,
   )
@@ -97,13 +120,16 @@ export async function requestCommandAwait(
 
   if (isTerminalCommandStatus(command.status)) {
     // Already terminal: persist-then-fire through the same exactly-once path
-    // so a duplicate/late status event can never fire twice.
+    // so a duplicate/late status event can never fire twice. An until-await
+    // on a finished command fires immediately with exit evidence (it can
+    // never observe more output; firing avoids a leaked await).
     await mutateState(directory, `cmd.await-request:${input.goalID}:${input.commandID}`, async (s) => {
       s.commandAwaits = [...(s.commandAwaits ?? []), {
         goalID: input.goalID,
         commandID: input.commandID,
         ownerSessionID: input.ownerSessionID,
         createdAt: new Date().toISOString(),
+        ...(until !== undefined ? { until, ignoreCase } : {}),
       }]
       return s
     })
@@ -134,6 +160,7 @@ export async function requestCommandAwait(
         commandID: input.commandID,
         ownerSessionID: input.ownerSessionID,
         createdAt: new Date().toISOString(),
+        ...(until !== undefined ? { until, ignoreCase } : {}),
       }]
     }
     const current = (s.commands ?? []).find((c) => c.id === input.commandID)
@@ -152,12 +179,152 @@ export async function requestCommandAwait(
       active: mine?.active ?? goal.status === "active",
     }
   }
+  if (until !== undefined) {
+    // Race recheck for until-awaits: the pattern may already sit in the
+    // retained log (emitted before this await registered). Fire immediately
+    // on the first matching retained line so the wake can never be missed.
+    const retained = await readRetainedLines(directory, input.commandID)
+    const hit = retained.find((line) => testUntil(until, ignoreCase, line))
+    if (hit !== undefined) {
+      const fired = await fireUntilAwaits(directory, input.commandID, [hit])
+      const mine = fired.find((f) => f.goalID === input.goalID)
+      if (mine) {
+        return {
+          ok: true,
+          message: `Pattern "${until}" already present in "${command.title}" output; wake-up delivered to goal "${goal.name}".`,
+          fired: true,
+          active: mine.active,
+        }
+      }
+      // A concurrent exit consumed it first — fall through to the terminal
+      // evidence path would double-deliver; the exit fire already woke us.
+      const again = await fireCommandAwaits(directory, input.commandID)
+      const second = again.find((f) => f.goalID === input.goalID)
+      if (second) {
+        return {
+          ok: true,
+          message: `Command "${command.title}" exited while registering; wake-up delivered to goal "${goal.name}".`,
+          fired: true,
+          active: second.active,
+        }
+      }
+    }
+  }
   await appendEvent(directory, ledgerEvent({
     goalID: input.goalID,
     commandID: input.commandID,
     type: "command.await-requested",
+    ...(until !== undefined ? { until } : {}),
   })).catch(() => {})
-  return { ok: true, message: `Goal "${goal.name}" now awaits "${command.title}" (fires once on exit).` }
+  return {
+    ok: true,
+    message: until !== undefined
+      ? `Goal "${goal.name}" now awaits pattern "${until}" in "${command.title}" (fires once on first match; the command keeps running).`
+      : `Goal "${goal.name}" now awaits "${command.title}" (fires once on exit).`,
+  }
+}
+
+/** Compile-test one until pattern against one line (patterns pre-validated; never throws). */
+function testUntil(until: string, ignoreCase: boolean, line: string): boolean {
+  try {
+    const re = new RegExp(until, ignoreCase ? "i" : "")
+    const hit = re.test(line)
+    re.lastIndex = 0
+    return hit
+  } catch {
+    return false
+  }
+}
+
+/** Read retained log lines (bounded) for the until race recheck. */
+async function readRetainedLines(directory: string, commandID: string): Promise<string[]> {
+  try {
+    const full = await readCommandLog(directory, commandID, {
+      offsetBytes: 0,
+      limitBytes: 512 * 1024,
+    })
+    if (!full.text) return []
+    return full.text.split("\n").filter((l) => l.trim() !== "")
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Fire outstanding until-awaits whose pattern matches any of the given
+ * (ANSI-stripped, non-blank) lines. Consumes each firing await BEFORE
+ * delivering so a duplicate/late call can never fire twice. Never stops the
+ * command. Returns the fired awaits (caller wakes active goals).
+ *
+ * Evidence: the first matching line(s) + the bounded 4KB tail.
+ */
+export async function fireUntilAwaits(
+  directory: string,
+  commandID: string,
+  lines: string[],
+): Promise<FiredAwait[]> {
+  if (lines.length === 0) return []
+  let candidates: CommandAwait[] = []
+  let command: CommandSession | undefined
+  await mutateState(directory, `cmd.await-until-consume:${commandID}`, async (s) => {
+    const outstanding = (s.commandAwaits ?? []).filter(
+      (a) => a.commandID === commandID && typeof a.until === "string" && a.until !== "",
+    )
+    if (outstanding.length === 0) return s
+    const current = (s.commands ?? []).find((c) => c.id === commandID) as CommandSession | undefined
+    if (!current) return s // command gone: leave awaits for the remove/clear path
+    command = current
+    const hits: CommandAwait[] = []
+    for (const a of outstanding) {
+      const pattern = a.until as string
+      if (lines.some((line) => testUntil(pattern, a.ignoreCase === true, line))) hits.push(a)
+    }
+    if (hits.length === 0) return s
+    const hitKeys = new Set(hits.map((h) => `${h.goalID}:${h.commandID}`))
+    s.commandAwaits = (s.commandAwaits ?? []).filter(
+      (a) => !(a.commandID === commandID && hitKeys.has(`${a.goalID}:${a.commandID}`)),
+    )
+    candidates = hits
+    return s
+  })
+  if (candidates.length === 0 || !command) return []
+  const cmd = command
+  const tail = await readBoundedTail(directory, commandID)
+  const fired: FiredAwait[] = []
+  for (const a of candidates) {
+    const pattern = a.until as string
+    const matched = lines.filter((line) => testUntil(pattern, a.ignoreCase === true, line))
+    const fresh = await readState(directory)
+    const goal = fresh.goals.find((g) => g.id === a.goalID)
+    if (!goal) {
+      await appendEvent(directory, ledgerEvent({
+        goalID: a.goalID,
+        commandID,
+        type: "command.await-discarded",
+        reason: "goal gone",
+      })).catch(() => {})
+      continue
+    }
+    const short = commandID.slice(0, 8)
+    const header =
+      `[command "${cmd.title}" (${[cmd.command, ...cmd.args].join(" ") || cmd.title}) ${cmd.status}` +
+      ` ${short}... watch-until "${pattern}" matched]`
+    const matchedText = tailLastBytes(matched.slice(0, 20).join("\n"), MAX_AWAIT_TAIL_BYTES)
+    const evidence = tail
+      ? `${header}\n${matchedText}\n--- tail ---\n${tail}`
+      : `${header}\n${matchedText}`
+    await appendGoalInbox(directory, a.goalID, "worker", evidence)
+    await appendEvent(directory, ledgerEvent({
+      goalID: a.goalID,
+      commandID,
+      type: "command.await-fired",
+      until: pattern,
+      matchedLines: matched.length,
+      status: cmd.status,
+    })).catch(() => {})
+    fired.push({ goalID: a.goalID, commandID, active: goal.status === "active" })
+  }
+  return fired
 }
 
 /** Exported for command-service's owner-exit-notification path (same bounded-tail contract). */

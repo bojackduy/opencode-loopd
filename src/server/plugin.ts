@@ -78,6 +78,16 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
         }),
       )
     },
+    // M2 watch pushes: coalesced filter/until notices on the same owner
+    // channel (never the goal inbox — watch is owner-scoped, not goal-scoped).
+    onWatchNotify: async (dir, ownerSessionID, message) => {
+      await host.notifyOwner(ownerSessionID, message).catch((error) =>
+        logServerEvent(dir, "command.watch-notify-failed", {
+          ownerSessionID,
+          detail: describeError(error),
+        }),
+      )
+    },
   })
   const commandStream = createCommandStreamServer(directory, commandService, commandBroker)
 

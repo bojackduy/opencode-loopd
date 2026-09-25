@@ -593,6 +593,237 @@ var init_command_await = __esm(() => {
   MAX_AWAIT_TAIL_BYTES = 4 * 1024;
 });
 
+// src/domain/command-watch.ts
+function initialWatchState() {
+  return { state: "active", matches: 0, pushes: 0, droppedLines: 0 };
+}
+function compileWatchPattern(kind, pattern, ignoreCase = false) {
+  let compiled;
+  try {
+    compiled = new RegExp(pattern, ignoreCase ? "i" : "");
+  } catch (e) {
+    throw new Error(`Invalid watch ${kind} regex '${pattern}': ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (DANGEROUS_REGEXES.some((d) => d.test(pattern))) {
+    throw new Error(`Potentially dangerous watch ${kind} regex rejected: '${pattern}'. Please use a safer pattern.`);
+  }
+  return compiled;
+}
+function compileWatchSpec(spec) {
+  const ignoreCase = spec.ignoreCase === true;
+  const untilAction = spec.untilAction ?? "stop";
+  if (untilAction !== "stop" && untilAction !== "keep") {
+    throw new Error(`Invalid watch untilAction '${spec.untilAction}': must be "stop" or "keep".`);
+  }
+  return {
+    ...spec.filter !== undefined ? { filterRe: compileWatchPattern("filter", spec.filter, ignoreCase) } : {},
+    ...spec.until !== undefined ? { untilRe: compileWatchPattern("until", spec.until, ignoreCase) } : {},
+    ignoreCase,
+    untilAction
+  };
+}
+function stripAnsiForWatch(line) {
+  return line.replace(ANSI_PATTERN, "");
+}
+function cleanRawLine(raw) {
+  const stripped = stripAnsiForWatch(raw);
+  if (!stripped.includes("\r"))
+    return stripped;
+  const parts = stripped.split("\r");
+  return parts[parts.length - 1] ?? "";
+}
+function createLineAssembler() {
+  let carry = "";
+  return {
+    push(chunk) {
+      carry += chunk;
+      const parts = carry.replace(/\r\n/g, `
+`).split(`
+`);
+      carry = parts.pop() ?? "";
+      return parts.map(cleanRawLine);
+    },
+    flush() {
+      if (!carry)
+        return [];
+      const line = cleanRawLine(carry);
+      carry = "";
+      return [line];
+    }
+  };
+}
+function testFresh(re, line) {
+  const hit = re.test(line);
+  re.lastIndex = 0;
+  return hit;
+}
+function matchLine(compiled, line) {
+  if (compiled.filterRe && !testFresh(compiled.filterRe, line))
+    return { pass: false, until: false };
+  if (compiled.untilRe && testFresh(compiled.untilRe, line))
+    return { pass: true, until: true };
+  return { pass: true, until: false };
+}
+function byteLen(s) {
+  return Buffer.byteLength(s, "utf8");
+}
+
+class CommandWatcher {
+  compiled;
+  state = initialWatchState();
+  assembler = createLineAssembler();
+  pending = [];
+  pendingBytes = 0;
+  stamps = [];
+  constructor(spec) {
+    this.compiled = compileWatchSpec(spec);
+  }
+  get untilAction() {
+    return this.compiled.untilAction;
+  }
+  get pendingCount() {
+    return this.pending.length;
+  }
+  feedChunk(chunk, now) {
+    const completed = [];
+    const matched = [];
+    let untilLine = null;
+    let floodNow = false;
+    const suspended = this.state.state === "flood-suspended" || this.state.state === "budget-exhausted";
+    const lines = this.assembler.push(chunk);
+    for (const line of lines) {
+      if (line.trim() === "")
+        continue;
+      if (suspended) {
+        this.state.droppedLines++;
+        continue;
+      }
+      completed.push(line);
+      this.stamps.push(now);
+      while (this.stamps.length > 0 && (this.stamps[0] ?? now) < now - 1000)
+        this.stamps.shift();
+      if (this.stamps.length > WATCH_FLOOD_LINES_PER_SEC) {
+        this.state.state = "flood-suspended";
+        this.state.droppedLines++;
+        floodNow = true;
+        continue;
+      }
+      const m = matchLine(this.compiled, line);
+      if (!m.pass)
+        continue;
+      if (m.until && this.state.state === "active") {
+        this.state.state = "until-matched";
+        this.state.matches++;
+        this.buffer(line);
+        untilLine = line;
+        continue;
+      }
+      if (this.state.state === "until-matched" && this.untilAction === "stop") {
+        this.state.droppedLines++;
+        continue;
+      }
+      this.state.matches++;
+      this.buffer(line);
+      matched.push(line);
+    }
+    return { completed, matched, untilLine, floodNow };
+  }
+  finish(now) {
+    const trailing = this.assembler.flush();
+    if (trailing.length === 0)
+      return { completed: [], matched: [], untilLine: null, floodNow: false };
+    return this.feedChunk(trailing[0] + `
+`, now);
+  }
+  buffer(line) {
+    this.pending.push(line);
+    this.pendingBytes += byteLen(line);
+  }
+  takePush() {
+    if (this.pending.length === 0)
+      return null;
+    if (this.state.state === "budget-exhausted") {
+      this.state.droppedLines += this.pending.length;
+      this.pending = [];
+      this.pendingBytes = 0;
+      return null;
+    }
+    if (this.state.pushes >= WATCH_MAX_PUSHES_PER_COMMAND) {
+      this.state.state = "budget-exhausted";
+      this.state.droppedLines += this.pending.length;
+      this.pending = [];
+      this.pendingBytes = 0;
+      return { lines: [], exhaustedNow: true };
+    }
+    const lines = [];
+    let bytes = 0;
+    while (this.pending.length > 0 && lines.length < WATCH_MAX_LINES_PER_PUSH) {
+      const next = this.pending[0];
+      const nextBytes = byteLen(next) + (lines.length > 0 ? 1 : 0);
+      if (bytes + nextBytes > WATCH_MAX_BYTES_PER_PUSH && lines.length > 0)
+        break;
+      this.pending.shift();
+      this.pendingBytes -= byteLen(next);
+      lines.push(next);
+      bytes += nextBytes;
+    }
+    this.state.pushes++;
+    return { lines, exhaustedNow: false };
+  }
+  takeUntilPush() {
+    const lines = [];
+    let bytes = 0;
+    while (this.pending.length > 0 && lines.length < WATCH_MAX_LINES_PER_PUSH) {
+      const next = this.pending.pop();
+      this.pendingBytes -= byteLen(next);
+      const nextBytes = byteLen(next) + (lines.length > 0 ? 1 : 0);
+      if (bytes + nextBytes > WATCH_MAX_BYTES_PER_PUSH && lines.length > 0) {
+        this.pending.push(next);
+        this.pendingBytes += byteLen(next);
+        break;
+      }
+      lines.unshift(next);
+      bytes += nextBytes;
+    }
+    this.state.droppedLines += this.pending.length;
+    this.pending = [];
+    this.pendingBytes = 0;
+    this.state.pushes++;
+    return lines;
+  }
+}
+function formatWatchMessage(title, lines, note) {
+  const header = `[watch "${title}"]`;
+  const tail = note ? [...lines, note].join(`
+`) : lines.join(`
+`);
+  if (!tail)
+    return header;
+  const room = Math.max(0, MAX_WATCH_MESSAGE_BYTES - byteLen(header) - 1);
+  return `${header}
+${tailLastBytes(tail, room)}`;
+}
+function formatWatchFloodMessage(title, dropped) {
+  return `[watch "${title}"] FLOOD: ${WATCH_FLOOD_LINES_PER_SEC}+ lines/sec exceeds the limit. ` + `Watch suspended (${dropped} line(s) dropped so far); the process keeps running.`;
+}
+function formatWatchBudgetMessage(title) {
+  return `[watch "${title}"] BUDGET: push limit (${WATCH_MAX_PUSHES_PER_COMMAND}) reached. ` + `Watch exhausted; further matches are dropped. The process keeps running.`;
+}
+var WATCH_COALESCE_WINDOW_MS = 2000, WATCH_MAX_LINES_PER_PUSH = 20, WATCH_MAX_BYTES_PER_PUSH, WATCH_MAX_PUSHES_PER_COMMAND = 30, WATCH_FLOOD_LINES_PER_SEC = 100, MAX_WATCH_MESSAGE_BYTES, DANGEROUS_REGEXES, ANSI_PATTERN;
+var init_command_watch = __esm(() => {
+  init_command_await();
+  WATCH_MAX_BYTES_PER_PUSH = 4 * 1024;
+  MAX_WATCH_MESSAGE_BYTES = 4 * 1024;
+  DANGEROUS_REGEXES = [
+    /\(\?:.*\)\*.*\(\?:.*\)\*/,
+    /.*\(\.\*\?\)\{2,\}.*/,
+    /.*\(.*\|.*\)\{3,\}.*/,
+    /\([^()]*[+*][^()]*\)[+*]/,
+    /\([^()]*(\.\*.*\.\*|\.\+.*\.\+|\\w\+.*\\s\*|\\s\*.*\\w\+)[^()]*\)/
+  ];
+  ANSI_PATTERN = new RegExp("\x1B\\[[0-9;?]*[ -/]*[@-~]|\x1B\\][^\x07]*(?:\x07|\x1B\\\\)|\x1B[()][0-9A-Z]", "g");
+});
+
 // src/application/command-await.ts
 import { randomUUID } from "crypto";
 function ledgerEvent(base) {
@@ -618,6 +849,18 @@ async function requestCommandAwait(directory, input) {
   if (goal.ownerSessionID !== command.ownerSessionID) {
     return { ok: false, message: "Owner mismatch: goal and command are owned by different sessions." };
   }
+  const until = input.until !== undefined && input.until !== "" ? input.until : undefined;
+  const ignoreCase = input.ignoreCase === true;
+  if (input.until !== undefined && until === undefined) {
+    return { ok: false, message: "Await 'until' must be a non-empty regex." };
+  }
+  if (until !== undefined) {
+    try {
+      compileWatchPattern("until", until, ignoreCase);
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e) };
+    }
+  }
   const existing = (snapshot.commandAwaits ?? []).some((a) => a.goalID === input.goalID && a.commandID === input.commandID);
   if (existing) {
     return { ok: true, message: `Already awaiting "${command.title}" for goal "${goal.name}".` };
@@ -628,7 +871,8 @@ async function requestCommandAwait(directory, input) {
         goalID: input.goalID,
         commandID: input.commandID,
         ownerSessionID: input.ownerSessionID,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        ...until !== undefined ? { until, ignoreCase } : {}
       }];
       return s;
     });
@@ -649,7 +893,8 @@ async function requestCommandAwait(directory, input) {
         goalID: input.goalID,
         commandID: input.commandID,
         ownerSessionID: input.ownerSessionID,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        ...until !== undefined ? { until, ignoreCase } : {}
       }];
     }
     const current = (s.commands ?? []).find((c) => c.id === input.commandID);
@@ -668,12 +913,133 @@ async function requestCommandAwait(directory, input) {
       active: mine?.active ?? goal.status === "active"
     };
   }
+  if (until !== undefined) {
+    const retained = await readRetainedLines(directory, input.commandID);
+    const hit = retained.find((line) => testUntil(until, ignoreCase, line));
+    if (hit !== undefined) {
+      const fired = await fireUntilAwaits(directory, input.commandID, [hit]);
+      const mine = fired.find((f) => f.goalID === input.goalID);
+      if (mine) {
+        return {
+          ok: true,
+          message: `Pattern "${until}" already present in "${command.title}" output; wake-up delivered to goal "${goal.name}".`,
+          fired: true,
+          active: mine.active
+        };
+      }
+      const again = await fireCommandAwaits(directory, input.commandID);
+      const second = again.find((f) => f.goalID === input.goalID);
+      if (second) {
+        return {
+          ok: true,
+          message: `Command "${command.title}" exited while registering; wake-up delivered to goal "${goal.name}".`,
+          fired: true,
+          active: second.active
+        };
+      }
+    }
+  }
   await appendEvent(directory, ledgerEvent({
     goalID: input.goalID,
     commandID: input.commandID,
-    type: "command.await-requested"
+    type: "command.await-requested",
+    ...until !== undefined ? { until } : {}
   })).catch(() => {});
-  return { ok: true, message: `Goal "${goal.name}" now awaits "${command.title}" (fires once on exit).` };
+  return {
+    ok: true,
+    message: until !== undefined ? `Goal "${goal.name}" now awaits pattern "${until}" in "${command.title}" (fires once on first match; the command keeps running).` : `Goal "${goal.name}" now awaits "${command.title}" (fires once on exit).`
+  };
+}
+function testUntil(until, ignoreCase, line) {
+  try {
+    const re = new RegExp(until, ignoreCase ? "i" : "");
+    const hit = re.test(line);
+    re.lastIndex = 0;
+    return hit;
+  } catch {
+    return false;
+  }
+}
+async function readRetainedLines(directory, commandID) {
+  try {
+    const full = await readCommandLog(directory, commandID, {
+      offsetBytes: 0,
+      limitBytes: 512 * 1024
+    });
+    if (!full.text)
+      return [];
+    return full.text.split(`
+`).filter((l) => l.trim() !== "");
+  } catch {
+    return [];
+  }
+}
+async function fireUntilAwaits(directory, commandID, lines) {
+  if (lines.length === 0)
+    return [];
+  let candidates = [];
+  let command;
+  await mutateState(directory, `cmd.await-until-consume:${commandID}`, async (s) => {
+    const outstanding = (s.commandAwaits ?? []).filter((a) => a.commandID === commandID && typeof a.until === "string" && a.until !== "");
+    if (outstanding.length === 0)
+      return s;
+    const current = (s.commands ?? []).find((c) => c.id === commandID);
+    if (!current)
+      return s;
+    command = current;
+    const hits = [];
+    for (const a of outstanding) {
+      const pattern = a.until;
+      if (lines.some((line) => testUntil(pattern, a.ignoreCase === true, line)))
+        hits.push(a);
+    }
+    if (hits.length === 0)
+      return s;
+    const hitKeys = new Set(hits.map((h) => `${h.goalID}:${h.commandID}`));
+    s.commandAwaits = (s.commandAwaits ?? []).filter((a) => !(a.commandID === commandID && hitKeys.has(`${a.goalID}:${a.commandID}`)));
+    candidates = hits;
+    return s;
+  });
+  if (candidates.length === 0 || !command)
+    return [];
+  const cmd = command;
+  const tail = await readBoundedTail(directory, commandID);
+  const fired = [];
+  for (const a of candidates) {
+    const pattern = a.until;
+    const matched = lines.filter((line) => testUntil(pattern, a.ignoreCase === true, line));
+    const fresh = await readState(directory);
+    const goal = fresh.goals.find((g) => g.id === a.goalID);
+    if (!goal) {
+      await appendEvent(directory, ledgerEvent({
+        goalID: a.goalID,
+        commandID,
+        type: "command.await-discarded",
+        reason: "goal gone"
+      })).catch(() => {});
+      continue;
+    }
+    const short = commandID.slice(0, 8);
+    const header = `[command "${cmd.title}" (${[cmd.command, ...cmd.args].join(" ") || cmd.title}) ${cmd.status}` + ` ${short}... watch-until "${pattern}" matched]`;
+    const matchedText = tailLastBytes(matched.slice(0, 20).join(`
+`), MAX_AWAIT_TAIL_BYTES);
+    const evidence = tail ? `${header}
+${matchedText}
+--- tail ---
+${tail}` : `${header}
+${matchedText}`;
+    await appendGoalInbox(directory, a.goalID, "worker", evidence);
+    await appendEvent(directory, ledgerEvent({
+      goalID: a.goalID,
+      commandID,
+      type: "command.await-fired",
+      until: pattern,
+      matchedLines: matched.length,
+      status: cmd.status
+    })).catch(() => {});
+    fired.push({ goalID: a.goalID, commandID, active: goal.status === "active" });
+  }
+  return fired;
 }
 async function readBoundedTail(directory, commandID) {
   try {
@@ -856,6 +1222,7 @@ async function wakeGoalForAwait(directory, continuation, goalID) {
 }
 var init_command_await2 = __esm(() => {
   init_command_await();
+  init_command_watch();
   init_state_repository();
 });
 
@@ -4421,6 +4788,11 @@ function createCommandSession(input) {
     timeoutSeconds: timeout,
     deadlineAt: input.deadlineAt ?? (timeout !== undefined ? computeDeadlineAt(new Date(now), timeout) : undefined),
     envKeys: input.envKeys,
+    watchFilter: input.watchFilter,
+    watchUntil: input.watchUntil,
+    watchIgnoreCase: input.watchIgnoreCase,
+    watchUntilAction: input.watchUntilAction,
+    watchState: input.watchState,
     cwd: input.cwd,
     ownerSessionID: input.ownerSessionID,
     goalID: input.goalID,
@@ -4440,6 +4812,8 @@ var MAX_COMMAND_OUTPUT_BYTES = 512 * 1024;
 var MAX_COMMAND_READ_LINES = 500;
 var NOTIFY_LONG_RUNNING_MS = 2 * 60 * 1000;
 function shouldNotifyOwnerOnExit(session) {
+  if (session.endReason === "until")
+    return false;
   if (session.notifyOnExit === false)
     return false;
   if (session.notifyOnExit === true)
@@ -4462,6 +4836,7 @@ function shouldNotifyOwnerOnExit(session) {
 }
 
 // src/application/command-service.ts
+init_command_watch();
 init_command_await();
 
 // src/domain/command-events.ts
@@ -4639,11 +5014,11 @@ function validateCommandStreamMessage(value) {
 // src/application/command-service.ts
 init_command_await2();
 init_state_repository();
-var ANSI_PATTERN = new RegExp("\x1B\\[[0-9;?]*[ -/]*[@-~]|\x1B\\][^\x07]*(?:\x07|\x1B\\\\)|\x1B[()][0-9A-Z]", "g");
+var ANSI_PATTERN2 = new RegExp("\x1B\\[[0-9;?]*[ -/]*[@-~]|\x1B\\][^\x07]*(?:\x07|\x1B\\\\)|\x1B[()][0-9A-Z]", "g");
 function stripAnsiForMatch(line) {
-  return line.replace(ANSI_PATTERN, "");
+  return line.replace(ANSI_PATTERN2, "");
 }
-var DANGEROUS_REGEXES = [
+var DANGEROUS_REGEXES2 = [
   /\(\?:.*\)\*.*\(\?:.*\)\*/,
   /.*\(\.\*\?\)\{2,\}.*/,
   /.*\(.*\|.*\)\{3,\}.*/,
@@ -4657,7 +5032,7 @@ function validateReadPattern(pattern) {
   } catch (e) {
     return { error: `Invalid regex pattern '${pattern}': ${e instanceof Error ? e.message : String(e)}` };
   }
-  if (DANGEROUS_REGEXES.some((d) => d.test(pattern))) {
+  if (DANGEROUS_REGEXES2.some((d) => d.test(pattern))) {
     return { error: `Potentially dangerous regex pattern rejected: '${pattern}'. Please use a safer pattern.` };
   }
   return compiled;
@@ -4680,6 +5055,57 @@ function createCommandService(host, opts) {
   const commandDirs = new Map;
   const timeouts = new Map;
   const timeoutOwners = new Map;
+  const watchers = new Map;
+  const watchTimers = new Map;
+  const awaitAsm = new Map;
+  const watchCoalesceMs = opts?.watchCoalesceMs ?? WATCH_COALESCE_WINDOW_MS;
+  function clearWatchTimer(id) {
+    const t = watchTimers.get(id);
+    if (t) {
+      try {
+        globalThis.clearTimeout(t);
+      } catch {}
+    }
+    watchTimers.delete(id);
+  }
+  function deleteWatch(id) {
+    clearWatchTimer(id);
+    watchers.delete(id);
+    awaitAsm.delete(id);
+  }
+  function scheduleWatchFlush(directory, id) {
+    if (watchTimers.has(id))
+      return;
+    const handle = setTimeout(() => {
+      watchTimers.delete(id);
+      enqueue(id, () => flushWatch(directory, id)).catch(() => {});
+    }, Math.max(0, watchCoalesceMs));
+    try {
+      handle.unref?.();
+    } catch {}
+    watchTimers.set(id, handle);
+  }
+  async function persistWatchState(directory, id, state) {
+    await mutateState(directory, `cmd.watch:${id}`, async (s) => {
+      const c = (s.commands ?? []).find((x) => x.id === id);
+      if (c) {
+        c.watchState = { ...state };
+        c.updatedAt = new Date().toISOString();
+      }
+      return s;
+    });
+  }
+  function watchLedger(directory, commandID, type, extra) {
+    return appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID8(),
+      commandID,
+      type,
+      timestamp: new Date().toISOString(),
+      revision: 0,
+      ...extra
+    }).catch(() => {});
+  }
   function clearCommandTimeout(id) {
     const t = timeouts.get(id);
     if (t) {
@@ -4808,6 +5234,99 @@ function createCommandService(host, opts) {
       await opts?.onOwnerNotify?.(directory, target.ownerSessionID, message);
     } catch {}
   }
+  async function flushWatch(directory, id) {
+    const watcher = watchers.get(id);
+    if (!watcher || watcher.pendingCount === 0)
+      return;
+    let session;
+    try {
+      session = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
+    } catch {
+      return;
+    }
+    if (!session || session.status !== "running")
+      return;
+    const push = watcher.takePush();
+    await persistWatchState(directory, id, watcher.state).catch(() => {});
+    if (!push)
+      return;
+    if (push.exhaustedNow) {
+      await watchLedger(directory, id, "command.watch-suspended", { reason: "budget", pushes: watcher.state.pushes });
+      try {
+        await opts?.onWatchNotify?.(directory, session.ownerSessionID, formatWatchBudgetMessage(session.title));
+      } catch {}
+      return;
+    }
+    await watchLedger(directory, id, "command.watch-matched", {
+      lines: push.lines.length,
+      matches: watcher.state.matches,
+      pushes: watcher.state.pushes
+    });
+    try {
+      await opts?.onWatchNotify?.(directory, session.ownerSessionID, formatWatchMessage(session.title, push.lines));
+    } catch {}
+    if (watcher.pendingCount > 0)
+      scheduleWatchFlush(directory, id);
+  }
+  async function handleUntilMatch(directory, id) {
+    const watcher = watchers.get(id);
+    if (!watcher)
+      return;
+    clearWatchTimer(id);
+    let session;
+    try {
+      session = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
+    } catch {
+      return;
+    }
+    if (!session)
+      return;
+    const action = watcher.untilAction;
+    const lines = watcher.takeUntilPush();
+    const snapshot = { ...watcher.state };
+    const message = formatWatchMessage(session.title, lines, `-- until "${session.watchUntil ?? ""}" matched (action=${action})`);
+    await mutateState(directory, `cmd.until-claim:${id}`, async (s) => {
+      const c = (s.commands ?? []).find((x) => x.id === id);
+      if (!c)
+        return s;
+      c.watchState = { ...snapshot };
+      if (action === "stop" && !c.ownerNotifiedAt)
+        c.ownerNotifiedAt = new Date().toISOString();
+      c.updatedAt = new Date().toISOString();
+      return s;
+    }).catch(() => {});
+    await watchLedger(directory, id, "command.watch-matched", {
+      until: session.watchUntil ?? "",
+      lines: lines.length,
+      pushes: snapshot.pushes
+    });
+    try {
+      await opts?.onWatchNotify?.(directory, session.ownerSessionID, message);
+    } catch {}
+    if (action !== "stop")
+      return;
+    if (session.status !== "running")
+      return;
+    await watchLedger(directory, id, "command.until-stopped", { until: session.watchUntil ?? "" });
+    await service.terminate(directory, id, session.ownerSessionID).catch(() => {});
+    await mutateState(directory, `cmd.until:${id}`, async (s) => {
+      const c = (s.commands ?? []).find((x) => x.id === id);
+      if (!c)
+        return s;
+      if (c.status === "terminated" && c.endReason !== "timeout") {
+        c.endReason = "until";
+        c.lastError = c.lastError ?? `Watch until pattern "${c.watchUntil ?? ""}" matched; command stopped (untilAction=stop).`;
+        c.updatedAt = new Date().toISOString();
+      }
+      return s;
+    }).catch(() => {});
+    try {
+      const fresh = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
+      if (fresh)
+        emitBroker(id, { type: "status", command: fresh });
+    } catch {}
+    await fireAwaits(directory, id);
+  }
   async function readBrokerSnapshot(commandID, ownerSessionID) {
     const directory = commandDirs.get(commandID);
     if (!directory)
@@ -4857,6 +5376,43 @@ function createCommandService(host, opts) {
         entry.bufferedBytes -= dropped.length;
       }
     }
+    let watcher;
+    let feed;
+    let bareLines = [];
+    try {
+      watcher = watchers.get(id);
+      if (!watcher) {
+        const spec = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id)).catch(() => {
+          return;
+        });
+        if (spec && spec.status === "running" && (spec.watchFilter !== undefined || spec.watchUntil !== undefined)) {
+          try {
+            watcher = new CommandWatcher({
+              ...spec.watchFilter !== undefined ? { filter: spec.watchFilter } : {},
+              ...spec.watchUntil !== undefined ? { until: spec.watchUntil } : {},
+              ...spec.watchIgnoreCase !== undefined ? { ignoreCase: spec.watchIgnoreCase } : {},
+              ...spec.watchUntilAction !== undefined ? { untilAction: spec.watchUntilAction } : {}
+            });
+            watchers.set(id, watcher);
+          } catch {
+            watcher = undefined;
+          }
+        }
+      }
+      if (watcher) {
+        feed = watcher.feedChunk(chunk, Date.now());
+      } else {
+        let asm = awaitAsm.get(id);
+        if (!asm) {
+          asm = createLineAssembler();
+          awaitAsm.set(id, asm);
+        }
+        bareLines = asm.push(chunk).filter((l) => l.trim() !== "");
+      }
+    } catch {
+      watcher = undefined;
+      feed = undefined;
+    }
     await appendCommandLog(directory, id, chunk);
     let retainedBytes = 0;
     let truncated = false;
@@ -4886,6 +5442,8 @@ function createCommandService(host, opts) {
       c.outputBytes = retainedBytes;
       if (truncated)
         c.truncated = true;
+      if (watcher)
+        c.watchState = { ...watcher.state };
       c.updatedAt = new Date().toISOString();
       return s;
     });
@@ -4903,11 +5461,86 @@ function createCommandService(host, opts) {
         });
       }
     } catch {}
+    try {
+      if (watcher && feed) {
+        if (feed.floodNow) {
+          await persistWatchState(directory, id, watcher.state).catch(() => {});
+          const dropped = watcher.state.droppedLines;
+          let owner;
+          let title = id;
+          try {
+            const snap = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
+            owner = snap?.ownerSessionID;
+            title = snap?.title ?? id;
+          } catch {}
+          await watchLedger(directory, id, "command.watch-suspended", { reason: "flood", dropped });
+          if (owner) {
+            try {
+              await opts?.onWatchNotify?.(directory, owner, formatWatchFloodMessage(title, dropped));
+            } catch {}
+          }
+        }
+        if (watcher.pendingCount > 0)
+          scheduleWatchFlush(directory, id);
+        if (feed.untilLine) {
+          clearWatchTimer(id);
+          enqueue(id, () => handleUntilMatch(directory, id)).catch(() => {});
+        }
+      }
+    } catch {}
+    try {
+      const completed = feed ? feed.completed : bareLines;
+      if (completed.length > 0) {
+        const fired = await fireUntilAwaits(directory, id, completed);
+        if (fired.length > 0) {
+          await opts?.onAwaitFired?.(directory, fired);
+        }
+      }
+    } catch {}
   }
   async function persistExit(directory, id, info) {
     rememberDir(id, directory);
     live.delete(id);
     clearCommandTimeout(id);
+    const exitWatcher = watchers.get(id);
+    if (exitWatcher) {
+      try {
+        const handledStop = exitWatcher.state.state === "until-matched" && exitWatcher.untilAction === "stop";
+        exitWatcher.finish(Date.now());
+        let snap;
+        try {
+          snap = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
+        } catch {
+          snap = undefined;
+        }
+        if (snap && !handledStop && exitWatcher.pendingCount > 0) {
+          const push = exitWatcher.takePush();
+          await persistWatchState(directory, id, exitWatcher.state).catch(() => {});
+          if (push && !push.exhaustedNow && push.lines.length > 0) {
+            await watchLedger(directory, id, "command.watch-matched", {
+              lines: push.lines.length,
+              atExit: true,
+              pushes: exitWatcher.state.pushes
+            });
+            try {
+              await opts?.onWatchNotify?.(directory, snap.ownerSessionID, formatWatchMessage(snap.title, push.lines));
+            } catch {}
+          } else if (push?.exhaustedNow) {
+            await watchLedger(directory, id, "command.watch-suspended", {
+              reason: "budget",
+              atExit: true,
+              pushes: exitWatcher.state.pushes
+            });
+            try {
+              await opts?.onWatchNotify?.(directory, snap.ownerSessionID, formatWatchBudgetMessage(snap.title));
+            } catch {}
+          }
+        } else {
+          await persistWatchState(directory, id, exitWatcher.state).catch(() => {});
+        }
+      } catch {}
+    }
+    deleteWatch(id);
     await mutateState(directory, `cmd.exit:${id}`, async (s) => {
       const c = (s.commands ?? []).find((x) => x.id === id);
       if (!c || c.status !== "running")
@@ -4965,6 +5598,20 @@ function createCommandService(host, opts) {
         throw new Error("A valid owner session is required. Run from an active OpenCode session.");
       }
       const timeoutSeconds = normalizeTimeoutSeconds(input.timeoutSeconds);
+      const watchFilter = input.watchFilter !== undefined && input.watchFilter !== "" ? input.watchFilter : undefined;
+      const watchUntil = input.watchUntil !== undefined && input.watchUntil !== "" ? input.watchUntil : undefined;
+      const hasWatch = watchFilter !== undefined || watchUntil !== undefined;
+      let watcher;
+      let watchState;
+      if (hasWatch) {
+        watcher = new CommandWatcher({
+          ...watchFilter !== undefined ? { filter: watchFilter } : {},
+          ...watchUntil !== undefined ? { until: watchUntil } : {},
+          ...input.watchIgnoreCase !== undefined ? { ignoreCase: input.watchIgnoreCase } : {},
+          ...input.watchUntilAction !== undefined ? { untilAction: input.watchUntilAction } : {}
+        });
+        watchState = initialWatchState();
+      }
       const startedAt = new Date;
       const id = randomUUID8();
       const cwd = input.cwd || directory;
@@ -4998,7 +5645,12 @@ function createCommandService(host, opts) {
         shell: useShell ? true : undefined,
         timeoutSeconds,
         deadlineAt: timeoutSeconds !== undefined ? computeDeadlineAt(startedAt, timeoutSeconds) : undefined,
-        envKeys: input.env ? Object.keys(input.env) : undefined
+        envKeys: input.env ? Object.keys(input.env) : undefined,
+        watchFilter,
+        watchUntil,
+        watchIgnoreCase: input.watchIgnoreCase,
+        watchUntilAction: watcher?.untilAction,
+        watchState
       });
       try {
         await mutateState(directory, `cmd.start:${id}`, async (s) => {
@@ -5016,6 +5668,8 @@ function createCommandService(host, opts) {
         throw error;
       }
       live.set(id, { handle, buffers: [], bufferedBytes: 0 });
+      if (watcher)
+        watchers.set(id, watcher);
       if (timeoutSeconds !== undefined)
         scheduleTimeout(directory, id, input.ownerSessionID, timeoutSeconds);
       rememberDir(id, directory);
@@ -5227,6 +5881,7 @@ function createCommandService(host, opts) {
       }
       const exitCode = status === "terminated" ? 143 : undefined;
       clearCommandTimeout(id);
+      clearWatchTimer(id);
       await mutateState(directory, `cmd.terminate:${id}`, async (s) => {
         const c = (s.commands ?? []).find((x) => x.id === id);
         if (!c || c.ownerSessionID !== ownerSessionID)
@@ -5273,6 +5928,7 @@ function createCommandService(host, opts) {
       if (session.status === "running") {
         return { ok: false, message: `Command "${session.title}" is still running \u2014 terminate it first (terminate \u2260 remove).` };
       }
+      deleteWatch(id);
       const lastKnown = { ...session };
       await mutateState(directory, `cmd.remove:${id}`, async (s) => {
         s.commands = (s.commands ?? []).filter((x) => !(x.id === id && x.ownerSessionID === ownerSessionID));
@@ -5297,6 +5953,7 @@ function createCommandService(host, opts) {
           if (!entry.handle.isAlive()) {
             live.delete(c.id);
             clearCommandTimeout(c.id);
+            deleteWatch(c.id);
             await mutateState(directory, `cmd.reconcile-exit:${c.id}`, async (s) => {
               const x = (s.commands ?? []).find((y) => y.id === c.id);
               if (x && x.status === "running") {
@@ -5319,6 +5976,7 @@ function createCommandService(host, opts) {
           continue;
         }
         clearCommandTimeout(c.id);
+        deleteWatch(c.id);
         const deadlinePassed = c.deadlineAt ? Date.parse(c.deadlineAt) <= Date.now() : false;
         await mutateState(directory, `cmd.reconcile-missing:${c.id}`, async (s) => {
           const x = (s.commands ?? []).find((y) => y.id === c.id);
@@ -5342,6 +6000,10 @@ function createCommandService(host, opts) {
       return { markedMissing };
     },
     async dispose(directory) {
+      for (const id of [...watchTimers.keys()])
+        clearWatchTimer(id);
+      watchers.clear();
+      awaitAsm.clear();
       const state = await readState(directory);
       const owned = new Map((state.commands ?? []).map((command) => [command.id, command.ownerSessionID]));
       await Promise.all([...live.entries()].map(async ([id, entry]) => {
@@ -7147,6 +7809,10 @@ function summarize(c) {
     deadlineAt: c.deadlineAt,
     envKeys: c.envKeys,
     shell: c.shell,
+    watchFilter: c.watchFilter,
+    watchUntil: c.watchUntil,
+    watchIgnoreCase: c.watchIgnoreCase,
+    watchUntilAction: c.watchUntilAction,
     outputBytes: c.outputBytes,
     truncated: c.truncated,
     goalID: c.goalID,
@@ -7172,7 +7838,11 @@ function commandTools(options) {
         rows: tool3.schema.number().optional().describe(`Requested terminal height (${sizeNote}).`),
         env: tool3.schema.record(tool3.schema.string(), tool3.schema.string()).optional().describe("Extra environment variables for the child. Values are passed to the host but never persisted \u2014 only names appear as envKeys in summaries."),
         timeout_seconds: tool3.schema.number().optional().describe("Per-command timeout in seconds (positive integer). The command is terminated via the standard SIGTERM\u2192SIGKILL path when the deadline passes; endReason becomes 'timeout' and the owner is always notified (auto policy). In-memory only \u2014 never resurrected across restarts."),
-        shell: tool3.schema.boolean().optional().describe("When true, spawn via /bin/sh -c with command+args joined into one shell string (POSIX single-quote escaping). Shell metacharacters are interpreted; prefer argv form for untrusted input.")
+        shell: tool3.schema.boolean().optional().describe("When true, spawn via /bin/sh -c with command+args joined into one shell string (POSIX single-quote escaping). Shell metacharacters are interpreted; prefer argv form for untrusted input."),
+        watch_filter: tool3.schema.string().optional().describe("Watch line filter (regex on ANSI-stripped lines): only matching lines buffer toward a coalesced owner push. For never-exiting processes (dev servers, log tails)."),
+        watch_until: tool3.schema.string().optional().describe("Watch until pattern (regex on the filter-surviving stream): first match notifies the owner immediately. With watch_until_action=stop (default) the command is terminated with endReason=until; with keep it keeps running."),
+        watch_ignore_case: tool3.schema.boolean().optional().describe("Case-insensitive watch matching (default false)."),
+        watch_until_action: tool3.schema.string().optional().describe('Until action: "stop" (default) terminates the command on first until-match; "keep" notifies but keeps running (until fires once, filter stream continues).')
       },
       execute: async (args, context) => {
         const owner = ownerID(context);
@@ -7186,6 +7856,9 @@ function commandTools(options) {
             always: [args.command],
             metadata: { command: args.command, args: args.args ?? [], cwd: args.cwd ?? directory }
           });
+          if (args.watch_until_action !== undefined && args.watch_until_action !== "stop" && args.watch_until_action !== "keep") {
+            throw new Error(`Invalid watch_until_action '${args.watch_until_action}': must be "stop" or "keep".`);
+          }
           const session = await commandService.start(directory, {
             title: args.title,
             command: args.command,
@@ -7198,7 +7871,11 @@ function commandTools(options) {
             rows: args.rows,
             env: args.env,
             timeoutSeconds: args.timeout_seconds,
-            shell: args.shell
+            shell: args.shell,
+            watchFilter: args.watch_filter,
+            watchUntil: args.watch_until,
+            watchIgnoreCase: args.watch_ignore_case,
+            watchUntilAction: args.watch_until_action
           });
           return {
             title: "Command started",
@@ -7322,10 +7999,12 @@ function commandTools(options) {
       }
     }),
     loopd_command_await: tool3({
-      description: "Opt in to a one-shot wake-up: the given goal wakes when the given command reaches a terminal status (exited/terminated/missing) with the exit code, signal, and last 4KB of output as evidence. Use this to have a GOAL worker block on a background process it started (e.g. 'wait for this build/test run to finish, then check the result') without polling. Explicit opt-in only \u2014 a merely linked command (goal_id passed to loopd_command_start) never wakes its goal on its own; this call is required. Exactly-once: the await is consumed on fire, output chunks never fire, pausing/clearing the goal or removing the command cancels it.",
+      description: "Opt in to a one-shot wake-up: the given goal wakes when the given command reaches a terminal status (exited/terminated/missing) with the exit code, signal, and last 4KB of output as evidence. With 'until', the goal instead wakes ONCE on the first output line matching the regex (evidence: matched lines + bounded tail) and the command keeps running \u2014 use this to have a GOAL worker block until a never-exiting process prints something (e.g. 'wait until the dev server prints ready') without polling. Explicit opt-in only \u2014 a merely linked command (goal_id passed to loopd_command_start) never wakes its goal on its own; this call is required. Exactly-once: the await is consumed on fire, output chunks never fire exit-awaits, pausing/clearing the goal or removing the command cancels it.",
       args: {
         command_id: tool3.schema.string().describe("Command session ID to await."),
-        goal_id: tool3.schema.string().describe("Goal ID to wake on exit. You must own both the goal and the command.")
+        goal_id: tool3.schema.string().describe("Goal ID to wake on exit. You must own both the goal and the command."),
+        until: tool3.schema.string().optional().describe("Regex to wake on: fires once on the first matching output line (matched lines + bounded tail as evidence) without stopping the command. Dangerous nested-quantifier patterns are rejected."),
+        ignore_case: tool3.schema.boolean().optional().describe("Case-insensitive until matching (default false).")
       },
       execute: async (args, context) => {
         const owner = ownerID(context);
@@ -7334,7 +8013,9 @@ function commandTools(options) {
         const result = await requestCommandAwait(directory, {
           goalID: args.goal_id,
           commandID: args.command_id,
-          ownerSessionID: owner
+          ownerSessionID: owner,
+          ...args.until !== undefined ? { until: args.until } : {},
+          ...args.ignore_case !== undefined ? { ignoreCase: args.ignore_case } : {}
         });
         if (result.ok && result.fired && result.active && options.goalService) {
           await wakeGoalForAwait(directory, options.goalService, args.goal_id).catch(() => {});
@@ -7396,6 +8077,12 @@ function createServerHooks(directory, host, defaults) {
     },
     onOwnerNotify: async (dir, ownerSessionID, message) => {
       await host.notifyOwner(ownerSessionID, message).catch((error) => logServerEvent(dir, "command.owner-notify-failed", {
+        ownerSessionID,
+        detail: describeError(error)
+      }));
+    },
+    onWatchNotify: async (dir, ownerSessionID, message) => {
+      await host.notifyOwner(ownerSessionID, message).catch((error) => logServerEvent(dir, "command.watch-notify-failed", {
         ownerSessionID,
         detail: describeError(error)
       }));

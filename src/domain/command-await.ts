@@ -20,6 +20,16 @@ export interface CommandAwait {
   commandID: string
   ownerSessionID: string
   createdAt: string
+  /**
+   * M2: when set, this await fires ONCE on the first output line matching the
+   * pattern (regex source; ANSI-stripped lines) instead of on terminal status.
+   * The command keeps running — unlike watch-until=stop, an until-await never
+   * stops anything. A terminal exit still consumes an unmatched until-await
+   * (with exit evidence) so awaits can never leak.
+   */
+  until?: string
+  /** Case-insensitive until matching. */
+  ignoreCase?: boolean
 }
 
 /** Terminal statuses that fire an await. Output chunks ("running") never fire. */

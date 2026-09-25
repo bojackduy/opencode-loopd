@@ -19,11 +19,25 @@ import {
   type CommandSessionID,
   type CommandSessionStatus,
 } from "../domain/command-session"
+import {
+  CommandWatcher,
+  compileWatchSpec,
+  createLineAssembler,
+  formatWatchBudgetMessage,
+  formatWatchFloodMessage,
+  formatWatchMessage,
+  initialWatchState,
+  WATCH_COALESCE_WINDOW_MS,
+  type LineAssembler,
+  type WatchFeedResult,
+  type WatchState,
+  type WatchUntilAction,
+} from "../domain/command-watch"
 import { isTerminalCommandStatus, formatAwaitEvidence } from "../domain/command-await"
 import type { CommandHost, CommandProcessHandle } from "../server/command-host"
 import { utf8ByteLength, type CommandStreamMessage } from "../domain/command-events"
 import type { CommandEventBroker } from "./command-event-broker"
-import { clearAwaitsForCommand, fireCommandAwaits, readBoundedTail, type FiredAwait } from "./command-await"
+import { clearAwaitsForCommand, fireCommandAwaits, fireUntilAwaits, readBoundedTail, type FiredAwait } from "./command-await"
 import {
   appendCommandLog,
   appendEvent,
@@ -55,6 +69,17 @@ export interface CommandStartInput {
    * dynamic values — prefer argv form (shell:false) for untrusted input.
    */
   shell?: boolean
+  // ─── M2 watch (line-level filter/until notifications) ────────────────────
+  // Empty string counts as unset. Invalid regexes fail closed at start (throw
+  // before spawning — same dangerous-pattern guard as pattern reads).
+  /** Regex source: only matching lines buffer toward an owner push. */
+  watchFilter?: string
+  /** Regex source on the filter-surviving stream; first match fires the until path. */
+  watchUntil?: string
+  /** Case-insensitive watch matching. */
+  watchIgnoreCase?: boolean
+  /** "stop" (default) terminates on until-match; "keep" keeps running. */
+  watchUntilAction?: WatchUntilAction
 }
 
 export interface CommandReadResult {
@@ -158,6 +183,18 @@ export function createCommandService(
      * a no-op — the exactly-once marker is still set either way.
      */
     onOwnerNotify?: (directory: string, ownerSessionID: string, message: string) => Promise<void>
+    /**
+     * M2 watch pushes: coalesced `[watch "<title>"]` matched-lines messages,
+     * flood/budget suspension notices, and until-match notices. Same channel
+     * as onOwnerNotify (the composition root wires both to host.notifyOwner).
+     * Failures never break persistence.
+     */
+    onWatchNotify?: (directory: string, ownerSessionID: string, message: string) => Promise<void>
+    /**
+     * Coalescing window override (default WATCH_COALESCE_WINDOW_MS). Tests use
+     * a small value; production keeps the 2000ms policy constant.
+     */
+    watchCoalesceMs?: number
   },
 ): CommandService {
   type LiveEntry = { handle: CommandProcessHandle; buffers: Buffer[]; bufferedBytes: number }
@@ -173,6 +210,73 @@ export function createCommandService(
   // honestly marks overdue commands missing instead of reviving a deadline.
   const timeouts = new Map<string, ReturnType<typeof setTimeout>>()
   const timeoutOwners = new Map<string, { directory: string; ownerSessionID: string }>()
+  // ─── M2 watch runtime (in-memory only) ───────────────────────────────────
+  // Watchers never survive restart (commands don't either); the persisted
+  // watchFilter/watchUntil/watchState fields are the durable half. Coalesce
+  // timers are unref'd like timeout timers. Bare assemblers give await-until
+  // correct line splitting on commands without a configured watch.
+  const watchers = new Map<string, CommandWatcher>()
+  const watchTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  const awaitAsm = new Map<string, LineAssembler>()
+  const watchCoalesceMs = opts?.watchCoalesceMs ?? WATCH_COALESCE_WINDOW_MS
+
+  function clearWatchTimer(id: string): void {
+    const t = watchTimers.get(id)
+    if (t) {
+      try {
+        globalThis.clearTimeout(t)
+      } catch {
+        // Timer already fired — harmless.
+      }
+    }
+    watchTimers.delete(id)
+  }
+
+  function deleteWatch(id: string): void {
+    clearWatchTimer(id)
+    watchers.delete(id)
+    awaitAsm.delete(id)
+  }
+
+  function scheduleWatchFlush(directory: string, id: string): void {
+    if (watchTimers.has(id)) return
+    const handle = setTimeout(() => {
+      watchTimers.delete(id)
+      void enqueue(id, () => flushWatch(directory, id)).catch(() => {})
+    }, Math.max(0, watchCoalesceMs))
+    try {
+      ;(handle as unknown as { unref?: () => void }).unref?.()
+    } catch {}
+    watchTimers.set(id, handle)
+  }
+
+  async function persistWatchState(directory: string, id: string, state: WatchState): Promise<void> {
+    await mutateState(directory, `cmd.watch:${id}`, async (s) => {
+      const c = (s.commands ?? []).find((x) => x.id === id)
+      if (c) {
+        c.watchState = { ...state }
+        c.updatedAt = new Date().toISOString()
+      }
+      return s
+    })
+  }
+
+  function watchLedger(
+    directory: string,
+    commandID: string,
+    type: "command.watch-matched" | "command.watch-suspended" | "command.until-stopped",
+    extra?: Record<string, unknown>,
+  ): Promise<void> {
+    return appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID(),
+      commandID,
+      type,
+      timestamp: new Date().toISOString(),
+      revision: 0,
+      ...extra,
+    }).catch(() => {})
+  }
 
   function clearCommandTimeout(id: string): void {
     const t = timeouts.get(id)
@@ -333,8 +437,125 @@ export function createCommandService(
     }
   }
 
-  async function readBrokerSnapshot(commandID: string, ownerSessionID: string) {
-    const directory = commandDirs.get(commandID)
+  /**
+   * M2 coalesce flush: deliver one bounded push for the buffered matches.
+   * One push per flush cycle (overflow re-schedules); budget exhaustion emits
+   * its one-shot notice here. Notify failures never break persistence.
+   */
+  async function flushWatch(directory: string, id: string): Promise<void> {
+    const watcher = watchers.get(id)
+    if (!watcher || watcher.pendingCount === 0) return
+    let session: CommandSession | undefined
+    try {
+      session = await readState(directory).then(
+        (s) => (s.commands ?? []).find((x) => x.id === id),
+      )
+    } catch {
+      return
+    }
+    if (!session || session.status !== "running") return
+    const push = watcher.takePush()
+    await persistWatchState(directory, id, watcher.state).catch(() => {})
+    if (!push) return
+    if (push.exhaustedNow) {
+      await watchLedger(directory, id, "command.watch-suspended", { reason: "budget", pushes: watcher.state.pushes })
+      try {
+        await opts?.onWatchNotify?.(directory, session.ownerSessionID, formatWatchBudgetMessage(session.title))
+      } catch {
+        // Notify delivery never breaks command persistence.
+      }
+      return
+    }
+    await watchLedger(directory, id, "command.watch-matched", {
+      lines: push.lines.length,
+      matches: watcher.state.matches,
+      pushes: watcher.state.pushes,
+    })
+    try {
+      await opts?.onWatchNotify?.(directory, session.ownerSessionID, formatWatchMessage(session.title, push.lines))
+    } catch {
+      // Notify delivery never breaks command persistence.
+    }
+    if (watcher.pendingCount > 0) scheduleWatchFlush(directory, id)
+  }
+
+  /**
+   * M2 until-match: deliver pending+matching line immediately, claim the
+   * exactly-once owner marker (suppressing the later standard exit ping),
+   * then stop (terminate + endReason="until") or keep running.
+   * Runs serialized per command (via enqueue) so it can't race persistence.
+   */
+  async function handleUntilMatch(directory: string, id: string): Promise<void> {
+    const watcher = watchers.get(id)
+    if (!watcher) return
+    clearWatchTimer(id)
+    let session: CommandSession | undefined
+    try {
+      session = await readState(directory).then(
+        (s) => (s.commands ?? []).find((x) => x.id === id),
+      )
+    } catch {
+      return
+    }
+    if (!session) return
+    const action = watcher.untilAction
+    const lines = watcher.takeUntilPush()
+    const snapshot: WatchState = { ...watcher.state }
+    const message = formatWatchMessage(
+      session.title,
+      lines,
+      `-- until "${session.watchUntil ?? ""}" matched (action=${action})`,
+    )
+    // Claim the exactly-once owner marker NOW so the subsequent standard exit
+    // notify (from terminate/persistExit below) skips: exactly one owner
+    // message total for an until-stop. For keep the until notice is
+    // ADDITIONAL — the later exit ping behaves normally, so leave the marker.
+    await mutateState(directory, `cmd.until-claim:${id}`, async (s) => {
+      const c = (s.commands ?? []).find((x) => x.id === id)
+      if (!c) return s
+      c.watchState = { ...snapshot }
+      if (action === "stop" && !c.ownerNotifiedAt) c.ownerNotifiedAt = new Date().toISOString()
+      c.updatedAt = new Date().toISOString()
+      return s
+    }).catch(() => {})
+    await watchLedger(directory, id, "command.watch-matched", {
+      until: session.watchUntil ?? "",
+      lines: lines.length,
+      pushes: snapshot.pushes,
+    })
+    try {
+      await opts?.onWatchNotify?.(directory, session.ownerSessionID, message)
+    } catch {
+      // Notify delivery never breaks command persistence.
+    }
+    if (action !== "stop") return // keep: filter stream continues, until spent
+    if (session.status !== "running") return // already terminal: nothing to stop
+    await watchLedger(directory, id, "command.until-stopped", { until: session.watchUntil ?? "" })
+    await service.terminate(directory, id, session.ownerSessionID).catch(() => {})
+    // Stamp endReason=until over the "terminate" the standard path produced
+    // (same overlay pattern as the timeout path).
+    await mutateState(directory, `cmd.until:${id}`, async (s) => {
+      const c = (s.commands ?? []).find((x) => x.id === id)
+      if (!c) return s
+      if (c.status === "terminated" && c.endReason !== "timeout") {
+        c.endReason = "until"
+        c.lastError = c.lastError ?? `Watch until pattern "${c.watchUntil ?? ""}" matched; command stopped (untilAction=stop).`
+        c.updatedAt = new Date().toISOString()
+      }
+      return s
+    }).catch(() => {})
+    try {
+      const fresh = await readState(directory).then(
+        (st) => (st.commands ?? []).find((x) => x.id === id),
+      )
+      if (fresh) emitBroker(id, { type: "status", command: fresh })
+    } catch {}
+    await fireAwaits(directory, id)
+    // Deliberately NO notifyOwnerIfNeeded: the until notice claimed the
+    // marker, so the owner already got exactly one message.
+  }
+
+  async function readBrokerSnapshot(commandID: string, ownerSessionID: string) {    const directory = commandDirs.get(commandID)
     if (!directory) return undefined
     const state = await readState(directory)
     const session = (state.commands ?? []).find(
@@ -386,6 +607,45 @@ export function createCommandService(
         entry.bufferedBytes -= dropped.length
       }
     }
+    // M2 watch feed (in-memory only; never breaks persistence). Lazy-creates
+    // the watcher from persisted spec when this instance doesn't have one yet.
+    let watcher: CommandWatcher | undefined
+    let feed: WatchFeedResult | undefined
+    let bareLines: string[] = []
+    try {
+      watcher = watchers.get(id)
+      if (!watcher) {
+        const spec = await readState(directory).then(
+          (s) => (s.commands ?? []).find((x) => x.id === id),
+        ).catch(() => undefined)
+        if (spec && spec.status === "running" && (spec.watchFilter !== undefined || spec.watchUntil !== undefined)) {
+          try {
+            watcher = new CommandWatcher({
+              ...(spec.watchFilter !== undefined ? { filter: spec.watchFilter } : {}),
+              ...(spec.watchUntil !== undefined ? { until: spec.watchUntil } : {}),
+              ...(spec.watchIgnoreCase !== undefined ? { ignoreCase: spec.watchIgnoreCase } : {}),
+              ...(spec.watchUntilAction !== undefined ? { untilAction: spec.watchUntilAction } : {}),
+            })
+            watchers.set(id, watcher)
+          } catch {
+            watcher = undefined
+          }
+        }
+      }
+      if (watcher) {
+        feed = watcher.feedChunk(chunk, Date.now())
+      } else {
+        let asm = awaitAsm.get(id)
+        if (!asm) {
+          asm = createLineAssembler()
+          awaitAsm.set(id, asm)
+        }
+        bareLines = asm.push(chunk).filter((l) => l.trim() !== "")
+      }
+    } catch {
+      watcher = undefined
+      feed = undefined
+    }
     await appendCommandLog(directory, id, chunk)
     // Output for one command is serialized, so append and truncation cannot
     // overwrite each other. outputBytes is the retained file size, not an
@@ -418,6 +678,8 @@ export function createCommandService(
       c.streamBytes = endOffset
       c.outputBytes = retainedBytes
       if (truncated) c.truncated = true
+      // M2: watcher counters ride the same persisted write (no extra lock).
+      if (watcher) c.watchState = { ...watcher.state }
       c.updatedAt = new Date().toISOString()
       return s
     })
@@ -441,12 +703,109 @@ export function createCommandService(
     } catch {
       // Read-back is best-effort; persistence already succeeded.
     }
+    // M2 post-persistence watch actions (serialized per command; failures
+    // never break the persistence above).
+    try {
+      if (watcher && feed) {
+        if (feed.floodNow) {
+          await persistWatchState(directory, id, watcher.state).catch(() => {})
+          const dropped = watcher.state.droppedLines
+          let owner: string | undefined
+          let title = id
+          try {
+            const snap = await readState(directory).then(
+              (s) => (s.commands ?? []).find((x) => x.id === id),
+            )
+            owner = snap?.ownerSessionID
+            title = snap?.title ?? id
+          } catch {}
+          await watchLedger(directory, id, "command.watch-suspended", { reason: "flood", dropped })
+          if (owner) {
+            try {
+              await opts?.onWatchNotify?.(directory, owner, formatWatchFloodMessage(title, dropped))
+            } catch {}
+          }
+        }
+        if (watcher.pendingCount > 0) scheduleWatchFlush(directory, id)
+        if (feed.untilLine) {
+          clearWatchTimer(id)
+          // Enqueued behind this op: runs after persistence, never deadlocks
+          // the terminate path it may trigger.
+          void enqueue(id, () => handleUntilMatch(directory, id)).catch(() => {})
+        }
+      }
+    } catch {
+      // Watch actions never break command persistence.
+    }
+    // M2 await-until: completed stripped lines wake pattern awaits ONCE; the
+    // command keeps running. Independent of the watch filter by design.
+    try {
+      const completed = feed ? feed.completed : bareLines
+      if (completed.length > 0) {
+        const fired = await fireUntilAwaits(directory, id, completed)
+        if (fired.length > 0) {
+          await opts?.onAwaitFired?.(directory, fired)
+        }
+      }
+    } catch {
+      // Await delivery never breaks command persistence.
+    }
   }
 
   async function persistExit(directory: string, id: string, info: { exitCode: number; signal?: string }): Promise<void> {
     rememberDir(id, directory)
     live.delete(id)
     clearCommandTimeout(id)
+    // M2 watch exit-finalize: assemble the trailing partial line, deliver one
+    // final bounded push (unless an until-stop already delivered its notice —
+    // exactly-once), then drop the in-memory watcher.
+    const exitWatcher = watchers.get(id)
+    if (exitWatcher) {
+      try {
+        // An until-stop handled while running already notified; anything the
+        // trailing line newly matches still goes out once below (no terminate
+        // — the process is already gone, endReason stays honest).
+        const handledStop =
+          exitWatcher.state.state === "until-matched" && exitWatcher.untilAction === "stop"
+        exitWatcher.finish(Date.now())
+        let snap: CommandSession | undefined
+        try {
+          snap = await readState(directory).then(
+            (s) => (s.commands ?? []).find((x) => x.id === id),
+          )
+        } catch {
+          snap = undefined
+        }
+        if (snap && !handledStop && exitWatcher.pendingCount > 0) {
+          const push = exitWatcher.takePush()
+          await persistWatchState(directory, id, exitWatcher.state).catch(() => {})
+          if (push && !push.exhaustedNow && push.lines.length > 0) {
+            await watchLedger(directory, id, "command.watch-matched", {
+              lines: push.lines.length,
+              atExit: true,
+              pushes: exitWatcher.state.pushes,
+            })
+            try {
+              await opts?.onWatchNotify?.(directory, snap.ownerSessionID, formatWatchMessage(snap.title, push.lines))
+            } catch {}
+          } else if (push?.exhaustedNow) {
+            await watchLedger(directory, id, "command.watch-suspended", {
+              reason: "budget",
+              atExit: true,
+              pushes: exitWatcher.state.pushes,
+            })
+            try {
+              await opts?.onWatchNotify?.(directory, snap.ownerSessionID, formatWatchBudgetMessage(snap.title))
+            } catch {}
+          }
+        } else {
+          await persistWatchState(directory, id, exitWatcher.state).catch(() => {})
+        }
+      } catch {
+        // Watch finalization never breaks exit persistence.
+      }
+    }
+    deleteWatch(id)
     await mutateState(directory, `cmd.exit:${id}`, async (s) => {
       const c = (s.commands ?? []).find((x) => x.id === id)
       if (!c || c.status !== "running") return s
@@ -511,6 +870,23 @@ export function createCommandService(
       // Fail closed BEFORE spawning: an invalid timeout must never start a
       // process without its deadline.
       const timeoutSeconds = normalizeTimeoutSeconds(input.timeoutSeconds)
+      // M2 watch: fail closed BEFORE spawning — an invalid regex must never
+      // start a process it cannot watch. Empty string counts as unset.
+      const watchFilter = input.watchFilter !== undefined && input.watchFilter !== "" ? input.watchFilter : undefined
+      const watchUntil = input.watchUntil !== undefined && input.watchUntil !== "" ? input.watchUntil : undefined
+      const hasWatch = watchFilter !== undefined || watchUntil !== undefined
+      let watcher: CommandWatcher | undefined
+      let watchState: WatchState | undefined
+      if (hasWatch) {
+        // Throws on invalid/dangerous patterns (same guard as pattern reads).
+        watcher = new CommandWatcher({
+          ...(watchFilter !== undefined ? { filter: watchFilter } : {}),
+          ...(watchUntil !== undefined ? { until: watchUntil } : {}),
+          ...(input.watchIgnoreCase !== undefined ? { ignoreCase: input.watchIgnoreCase } : {}),
+          ...(input.watchUntilAction !== undefined ? { untilAction: input.watchUntilAction } : {}),
+        })
+        watchState = initialWatchState()
+      }
       const startedAt = new Date()
       const id = randomUUID() as CommandSessionID
       const cwd = input.cwd || directory
@@ -548,6 +924,11 @@ export function createCommandService(
         timeoutSeconds,
         deadlineAt: timeoutSeconds !== undefined ? computeDeadlineAt(startedAt, timeoutSeconds) : undefined,
         envKeys: input.env ? Object.keys(input.env) : undefined,
+        watchFilter,
+        watchUntil,
+        watchIgnoreCase: input.watchIgnoreCase,
+        watchUntilAction: watcher?.untilAction,
+        watchState,
       })
       try {
         await mutateState(directory, `cmd.start:${id}`, async (s) => {
@@ -564,6 +945,7 @@ export function createCommandService(
         throw error
       }
       live.set(id, { handle, buffers: [], bufferedBytes: 0 })
+      if (watcher) watchers.set(id, watcher)
       if (timeoutSeconds !== undefined) scheduleTimeout(directory, id, input.ownerSessionID, timeoutSeconds)
       rememberDir(id, directory)
       await appendEvent(directory, {
@@ -798,6 +1180,10 @@ export function createCommandService(
       }
       const exitCode = status === "terminated" ? 143 : undefined
       clearCommandTimeout(id)
+      // M2: stop coalesce timers at terminate time; the exit event's
+      // persistExit still delivers one final bounded push, then drops the
+      // in-memory watcher. (Timer cleared here so it can't double-deliver.)
+      clearWatchTimer(id)
       await mutateState(directory, `cmd.terminate:${id}`, async (s) => {
         const c = (s.commands ?? []).find((x) => x.id === id)
         if (!c || c.ownerSessionID !== ownerSessionID) return s
@@ -853,6 +1239,7 @@ export function createCommandService(
       if (session.status === "running") {
         return { ok: false, message: `Command "${session.title}" is still running — terminate it first (terminate ≠ remove).` }
       }
+      deleteWatch(id)
       // Capture pre-delete metadata for the post-persistence status emit.
       const lastKnown = { ...session }
       await mutateState(directory, `cmd.remove:${id}`, async (s) => {
@@ -881,6 +1268,7 @@ export function createCommandService(
           if (!entry.handle.isAlive()) {
             live.delete(c.id)
             clearCommandTimeout(c.id)
+            deleteWatch(c.id)
             await mutateState(directory, `cmd.reconcile-exit:${c.id}`, async (s) => {
               const x = (s.commands ?? []).find((y) => y.id === c.id)
               if (x && x.status === "running") {
@@ -908,7 +1296,10 @@ export function createCommandService(
         // persisted deadlineAt already passed, record that the timeout elapsed
         // so a later start doesn't resurrect the deadline — status stays
         // missing, endReason stays missing, but lastError says timeout.
+        // M2: in-memory watcher dropped (nothing can feed it); persisted watch
+        // fields stay as-is by design.
         clearCommandTimeout(c.id)
+        deleteWatch(c.id)
         const deadlinePassed = c.deadlineAt ? Date.parse(c.deadlineAt) <= Date.now() : false
         await mutateState(directory, `cmd.reconcile-missing:${c.id}`, async (s) => {
           const x = (s.commands ?? []).find((y) => y.id === c.id)
@@ -937,6 +1328,9 @@ export function createCommandService(
     },
 
     async dispose(directory) {
+      for (const id of [...watchTimers.keys()]) clearWatchTimer(id)
+      watchers.clear()
+      awaitAsm.clear()
       const state = await readState(directory)
       const owned = new Map<string, string>((state.commands ?? []).map((command) => [command.id, command.ownerSessionID]))
       await Promise.all([...live.entries()].map(async ([id, entry]) => {
