@@ -212,12 +212,12 @@ Typical uses: dev servers (`npm run dev`), watch mode (`npm test -- --watch`), R
 
 | Tool | Purpose |
 |------|---------|
-| `loopd_command_start` | Spawn `{title, command, args, cwd?, goal_id?, cols?, rows?}`. Requests OpenCode's `bash` permission first. Returns `command_id` + host `capabilities` (`spawn`/`write`/`interruptSignal`/`terminate`/`resize`/`terminalEmulation`). |
+| `loopd_command_start` | Spawn `{title, command, args, cwd?, goal_id?, cols?, rows?, env?, timeout_seconds?, shell?}`. Requests OpenCode's `bash` permission first. Returns `command_id` + host `capabilities` (`spawn`/`write`/`interruptSignal`/`terminate`/`resize`/`terminalEmulation`). `env` passes values to the child but persists names only (`envKeys`); `timeout_seconds` (positive integer) kills via SIGTERM→SIGKILL with `endReason: timeout` + owner notify; `shell:true` spawns via `/bin/sh -c` (POSIX-quoted join; prefer argv form for untrusted input). |
 | `loopd_command_list` | List commands owned by the calling session. |
-| `loopd_command_get` | Read status + a bounded output snapshot (`offset_bytes` to page, default 64KB/cap 256KB). |
+| `loopd_command_get` | Read status + a bounded output snapshot (`offset_bytes` to page, default 64KB/cap 256KB). With `pattern` (+`ignore_case`), only regex-matching lines return (ANSI-stripped for matching, originals kept) and `offset_bytes`/`limit_bytes` page over matches. |
 | `loopd_command_write` | Send raw stdin bytes (include your own trailing `\n` for line-buffered programs). |
 | `loopd_command_interrupt` | Deliver SIGINT (Ctrl+C as a signal). A process that traps it may keep running — that's correct, not a failure. |
-| `loopd_command_terminate` | SIGTERM, escalating to SIGKILL. The only way a command actually stops (closing a view never does). |
+| `loopd_command_terminate` | SIGTERM, escalating to SIGKILL. The only way a command actually stops (closing a view never does). With `remove:true`, deletes the record+log in the same call (works even when already terminal). |
 | `loopd_command_remove` | Delete a finished command's record + log. Refuses while `running` (terminate first). |
 | `loopd_command_resize` | Set terminal size. Applied live to the real PTY winsize when the host supports it; stored-only (never applied) on the pipe fallback — check `capabilities.resize`. |
 | `loopd_command_await` | **The only command→goal edge.** Explicit opt-in: makes `goal_id` wake up exactly once when `command_id` reaches a terminal state (`exited`/`terminated`/`missing`), with exit code/signal/last-4KB output as evidence. Merely passing `goal_id` to `loopd_command_start` links for *display only* — it never wakes anything by itself. |
@@ -225,9 +225,10 @@ Typical uses: dev servers (`npm run dev`), watch mode (`npm test -- --watch`), R
 ### Lifecycle
 
 ```
-running → exited      (process ended on its own; exit code kept)
-running → terminated  (explicit terminate/kill; signal kept)
-running → missing     (plugin restart found no live execution — log retained)
+running → exited      (process ended on its own; exit code kept; endReason: exit)
+running → terminated  (explicit terminate/kill; signal kept; endReason: terminate)
+running → terminated  (timeout_seconds deadline; endReason: timeout — always notifies the owner)
+running → missing     (plugin restart found no live execution — log retained; endReason: missing)
 ```
 
 - **Detach ≠ terminate.** Closing the fullscreen terminal page, switching tabs, or the TUI restarting never stops the process. Only `loopd_command_terminate` (or the process exiting on its own) does.

@@ -52,6 +52,11 @@ function summarize(c: {
   goalID?: string
   notifyOnExit?: boolean
   updatedAt: string
+  endReason?: string
+  timeoutSeconds?: number
+  deadlineAt?: string
+  envKeys?: string[]
+  shell?: boolean
 }) {
   return {
     id: c.id,
@@ -60,6 +65,11 @@ function summarize(c: {
     status: c.status,
     exitCode: c.exitCode,
     signal: c.signal,
+    endReason: c.endReason,
+    timeoutSeconds: c.timeoutSeconds,
+    deadlineAt: c.deadlineAt,
+    envKeys: c.envKeys,
+    shell: c.shell,
     outputBytes: c.outputBytes,
     truncated: c.truncated,
     goalID: c.goalID,
@@ -83,16 +93,19 @@ export function commandTools(options: CommandToolsOptions) {
         "The user can also open it live: /loop or /commands → Tab/l to the Commands tab → select it → `o` opens a fullscreen interactive terminal page (type directly, Ctrl+C interrupts, Ctrl+] detaches without stopping it). " +
         "Independent from goals: an optional goal_id is display-only metadata and never couples lifecycles — pausing/clearing a goal never touches the command, and terminating a command never touches the goal. " +
         "To make a specific goal wake up when this command finishes, call loopd_command_await separately after starting it (linking alone does not wake anything). " +
-        "The OWNER session (you) gets pushed a real message when the command reaches a terminal status — no polling required to find out: by default (auto) that fires on a non-zero exit, on 'missing' (host restarted mid-run), or once total runtime crosses ~2 minutes (the long-running/monitor case); quick successful commands stay silent. Override with notify_on_exit.",
+        "The OWNER session (you) gets pushed a real message when the command reaches a terminal status — no polling required to find out: by default (auto) that fires on a non-zero exit, on 'missing' (host restarted mid-run), on 'timeout' (timeout_seconds deadline reached — always notifies), or once total runtime crosses ~2 minutes (the long-running/monitor case); quick successful commands stay silent. Override with notify_on_exit.",
       args: {
         title: tool.schema.string().describe("Short human label for the session."),
         command: tool.schema.string().describe("Executable to spawn (e.g. \"bun\", \"python3\")."),
         args: tool.schema.array(tool.schema.string()).optional().describe("Arguments for the command."),
         cwd: tool.schema.string().optional().describe("Working directory. Defaults to the project root."),
         goal_id: tool.schema.string().optional().describe("Optional goal linkage (display only — no lifecycle coupling)."),
-        notify_on_exit: tool.schema.boolean().optional().describe("Owner-exit-notification override. true = always push a message to you when this command finishes. false = never (dashboard/loopd_command_get only). Omit for auto (failure, lost-host, or long-running success)."),
+        notify_on_exit: tool.schema.boolean().optional().describe("Owner-exit-notification override. true = always push a message to you when this command finishes. false = never (dashboard/loopd_command_get only). Omit for auto (failure, lost-host, timeout, or long-running success)."),
         cols: tool.schema.number().optional().describe(`Requested terminal width (${sizeNote}).`),
         rows: tool.schema.number().optional().describe(`Requested terminal height (${sizeNote}).`),
+        env: tool.schema.record(tool.schema.string(), tool.schema.string()).optional().describe("Extra environment variables for the child. Values are passed to the host but never persisted — only names appear as envKeys in summaries."),
+        timeout_seconds: tool.schema.number().optional().describe("Per-command timeout in seconds (positive integer). The command is terminated via the standard SIGTERM→SIGKILL path when the deadline passes; endReason becomes 'timeout' and the owner is always notified (auto policy). In-memory only — never resurrected across restarts."),
+        shell: tool.schema.boolean().optional().describe("When true, spawn via /bin/sh -c with command+args joined into one shell string (POSIX single-quote escaping). Shell metacharacters are interpreted; prefer argv form for untrusted input."),
       },
       execute: async (args, context) => {
         const owner = ownerID(context)
@@ -115,6 +128,9 @@ export function commandTools(options: CommandToolsOptions) {
             notifyOnExit: args.notify_on_exit,
             cols: args.cols,
             rows: args.rows,
+            env: args.env,
+            timeoutSeconds: args.timeout_seconds,
+            shell: args.shell,
           })
           return {
             title: "Command started",
@@ -144,19 +160,28 @@ export function commandTools(options: CommandToolsOptions) {
     }),
 
     loopd_command_get: tool({
-      description: "Read a command session's status plus its output so far (bounded snapshot; page with offset_bytes for more). This is how you check on a background process — poll it after starting a build/test-watch/server to see progress or a result. Never terminates the command; detach/inspect is always read-only.",
+      description: "Read a command session's status plus its output so far (bounded snapshot; page with offset_bytes for more). This is how you check on a background process — poll it after starting a build/test-watch/server to see progress or a result. Never terminates the command; detach/inspect is always read-only. With pattern, only matching lines return (regex on ANSI-stripped text, original lines kept) and offset_bytes/limit_bytes page over MATCHES (match index + max matched lines, default 500).",
       args: {
         command_id: tool.schema.string().describe("Command session ID."),
-        offset_bytes: tool.schema.number().optional().describe("Byte offset into the output log (paging)."),
-        limit_bytes: tool.schema.number().optional().describe("Max bytes to return (default 64KB, cap 256KB)."),
+        offset_bytes: tool.schema.number().optional().describe("Byte offset into the output log (paging). With pattern: number of matching lines to skip."),
+        limit_bytes: tool.schema.number().optional().describe("Max bytes to return (default 64KB, cap 256KB). With pattern: max matching lines (default 500)."),
+        pattern: tool.schema.string().optional().describe("Regex to filter lines (matched against ANSI-stripped text; original lines returned). Dangerous nested-quantifier patterns are rejected."),
+        ignore_case: tool.schema.boolean().optional().describe("Case-insensitive pattern matching (default false)."),
       },
       execute: async (args, context) => {
         const owner = ownerID(context)
         if (!owner) return denied()
-        const result = await commandService.read(directory, args.command_id, owner, {
-          offsetBytes: args.offset_bytes,
-          limitBytes: args.limit_bytes,
-        })
+        let result
+        try {
+          result = await commandService.read(directory, args.command_id, owner, {
+            offsetBytes: args.offset_bytes,
+            limitBytes: args.limit_bytes,
+            pattern: args.pattern,
+            ignoreCase: args.ignore_case,
+          })
+        } catch (error) {
+          return { title: "Read failed", output: JSON.stringify({ ok: false, message: error instanceof Error ? error.message : String(error) }) }
+        }
         if (!result) {
           return { title: "Not found", output: JSON.stringify({ ok: false, message: "Command not found for this session." }) }
         }
@@ -169,6 +194,7 @@ export function commandTools(options: CommandToolsOptions) {
             startByte: result.startByte,
             totalBytes: result.totalBytes,
             live: result.live,
+            ...(result.pattern !== undefined ? { pattern: result.pattern, totalMatches: result.totalMatches } : {}),
           }, null, 2),
         }
       },
@@ -202,14 +228,15 @@ export function commandTools(options: CommandToolsOptions) {
     }),
 
     loopd_command_terminate: tool({
-      description: "Terminate a running command (SIGTERM, escalates to SIGKILL). Stopping a command never pauses/blocks any goal.",
+      description: "Terminate a running command (SIGTERM, escalates to SIGKILL). Stopping a command never pauses/blocks any goal. With remove:true, the record+log are deleted in the same call (atomic from the caller's perspective; proceeds to remove even when the command is already terminal).",
       args: {
         command_id: tool.schema.string().describe("Command session ID."),
+        remove: tool.schema.boolean().optional().describe("Also remove the record+log after terminating (or when already terminal)."),
       },
       execute: async (args, context) => {
         const owner = ownerID(context)
         if (!owner) return denied()
-        const result = await commandService.terminate(directory, args.command_id, owner)
+        const result = await commandService.terminate(directory, args.command_id, owner, { remove: args.remove })
         return { title: result.ok ? "Terminated" : "Terminate failed", output: JSON.stringify({ ...result, command_id: args.command_id }) }
       },
     }),

@@ -14,6 +14,8 @@ export type CommandSessionStatus =
   | "terminated" // stopped via terminate/interrupt-kill (signal recorded)
   | "missing" // host restart reconciliation: no live execution found
 
+export type CommandEndReason = "exit" | "terminate" | "timeout" | "until" | "missing"
+
 export interface CommandSession {
   id: CommandSessionID
   /** Short human label shown in lists/TUI. */
@@ -22,6 +24,16 @@ export interface CommandSession {
   command: string
   /** Full argv that was spawned. */
   args: string[]
+  /** Whether the spawn went through `/bin/sh -c` (shell string join). */
+  shell?: boolean
+  /** How the command reached its terminal status (set at every terminal transition). */
+  endReason?: CommandEndReason
+  /** Requested timeout in seconds (positive integer; in-memory timer only). */
+  timeoutSeconds?: number
+  /** ISO deadline computed at start as now + timeoutSeconds. */
+  deadlineAt?: string
+  /** Env var NAMES only — values are never persisted. */
+  envKeys?: string[]
   /** Working directory the command runs in. */
   cwd: string
   /** Owner session that created the command (permission scope). */
@@ -92,6 +104,18 @@ export function isLiveCommand(status: CommandSessionStatus): boolean {
   return status === "running"
 }
 
+export function normalizeTimeoutSeconds(timeoutSeconds: number | undefined): number | undefined {
+  if (timeoutSeconds === undefined) return undefined
+  if (!Number.isInteger(timeoutSeconds) || timeoutSeconds <= 0) {
+    throw new Error("timeoutSeconds must be a positive integer in seconds")
+  }
+  return timeoutSeconds
+}
+
+export function computeDeadlineAt(from: Date, timeoutSeconds: number): string {
+  return new Date(from.getTime() + timeoutSeconds * 1000).toISOString()
+}
+
 export function createCommandSession(input: {
   id: string
   title: string
@@ -104,13 +128,24 @@ export function createCommandSession(input: {
   pid?: number
   cols?: number
   rows?: number
+  shell?: boolean
+  timeoutSeconds?: number
+  deadlineAt?: string
+  envKeys?: string[]
+  endReason?: CommandEndReason
 }): CommandSession {
   const now = new Date().toISOString()
+  const timeout = normalizeTimeoutSeconds(input.timeoutSeconds)
   return {
     id: input.id as CommandSessionID,
     title: input.title,
     command: input.command,
     args: input.args ?? [],
+    shell: input.shell,
+    endReason: input.endReason,
+    timeoutSeconds: timeout,
+    deadlineAt: input.deadlineAt ?? (timeout !== undefined ? computeDeadlineAt(new Date(now), timeout) : undefined),
+    envKeys: input.envKeys,
     cwd: input.cwd,
     ownerSessionID: input.ownerSessionID,
     goalID: input.goalID,
@@ -158,6 +193,10 @@ export const NOTIFY_LONG_RUNNING_MS = 2 * 60 * 1000
 export function shouldNotifyOwnerOnExit(session: CommandSession): boolean {
   if (session.notifyOnExit === false) return false
   if (session.notifyOnExit === true) return true
+  // Timeout was never caller-initiated (in-memory timer killed it): always
+  // notify, like the surprising missing case — even though the status reads
+  // "terminated" underneath.
+  if (session.endReason === "timeout") return true
   if (session.status === "missing") return true
   if (session.status === "terminated") return false
   if (session.status !== "exited") return false

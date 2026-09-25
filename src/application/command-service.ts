@@ -11,7 +11,10 @@ import path from "path"
 import {
   createCommandSession,
   shouldNotifyOwnerOnExit,
+  normalizeTimeoutSeconds,
+  computeDeadlineAt,
   MAX_COMMAND_OUTPUT_BYTES,
+  MAX_COMMAND_READ_LINES,
   type CommandSession,
   type CommandSessionID,
   type CommandSessionStatus,
@@ -41,6 +44,17 @@ export interface CommandStartInput {
   notifyOnExit?: boolean
   cols?: number
   rows?: number
+  /** Extra env vars for the child (passed to the host; only NAMES persisted in envKeys). */
+  env?: Record<string, string>
+  /** Per-command timeout in seconds (positive integer; in-memory timer kills via the terminate path). */
+  timeoutSeconds?: number
+  /**
+   * When true, spawn via `/bin/sh -c` with command+args joined into one shell
+   * string (POSIX single-quote escaping: `'` → `'\''`). Shell metacharacters
+   * (pipes, globs, `&&`) are interpreted; quoting is the caller's job for
+   * dynamic values — prefer argv form (shell:false) for untrusted input.
+   */
+  shell?: boolean
 }
 
 export interface CommandReadResult {
@@ -50,6 +64,53 @@ export interface CommandReadResult {
   startByte: number
   /** Live/streaming truth: process still producing output. */
   live: boolean
+  /** Pattern-mode only: echo of the filter + match counts. */
+  pattern?: string
+  totalMatches?: number
+}
+
+// ─── Pattern-read helpers (pty parity) ───────────────────────────────────────
+// Lines are split on \n; matching runs against ANSI-stripped text (CSI/OSC
+// sequences removed) while the ORIGINAL line (with escapes) is returned.
+
+const ANSI_PATTERN = new RegExp(
+  "\u001b\\[[0-9;?]*[ -/]*[@-~]|\u001b\\][^\u0007]*(?:\u0007|\u001b\\\\)|\u001b[()][0-9A-Z]",
+  "g",
+)
+
+export function stripAnsiForMatch(line: string): string {
+  return line.replace(ANSI_PATTERN, "")
+}
+
+const DANGEROUS_REGEXES: RegExp[] = [
+  /\(\?:.*\)\*.*\(\?:.*\)\*/, // nested optional groups with repetition (pty)
+  /.*\(\.\*\?\)\{2,\}.*/, // overlapping non-greedy quantifiers (pty)
+  /.*\(.*\|.*\)\{3,\}.*/, // complex alternation with repetition (pty)
+  /\([^()]*[+*][^()]*\)[+*]/, // nested quantifier: quantified group containing a quantifier, e.g. (a+)+
+  /\([^()]*(\.\*.*\.\*|\.\+.*\.\+|\\w\+.*\\s\*|\\s\*.*\\w\+)[^()]*\)/, // overlapping classes inside one group, e.g. (.*.*)
+]
+
+export function validateReadPattern(pattern: string): RegExp | { error: string } {
+  let compiled: RegExp
+  try {
+    compiled = new RegExp(pattern)
+  } catch (e) {
+    return { error: `Invalid regex pattern '${pattern}': ${e instanceof Error ? e.message : String(e)}` }
+  }
+  if (DANGEROUS_REGEXES.some((d) => d.test(pattern))) {
+    return { error: `Potentially dangerous regex pattern rejected: '${pattern}'. Please use a safer pattern.` }
+  }
+  return compiled
+}
+
+/** Quote one argv word for POSIX sh -c joining. */
+export function shellQuote(word: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(word)) return word
+  return `'${word.replace(/'/g, `'\\''`)}'`
+}
+
+export function shellJoin(command: string, args: string[]): string {
+  return [command, ...args].map(shellQuote).join(" ")
 }
 
 export interface CommandService {
@@ -60,12 +121,12 @@ export interface CommandService {
     directory: string,
     id: string,
     ownerSessionID: string,
-    opts?: { offsetBytes?: number; limitBytes?: number },
+    opts?: { offsetBytes?: number; limitBytes?: number; pattern?: string; ignoreCase?: boolean },
   ): Promise<CommandReadResult | undefined>
   write(directory: string, id: string, ownerSessionID: string, data: string): Promise<{ ok: boolean; message: string }>
   resize(directory: string, id: string, ownerSessionID: string, cols: number, rows: number): Promise<{ ok: boolean; message: string; unsupported?: boolean }>
   interrupt(directory: string, id: string, ownerSessionID: string): Promise<{ ok: boolean; message: string }>
-  terminate(directory: string, id: string, ownerSessionID: string): Promise<{ ok: boolean; message: string }>
+  terminate(directory: string, id: string, ownerSessionID: string, opts?: { remove?: boolean }): Promise<{ ok: boolean; message: string; removed?: boolean }>
   remove(directory: string, id: string, ownerSessionID: string): Promise<{ ok: boolean; message: string }>
   /** Reconcile persisted metadata against host truth after restart. */
   reconcile(directory: string): Promise<{ markedMissing: number }>
@@ -107,6 +168,77 @@ export function createCommandService(
   // the broker subscribe() contract is not; the resolver recovers the
   // directory from recent service activity — single-project assumption).
   const commandDirs = new Map<string, string>()
+  // In-memory timeout timers only: never persisted, never resurrected across
+  // restart. A fresh service instance starts with zero timers, so reconcile
+  // honestly marks overdue commands missing instead of reviving a deadline.
+  const timeouts = new Map<string, ReturnType<typeof setTimeout>>()
+  const timeoutOwners = new Map<string, { directory: string; ownerSessionID: string }>()
+
+  function clearCommandTimeout(id: string): void {
+    const t = timeouts.get(id)
+    if (t) {
+      try {
+        globalThis.clearTimeout(t)
+      } catch {
+        // Timer already fired — harmless.
+      }
+    }
+    timeouts.delete(id)
+    timeoutOwners.delete(id)
+  }
+
+  function scheduleTimeout(directory: string, id: string, ownerSessionID: string, timeoutSeconds: number): void {
+    clearCommandTimeout(id)
+    const handle = setTimeout(() => {
+      timeouts.delete(id)
+      void fireTimeout(directory, id).catch(() => {})
+    }, timeoutSeconds * 1000)
+    // Don't hold the process open for a background deadline.
+    try {
+      ;(handle as unknown as { unref?: () => void }).unref?.()
+    } catch {}
+    timeouts.set(id, handle)
+    timeoutOwners.set(id, { directory, ownerSessionID })
+  }
+
+  /**
+   * Timeout path: run the existing terminate flow (SIGTERM → grace → SIGKILL),
+   * then stamp endReason=timeout + endedAt over the "terminated" it produced.
+   * Owner-notify fires once here (auto-policy always notifies on timeout);
+   * the inner terminate's own notify stays silent for caller-initiated
+   * "terminated", so no duplicate ping is possible.
+   */
+  async function fireTimeout(directory: string, id: string): Promise<void> {
+    const owner = timeoutOwners.get(id)?.ownerSessionID
+    timeoutOwners.delete(id)
+    if (!owner) return
+    const before = await readState(directory).then(
+      (s) => (s.commands ?? []).find((x) => x.id === id),
+    )
+    if (!before || before.status !== "running") return
+    await service.terminate(directory, id, owner).catch(() => {})
+    await mutateState(directory, `cmd.timeout:${id}`, async (s) => {
+      const c = (s.commands ?? []).find((x) => x.id === id)
+      if (!c) return s
+      c.endReason = "timeout"
+      c.lastError = c.lastError ?? `Command timed out after ${c.timeoutSeconds ?? "?"}s (timeoutSeconds deadline reached; terminated via the standard SIGTERM→SIGKILL path).`
+      if (!c.endedAt) {
+        c.endedAt = new Date().toISOString()
+        c.updatedAt = c.endedAt
+      } else {
+        c.updatedAt = new Date().toISOString()
+      }
+      return s
+    }).catch(() => {})
+    try {
+      const fresh = await readState(directory).then(
+        (st) => (st.commands ?? []).find((x) => x.id === id),
+      )
+      if (fresh) emitBroker(id, { type: "status", command: fresh })
+    } catch {}
+    await fireAwaits(directory, id)
+    await notifyOwnerIfNeeded(directory, id)
+  }
 
   function tailText(entry: LiveEntry, limitBytes = 64 * 1024): string {
     let want = limitBytes
@@ -314,17 +446,28 @@ export function createCommandService(
   async function persistExit(directory: string, id: string, info: { exitCode: number; signal?: string }): Promise<void> {
     rememberDir(id, directory)
     live.delete(id)
+    clearCommandTimeout(id)
     await mutateState(directory, `cmd.exit:${id}`, async (s) => {
       const c = (s.commands ?? []).find((x) => x.id === id)
       if (!c || c.status !== "running") return s
       // Honest outcome: a SIGINT/SIGTERM that the process converted into an
       // exit code is still "exited"; only an explicit terminate action (or a
-      // signal recorded by the host kill path) marks "terminated".
+      // signal recorded by the host kill path) marks "terminated". A timeout
+      // claim already stamped by the timer path is never downgraded.
+      if (c.endReason === "timeout") {
+        if (!c.endedAt) {
+          c.endedAt = new Date().toISOString()
+          c.updatedAt = c.endedAt
+        }
+        return s
+      }
       c.exitCode = info.exitCode
       if (info.signal && (c.signal === "SIGKILL" || c.signal === "SIGTERM")) {
         c.status = "terminated"
+        c.endReason = "terminate"
       } else {
         c.status = "exited"
+        c.endReason = "exit"
         if (info.signal) c.signal = info.signal
       }
       c.endedAt = new Date().toISOString()
@@ -356,7 +499,7 @@ export function createCommandService(
     return !!cmd && cmd.ownerSessionID === ownerSessionID
   }
 
-  return {
+  const service: CommandService = {
     async start(directory, input) {
       const title = input.title.trim()
       const command = input.command.trim()
@@ -365,13 +508,21 @@ export function createCommandService(
       if (!input.ownerSessionID || input.ownerSessionID === "main") {
         throw new Error("A valid owner session is required. Run from an active OpenCode session.")
       }
+      // Fail closed BEFORE spawning: an invalid timeout must never start a
+      // process without its deadline.
+      const timeoutSeconds = normalizeTimeoutSeconds(input.timeoutSeconds)
+      const startedAt = new Date()
       const id = randomUUID() as CommandSessionID
       const cwd = input.cwd || directory
+      const useShell = input.shell === true
+      const spawnOpts = useShell
+        ? { command: "/bin/sh", args: ["-c", shellJoin(command, input.args ?? [])], cwd, cols: input.cols, rows: input.rows, env: input.env }
+        : { command, args: input.args ?? [], cwd, cols: input.cols, rows: input.rows, env: input.env }
       type PendingEvent = { type: "output"; chunk: string } | { type: "exit"; info: { exitCode: number; signal?: string } }
       const pending: PendingEvent[] = []
       let ready = false
       const handle = host.spawn(
-        { command, args: input.args ?? [], cwd, cols: input.cols, rows: input.rows },
+        spawnOpts,
         (chunk) => {
           if (!ready) pending.push({ type: "output", chunk })
           else void enqueue(id, () => persistOutput(directory, id, chunk)).catch(() => {})
@@ -393,6 +544,10 @@ export function createCommandService(
         pid: handle.pid,
         cols: input.cols,
         rows: input.rows,
+        shell: useShell ? true : undefined,
+        timeoutSeconds,
+        deadlineAt: timeoutSeconds !== undefined ? computeDeadlineAt(startedAt, timeoutSeconds) : undefined,
+        envKeys: input.env ? Object.keys(input.env) : undefined,
       })
       try {
         await mutateState(directory, `cmd.start:${id}`, async (s) => {
@@ -409,6 +564,7 @@ export function createCommandService(
         throw error
       }
       live.set(id, { handle, buffers: [], bufferedBytes: 0 })
+      if (timeoutSeconds !== undefined) scheduleTimeout(directory, id, input.ownerSessionID, timeoutSeconds)
       rememberDir(id, directory)
       await appendEvent(directory, {
         version: 1,
@@ -443,7 +599,7 @@ export function createCommandService(
           : enqueue(id, () => persistExit(directory, id, event.info)))
       }
       await Promise.all(initialOperations)
-      return (await this.get(directory, id, input.ownerSessionID)) ?? session
+      return (await service.get(directory, id, input.ownerSessionID)) ?? session
     },
 
     async list(directory, ownerSessionID) {
@@ -461,8 +617,53 @@ export function createCommandService(
 
     async read(directory, id, ownerSessionID, opts) {
       await waitForOperations(id)
-      const session = await this.get(directory, id, ownerSessionID)
+      const session = await service.get(directory, id, ownerSessionID)
       if (!session) return undefined
+      // Pattern mode (pty parity): filter retained-log LINES on ANSI-stripped
+      // text, keep the original line in output, and page over MATCHES —
+      // offsetBytes skips N matching lines, limitBytes caps matched lines
+      // (default 500, hard cap MAX_COMMAND_READ_LINES). Byte snapshot paging
+      // below is unchanged when no pattern is given.
+      if (opts?.pattern !== undefined) {
+        const flags = opts.ignoreCase ? "i" : ""
+        const checked = validateReadPattern(opts.pattern)
+        if (typeof checked !== "object" || !(checked instanceof RegExp)) {
+          throw new Error((checked as { error: string }).error)
+        }
+        const regex = new RegExp(opts.pattern, flags)
+        const full = await readCommandLog(directory, id, { offsetBytes: 0, limitBytes: MAX_COMMAND_OUTPUT_BYTES })
+        const lines = full.text.length === 0 ? [] : full.text.split("\n")
+        const matches: string[] = []
+        for (const line of lines) {
+          let stripped: string
+          try {
+            stripped = stripAnsiForMatch(line)
+          } catch {
+            stripped = line
+          }
+          let hit = false
+          try {
+            hit = regex.test(stripped)
+          } catch {
+            throw new Error(`Invalid regex pattern '${opts.pattern}'.`)
+          }
+          // Reset lastIndex for global patterns so every line tests from 0.
+          regex.lastIndex = 0
+          if (hit) matches.push(line)
+        }
+        const skip = Math.max(0, opts.offsetBytes ?? 0)
+        const take = Math.min(opts.limitBytes ?? MAX_COMMAND_READ_LINES, MAX_COMMAND_READ_LINES)
+        const page = matches.slice(skip, skip + Math.max(0, take))
+        return {
+          session,
+          text: page.join("\n") + (page.length > 0 ? "\n" : ""),
+          totalBytes: matches.length,
+          startByte: skip,
+          live: session.status === "running",
+          pattern: opts.pattern,
+          totalMatches: matches.length,
+        }
+      }
       const entry = live.get(id)
       const offset = opts?.offsetBytes ?? 0
       const limit = Math.min(opts?.limitBytes ?? 64 * 1024, 256 * 1024)
@@ -481,7 +682,7 @@ export function createCommandService(
     },
 
     async write(directory, id, ownerSessionID, data) {
-      const session = await this.get(directory, id, ownerSessionID)
+      const session = await service.get(directory, id, ownerSessionID)
       if (!session) return { ok: false, message: "Command not found." }
       if (session.status !== "running") return { ok: false, message: `Command is ${session.status}; only running commands accept input.` }
       const entry = live.get(id)
@@ -491,7 +692,7 @@ export function createCommandService(
     },
 
     async resize(directory, id, ownerSessionID, cols, rows) {
-      const session = await this.get(directory, id, ownerSessionID)
+      const session = await service.get(directory, id, ownerSessionID)
       if (!session) return { ok: false, message: "Command not found." }
       if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0) {
         return { ok: false, message: `Invalid size ${cols}x${rows}: cols and rows must be positive integers.` }
@@ -521,7 +722,7 @@ export function createCommandService(
     },
 
     async interrupt(directory, id, ownerSessionID) {
-      const session = await this.get(directory, id, ownerSessionID)
+      const session = await service.get(directory, id, ownerSessionID)
       if (!session) return { ok: false, message: "Command not found." }
       if (session.status !== "running") return { ok: false, message: `Command is ${session.status}; nothing to interrupt.` }
       const entry = live.get(id)
@@ -541,11 +742,21 @@ export function createCommandService(
       return { ok: true, message: `SIGINT delivered to "${session.title}" (process may continue if it traps the signal).` }
     },
 
-    async terminate(directory, id, ownerSessionID) {
+    async terminate(directory, id, ownerSessionID, opts) {
       rememberDir(id, directory)
-      const session = await this.get(directory, id, ownerSessionID)
+      const session = await service.get(directory, id, ownerSessionID)
       if (!session) return { ok: false, message: "Command not found." }
-      if (session.status !== "running") return { ok: false, message: `Command is ${session.status}; nothing to terminate.` }
+      if (session.status !== "running") {
+        // Atomic terminate+remove: an already-terminal command still proceeds
+        // to removal when remove:true (caller perspective: one call cleans up).
+        if (opts?.remove) {
+          const removed = await service.remove(directory, id, ownerSessionID)
+          return removed.ok
+            ? { ok: true, message: `Command was already ${session.status}; removed.`, removed: true }
+            : { ok: false, message: `Command is ${session.status}; remove failed: ${removed.message}` }
+        }
+        return { ok: false, message: `Command is ${session.status}; nothing to terminate.` }
+      }
       // Claim termination BEFORE signaling: onExit honors a recorded
       // SIGTERM/SIGKILL and marks "terminated", so the exit event can never
       // win the race and misreport an explicit terminate as a natural exit.
@@ -586,12 +797,14 @@ export function createCommandService(
         live.delete(id)
       }
       const exitCode = status === "terminated" ? 143 : undefined
+      clearCommandTimeout(id)
       await mutateState(directory, `cmd.terminate:${id}`, async (s) => {
         const c = (s.commands ?? []).find((x) => x.id === id)
         if (!c || c.ownerSessionID !== ownerSessionID) return s
         if (c.status === "running") {
           // No exit event observed (e.g. no live handle): finalize here.
           c.status = status
+          if (c.endReason !== "timeout") c.endReason = status === "terminated" ? "terminate" : "exit"
           if (exitCode !== undefined) c.exitCode = c.exitCode ?? exitCode
           c.signal = c.signal ?? "SIGTERM"
           c.endedAt = new Date().toISOString()
@@ -599,6 +812,7 @@ export function createCommandService(
         } else if (c.status === "terminated" && !c.endedAt) {
           // onExit already marked terminated via the claimed signal: fill in
           // the terminal timestamps/defaults it could not know.
+          if (c.endReason !== "timeout" && !c.endReason) c.endReason = "terminate"
           if (exitCode !== undefined) c.exitCode = c.exitCode ?? exitCode
           c.endedAt = new Date().toISOString()
           c.updatedAt = c.endedAt
@@ -619,14 +833,22 @@ export function createCommandService(
       await fireAwaits(directory, id)
       // Auto policy stays silent for "terminated" (caller already has this
       // synchronous result) — notifyOwnerIfNeeded only fires here when the
-      // command opted in with notifyOnExit: true.
+      // command opted in with notifyOnExit: true, or the timer path already
+      // stamped endReason=timeout (never caller-initiated: always notifies).
       await notifyOwnerIfNeeded(directory, id)
+      if (opts?.remove) {
+        const removed = await service.remove(directory, id, ownerSessionID)
+        // The notify claim above already fired at most once (exactly-once
+        // marker), so the combined call never double-pings.
+        if (removed.ok) return { ok: true, message: `Command "${session.title}" ${status}; removed.`, removed: true }
+        return { ok: true, message: `Command "${session.title}" ${status}; remove failed: ${removed.message}` }
+      }
       return { ok: true, message: `Command "${session.title}" ${status}.` }
     },
 
     async remove(directory, id, ownerSessionID) {
       rememberDir(id, directory)
-      const session = await this.get(directory, id, ownerSessionID)
+      const session = await service.get(directory, id, ownerSessionID)
       if (!session) return { ok: false, message: "Command not found." }
       if (session.status === "running") {
         return { ok: false, message: `Command "${session.title}" is still running — terminate it first (terminate ≠ remove).` }
@@ -658,10 +880,12 @@ export function createCommandService(
         if (entry) {
           if (!entry.handle.isAlive()) {
             live.delete(c.id)
+            clearCommandTimeout(c.id)
             await mutateState(directory, `cmd.reconcile-exit:${c.id}`, async (s) => {
               const x = (s.commands ?? []).find((y) => y.id === c.id)
               if (x && x.status === "running") {
                 x.status = "exited"
+                x.endReason = "exit"
                 x.endedAt = new Date().toISOString()
                 x.updatedAt = x.endedAt
                 x.lastError = x.lastError ?? "Process handle died without an exit event."
@@ -679,11 +903,21 @@ export function createCommandService(
           }
           continue
         }
+        // No live handle and no timer to revive (timers are in-memory only and
+        // never resurrected across restart): honestly missing wins. When the
+        // persisted deadlineAt already passed, record that the timeout elapsed
+        // so a later start doesn't resurrect the deadline — status stays
+        // missing, endReason stays missing, but lastError says timeout.
+        clearCommandTimeout(c.id)
+        const deadlinePassed = c.deadlineAt ? Date.parse(c.deadlineAt) <= Date.now() : false
         await mutateState(directory, `cmd.reconcile-missing:${c.id}`, async (s) => {
           const x = (s.commands ?? []).find((y) => y.id === c.id)
           if (x && x.status === "running") {
             x.status = "missing"
-            x.lastError = "Host restarted or handle lost — no live execution found. Output log retained; remove to clean up."
+            x.endReason = "missing"
+            x.lastError = deadlinePassed
+              ? `Host restarted or handle lost — no live execution found (timeoutSeconds=${x.timeoutSeconds ?? "?"}s deadline ${x.deadlineAt} already passed; treated as missing, timeout elapsed). Output log retained; remove to clean up.`
+              : "Host restarted or handle lost — no live execution found. Output log retained; remove to clean up."
             x.updatedAt = new Date().toISOString()
             markedMissing++
           }
@@ -708,7 +942,7 @@ export function createCommandService(
       await Promise.all([...live.entries()].map(async ([id, entry]) => {
         const owner = owned.get(id)
         if (owner) {
-          await this.terminate(directory, id, owner).catch(() => {})
+          await service.terminate(directory, id, owner).catch(() => {})
           return
         }
         entry.handle.terminate()
@@ -719,6 +953,9 @@ export function createCommandService(
         if (!exited && entry.handle.isAlive()) entry.handle.kill()
         live.delete(id)
       }))
+      for (const id of [...timeouts.keys()]) clearCommandTimeout(id)
     },
   }
+
+  return service
 }
