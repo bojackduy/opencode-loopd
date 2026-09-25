@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased — Command sessions replace opencode-pty + sentinel
+
+> `loopd_command_*` now covers everything `opencode-pty` (`pty_spawn/write/read/list/kill`) and `opencode-sentinel` (`sentinel_monitor/stop/list`) do — remove both plugins from config. Live-smoked on the real PTY backend (timeout, until-stop, pattern read, env, terminate+remove).
+
+### Added
+
+- **M1 pty parity** — `env` (values to host, names-only persistence), `timeout_seconds` (in-memory deadline → terminate path, `endReason=timeout`, always notifies), `shell:true` (`/bin/sh -c`), `pattern`+`ignore_case` log read (ANSI-stripped match, ReDoS guard), `terminate remove:true`, `endReason` (`exit|terminate|timeout|until|missing`) on every terminal transition.
+- **M2 sentinel watcher engine** — `watch_filter`/`watch_until`/`watch_ignore_case`/`watch_until_action (stop|keep)` at start, `loopd_command_watch` on running commands; 2s coalescing (20 lines/4KB), 100-lines/sec flood-suspend (process keeps running), 30-push budget; `until:stop` terminates with `endReason=until` and exactly one owner message; `loopd_command_await until:` wakes a goal once on match without stopping.
+- **M3 surface** — watch badges + endReason in Commands tab, watch counters in detail panel, SKILL.md watching guide with pty + sentinel migration tables, de-polled `loopd_command_get` docs.
+- **Owner auto-notify policy** — failure, lost-host `missing`, `timeout`, or ≥2min long-running success; `notify_on_exit` overrides.
+
+### Live proof
+
+- Scratch harness (real host + real service): timeout→`terminated/timeout`+notify; until→`terminated/until` with 1 notify and `until-matched` state; pattern read returns ANSI-original lines case-insensitively, rejects `(a+)+`; env value reaches process while state keeps only the name; terminate+remove in one call. 555 tests pass.
+
 ## 1.7.0 (2026-08-25) — Scheduled Intervals
 
 > Interval requeue for repetitive dialogues — one `/goal` covers `monitor deploy` `periodic tests` `keep going` without manual re-prompt. `5s` `createScheduleWorker` resurrects `complete → active` with `Scheduled tick N/M`.
