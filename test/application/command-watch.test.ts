@@ -197,6 +197,102 @@ describe("Command watch (M2 line-level filter/until)", () => {
     expect(cmdHost.procs.size).toBe(before) // nothing spawned
   })
 
+  it("watch() sets a watch on a running command without one", async () => {
+    const s = await svc.start(dir, { title: "plain", command: "sleep", ownerSessionID: "owner-1" })
+    expect((await svc.get(dir, s.id, "owner-1"))?.watchState).toBeUndefined()
+    const r = await svc.watch(dir, s.id, "owner-1", { filter: "ERROR", until: "READY", untilAction: "keep" })
+    expect(r.ok).toBe(true)
+    expect(r.message).toMatch(/Watch set/)
+    const after = await svc.get(dir, s.id, "owner-1")
+    expect(after!.watchFilter).toBe("ERROR")
+    expect(after!.watchUntil).toBe("READY")
+    expect(after!.watchUntilAction).toBe("keep")
+    expect(after!.watchState).toMatchObject({ state: "active", matches: 0, pushes: 0 })
+    // The new watch is live: matching output notifies.
+    lastProc().emitOutput("ERROR boom\n")
+    await waitFor(() => watchNotifies.length >= 1)
+    expect(watchNotifies[0]!.message).toContain("ERROR boom")
+  })
+
+  it("watch() replace resets counters/state to active", async () => {
+    const s = await svc.start(dir, {
+      title: "re",
+      command: "sleep",
+      ownerSessionID: "owner-1",
+      watchFilter: "ERROR",
+    })
+    lastProc().emitOutput("ERROR one\n")
+    await waitFor(() => watchNotifies.length >= 1)
+    await waitFor(async () => ((await svc.get(dir, s.id, "owner-1"))?.watchState?.pushes ?? 0) >= 1)
+    const before = await svc.get(dir, s.id, "owner-1")
+    expect(before!.watchState!.matches).toBeGreaterThan(0)
+    const r = await svc.watch(dir, s.id, "owner-1", { filter: "WARN" })
+    expect(r.ok).toBe(true)
+    const after = await svc.get(dir, s.id, "owner-1")
+    expect(after!.watchFilter).toBe("WARN")
+    expect(after!.watchUntil).toBeUndefined()
+    expect(after!.watchState).toMatchObject({ state: "active", matches: 0, pushes: 0, droppedLines: 0 })
+    // Old-pattern lines no longer match; new-pattern lines do.
+    const n = watchNotifies.length
+    lastProc().emitOutput("ERROR ignored\n")
+    lastProc().emitOutput("WARN fresh\n")
+    await waitFor(() => watchNotifies.length >= n + 1)
+    expect(watchNotifies.at(-1)!.message).toContain("WARN fresh")
+    expect(watchNotifies.at(-1)!.message).not.toContain("ERROR ignored")
+  })
+
+  it("watch() clear drops spec, counters, and the live watcher", async () => {
+    const s = await svc.start(dir, {
+      title: "cl",
+      command: "sleep",
+      ownerSessionID: "owner-1",
+      watchFilter: "ERROR",
+    })
+    const r = await svc.watch(dir, s.id, "owner-1", { clear: true })
+    expect(r.ok).toBe(true)
+    const after = await svc.get(dir, s.id, "owner-1")
+    expect(after!.watchFilter).toBeUndefined()
+    expect(after!.watchUntil).toBeUndefined()
+    expect(after!.watchState).toBeUndefined()
+    const n = watchNotifies.length
+    lastProc().emitOutput("ERROR silent\n")
+    await new Promise((res) => setTimeout(res, 80))
+    expect(watchNotifies).toHaveLength(n) // no watcher left to fire
+  })
+
+  it("watch() denies owner mismatch and rejects terminal commands", async () => {
+    const s = await svc.start(dir, {
+      title: "owned",
+      command: "sleep",
+      ownerSessionID: "owner-1",
+      watchFilter: "x",
+    })
+    const wrong = await svc.watch(dir, s.id, "owner-2", { filter: "y" })
+    expect(wrong.ok).toBe(false)
+    expect(wrong.message).toMatch(/not found/i) // owner-scoped lookup, same as read/write
+    expect((await svc.get(dir, s.id, "owner-1"))?.watchFilter).toBe("x") // untouched
+    lastProc().emitExit({ exitCode: 0 })
+    await waitFor(async () => (await svc.get(dir, s.id, "owner-1"))?.status === "exited")
+    const terminal = await svc.watch(dir, s.id, "owner-1", { filter: "y" })
+    expect(terminal.ok).toBe(false)
+    expect(terminal.message).toMatch(/meaningless after exit/)
+  })
+
+  it("watch() fails closed on invalid regexes (previous watch untouched)", async () => {
+    const s = await svc.start(dir, {
+      title: "guarded",
+      command: "sleep",
+      ownerSessionID: "owner-1",
+      watchFilter: "GOOD",
+    })
+    await expect(svc.watch(dir, s.id, "owner-1", { filter: "(unclosed" })).rejects.toThrow(/Invalid watch filter/)
+    await expect(svc.watch(dir, s.id, "owner-1", { until: "(a+)+" })).rejects.toThrow(/dangerous/)
+    await expect(
+      svc.watch(dir, s.id, "owner-1", { until: "x", untilAction: "bogus" as never }),
+    ).rejects.toThrow(/untilAction/)
+    expect((await svc.get(dir, s.id, "owner-1"))?.watchFilter).toBe("GOOD") // untouched
+  })
+
   it("reconcile leaves persisted watch fields as-is on missing", async () => {
     const s = await svc.start(dir, {
       title: "watched",

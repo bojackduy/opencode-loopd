@@ -61,6 +61,7 @@ function summarize(c: {
   watchUntil?: string
   watchIgnoreCase?: boolean
   watchUntilAction?: string
+  watchState?: { state: string; matches: number; pushes: number; droppedLines: number }
 }) {
   return {
     id: c.id,
@@ -78,6 +79,7 @@ function summarize(c: {
     watchUntil: c.watchUntil,
     watchIgnoreCase: c.watchIgnoreCase,
     watchUntilAction: c.watchUntilAction,
+    watchState: c.watchState,
     outputBytes: c.outputBytes,
     truncated: c.truncated,
     goalID: c.goalID,
@@ -114,8 +116,8 @@ export function commandTools(options: CommandToolsOptions) {
         env: tool.schema.record(tool.schema.string(), tool.schema.string()).optional().describe("Extra environment variables for the child. Values are passed to the host but never persisted — only names appear as envKeys in summaries."),
         timeout_seconds: tool.schema.number().optional().describe("Per-command timeout in seconds (positive integer). The command is terminated via the standard SIGTERM→SIGKILL path when the deadline passes; endReason becomes 'timeout' and the owner is always notified (auto policy). In-memory only — never resurrected across restarts."),
         shell: tool.schema.boolean().optional().describe("When true, spawn via /bin/sh -c with command+args joined into one shell string (POSIX single-quote escaping). Shell metacharacters are interpreted; prefer argv form for untrusted input."),
-        watch_filter: tool.schema.string().optional().describe("Watch line filter (regex on ANSI-stripped lines): only matching lines buffer toward a coalesced owner push. For never-exiting processes (dev servers, log tails)."),
-        watch_until: tool.schema.string().optional().describe("Watch until pattern (regex on the filter-surviving stream): first match notifies the owner immediately. With watch_until_action=stop (default) the command is terminated with endReason=until; with keep it keeps running."),
+        watch_filter: tool.schema.string().optional().describe("Watch line filter (regex on ANSI-stripped lines): only matching lines buffer toward a coalesced owner push (one push per ~2s window, ≤20 lines/≤4KB each, ≤30 pushes per command; 100+ lines/sec suspends with one notice). For never-exiting processes (dev servers, log tails). Adjust later via loopd_command_watch."),
+        watch_until: tool.schema.string().optional().describe("Watch until pattern (regex on the filter-surviving stream): first match notifies the owner immediately with the matched lines. With watch_until_action=stop (default) the command is terminated with endReason=until (exactly one owner message total); with keep it keeps running (until fires once, filter stream continues)."),
         watch_ignore_case: tool.schema.boolean().optional().describe("Case-insensitive watch matching (default false)."),
         watch_until_action: tool.schema.string().optional().describe("Until action: \"stop\" (default) terminates the command on first until-match; \"keep\" notifies but keeps running (until fires once, filter stream continues)."),
       },
@@ -179,7 +181,7 @@ export function commandTools(options: CommandToolsOptions) {
     }),
 
     loopd_command_get: tool({
-      description: "Read a command session's status plus its output so far (bounded snapshot; page with offset_bytes for more). This is how you check on a background process — poll it after starting a build/test-watch/server to see progress or a result. Never terminates the command; detach/inspect is always read-only. With pattern, only matching lines return (regex on ANSI-stripped text, original lines kept) and offset_bytes/limit_bytes page over MATCHES (match index + max matched lines, default 500).",
+      description: "Read a command session's status plus its output so far (bounded snapshot; page with offset_bytes for more). For progress checks on plain one-shot commands, read once or twice as needed — but for never-exiting processes (dev servers, log tails, watch mode) prefer watch_filter/watch_until at start (or loopd_command_watch on a running command) and loopd_command_await for goal wakes: the owner gets pushed on match/exit with no repeated reads. Never terminates the command; detach/inspect is always read-only. With pattern, only matching lines return (regex on ANSI-stripped text, original lines kept; dangerous nested-quantifier patterns are rejected) and offset_bytes/limit_bytes page over MATCHES (match index + max matched lines, default 500).",
       args: {
         command_id: tool.schema.string().describe("Command session ID."),
         offset_bytes: tool.schema.number().optional().describe("Byte offset into the output log (paging). With pattern: number of matching lines to skip."),
@@ -270,6 +272,47 @@ export function commandTools(options: CommandToolsOptions) {
         if (!owner) return denied()
         const result = await commandService.remove(directory, args.command_id, owner)
         return { title: result.ok ? "Removed" : "Remove failed", output: JSON.stringify({ ...result, command_id: args.command_id }) }
+      },
+    }),
+
+    loopd_command_watch: tool({
+      description:
+        "Set, replace, or clear a watch on an ALREADY-RUNNING command — line-level filter/until notifications for never-exiting processes (dev servers, log tails, watch mode). watch_filter buffers only matching lines toward a coalesced owner push (one push per ~2s window, ≤20 lines/≤4KB each, ≤30 pushes per command); watch_until fires once on the first matching line of the filter-surviving stream with an immediate owner notice. watch_until_action \"stop\" (default) terminates the command on first until-match (endReason=until); \"keep\" notifies but keeps running (until fires once, the filter stream continues). Replacing the spec resets counters/state to active. Fail closed: invalid or dangerous regexes are rejected and the previous watch (if any) is left untouched; watching a terminal command returns ok:false (watch is meaningless after exit).",
+      args: {
+        command_id: tool.schema.string().describe("Command session ID (must be running)."),
+        watch_filter: tool.schema.string().optional().describe("Watch line filter (regex on ANSI-stripped lines): only matching lines buffer toward a coalesced owner push. Omit (or pair with clear) to remove."),
+        watch_until: tool.schema.string().optional().describe("Watch until pattern (regex on the filter-surviving stream): first match notifies the owner immediately. With watch_until_action=stop (default) the command is terminated with endReason=until; with keep it keeps running."),
+        watch_ignore_case: tool.schema.boolean().optional().describe("Case-insensitive watch matching (default false)."),
+        watch_until_action: tool.schema.string().optional().describe("Until action: \"stop\" (default) terminates the command on first until-match; \"keep\" notifies but keeps running (until fires once, filter stream continues)."),
+        clear: tool.schema.boolean().optional().describe("When true, drop the watch entirely (spec + counters + in-memory watcher) instead of setting one."),
+      },
+      execute: async (args, context) => {
+        const owner = ownerID(context)
+        if (!owner) return denied()
+        try {
+          if (args.watch_until_action !== undefined && args.watch_until_action !== "stop" && args.watch_until_action !== "keep") {
+            throw new Error(`Invalid watch_until_action '${args.watch_until_action}': must be "stop" or "keep".`)
+          }
+          const result = await commandService.watch(directory, args.command_id, owner, {
+            ...(args.watch_filter !== undefined ? { filter: args.watch_filter } : {}),
+            ...(args.watch_until !== undefined ? { until: args.watch_until } : {}),
+            ...(args.watch_ignore_case !== undefined ? { ignoreCase: args.watch_ignore_case } : {}),
+            ...(args.watch_until_action !== undefined ? { untilAction: args.watch_until_action as "stop" | "keep" } : {}),
+            ...(args.clear !== undefined ? { clear: args.clear } : {}),
+          })
+          if (!result.ok) {
+            return { title: "Watch not set", output: JSON.stringify({ ...result, command_id: args.command_id }) }
+          }
+          return {
+            title: "Watch updated",
+            output: JSON.stringify({ ok: true, message: result.message, command: summarize(result.command as never), command_id: args.command_id }, null, 2),
+          }
+        } catch (error) {
+          return {
+            title: "Watch not set",
+            output: JSON.stringify({ ok: false, message: error instanceof Error ? error.message : String(error), command_id: args.command_id }),
+          }
+        }
       },
     }),
 

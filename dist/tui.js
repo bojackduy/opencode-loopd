@@ -6089,6 +6089,33 @@ function parseCommandLine(input) {
     args.push(current);
   return args;
 }
+function watchBadge(c) {
+  const st = c.watchState?.state;
+  if (st === "until-matched")
+    return "until-matched";
+  if (st === "flood-suspended")
+    return "flood-suspended";
+  if (st === "budget-exhausted")
+    return "budget-exhausted";
+  if (c.watchUntil !== undefined)
+    return `until:${c.watchUntilAction ?? "stop"}-armed`;
+  if (c.watchFilter !== undefined)
+    return "watch:filter";
+  return;
+}
+function formatWatchDetail(c) {
+  if (c.watchFilter === undefined && c.watchUntil === undefined && c.watchState === undefined)
+    return;
+  const spec = [
+    c.watchFilter !== undefined ? `filter="${c.watchFilter}"` : null,
+    c.watchUntil !== undefined ? `until="${c.watchUntil}"` : null,
+    `action=${c.watchUntilAction ?? "stop"}`,
+    c.watchIgnoreCase === true ? "ignore-case" : null
+  ].filter((x) => x !== null).join(" ");
+  const st = c.watchState;
+  const counters = st ? `state=${st.state} matches=${st.matches} pushes=${st.pushes} dropped=${st.droppedLines}` : "state=\u2014";
+  return `watch ${spec} \xB7 ${counters}`;
+}
 function parseNewCommandTail(raw) {
   const match = /^(?::?\s*new)(?:\s+(.*))?\s*$/s.exec(raw.trim());
   if (!match)
@@ -10603,43 +10630,69 @@ function CommandPanel(props) {
           get each() {
             return state().commands;
           },
-          children: (cmd, i) => (() => {
-            var _el$17 = _$createElement2("box"), _el$18 = _$createElement2("text"), _el$19 = _$createElement2("span"), _el$20 = _$createElement2("span"), _el$21 = _$createTextNode2(` \u2502 `), _el$22 = _$createTextNode2(` \u2502 `);
-            _$insertNode2(_el$17, _el$18);
-            _$setProp2(_el$17, "paddingLeft", 1);
-            _$setProp2(_el$17, "paddingRight", 1);
-            _$insertNode2(_el$18, _el$19);
-            _$insertNode2(_el$18, _el$20);
-            _$setProp2(_el$18, "wrapMode", "none");
-            _$setProp2(_el$18, "truncate", true);
-            _$insert2(_el$19, () => i() === state().selected ? "\u25B6 " : "  ", null);
-            _$insert2(_el$19, () => cmd.title, null);
-            _$insertNode2(_el$20, _el$21);
-            _$insertNode2(_el$20, _el$22);
-            _$insert2(_el$20, () => [cmd.command, ...cmd.args].join(" ").slice(0, 60), _el$22);
-            _$insert2(_el$20, () => cmd.status, null);
-            _$insert2(_el$20, (() => {
-              var _c$ = _$memo2(() => cmd.exitCode !== undefined);
-              return () => _c$() ? ` (${cmd.exitCode})` : "";
-            })(), null);
-            _$effect2((_p$) => {
-              var _v$10 = i() === state().selected ? theme().backgroundElement : undefined, _v$11 = {
-                fg: cmd.status === "running" ? theme().success : theme().textMuted,
-                bold: i() === state().selected
-              }, _v$12 = {
-                fg: theme().textMuted
-              };
-              _v$10 !== _p$.e && (_p$.e = _$setProp2(_el$17, "backgroundColor", _v$10, _p$.e));
-              _v$11 !== _p$.t && (_p$.t = _$setProp2(_el$19, "style", _v$11, _p$.t));
-              _v$12 !== _p$.a && (_p$.a = _$setProp2(_el$20, "style", _v$12, _p$.a));
-              return _p$;
-            }, {
-              e: undefined,
-              t: undefined,
-              a: undefined
-            });
-            return _el$17;
-          })()
+          children: (cmd, i) => {
+            const badge = watchBadge(cmd);
+            const badgeWarn = badge === "flood-suspended" || badge === "budget-exhausted";
+            const badgeHot = badge === "until-matched";
+            const terminalReason = cmd.status !== "running" ? cmd.endReason : undefined;
+            return (() => {
+              var _el$17 = _$createElement2("box"), _el$18 = _$createElement2("text"), _el$19 = _$createElement2("span"), _el$20 = _$createElement2("span"), _el$21 = _$createTextNode2(` \u2502 `), _el$22 = _$createTextNode2(` \u2502 `);
+              _$insertNode2(_el$17, _el$18);
+              _$setProp2(_el$17, "paddingLeft", 1);
+              _$setProp2(_el$17, "paddingRight", 1);
+              _$insertNode2(_el$18, _el$19);
+              _$insertNode2(_el$18, _el$20);
+              _$setProp2(_el$18, "wrapMode", "none");
+              _$setProp2(_el$18, "truncate", true);
+              _$insert2(_el$19, () => i() === state().selected ? "\u25B6 " : "  ", null);
+              _$insert2(_el$19, () => cmd.title, null);
+              _$insertNode2(_el$20, _el$21);
+              _$insertNode2(_el$20, _el$22);
+              _$insert2(_el$20, () => [cmd.command, ...cmd.args].join(" ").slice(0, 60), _el$22);
+              _$insert2(_el$20, () => cmd.status, null);
+              _$insert2(_el$20, (() => {
+                var _c$ = _$memo2(() => cmd.exitCode !== undefined);
+                return () => _c$() ? ` (${cmd.exitCode})` : "";
+              })(), null);
+              _$insert2(_el$18, terminalReason ? (() => {
+                var _el$23 = _$createElement2("span"), _el$24 = _$createTextNode2(` [`), _el$25 = _$createTextNode2(`]`);
+                _$insertNode2(_el$23, _el$24);
+                _$insertNode2(_el$23, _el$25);
+                _$insert2(_el$23, terminalReason, _el$25);
+                _$effect2((_$p) => _$setProp2(_el$23, "style", {
+                  fg: terminalReason === "timeout" ? theme().warning : theme().textMuted
+                }, _$p));
+                return _el$23;
+              })() : undefined, null);
+              _$insert2(_el$18, badge ? (() => {
+                var _el$26 = _$createElement2("span"), _el$27 = _$createTextNode2(` [`), _el$28 = _$createTextNode2(`]`);
+                _$insertNode2(_el$26, _el$27);
+                _$insertNode2(_el$26, _el$28);
+                _$insert2(_el$26, badge, _el$28);
+                _$effect2((_$p) => _$setProp2(_el$26, "style", {
+                  fg: badgeWarn ? theme().warning : badgeHot ? theme().primary : theme().textMuted
+                }, _$p));
+                return _el$26;
+              })() : undefined, null);
+              _$effect2((_p$) => {
+                var _v$10 = i() === state().selected ? theme().backgroundElement : undefined, _v$11 = {
+                  fg: cmd.status === "running" ? theme().success : theme().textMuted,
+                  bold: i() === state().selected
+                }, _v$12 = {
+                  fg: theme().textMuted
+                };
+                _v$10 !== _p$.e && (_p$.e = _$setProp2(_el$17, "backgroundColor", _v$10, _p$.e));
+                _v$11 !== _p$.t && (_p$.t = _$setProp2(_el$19, "style", _v$11, _p$.t));
+                _v$12 !== _p$.a && (_p$.a = _$setProp2(_el$20, "style", _v$12, _p$.a));
+                return _p$;
+              }, {
+                e: undefined,
+                t: undefined,
+                a: undefined
+              });
+              return _el$17;
+            })();
+          }
         }));
         return _el$1;
       }
@@ -10649,43 +10702,59 @@ function CommandPanel(props) {
         return sel();
       },
       children: (cmd) => (() => {
-        var _el$23 = _$createElement2("box"), _el$24 = _$createElement2("text"), _el$25 = _$createElement2("span"), _el$26 = _$createElement2("span"), _el$27 = _$createTextNode2(` \u2502 `), _el$28 = _$createTextNode2(` \u2502 `), _el$29 = _$createTextNode2(` \u2502 `), _el$30 = _$createTextNode2(` bytes`);
-        _$insertNode2(_el$23, _el$24);
-        _$setProp2(_el$23, "flexDirection", "column");
-        _$setProp2(_el$23, "border", true);
-        _$setProp2(_el$23, "padding", 1);
-        _$setProp2(_el$23, "flexShrink", 0);
-        _$setProp2(_el$23, "maxHeight", 16);
-        _$setProp2(_el$23, "overflow", "hidden");
-        _$insertNode2(_el$24, _el$25);
-        _$insertNode2(_el$24, _el$26);
-        _$insert2(_el$25, () => cmd().title);
-        _$insertNode2(_el$26, _el$27);
-        _$insertNode2(_el$26, _el$28);
-        _$insertNode2(_el$26, _el$29);
-        _$insertNode2(_el$26, _el$30);
-        _$insert2(_el$26, () => [cmd().command, ...cmd().args].join(" "), _el$28);
-        _$insert2(_el$26, () => cmd().status, _el$29);
-        _$insert2(_el$26, () => outputMeta().totalBytes, _el$30);
-        _$insert2(_el$26, () => outputMeta().live ? " \xB7 live" : "", null);
-        _$insert2(_el$26, () => cmd().truncated ? " \xB7 truncated" : "", null);
-        _$insert2(_el$26, (() => {
-          var _c$2 = _$memo2(() => !!(emulated() && screen && feedForID === cmd().id));
-          return () => _c$2() ? ` \xB7 ${screen.cols}x${screen.rows} screen${screen.activeBuffer === "alternate" ? " \xB7 alt-screen" : ""}` : "";
+        var _el$29 = _$createElement2("box"), _el$30 = _$createElement2("text"), _el$31 = _$createElement2("span"), _el$32 = _$createElement2("span"), _el$33 = _$createTextNode2(` \u2502 `), _el$34 = _$createTextNode2(` \u2502 `), _el$35 = _$createTextNode2(` \u2502 `), _el$36 = _$createTextNode2(` bytes`);
+        _$insertNode2(_el$29, _el$30);
+        _$setProp2(_el$29, "flexDirection", "column");
+        _$setProp2(_el$29, "border", true);
+        _$setProp2(_el$29, "padding", 1);
+        _$setProp2(_el$29, "flexShrink", 0);
+        _$setProp2(_el$29, "maxHeight", 16);
+        _$setProp2(_el$29, "overflow", "hidden");
+        _$insertNode2(_el$30, _el$31);
+        _$insertNode2(_el$30, _el$32);
+        _$insert2(_el$31, () => cmd().title);
+        _$insertNode2(_el$32, _el$33);
+        _$insertNode2(_el$32, _el$34);
+        _$insertNode2(_el$32, _el$35);
+        _$insertNode2(_el$32, _el$36);
+        _$insert2(_el$32, () => [cmd().command, ...cmd().args].join(" "), _el$34);
+        _$insert2(_el$32, () => cmd().status, _el$35);
+        _$insert2(_el$32, () => outputMeta().totalBytes, _el$36);
+        _$insert2(_el$32, () => outputMeta().live ? " \xB7 live" : "", null);
+        _$insert2(_el$32, () => cmd().truncated ? " \xB7 truncated" : "", null);
+        _$insert2(_el$32, (() => {
+          var _c$2 = _$memo2(() => !!(cmd().status !== "running" && cmd().endReason));
+          return () => _c$2() ? ` \xB7 end:${cmd().endReason}` : "";
         })(), null);
-        _$insert2(_el$23, _$createComponent2(Show2, {
+        _$insert2(_el$32, (() => {
+          var _c$3 = _$memo2(() => !!(emulated() && screen && feedForID === cmd().id));
+          return () => _c$3() ? ` \xB7 ${screen.cols}x${screen.rows} screen${screen.activeBuffer === "alternate" ? " \xB7 alt-screen" : ""}` : "";
+        })(), null);
+        _$insert2(_el$29, (() => {
+          var _c$4 = _$memo2(() => !!formatWatchDetail(cmd()));
+          return () => _c$4() ? (() => {
+            var _el$37 = _$createElement2("text"), _el$38 = _$createElement2("span");
+            _$insertNode2(_el$37, _el$38);
+            _$insert2(_el$38, () => formatWatchDetail(cmd()));
+            _$effect2((_$p) => _$setProp2(_el$38, "style", {
+              fg: theme().textMuted
+            }, _$p));
+            return _el$37;
+          })() : undefined;
+        })(), null);
+        _$insert2(_el$29, _$createComponent2(Show2, {
           get when() {
             return _$memo2(() => !!emulated())() && screenRows().length > 0;
           },
           get fallback() {
             return (() => {
-              var _el$31 = _$createElement2("text"), _el$32 = _$createElement2("span");
-              _$insertNode2(_el$31, _el$32);
-              _$insert2(_el$32, () => output().slice(-4000) || "(no output yet)");
-              _$effect2((_$p) => _$setProp2(_el$32, "style", {
+              var _el$39 = _$createElement2("text"), _el$40 = _$createElement2("span");
+              _$insertNode2(_el$39, _el$40);
+              _$insert2(_el$40, () => output().slice(-4000) || "(no output yet)");
+              _$effect2((_$p) => _$setProp2(_el$40, "style", {
                 fg: theme().text
               }, _$p));
-              return _el$31;
+              return _el$39;
             })();
           },
           get children() {
@@ -10694,26 +10763,26 @@ function CommandPanel(props) {
                 return screenRows();
               },
               children: (row) => (() => {
-                var _el$33 = _$createElement2("text");
-                _$setProp2(_el$33, "wrapMode", "none");
-                _$setProp2(_el$33, "truncate", true);
-                _$insert2(_el$33, _$createComponent2(For2, {
+                var _el$41 = _$createElement2("text");
+                _$setProp2(_el$41, "wrapMode", "none");
+                _$setProp2(_el$41, "truncate", true);
+                _$insert2(_el$41, _$createComponent2(For2, {
                   get each() {
                     return row.runs;
                   },
                   children: (run) => (() => {
-                    var _el$34 = _$createElement2("span");
-                    _$insert2(_el$34, () => run.text);
-                    _$effect2((_$p) => _$setProp2(_el$34, "style", {
+                    var _el$42 = _$createElement2("span");
+                    _$insert2(_el$42, () => run.text);
+                    _$effect2((_$p) => _$setProp2(_el$42, "style", {
                       fg: run.fg ?? theme().text,
                       bg: run.bg,
                       bold: run.bold,
                       underline: run.underline
                     }, _$p));
-                    return _el$34;
+                    return _el$42;
                   })()
                 }));
-                return _el$33;
+                return _el$41;
               })()
             });
           }
@@ -10725,16 +10794,16 @@ function CommandPanel(props) {
           }, _v$15 = {
             fg: theme().textMuted
           };
-          _v$13 !== _p$.e && (_p$.e = _$setProp2(_el$23, "borderColor", _v$13, _p$.e));
-          _v$14 !== _p$.t && (_p$.t = _$setProp2(_el$25, "style", _v$14, _p$.t));
-          _v$15 !== _p$.a && (_p$.a = _$setProp2(_el$26, "style", _v$15, _p$.a));
+          _v$13 !== _p$.e && (_p$.e = _$setProp2(_el$29, "borderColor", _v$13, _p$.e));
+          _v$14 !== _p$.t && (_p$.t = _$setProp2(_el$31, "style", _v$14, _p$.t));
+          _v$15 !== _p$.a && (_p$.a = _$setProp2(_el$32, "style", _v$15, _p$.a));
           return _p$;
         }, {
           e: undefined,
           t: undefined,
           a: undefined
         });
-        return _el$23;
+        return _el$29;
       })()
     }), _el$10);
     _$insertNode2(_el$10, _el$11);

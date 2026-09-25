@@ -430,7 +430,8 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
       case "cmd_interrupt":
       case "cmd_terminate":
       case "cmd_remove":
-      case "cmd_resize": {
+      case "cmd_resize":
+      case "cmd_watch": {
         const cmdSvc = options.commandService
         if (!cmdSvc) {
           response = {
@@ -485,6 +486,16 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
               response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision }
             } else if (request.command === "cmd_remove") {
               const r = await cmdSvc.remove(directory, id, ownerSessionID)
+              const state = await readState(directory)
+              response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision }
+            } else if (request.command === "cmd_watch") {
+              const r = await cmdSvc.watch(directory, id, ownerSessionID, {
+                ...(typeof args.watchFilter === "string" ? { filter: args.watchFilter } : {}),
+                ...(typeof args.watchUntil === "string" ? { until: args.watchUntil } : {}),
+                ...(typeof args.watchIgnoreCase === "boolean" ? { ignoreCase: args.watchIgnoreCase } : {}),
+                ...(typeof args.watchUntilAction === "string" ? { untilAction: args.watchUntilAction as "stop" | "keep" } : {}),
+                ...(typeof args.clear === "boolean" ? { clear: args.clear } : {}),
+              }).catch((error: unknown) => ({ ok: false as const, message: error instanceof Error ? error.message : String(error) }))
               const state = await readState(directory)
               response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision }
             } else {

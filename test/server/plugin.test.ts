@@ -155,6 +155,7 @@ describe("Server Plugin V2", () => {
       "loopd_command_interrupt",
       "loopd_command_terminate",
       "loopd_command_remove",
+      "loopd_command_watch",
       "loopd_command_await",
       "loopd_command_resize",
     ])

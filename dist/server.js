@@ -1688,7 +1688,8 @@ function createControlWorker(options) {
       case "cmd_interrupt":
       case "cmd_terminate":
       case "cmd_remove":
-      case "cmd_resize": {
+      case "cmd_resize":
+      case "cmd_watch": {
         const cmdSvc = options.commandService;
         if (!cmdSvc) {
           response = {
@@ -1740,6 +1741,16 @@ function createControlWorker(options) {
               response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision };
             } else if (request.command === "cmd_remove") {
               const r = await cmdSvc.remove(directory, id, ownerSessionID);
+              const state = await readState(directory);
+              response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision };
+            } else if (request.command === "cmd_watch") {
+              const r = await cmdSvc.watch(directory, id, ownerSessionID, {
+                ...typeof args.watchFilter === "string" ? { filter: args.watchFilter } : {},
+                ...typeof args.watchUntil === "string" ? { until: args.watchUntil } : {},
+                ...typeof args.watchIgnoreCase === "boolean" ? { ignoreCase: args.watchIgnoreCase } : {},
+                ...typeof args.watchUntilAction === "string" ? { untilAction: args.watchUntilAction } : {},
+                ...typeof args.clear === "boolean" ? { clear: args.clear } : {}
+              }).catch((error) => ({ ok: false, message: error instanceof Error ? error.message : String(error) }));
               const state = await readState(directory);
               response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision };
             } else {
@@ -5939,6 +5950,86 @@ function createCommandService(host, opts) {
       await clearAwaitsForCommand(directory, id, "command removed").catch(() => {});
       return { ok: true, message: `Command "${session.title}" removed.` };
     },
+    async watch(directory, id, ownerSessionID, opts) {
+      rememberDir(id, directory);
+      const session = await service.get(directory, id, ownerSessionID);
+      if (!session)
+        return { ok: false, message: "Command not found." };
+      if (session.status !== "running") {
+        return { ok: false, message: `Command is ${session.status}; watch is meaningless after exit.` };
+      }
+      if (opts?.untilAction !== undefined && opts.untilAction !== "stop" && opts.untilAction !== "keep") {
+        throw new Error(`Invalid watch untilAction '${opts.untilAction}': must be "stop" or "keep".`);
+      }
+      if (opts?.clear === true) {
+        deleteWatch(id);
+        await mutateState(directory, `cmd.watch-clear:${id}`, async (s) => {
+          const c = (s.commands ?? []).find((x) => x.id === id);
+          if (c && c.ownerSessionID === ownerSessionID) {
+            delete c.watchFilter;
+            delete c.watchUntil;
+            delete c.watchIgnoreCase;
+            delete c.watchUntilAction;
+            delete c.watchState;
+            c.updatedAt = new Date().toISOString();
+          }
+          return s;
+        });
+        await watchLedger(directory, id, "command.watch-suspended", { reason: "cleared" }).catch(() => {});
+        try {
+          const fresh = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
+          if (fresh)
+            emitBroker(id, { type: "status", command: fresh });
+        } catch {}
+        const cleared = await service.get(directory, id, ownerSessionID);
+        return { ok: true, message: `Watch cleared for "${session.title}".`, command: cleared };
+      }
+      const filter = opts?.filter !== undefined && opts.filter !== "" ? opts.filter : undefined;
+      const until = opts?.until !== undefined && opts.until !== "" ? opts.until : undefined;
+      const watcher = new CommandWatcher({
+        ...filter !== undefined ? { filter } : {},
+        ...until !== undefined ? { until } : {},
+        ...opts?.ignoreCase !== undefined ? { ignoreCase: opts.ignoreCase } : {},
+        ...opts?.untilAction !== undefined ? { untilAction: opts.untilAction } : {}
+      });
+      clearWatchTimer(id);
+      watchers.set(id, watcher);
+      awaitAsm.delete(id);
+      const freshState = initialWatchState();
+      await mutateState(directory, `cmd.watch:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id);
+        if (c && c.ownerSessionID === ownerSessionID) {
+          if (filter !== undefined)
+            c.watchFilter = filter;
+          else
+            delete c.watchFilter;
+          if (until !== undefined)
+            c.watchUntil = until;
+          else
+            delete c.watchUntil;
+          if (opts?.ignoreCase !== undefined)
+            c.watchIgnoreCase = opts.ignoreCase;
+          else
+            delete c.watchIgnoreCase;
+          c.watchUntilAction = watcher.untilAction;
+          c.watchState = { ...freshState };
+          c.updatedAt = new Date().toISOString();
+        }
+        return s;
+      });
+      try {
+        const fresh = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
+        if (fresh)
+          emitBroker(id, { type: "status", command: fresh });
+      } catch {}
+      const updated = await service.get(directory, id, ownerSessionID);
+      const desc = [
+        filter !== undefined ? `filter="${filter}"` : "filter=\u2014",
+        until !== undefined ? `until="${until}"` : "until=\u2014",
+        `action=${watcher.untilAction}`
+      ].join(" ");
+      return { ok: true, message: `Watch set for "${session.title}" (${desc}; counters reset to active).`, command: updated };
+    },
     async reconcile(directory) {
       const state = await readState(directory);
       const cmds = state.commands ?? [];
@@ -7813,6 +7904,7 @@ function summarize(c) {
     watchUntil: c.watchUntil,
     watchIgnoreCase: c.watchIgnoreCase,
     watchUntilAction: c.watchUntilAction,
+    watchState: c.watchState,
     outputBytes: c.outputBytes,
     truncated: c.truncated,
     goalID: c.goalID,
@@ -7839,8 +7931,8 @@ function commandTools(options) {
         env: tool3.schema.record(tool3.schema.string(), tool3.schema.string()).optional().describe("Extra environment variables for the child. Values are passed to the host but never persisted \u2014 only names appear as envKeys in summaries."),
         timeout_seconds: tool3.schema.number().optional().describe("Per-command timeout in seconds (positive integer). The command is terminated via the standard SIGTERM\u2192SIGKILL path when the deadline passes; endReason becomes 'timeout' and the owner is always notified (auto policy). In-memory only \u2014 never resurrected across restarts."),
         shell: tool3.schema.boolean().optional().describe("When true, spawn via /bin/sh -c with command+args joined into one shell string (POSIX single-quote escaping). Shell metacharacters are interpreted; prefer argv form for untrusted input."),
-        watch_filter: tool3.schema.string().optional().describe("Watch line filter (regex on ANSI-stripped lines): only matching lines buffer toward a coalesced owner push. For never-exiting processes (dev servers, log tails)."),
-        watch_until: tool3.schema.string().optional().describe("Watch until pattern (regex on the filter-surviving stream): first match notifies the owner immediately. With watch_until_action=stop (default) the command is terminated with endReason=until; with keep it keeps running."),
+        watch_filter: tool3.schema.string().optional().describe("Watch line filter (regex on ANSI-stripped lines): only matching lines buffer toward a coalesced owner push (one push per ~2s window, \u226420 lines/\u22644KB each, \u226430 pushes per command; 100+ lines/sec suspends with one notice). For never-exiting processes (dev servers, log tails). Adjust later via loopd_command_watch."),
+        watch_until: tool3.schema.string().optional().describe("Watch until pattern (regex on the filter-surviving stream): first match notifies the owner immediately with the matched lines. With watch_until_action=stop (default) the command is terminated with endReason=until (exactly one owner message total); with keep it keeps running (until fires once, filter stream continues)."),
         watch_ignore_case: tool3.schema.boolean().optional().describe("Case-insensitive watch matching (default false)."),
         watch_until_action: tool3.schema.string().optional().describe('Until action: "stop" (default) terminates the command on first until-match; "keep" notifies but keeps running (until fires once, filter stream continues).')
       },
@@ -7904,7 +7996,7 @@ function commandTools(options) {
       }
     }),
     loopd_command_get: tool3({
-      description: "Read a command session's status plus its output so far (bounded snapshot; page with offset_bytes for more). This is how you check on a background process \u2014 poll it after starting a build/test-watch/server to see progress or a result. Never terminates the command; detach/inspect is always read-only. With pattern, only matching lines return (regex on ANSI-stripped text, original lines kept) and offset_bytes/limit_bytes page over MATCHES (match index + max matched lines, default 500).",
+      description: "Read a command session's status plus its output so far (bounded snapshot; page with offset_bytes for more). For progress checks on plain one-shot commands, read once or twice as needed \u2014 but for never-exiting processes (dev servers, log tails, watch mode) prefer watch_filter/watch_until at start (or loopd_command_watch on a running command) and loopd_command_await for goal wakes: the owner gets pushed on match/exit with no repeated reads. Never terminates the command; detach/inspect is always read-only. With pattern, only matching lines return (regex on ANSI-stripped text, original lines kept; dangerous nested-quantifier patterns are rejected) and offset_bytes/limit_bytes page over MATCHES (match index + max matched lines, default 500).",
       args: {
         command_id: tool3.schema.string().describe("Command session ID."),
         offset_bytes: tool3.schema.number().optional().describe("Byte offset into the output log (paging). With pattern: number of matching lines to skip."),
@@ -7996,6 +8088,46 @@ function commandTools(options) {
           return denied();
         const result = await commandService.remove(directory, args.command_id, owner);
         return { title: result.ok ? "Removed" : "Remove failed", output: JSON.stringify({ ...result, command_id: args.command_id }) };
+      }
+    }),
+    loopd_command_watch: tool3({
+      description: 'Set, replace, or clear a watch on an ALREADY-RUNNING command \u2014 line-level filter/until notifications for never-exiting processes (dev servers, log tails, watch mode). watch_filter buffers only matching lines toward a coalesced owner push (one push per ~2s window, \u226420 lines/\u22644KB each, \u226430 pushes per command); watch_until fires once on the first matching line of the filter-surviving stream with an immediate owner notice. watch_until_action "stop" (default) terminates the command on first until-match (endReason=until); "keep" notifies but keeps running (until fires once, the filter stream continues). Replacing the spec resets counters/state to active. Fail closed: invalid or dangerous regexes are rejected and the previous watch (if any) is left untouched; watching a terminal command returns ok:false (watch is meaningless after exit).',
+      args: {
+        command_id: tool3.schema.string().describe("Command session ID (must be running)."),
+        watch_filter: tool3.schema.string().optional().describe("Watch line filter (regex on ANSI-stripped lines): only matching lines buffer toward a coalesced owner push. Omit (or pair with clear) to remove."),
+        watch_until: tool3.schema.string().optional().describe("Watch until pattern (regex on the filter-surviving stream): first match notifies the owner immediately. With watch_until_action=stop (default) the command is terminated with endReason=until; with keep it keeps running."),
+        watch_ignore_case: tool3.schema.boolean().optional().describe("Case-insensitive watch matching (default false)."),
+        watch_until_action: tool3.schema.string().optional().describe('Until action: "stop" (default) terminates the command on first until-match; "keep" notifies but keeps running (until fires once, filter stream continues).'),
+        clear: tool3.schema.boolean().optional().describe("When true, drop the watch entirely (spec + counters + in-memory watcher) instead of setting one.")
+      },
+      execute: async (args, context) => {
+        const owner = ownerID(context);
+        if (!owner)
+          return denied();
+        try {
+          if (args.watch_until_action !== undefined && args.watch_until_action !== "stop" && args.watch_until_action !== "keep") {
+            throw new Error(`Invalid watch_until_action '${args.watch_until_action}': must be "stop" or "keep".`);
+          }
+          const result = await commandService.watch(directory, args.command_id, owner, {
+            ...args.watch_filter !== undefined ? { filter: args.watch_filter } : {},
+            ...args.watch_until !== undefined ? { until: args.watch_until } : {},
+            ...args.watch_ignore_case !== undefined ? { ignoreCase: args.watch_ignore_case } : {},
+            ...args.watch_until_action !== undefined ? { untilAction: args.watch_until_action } : {},
+            ...args.clear !== undefined ? { clear: args.clear } : {}
+          });
+          if (!result.ok) {
+            return { title: "Watch not set", output: JSON.stringify({ ...result, command_id: args.command_id }) };
+          }
+          return {
+            title: "Watch updated",
+            output: JSON.stringify({ ok: true, message: result.message, command: summarize(result.command), command_id: args.command_id }, null, 2)
+          };
+        } catch (error) {
+          return {
+            title: "Watch not set",
+            output: JSON.stringify({ ok: false, message: error instanceof Error ? error.message : String(error), command_id: args.command_id })
+          };
+        }
       }
     }),
     loopd_command_await: tool3({

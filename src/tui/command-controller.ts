@@ -155,7 +155,49 @@ export function parseCommandLine(input: string): string[] | undefined {
 export function formatCommandRow(c: CommandSession): string {
   const argv = [c.command, ...c.args].join(" ")
   const tail = c.status === "running" ? "running" : `${c.status}${c.exitCode !== undefined ? ` (${c.exitCode})` : ""}`
-  return `${c.title} — ${argv} — ${tail}`
+  const extra = commandBadges(c)
+  return extra.length > 0 ? `${c.title} — ${argv} — ${tail} — ${extra.join(" ")}` : `${c.title} — ${argv} — ${tail}`
+}
+
+// ─── M3 watch/endReason badges (testable row vocabulary) ─────────────────────
+// Badge strings: `watch:filter` (filter armed, no until), `until:stop-armed` /
+// `until:keep-armed` (until armed, still active), `until-matched`,
+// `flood-suspended`, `budget-exhausted`, plus the terminal `endReason`
+// (timeout/until/...) on non-running rows. Terminal watch states outrank the
+// armed forms; endReason is terminal-only (running rows never show one).
+
+/** Watch badge for one command, or undefined when no watch is configured. */
+export function watchBadge(c: CommandSession): string | undefined {
+  const st = c.watchState?.state
+  if (st === "until-matched") return "until-matched"
+  if (st === "flood-suspended") return "flood-suspended"
+  if (st === "budget-exhausted") return "budget-exhausted"
+  if (c.watchUntil !== undefined) return `until:${c.watchUntilAction ?? "stop"}-armed`
+  if (c.watchFilter !== undefined) return "watch:filter"
+  return undefined
+}
+
+/** Row badges: terminal endReason (when set) + watch badge (when configured). */
+export function commandBadges(c: CommandSession): string[] {
+  const out: string[] = []
+  if (c.status !== "running" && c.endReason) out.push(c.endReason)
+  const w = watchBadge(c)
+  if (w) out.push(w)
+  return out
+}
+
+/** One-line watch detail for the detail panel (spec + live counters). */
+export function formatWatchDetail(c: CommandSession): string | undefined {
+  if (c.watchFilter === undefined && c.watchUntil === undefined && c.watchState === undefined) return undefined
+  const spec = [
+    c.watchFilter !== undefined ? `filter="${c.watchFilter}"` : null,
+    c.watchUntil !== undefined ? `until="${c.watchUntil}"` : null,
+    `action=${c.watchUntilAction ?? "stop"}`,
+    c.watchIgnoreCase === true ? "ignore-case" : null,
+  ].filter((x): x is string => x !== null).join(" ")
+  const st = c.watchState
+  const counters = st ? `state=${st.state} matches=${st.matches} pushes=${st.pushes} dropped=${st.droppedLines}` : "state=—"
+  return `watch ${spec} · ${counters}`
 }
 
 /**

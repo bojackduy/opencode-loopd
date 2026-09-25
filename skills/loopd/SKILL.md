@@ -212,15 +212,16 @@ Typical uses: dev servers (`npm run dev`), watch mode (`npm test -- --watch`), R
 
 | Tool | Purpose |
 |------|---------|
-| `loopd_command_start` | Spawn `{title, command, args, cwd?, goal_id?, cols?, rows?, env?, timeout_seconds?, shell?}`. Requests OpenCode's `bash` permission first. Returns `command_id` + host `capabilities` (`spawn`/`write`/`interruptSignal`/`terminate`/`resize`/`terminalEmulation`). `env` passes values to the child but persists names only (`envKeys`); `timeout_seconds` (positive integer) kills via SIGTERM→SIGKILL with `endReason: timeout` + owner notify; `shell:true` spawns via `/bin/sh -c` (POSIX-quoted join; prefer argv form for untrusted input). |
-| `loopd_command_list` | List commands owned by the calling session. |
-| `loopd_command_get` | Read status + a bounded output snapshot (`offset_bytes` to page, default 64KB/cap 256KB). With `pattern` (+`ignore_case`), only regex-matching lines return (ANSI-stripped for matching, originals kept) and `offset_bytes`/`limit_bytes` page over matches. |
+| `loopd_command_start` | Spawn `{title, command, args, cwd?, goal_id?, cols?, rows?, env?, timeout_seconds?, shell?, watch_filter?, watch_until?, watch_ignore_case?, watch_until_action?}`. Requests OpenCode's `bash` permission first. Returns `command_id` + host `capabilities` (`spawn`/`write`/`interruptSignal`/`terminate`/`resize`/`terminalEmulation`). `env` passes values to the child but persists names only (`envKeys`); `timeout_seconds` (positive integer) kills via SIGTERM→SIGKILL with `endReason: timeout` + owner notify; `shell:true` spawns via `/bin/sh -c` (POSIX-quoted join; prefer argv form for untrusted input). `watch_filter`/`watch_until` arm line-level notifications at spawn (see Watching below); invalid `watch_until_action` (anything but `"stop"`/`"keep"`) or bad regexes fail the start before spawning. |
+| `loopd_command_list` | List commands owned by the calling session. Summaries include the watch spec (`watchFilter`/`watchUntil`/`watchIgnoreCase`/`watchUntilAction`) plus the live `watchState` snapshot (`state`/`matches`/`pushes`/`droppedLines`). |
+| `loopd_command_watch` | Set, replace, or clear a watch on an ALREADY-RUNNING command (`{command_id, watch_filter?, watch_until?, watch_ignore_case?, watch_until_action?, clear?}`). Replacing resets counters/state to `active`. Fails closed on bad regexes (previous watch untouched) and returns `ok:false` for terminal commands (watch is meaningless after exit) or another session's commands. |
+| `loopd_command_get` | Read status + a bounded output snapshot (`offset_bytes` to page, default 64KB/cap 256KB) — for progress checks on plain one-shot commands. For never-exiting processes prefer a watch + `loopd_command_await` (pushes come to you; no repeated reads). With `pattern` (+`ignore_case`), only regex-matching lines return (ANSI-stripped for matching, originals kept; dangerous nested-quantifier patterns are rejected) and `offset_bytes`/`limit_bytes` page over matches. |
 | `loopd_command_write` | Send raw stdin bytes (include your own trailing `\n` for line-buffered programs). |
 | `loopd_command_interrupt` | Deliver SIGINT (Ctrl+C as a signal). A process that traps it may keep running — that's correct, not a failure. |
 | `loopd_command_terminate` | SIGTERM, escalating to SIGKILL. The only way a command actually stops (closing a view never does). With `remove:true`, deletes the record+log in the same call (works even when already terminal). |
 | `loopd_command_remove` | Delete a finished command's record + log. Refuses while `running` (terminate first). |
 | `loopd_command_resize` | Set terminal size. Applied live to the real PTY winsize when the host supports it; stored-only (never applied) on the pipe fallback — check `capabilities.resize`. |
-| `loopd_command_await` | **The only command→goal edge.** Explicit opt-in: makes `goal_id` wake up exactly once when `command_id` reaches a terminal state (`exited`/`terminated`/`missing`), with exit code/signal/last-4KB output as evidence. Merely passing `goal_id` to `loopd_command_start` links for *display only* — it never wakes anything by itself. |
+| `loopd_command_await` | **The only command→goal edge.** Explicit opt-in: makes `goal_id` wake up exactly once when `command_id` reaches a terminal state (`exited`/`terminated`/`missing`), with exit code/signal/last-4KB output as evidence. With `until` (+`ignore_case`), the goal instead wakes ONCE on the first output line matching the regex (matched lines + bounded tail as evidence) and the command keeps running — for "wait until the dev server prints ready" without repeated reads. Invalid/dangerous `until` patterns are rejected; an `until` already present in the log fires immediately. Merely passing `goal_id` to `loopd_command_start` links for *display only* — it never wakes anything by itself. |
 
 ### Lifecycle
 
@@ -256,12 +257,55 @@ User: Start the dev server and let me see the logs.
 
 Agent: loopd_command_start({ title: "dev-server", command: "npm", args: ["run", "dev"] })
 # → {ok:true, command:{id:"...", status:"running", ...}, capabilities:{...}}
-Agent: "Started — open /loop, Tab to Commands, press o to watch live, or I can poll it for you."
+Agent: "Started — open /loop, Tab to Commands, press o to watch live, or I can set a watch so it pings you on interesting lines."
 
 # Later, to check on it without opening the TUI:
 loopd_command_get({ command_id: "..." })
 # → status + latest output
 ```
+
+### Watching Long-Running Commands
+
+For never-exiting processes (dev servers, `test --watch`, log tails), **watch instead of re-reading**: the owner gets pushed on match/exit with no repeated `loopd_command_get` calls.
+
+```
+# Arm at spawn…
+loopd_command_start({ title: "dev", command: "npm", args: ["run", "dev"],
+  watch_filter: "ERROR|WARN", watch_until: "ready in",
+  watch_until_action: "keep" })
+# …or attach to an already-running command:
+loopd_command_watch({ command_id: "...", watch_filter: "ERROR|WARN" })
+loopd_command_watch({ command_id: "...", watch_until: "ready in", watch_until_action: "keep" })
+loopd_command_watch({ command_id: "...", clear: true })  # drop the watch
+```
+
+- **`watch_filter`** (regex on ANSI-stripped lines): only matching lines buffer toward an owner push. No filter = every non-blank line counts.
+- **`watch_until`** (regex on the filter-surviving stream — filter first, then until): first match notifies the owner immediately with the matched lines.
+- **`watch_until_action`**: `"stop"` (default) terminates the command on first until-match (`endReason: until`, exactly one owner message total — the later exit ping is suppressed); `"keep"` notifies once but keeps running (until fires once, the filter stream continues, a later exit still notifies normally).
+- **Replacing** a watch (calling `loopd_command_watch` again) resets counters/state to `active`. **Clearing** drops spec + counters + the in-memory watcher. Watching a terminal command returns `ok:false`. Bad regexes fail closed — the previous watch is left untouched.
+- **Notifications are bounded** (so chatty processes can't spam you): matched lines coalesce into one push per ~2s window (≤20 lines / ≤4KB each); at most 30 pushes per command (`budget-exhausted`, one notice, process keeps running); over 100 lines/sec suspends the watch (`flood-suspended`, one notice with dropped count, process keeps running). Every push is prefixed `[watch "<title>"]`.
+- **Dashboard**: the Commands tab shows a badge per command — `watch:filter`, `until:stop-armed` / `until:keep-armed`, `until-matched`, `flood-suspended`, `budget-exhausted` — plus the `endReason` (`timeout`/`until`/…) on terminal rows; the detail panel shows the watch spec with `matches`/`pushes`/`dropped` counters.
+
+### Migrating from PTY Sessions (`pty_*` tools)
+
+| Before (`pty_*`) | After (`loopd_command_*`) | Notes |
+|---|---|---|
+| `pty_spawn({cmd, args, cwd})` | `loopd_command_start({title, command, args, cwd, env?, timeout_seconds?, shell?, notify_on_exit?, watch_filter?, watch_until?, watch_ignore_case?, watch_until_action?})` | `env` passes values but persists names only (`envKeys`); `timeout_seconds` kills via SIGTERM→SIGKILL with `endReason: timeout` and always notifies the owner (in-memory timer, never resurrected across restarts); `shell:true` joins via `/bin/sh -c`; `notify_on_exit` overrides the auto policy (auto = notify on non-zero exit, `missing`, `timeout`, or runs ≥ ~2min; quick successes stay silent) |
+| `pty_write({id, data})` | `loopd_command_write({command_id, input})` | Same raw-stdin bytes; include your own trailing `\n` |
+| `pty_read({id, pattern?})` | `loopd_command_get({command_id, pattern?, ignore_case?, offset_bytes?, limit_bytes?})` | `pattern` matches ANSI-stripped text, originals returned; pages over matches; dangerous patterns rejected. For continuous monitoring prefer a watch over repeated reads |
+| `pty_list()` | `loopd_command_list()` | Owner-scoped (your session's commands only — same set as the TUI Commands tab); summaries carry `watchState` + `endReason` |
+| `pty_kill({id, cleanup})` | `loopd_command_terminate({command_id, remove?})` | `remove:true` deletes record+log atomically (even when already terminal); plain `terminate` keeps the record for `loopd_command_remove` later |
+| `notifyOnExit` / `timeoutSeconds` spawn opts | `notify_on_exit` / `timeout_seconds` args | Same shape, two loopd differences: the auto-notify policy above (not plain true/false), and timeout stamps `endReason: timeout` instead of a generic kill |
+
+### Migrating from Sentinel Watches (`sentinel_monitor`)
+
+| Sentinel | Loopd | Notes |
+|---|---|---|
+| `filter` / `until` patterns | `watch_filter` / `watch_until` (+`watch_ignore_case`) | Same filter-first-then-until pipeline; same dangerous-regex guard; attach at start or later via `loopd_command_watch` |
+| Steer delivery (message routed back into the agent turn) | Owner prompt push (`[watch "<title>"] …`) | Loopd notifies the owning session directly; a goal that must *act* on output should use `loopd_command_await` (`until` variant) instead |
+| Flood/batch limits | Coalesce (~2s) + per-push bounds + 30-push budget + 100-lines/sec flood suspend | All bounded, all one-notice, process always keeps running (sentinel SIGTERMs on flood — loopd deliberately doesn't) |
+| Until auto-stop | `watch_until_action: "stop"` (default) → `endReason: until` | `"keep"` is the explicit opt-out; `until-matched` shows as a dashboard badge either way |
+| Shell-string spawn | `shell:true` (`command`+`args` joined POSIX-quoted via `/bin/sh -c`) | Prefer argv form for untrusted input |
 
 ### Example: A Goal That Waits On a Background Build
 

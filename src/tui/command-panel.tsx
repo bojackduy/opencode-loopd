@@ -28,6 +28,8 @@ import {
   selectCommandFirst,
   selectCommandLast,
   parseCommandLine,
+  watchBadge,
+  formatWatchDetail,
   type CommandPanelState,
 } from "./command-controller"
 import { createCommandStreamClient } from "./command-stream-client"
@@ -765,16 +767,28 @@ export function CommandPanel(props: Props) {
         >
           <box flexDirection="column" flexShrink={1} minHeight={0} overflow="hidden">
             <For each={state().commands}>
-              {(cmd, i) => (
+              {(cmd, i) => {
+                const badge = watchBadge(cmd)
+                const badgeWarn = badge === "flood-suspended" || badge === "budget-exhausted"
+                const badgeHot = badge === "until-matched"
+                const terminalReason = cmd.status !== "running" ? cmd.endReason : undefined
+                return (
                 <box paddingLeft={1} paddingRight={1} backgroundColor={i() === state().selected ? theme().backgroundElement : undefined}>
                   <text wrapMode="none" truncate={true}>
                     <span style={{ fg: cmd.status === "running" ? theme().success : theme().textMuted, bold: i() === state().selected }}>
                       {i() === state().selected ? "▶ " : "  "}{cmd.title}
                     </span>
                     <span style={{ fg: theme().textMuted }}> │ {[cmd.command, ...cmd.args].join(" ").slice(0, 60)} │ {cmd.status}{cmd.exitCode !== undefined ? ` (${cmd.exitCode})` : ""}</span>
+                    {terminalReason ? (
+                      <span style={{ fg: terminalReason === "timeout" ? theme().warning : theme().textMuted }}> [{terminalReason}]</span>
+                    ) : undefined}
+                    {badge ? (
+                      <span style={{ fg: badgeWarn ? theme().warning : badgeHot ? theme().primary : theme().textMuted }}> [{badge}]</span>
+                    ) : undefined}
                   </text>
                 </box>
-              )}
+                )
+              }}
             </For>
           </box>
         </Show>
@@ -784,8 +798,13 @@ export function CommandPanel(props: Props) {
             <box flexDirection="column" border={true} borderColor={theme().border} padding={1} flexShrink={0} maxHeight={16} overflow="hidden">
               <text>
                 <span style={{ fg: theme().primary, bold: true }}>{cmd().title}</span>
-                <span style={{ fg: theme().textMuted }}> │ {[cmd().command, ...cmd().args].join(" ")} │ {cmd().status} │ {outputMeta().totalBytes} bytes{outputMeta().live ? " · live" : ""}{cmd().truncated ? " · truncated" : ""}{emulated() && screen && feedForID === cmd().id ? ` · ${screen.cols}x${screen.rows} screen${screen.activeBuffer === "alternate" ? " · alt-screen" : ""}` : ""}</span>
+                <span style={{ fg: theme().textMuted }}> │ {[cmd().command, ...cmd().args].join(" ")} │ {cmd().status} │ {outputMeta().totalBytes} bytes{outputMeta().live ? " · live" : ""}{cmd().truncated ? " · truncated" : ""}{cmd().status !== "running" && cmd().endReason ? ` · end:${cmd().endReason}` : ""}{emulated() && screen && feedForID === cmd().id ? ` · ${screen.cols}x${screen.rows} screen${screen.activeBuffer === "alternate" ? " · alt-screen" : ""}` : ""}</span>
               </text>
+              {formatWatchDetail(cmd()) ? (
+                <text>
+                  <span style={{ fg: theme().textMuted }}>{formatWatchDetail(cmd())}</span>
+                </text>
+              ) : undefined}
               <Show
                 when={emulated() && screenRows().length > 0}
                 fallback={

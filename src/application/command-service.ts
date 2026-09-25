@@ -153,6 +153,20 @@ export interface CommandService {
   interrupt(directory: string, id: string, ownerSessionID: string): Promise<{ ok: boolean; message: string }>
   terminate(directory: string, id: string, ownerSessionID: string, opts?: { remove?: boolean }): Promise<{ ok: boolean; message: string; removed?: boolean }>
   remove(directory: string, id: string, ownerSessionID: string): Promise<{ ok: boolean; message: string }>
+  /**
+   * M3 watch: set/replace/clear a watch on an ALREADY-RUNNING command.
+   * Replacing the spec resets counters/state to active (new watcher +
+   * fresh initialWatchState, persisted atomically). Clear drops the spec,
+   * the in-memory watcher/timer, and the persisted watchState.
+   * Owner mismatch → ok:false; non-running → ok:false (watch is meaningless
+   * after exit); invalid regexes throw (fail closed, same guard as start).
+   */
+  watch(
+    directory: string,
+    id: string,
+    ownerSessionID: string,
+    opts?: { filter?: string; until?: string; ignoreCase?: boolean; untilAction?: WatchUntilAction; clear?: boolean },
+  ): Promise<{ ok: boolean; message: string; command?: CommandSession }>
   /** Reconcile persisted metadata against host truth after restart. */
   reconcile(directory: string): Promise<{ markedMissing: number }>
   /** Stop all live children before the plugin host unloads. */
@@ -1251,6 +1265,88 @@ export function createCommandService(
       // Removing a finished command clears awaits pointing at it.
       await clearAwaitsForCommand(directory, id, "command removed").catch(() => {})
       return { ok: true, message: `Command "${session.title}" removed.` }
+    },
+
+    async watch(directory, id, ownerSessionID, opts) {
+      rememberDir(id, directory)
+      const session = await service.get(directory, id, ownerSessionID)
+      if (!session) return { ok: false, message: "Command not found." }
+      if (session.status !== "running") {
+        return { ok: false, message: `Command is ${session.status}; watch is meaningless after exit.` }
+      }
+      if (opts?.untilAction !== undefined && opts.untilAction !== "stop" && opts.untilAction !== "keep") {
+        throw new Error(`Invalid watch untilAction '${opts.untilAction}': must be "stop" or "keep".`)
+      }
+      if (opts?.clear === true) {
+        deleteWatch(id)
+        await mutateState(directory, `cmd.watch-clear:${id}`, async (s) => {
+          const c = (s.commands ?? []).find((x) => x.id === id)
+          if (c && c.ownerSessionID === ownerSessionID) {
+            delete c.watchFilter
+            delete c.watchUntil
+            delete c.watchIgnoreCase
+            delete c.watchUntilAction
+            delete c.watchState
+            c.updatedAt = new Date().toISOString()
+          }
+          return s
+        })
+        await watchLedger(directory, id, "command.watch-suspended", { reason: "cleared" }).catch(() => {})
+        try {
+          const fresh = await readState(directory).then(
+            (st) => (st.commands ?? []).find((x) => x.id === id),
+          )
+          if (fresh) emitBroker(id, { type: "status", command: fresh })
+        } catch {}
+        const cleared = await service.get(directory, id, ownerSessionID)
+        return { ok: true, message: `Watch cleared for "${session.title}".`, command: cleared }
+      }
+      const filter = opts?.filter !== undefined && opts.filter !== "" ? opts.filter : undefined
+      const until = opts?.until !== undefined && opts.until !== "" ? opts.until : undefined
+      // Fail closed BEFORE touching state: invalid/dangerous patterns throw
+      // here (same guard as start), so a bad watch never resets a good one.
+      const watcher = new CommandWatcher({
+        ...(filter !== undefined ? { filter } : {}),
+        ...(until !== undefined ? { until } : {}),
+        ...(opts?.ignoreCase !== undefined ? { ignoreCase: opts.ignoreCase } : {}),
+        ...(opts?.untilAction !== undefined ? { untilAction: opts.untilAction } : {}),
+      })
+      // New spec wins: drop the old timer/watcher, install the fresh one.
+      // Counters reset to active by construction (new watcher + fresh state).
+      clearWatchTimer(id)
+      watchers.set(id, watcher)
+      // A bare await-until assembler may hold a partial line the new watcher
+      // never saw — drop it so the fresh watcher owns line assembly outright.
+      awaitAsm.delete(id)
+      const freshState = initialWatchState()
+      await mutateState(directory, `cmd.watch:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id)
+        if (c && c.ownerSessionID === ownerSessionID) {
+          if (filter !== undefined) c.watchFilter = filter
+          else delete c.watchFilter
+          if (until !== undefined) c.watchUntil = until
+          else delete c.watchUntil
+          if (opts?.ignoreCase !== undefined) c.watchIgnoreCase = opts.ignoreCase
+          else delete c.watchIgnoreCase
+          c.watchUntilAction = watcher.untilAction
+          c.watchState = { ...freshState }
+          c.updatedAt = new Date().toISOString()
+        }
+        return s
+      })
+      try {
+        const fresh = await readState(directory).then(
+          (st) => (st.commands ?? []).find((x) => x.id === id),
+        )
+        if (fresh) emitBroker(id, { type: "status", command: fresh })
+      } catch {}
+      const updated = await service.get(directory, id, ownerSessionID)
+      const desc = [
+        filter !== undefined ? `filter="${filter}"` : "filter=—",
+        until !== undefined ? `until="${until}"` : "until=—",
+        `action=${watcher.untilAction}`,
+      ].join(" ")
+      return { ok: true, message: `Watch set for "${session.title}" (${desc}; counters reset to active).`, command: updated }
     },
 
     async reconcile(directory) {

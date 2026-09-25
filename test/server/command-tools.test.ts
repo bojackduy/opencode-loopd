@@ -96,6 +96,68 @@ describe("Command tools (permissions + capabilities)", () => {
     expect(JSON.parse((await tools.loopd_command_remove.execute({ command_id: id }, context("owner-1"))).output).ok).toBe(true)
   })
 
+  it("summaries carry watch spec + watchState; loopd_command_watch set/replace/clear", async () => {
+    const started = JSON.parse(
+      (await tools.loopd_command_start.execute(
+        { title: "w", command: "sleep", watch_filter: "ERROR", watch_until: "READY" },
+        context("owner-1"),
+      )).output,
+    )
+    expect(started.ok).toBe(true)
+    expect(started.command.watchFilter).toBe("ERROR")
+    expect(started.command.watchUntil).toBe("READY")
+    expect(started.command.watchState).toMatchObject({ state: "active", matches: 0, pushes: 0 })
+    const id = started.command.id as string
+
+    const listed = JSON.parse(
+      (await tools.loopd_command_list.execute({}, context("owner-1"))).output,
+    )
+    expect(listed.commands[0].watchState).toMatchObject({ state: "active" })
+
+    // Replace resets (until dropped, counters fresh)
+    const replaced = JSON.parse(
+      (await tools.loopd_command_watch.execute({ command_id: id, watch_filter: "WARN" }, context("owner-1"))).output,
+    )
+    expect(replaced.ok).toBe(true)
+    expect(replaced.command.watchFilter).toBe("WARN")
+    expect(replaced.command.watchUntil).toBeUndefined()
+    expect(replaced.command.watchState).toMatchObject({ state: "active", matches: 0, pushes: 0 })
+
+    // Clear drops everything
+    const cleared = JSON.parse(
+      (await tools.loopd_command_watch.execute({ command_id: id, clear: true }, context("owner-1"))).output,
+    )
+    expect(cleared.ok).toBe(true)
+    expect(cleared.command.watchFilter).toBeUndefined()
+    expect(cleared.command.watchState).toBeUndefined()
+
+    // Owner mismatch fails closed
+    expect(JSON.parse(
+      (await tools.loopd_command_watch.execute({ command_id: id, watch_filter: "x" }, context("owner-2"))).output,
+    ).ok).toBe(false)
+
+    // Invalid regex fails closed
+    expect(JSON.parse(
+      (await tools.loopd_command_watch.execute({ command_id: id, watch_filter: "(unclosed" }, context("owner-1"))).output,
+    ).ok).toBe(false)
+    expect(JSON.parse(
+      (await tools.loopd_command_watch.execute({ command_id: id, watch_until_action: "bogus" }, context("owner-1"))).output,
+    ).ok).toBe(false)
+  })
+
+  it("loopd_command_watch rejects terminal commands (watch is meaningless after exit)", async () => {
+    const started = JSON.parse(
+      (await tools.loopd_command_start.execute({ title: "short", command: "echo" }, context("owner-1"))).output,
+    )
+    const id = started.command.id as string
+    expect(JSON.parse((await tools.loopd_command_terminate.execute({ command_id: id }, context("owner-1"))).output).ok).toBe(true)
+    const r = JSON.parse(
+      (await tools.loopd_command_watch.execute({ command_id: id, watch_filter: "x" }, context("owner-1"))).output,
+    )
+    expect(r.ok).toBe(false)
+    expect(r.message).toMatch(/meaningless after exit/)
+  })
+
   it("requests bash permission before spawning and fails closed on rejection", async () => {
     const requests: unknown[] = []
     const allowed = await tools.loopd_command_start.execute(
