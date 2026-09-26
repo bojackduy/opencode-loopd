@@ -98,6 +98,7 @@ export function commandTools(options: CommandToolsOptions) {
   return {
     loopd_command_start: tool({
       description:
+        "PREFER THIS over the built-in shell/bash tool whenever a command might take a while or never return: installs (npm/pip/brew/cargo...), builds, test suites, downloads, migrations, dev servers, watchers, log tails, REPLs, or anything interactive. The built-in shell BLOCKS your whole turn until the process exits — a long install freezes you (and can time out); this returns immediately with a command_id and pushes you a message on exit or pattern match, so you stay responsive and can do other work meanwhile. Only use the built-in shell for quick one-shots (ls, git status, a single fast test) that finish in seconds. " +
         "Start a standalone interactive OS process (arbitrary shell command) in the background — a dev server, `npm test --watch`, a REPL, a log tail, a build, or a one-off script. This is a raw process, NOT an AI worker: no agent, no checks, no turn loop. For multi-turn autonomous AI work with completion criteria, use loopd_create_goal instead. " +
         "Returns a command_id for loopd_command_get (read output)/loopd_command_write (send stdin)/loopd_command_interrupt (Ctrl+C)/loopd_command_terminate (kill)/loopd_command_remove (delete). " +
         "The user can also open it live: /loop or /commands → Tab/l to the Commands tab → select it → `o` opens a fullscreen interactive terminal page (type directly, Ctrl+C interrupts, Ctrl+] detaches without stopping it). " +

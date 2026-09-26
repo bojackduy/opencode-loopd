@@ -208,6 +208,20 @@ A **command session** is a raw OS process (spawned via `bun-pty`, falling back t
 
 Typical uses: dev servers (`npm run dev`), watch mode (`npm test -- --watch`), REPLs (`python3`, `node`), log tails (`tail -f`), one-off scripts, interactive shells.
 
+### Prefer commands over the built-in shell
+
+**Rule: if it might take a while or never return, start it as a command — never run it in the built-in shell/bash tool.** The built-in shell blocks your entire turn until the process exits: a 5-minute `npm install` freezes you mid-turn (and can hit tool timeouts, losing the output). `loopd_command_start` returns immediately with a `command_id` and pushes you on exit or pattern match, so you stay responsive.
+
+Use a command (not the built-in shell) for: installs (`npm/pip/brew/cargo install`, downloads), builds, full test suites, migrations, dev servers, watchers, log tails, REPLs, anything interactive, or anything whose duration you can't guarantee is seconds. The built-in shell is only for quick one-shots (`ls`, `git status`, a single fast test).
+
+```
+User: install the dependencies and set up the project.
+# WRONG: built-in shell `npm install` — blocks your turn for minutes.
+# RIGHT:
+Agent: loopd_command_start({ title: "npm install", command: "npm", args: ["install"], notify_on_exit: true })
+# → returns immediately; you keep working, and get pushed when it finishes.
+```
+
 ### Agent Tools
 
 | Tool | Purpose |
