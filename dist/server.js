@@ -1687,6 +1687,8 @@ function createControlWorker(options) {
       case "cmd_write":
       case "cmd_interrupt":
       case "cmd_terminate":
+      case "cmd_kill":
+      case "cmd_restart":
       case "cmd_remove":
       case "cmd_resize":
       case "cmd_watch": {
@@ -1737,6 +1739,14 @@ function createControlWorker(options) {
               response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision };
             } else if (request.command === "cmd_terminate") {
               const r = await cmdSvc.terminate(directory, id, ownerSessionID);
+              const state = await readState(directory);
+              response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision };
+            } else if (request.command === "cmd_kill") {
+              const r = await cmdSvc.kill(directory, id, ownerSessionID);
+              const state = await readState(directory);
+              response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision };
+            } else if (request.command === "cmd_restart") {
+              const r = await cmdSvc.restart(directory, id, ownerSessionID);
               const state = await readState(directory);
               response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision };
             } else if (request.command === "cmd_remove") {
@@ -5930,6 +5940,104 @@ function createCommandService(host, opts) {
         return { ok: true, message: `Command "${session.title}" ${status}; remove failed: ${removed.message}` };
       }
       return { ok: true, message: `Command "${session.title}" ${status}.` };
+    },
+    async kill(directory, id, ownerSessionID) {
+      rememberDir(id, directory);
+      const session = await service.get(directory, id, ownerSessionID);
+      if (!session)
+        return { ok: false, message: "Command not found." };
+      if (session.status !== "running") {
+        return { ok: false, message: `Command is ${session.status}; nothing to kill.` };
+      }
+      await mutateState(directory, `cmd.kill-claim:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id);
+        if (c && c.ownerSessionID === ownerSessionID && c.status === "running") {
+          c.signal = "SIGKILL";
+          c.updatedAt = new Date().toISOString();
+        }
+        return s;
+      }).catch(() => {});
+      try {
+        const claimed = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
+        if (claimed)
+          emitBroker(id, { type: "status", command: claimed });
+      } catch {}
+      const entry = live.get(id);
+      if (entry) {
+        if (entry.handle.isAlive())
+          entry.handle.kill();
+        try {
+          await entry.handle.exited();
+        } catch {}
+        live.delete(id);
+      }
+      clearCommandTimeout(id);
+      clearWatchTimer(id);
+      await mutateState(directory, `cmd.kill:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id);
+        if (!c || c.ownerSessionID !== ownerSessionID)
+          return s;
+        if (c.status === "running") {
+          c.status = "terminated";
+          if (c.endReason !== "timeout")
+            c.endReason = "terminate";
+          c.exitCode = c.exitCode ?? 137;
+          c.signal = c.signal ?? "SIGKILL";
+          c.endedAt = new Date().toISOString();
+          c.updatedAt = c.endedAt;
+        } else if (c.status === "terminated" && !c.endedAt) {
+          if (c.endReason !== "timeout" && !c.endReason)
+            c.endReason = "terminate";
+          c.exitCode = c.exitCode ?? 137;
+          c.endedAt = new Date().toISOString();
+          c.updatedAt = c.endedAt;
+        }
+        return s;
+      });
+      try {
+        const fresh = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
+        if (fresh)
+          emitBroker(id, { type: "status", command: fresh });
+      } catch {}
+      await fireAwaits(directory, id);
+      await notifyOwnerIfNeeded(directory, id);
+      return { ok: true, message: `Command "${session.title}" killed (SIGKILL).` };
+    },
+    async restart(directory, id, ownerSessionID) {
+      rememberDir(id, directory);
+      const session = await service.get(directory, id, ownerSessionID);
+      if (!session)
+        return { ok: false, message: "Command not found." };
+      const spec = {
+        title: session.title,
+        command: session.command,
+        args: [...session.args],
+        cwd: session.cwd,
+        ownerSessionID,
+        ...session.goalID !== undefined ? { goalID: session.goalID } : {},
+        ...session.notifyOnExit !== undefined ? { notifyOnExit: session.notifyOnExit } : {},
+        ...session.cols !== undefined ? { cols: session.cols } : {},
+        ...session.rows !== undefined ? { rows: session.rows } : {},
+        ...session.shell !== undefined ? { shell: session.shell } : {},
+        ...session.timeoutSeconds !== undefined ? { timeoutSeconds: session.timeoutSeconds } : {},
+        ...session.watchFilter !== undefined ? { watchFilter: session.watchFilter } : {},
+        ...session.watchUntil !== undefined ? { watchUntil: session.watchUntil } : {},
+        ...session.watchIgnoreCase !== undefined ? { watchIgnoreCase: session.watchIgnoreCase } : {},
+        ...session.watchUntilAction !== undefined ? { watchUntilAction: session.watchUntilAction } : {}
+      };
+      if (session.status === "running") {
+        const stopped = await service.terminate(directory, id, ownerSessionID);
+        if (!stopped.ok) {
+          return { ok: false, message: `Restart aborted: could not stop "${session.title}": ${stopped.message}` };
+        }
+      }
+      const next = await service.start(directory, spec);
+      const envNote = (session.envKeys?.length ?? 0) > 0 ? ` (env ${session.envKeys.join(",")} NOT restored \u2014 values are never persisted)` : "";
+      return {
+        ok: true,
+        message: `Command "${session.title}" restarted as ${next.id.slice(0, 8)}...${envNote}`,
+        command: next
+      };
     },
     async remove(directory, id, ownerSessionID) {
       rememberDir(id, directory);

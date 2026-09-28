@@ -5990,7 +5990,7 @@ function tokenize(input) {
 function commandHelp() {
   return [
     "Modes: : insert \u2192 send/commands | Ctrl+N \u2192 normal | ? toggle help | Shift+B bug report",
-    "Nav: j/k move | g/G top/bottom | o open child | c toggle done | p/r/R/x pause/resume/retry/clear | A abort worker | N nudge | L logs | q close",
+    "Nav: j/k move | g/G top/bottom | o open child | c toggle done | p/r/R/x pause/resume/retry/clear (Goals) \xB7 X kill/R restart/x remove-done (Commands) | A abort worker | N nudge | L logs | q close",
     "Goal (ownership): Active=loopd owns it | Blocked/Paused=needs you | Out of budget=resume to spend | Waiting for capacity=auto-resumes | Done=verified",
     "Worker (activity now): Running=acting now | Idle=between turns | Retrying=backing off | Queued/Compacting/Stopping=transitional",
     "Commands (insert mode, : prefix):",
@@ -6786,6 +6786,18 @@ function LoopDashboard(props) {
       return;
     }
     const key = raw || seq || name;
+    if (tab() === "commands" && Boolean(evt.ctrl) && name === "c") {
+      prevent(evt);
+      const sel = selectedCommand();
+      if (!sel) {
+        setStatusText("No command selected.");
+        return;
+      }
+      executeCommandRaw("cmd_interrupt", {
+        commandID: sel.id
+      }, sel.id);
+      return;
+    }
     if (key === "c") {
       prevent(evt);
       setShowCompleted((v) => !v);
@@ -6839,7 +6851,22 @@ function LoopDashboard(props) {
       applyMove("last");
       return;
     }
-    const needsGoalsTab = ["p", "r", "R", "x", "A", "N"].includes(key);
+    if (tab() === "commands" && key === "X") {
+      prevent(evt);
+      killSelectedCommand();
+      return;
+    }
+    if (tab() === "commands" && key === "R") {
+      prevent(evt);
+      restartSelectedCommand();
+      return;
+    }
+    if (tab() === "commands" && key === "x") {
+      prevent(evt);
+      removeFinishedSelected();
+      return;
+    }
+    const needsGoalsTab = ["p", "r", "A", "N"].includes(key);
     if (needsGoalsTab && tab() !== "goals") {
       prevent(evt);
       setStatusText("Goal controls need the Goals tab (Tab to switch).");
@@ -6945,6 +6972,40 @@ function LoopDashboard(props) {
   function selectedCommand() {
     return ownerCommands()[cmdSelected()] ?? null;
   }
+  async function killSelectedCommand() {
+    const sel = selectedCommand();
+    if (!sel) {
+      setStatusText("No command selected.");
+      return;
+    }
+    await executeCommandRaw("cmd_kill", {
+      commandID: sel.id
+    }, sel.id);
+  }
+  async function restartSelectedCommand() {
+    const sel = selectedCommand();
+    if (!sel) {
+      setStatusText("No command selected.");
+      return;
+    }
+    await executeCommandRaw("cmd_restart", {
+      commandID: sel.id
+    }, sel.id);
+  }
+  function removeFinishedSelected() {
+    const sel = selectedCommand();
+    if (!sel) {
+      setStatusText("No command selected.");
+      return;
+    }
+    if (sel.status === "running") {
+      setStatusText(`"${sel.title}" is still running \u2014 X force kill \xB7 :terminate graceful \xB7 q detach (keeps running).`);
+      return;
+    }
+    executeCommandRaw("cmd_remove", {
+      commandID: sel.id
+    }, sel.id);
+  }
   async function executeCommandTabCommand(verb, positional, raw) {
     debugLog("commands-tab command", verb);
     switch (verb) {
@@ -6982,6 +7043,12 @@ function LoopDashboard(props) {
         await executeCommandRaw("cmd_terminate", {
           commandID: selectedCommand().id
         }, selectedCommand().id);
+        return;
+      case "kill":
+        await killSelectedCommand();
+        return;
+      case "restart":
+        await restartSelectedCommand();
         return;
       case "remove":
         if (!selectedCommand()) {
@@ -8415,7 +8482,7 @@ function LoopDashboard(props) {
           },
           get fallback() {
             return (() => {
-              var _el$260 = _$createElement("box"), _el$261 = _$createElement("text"), _el$262 = _$createElement("span"), _el$264 = _$createElement("span"), _el$266 = _$createElement("span"), _el$268 = _$createElement("text"), _el$269 = _$createElement("span"), _el$271 = _$createElement("span"), _el$273 = _$createElement("span"), _el$275 = _$createElement("span"), _el$277 = _$createElement("span");
+              var _el$260 = _$createElement("box"), _el$261 = _$createElement("text"), _el$262 = _$createElement("span"), _el$264 = _$createElement("span"), _el$266 = _$createElement("span"), _el$268 = _$createElement("text"), _el$269 = _$createElement("span"), _el$271 = _$createElement("span"), _el$273 = _$createElement("span"), _el$275 = _$createElement("span"), _el$277 = _$createElement("span"), _el$279 = _$createElement("span"), _el$281 = _$createElement("span");
               _$insertNode(_el$260, _el$261);
               _$insertNode(_el$260, _el$268);
               _$setProp(_el$260, "flexDirection", "column");
@@ -8432,11 +8499,15 @@ function LoopDashboard(props) {
               _$insertNode(_el$268, _el$273);
               _$insertNode(_el$268, _el$275);
               _$insertNode(_el$268, _el$277);
+              _$insertNode(_el$268, _el$279);
+              _$insertNode(_el$268, _el$281);
               _$insertNode(_el$269, _$createTextNode(`Tip: `));
               _$insertNode(_el$271, _$createTextNode(`o`));
               _$insertNode(_el$273, _$createTextNode(` fullscreen \xB7 `));
-              _$insertNode(_el$275, _$createTextNode(`:interrupt :terminate :remove`));
-              _$insertNode(_el$277, _$createTextNode(` manage \xB7 text + Enter writes stdin.`));
+              _$insertNode(_el$275, _$createTextNode(`X kill \xB7 R restart \xB7 x remove-done`));
+              _$insertNode(_el$277, _$createTextNode(` \xB7 `));
+              _$insertNode(_el$279, _$createTextNode(`:interrupt :terminate :remove`));
+              _$insertNode(_el$281, _$createTextNode(` manage \xB7 text + Enter writes stdin.`));
               _$effect((_p$) => {
                 var _v$49 = {
                   fg: theme().textMuted
@@ -8454,6 +8525,10 @@ function LoopDashboard(props) {
                   fg: theme().warning
                 }, _v$56 = {
                   fg: theme().textMuted
+                }, _v$57 = {
+                  fg: theme().warning
+                }, _v$58 = {
+                  fg: theme().textMuted
                 };
                 _v$49 !== _p$.e && (_p$.e = _$setProp(_el$262, "style", _v$49, _p$.e));
                 _v$50 !== _p$.t && (_p$.t = _$setProp(_el$264, "style", _v$50, _p$.t));
@@ -8463,6 +8538,8 @@ function LoopDashboard(props) {
                 _v$54 !== _p$.n && (_p$.n = _$setProp(_el$273, "style", _v$54, _p$.n));
                 _v$55 !== _p$.s && (_p$.s = _$setProp(_el$275, "style", _v$55, _p$.s));
                 _v$56 !== _p$.h && (_p$.h = _$setProp(_el$277, "style", _v$56, _p$.h));
+                _v$57 !== _p$.r && (_p$.r = _$setProp(_el$279, "style", _v$57, _p$.r));
+                _v$58 !== _p$.d && (_p$.d = _$setProp(_el$281, "style", _v$58, _p$.d));
                 return _p$;
               }, {
                 e: undefined,
@@ -8472,7 +8549,9 @@ function LoopDashboard(props) {
                 i: undefined,
                 n: undefined,
                 s: undefined,
-                h: undefined
+                h: undefined,
+                r: undefined,
+                d: undefined
               });
               return _el$260;
             })();
@@ -8486,106 +8565,106 @@ function LoopDashboard(props) {
               children: (cmd, i) => {
                 const isActive = () => i() === cmdSelected();
                 return (() => {
-                  var _el$279 = _$createElement("box"), _el$280 = _$createElement("text"), _el$281 = _$createElement("span"), _el$282 = _$createElement("span"), _el$284 = _$createElement("span"), _el$286 = _$createElement("span"), _el$287 = _$createElement("span"), _el$289 = _$createElement("span"), _el$290 = _$createElement("span"), _el$291 = _$createTextNode(` \u2502 `);
-                  _$insertNode(_el$279, _el$280);
-                  _$setProp(_el$279, "flexDirection", "row");
-                  _$setProp(_el$279, "paddingLeft", 1);
-                  _$setProp(_el$279, "paddingRight", 1);
-                  _$insertNode(_el$280, _el$281);
-                  _$insertNode(_el$280, _el$282);
-                  _$insertNode(_el$280, _el$284);
-                  _$insertNode(_el$280, _el$286);
-                  _$insertNode(_el$280, _el$287);
-                  _$insertNode(_el$280, _el$289);
-                  _$insertNode(_el$280, _el$290);
-                  _$setProp(_el$280, "wrapMode", "none");
-                  _$setProp(_el$280, "truncate", true);
-                  _$insert(_el$281, (() => {
+                  var _el$283 = _$createElement("box"), _el$284 = _$createElement("text"), _el$285 = _$createElement("span"), _el$286 = _$createElement("span"), _el$288 = _$createElement("span"), _el$290 = _$createElement("span"), _el$291 = _$createElement("span"), _el$293 = _$createElement("span"), _el$294 = _$createElement("span"), _el$295 = _$createTextNode(` \u2502 `);
+                  _$insertNode(_el$283, _el$284);
+                  _$setProp(_el$283, "flexDirection", "row");
+                  _$setProp(_el$283, "paddingLeft", 1);
+                  _$setProp(_el$283, "paddingRight", 1);
+                  _$insertNode(_el$284, _el$285);
+                  _$insertNode(_el$284, _el$286);
+                  _$insertNode(_el$284, _el$288);
+                  _$insertNode(_el$284, _el$290);
+                  _$insertNode(_el$284, _el$291);
+                  _$insertNode(_el$284, _el$293);
+                  _$insertNode(_el$284, _el$294);
+                  _$setProp(_el$284, "wrapMode", "none");
+                  _$setProp(_el$284, "truncate", true);
+                  _$insert(_el$285, (() => {
                     var _c$23 = _$memo(() => !!isActive());
                     return () => _c$23() ? `\u25B6 ${commandStatusIcon(cmd.status)} ${cmd.title}` : `  ${commandStatusIcon(cmd.status)} ${cmd.title}`;
                   })());
-                  _$insertNode(_el$282, _$createTextNode(` \u2502 `));
-                  _$insertNode(_el$284, _$createTextNode(`Cmd `));
-                  _$insert(_el$286, () => commandStatusLabel(cmd.status).short);
-                  _$insertNode(_el$287, _$createTextNode(` \u2502 `));
-                  _$insert(_el$289, () => cmd.command);
-                  _$insert(_el$280, (() => {
+                  _$insertNode(_el$286, _$createTextNode(` \u2502 `));
+                  _$insertNode(_el$288, _$createTextNode(`Cmd `));
+                  _$insert(_el$290, () => commandStatusLabel(cmd.status).short);
+                  _$insertNode(_el$291, _$createTextNode(` \u2502 `));
+                  _$insert(_el$293, () => cmd.command);
+                  _$insert(_el$284, (() => {
                     var _c$24 = _$memo(() => cmd.args.length > 0);
                     return () => _c$24() && (() => {
-                      var _el$292 = _$createElement("span"), _el$293 = _$createTextNode(` `);
-                      _$insertNode(_el$292, _el$293);
-                      _$insert(_el$292, () => cmd.args.join(" ").slice(0, 40), null);
-                      _$effect((_$p) => _$setProp(_el$292, "style", {
-                        fg: theme().textMuted
-                      }, _$p));
-                      return _el$292;
-                    })();
-                  })(), _el$290);
-                  _$insert(_el$280, (() => {
-                    var _c$25 = _$memo(() => cmd.exitCode !== undefined);
-                    return () => _c$25() && (() => {
-                      var _el$294 = _$createElement("span"), _el$295 = _$createTextNode(` \u2502 exit `);
-                      _$insertNode(_el$294, _el$295);
-                      _$insert(_el$294, () => cmd.exitCode, null);
-                      _$effect((_$p) => _$setProp(_el$294, "style", {
-                        fg: cmd.exitCode === 0 ? theme().success : theme().error
-                      }, _$p));
-                      return _el$294;
-                    })();
-                  })(), _el$290);
-                  _$insert(_el$280, (() => {
-                    var _c$26 = _$memo(() => !!cmd.signal);
-                    return () => _c$26() && (() => {
-                      var _el$296 = _$createElement("span"), _el$297 = _$createTextNode(` \u2502 `);
+                      var _el$296 = _$createElement("span"), _el$297 = _$createTextNode(` `);
                       _$insertNode(_el$296, _el$297);
-                      _$insert(_el$296, () => cmd.signal, null);
+                      _$insert(_el$296, () => cmd.args.join(" ").slice(0, 40), null);
                       _$effect((_$p) => _$setProp(_el$296, "style", {
-                        fg: theme().warning
+                        fg: theme().textMuted
                       }, _$p));
                       return _el$296;
                     })();
-                  })(), _el$290);
-                  _$insertNode(_el$290, _el$291);
-                  _$insert(_el$290, () => ageLabel(cmd.updatedAt, clock()), null);
-                  _$insert(_el$280, (() => {
-                    var _c$27 = _$memo(() => !!cmd.truncated);
-                    return () => _c$27() && (() => {
-                      var _el$298 = _$createElement("span");
-                      _$insertNode(_el$298, _$createTextNode(` \u2502 \u26A0 truncated`));
+                  })(), _el$294);
+                  _$insert(_el$284, (() => {
+                    var _c$25 = _$memo(() => cmd.exitCode !== undefined);
+                    return () => _c$25() && (() => {
+                      var _el$298 = _$createElement("span"), _el$299 = _$createTextNode(` \u2502 exit `);
+                      _$insertNode(_el$298, _el$299);
+                      _$insert(_el$298, () => cmd.exitCode, null);
                       _$effect((_$p) => _$setProp(_el$298, "style", {
-                        fg: theme().warning,
-                        bold: true
+                        fg: cmd.exitCode === 0 ? theme().success : theme().error
                       }, _$p));
                       return _el$298;
                     })();
+                  })(), _el$294);
+                  _$insert(_el$284, (() => {
+                    var _c$26 = _$memo(() => !!cmd.signal);
+                    return () => _c$26() && (() => {
+                      var _el$300 = _$createElement("span"), _el$301 = _$createTextNode(` \u2502 `);
+                      _$insertNode(_el$300, _el$301);
+                      _$insert(_el$300, () => cmd.signal, null);
+                      _$effect((_$p) => _$setProp(_el$300, "style", {
+                        fg: theme().warning
+                      }, _$p));
+                      return _el$300;
+                    })();
+                  })(), _el$294);
+                  _$insertNode(_el$294, _el$295);
+                  _$insert(_el$294, () => ageLabel(cmd.updatedAt, clock()), null);
+                  _$insert(_el$284, (() => {
+                    var _c$27 = _$memo(() => !!cmd.truncated);
+                    return () => _c$27() && (() => {
+                      var _el$302 = _$createElement("span");
+                      _$insertNode(_el$302, _$createTextNode(` \u2502 \u26A0 truncated`));
+                      _$effect((_$p) => _$setProp(_el$302, "style", {
+                        fg: theme().warning,
+                        bold: true
+                      }, _$p));
+                      return _el$302;
+                    })();
                   })(), null);
                   _$effect((_p$) => {
-                    var _v$57 = isActive() ? theme().backgroundElement : undefined, _v$58 = {
+                    var _v$59 = isActive() ? theme().backgroundElement : undefined, _v$60 = {
                       fg: commandStatusColor(cmd.status, theme()),
                       bold: isActive()
-                    }, _v$59 = {
-                      fg: theme().textMuted
-                    }, _v$60 = {
-                      fg: theme().textMuted
                     }, _v$61 = {
-                      fg: commandStatusColor(cmd.status, theme()),
-                      bold: true
+                      fg: theme().textMuted
                     }, _v$62 = {
                       fg: theme().textMuted
                     }, _v$63 = {
-                      fg: theme().accent,
+                      fg: commandStatusColor(cmd.status, theme()),
                       bold: true
                     }, _v$64 = {
                       fg: theme().textMuted
+                    }, _v$65 = {
+                      fg: theme().accent,
+                      bold: true
+                    }, _v$66 = {
+                      fg: theme().textMuted
                     };
-                    _v$57 !== _p$.e && (_p$.e = _$setProp(_el$279, "backgroundColor", _v$57, _p$.e));
-                    _v$58 !== _p$.t && (_p$.t = _$setProp(_el$281, "style", _v$58, _p$.t));
-                    _v$59 !== _p$.a && (_p$.a = _$setProp(_el$282, "style", _v$59, _p$.a));
-                    _v$60 !== _p$.o && (_p$.o = _$setProp(_el$284, "style", _v$60, _p$.o));
-                    _v$61 !== _p$.i && (_p$.i = _$setProp(_el$286, "style", _v$61, _p$.i));
-                    _v$62 !== _p$.n && (_p$.n = _$setProp(_el$287, "style", _v$62, _p$.n));
-                    _v$63 !== _p$.s && (_p$.s = _$setProp(_el$289, "style", _v$63, _p$.s));
-                    _v$64 !== _p$.h && (_p$.h = _$setProp(_el$290, "style", _v$64, _p$.h));
+                    _v$59 !== _p$.e && (_p$.e = _$setProp(_el$283, "backgroundColor", _v$59, _p$.e));
+                    _v$60 !== _p$.t && (_p$.t = _$setProp(_el$285, "style", _v$60, _p$.t));
+                    _v$61 !== _p$.a && (_p$.a = _$setProp(_el$286, "style", _v$61, _p$.a));
+                    _v$62 !== _p$.o && (_p$.o = _$setProp(_el$288, "style", _v$62, _p$.o));
+                    _v$63 !== _p$.i && (_p$.i = _$setProp(_el$290, "style", _v$63, _p$.i));
+                    _v$64 !== _p$.n && (_p$.n = _$setProp(_el$291, "style", _v$64, _p$.n));
+                    _v$65 !== _p$.s && (_p$.s = _$setProp(_el$293, "style", _v$65, _p$.s));
+                    _v$66 !== _p$.h && (_p$.h = _$setProp(_el$294, "style", _v$66, _p$.h));
                     return _p$;
                   }, {
                     e: undefined,
@@ -8597,7 +8676,7 @@ function LoopDashboard(props) {
                     s: undefined,
                     h: undefined
                   });
-                  return _el$279;
+                  return _el$283;
                 })();
               }
             }));
@@ -8609,163 +8688,163 @@ function LoopDashboard(props) {
             return selectedCommand();
           },
           children: (cmd) => (() => {
-            var _el$300 = _$createElement("box"), _el$301 = _$createElement("text"), _el$302 = _$createElement("span"), _el$303 = _$createTextNode(` `), _el$304 = _$createElement("span"), _el$306 = _$createElement("span"), _el$307 = _$createTextNode(` \u2014 `), _el$308 = _$createTextNode(`
-`), _el$309 = _$createElement("span"), _el$311 = _$createElement("span"), _el$312 = _$createTextNode(`
-`), _el$313 = _$createElement("span"), _el$315 = _$createElement("span"), _el$317 = _$createElement("span"), _el$318 = _$createTextNode(`
-`), _el$319 = _$createElement("span"), _el$321 = _$createElement("span"), _el$323 = _$createElement("span"), _el$324 = _$createTextNode(` bytes`), _el$325 = _$createElement("span"), _el$326 = _$createTextNode(` \u2502 updated `), _el$327 = _$createTextNode(`
-`), _el$328 = _$createElement("span");
-            _$insertNode(_el$300, _el$301);
-            _$setProp(_el$300, "flexDirection", "column");
-            _$setProp(_el$300, "border", true);
-            _$setProp(_el$300, "padding", 1);
-            _$setProp(_el$300, "flexShrink", 0);
-            _$setProp(_el$300, "maxHeight", 8);
-            _$insertNode(_el$301, _el$302);
-            _$insertNode(_el$301, _el$304);
-            _$insertNode(_el$301, _el$306);
-            _$insertNode(_el$301, _el$308);
-            _$insertNode(_el$301, _el$309);
-            _$insertNode(_el$301, _el$311);
-            _$insertNode(_el$301, _el$312);
-            _$insertNode(_el$301, _el$313);
-            _$insertNode(_el$301, _el$315);
-            _$insertNode(_el$301, _el$317);
-            _$insertNode(_el$301, _el$318);
-            _$insertNode(_el$301, _el$319);
-            _$insertNode(_el$301, _el$321);
-            _$insertNode(_el$301, _el$323);
-            _$insertNode(_el$301, _el$325);
-            _$insertNode(_el$301, _el$327);
-            _$insertNode(_el$301, _el$328);
-            _$insertNode(_el$302, _el$303);
-            _$insert(_el$302, () => commandStatusIcon(cmd().status), _el$303);
-            _$insert(_el$302, () => cmd().title, null);
-            _$insertNode(_el$304, _$createTextNode(` Cmd `));
+            var _el$304 = _$createElement("box"), _el$305 = _$createElement("text"), _el$306 = _$createElement("span"), _el$307 = _$createTextNode(` `), _el$308 = _$createElement("span"), _el$310 = _$createElement("span"), _el$311 = _$createTextNode(` \u2014 `), _el$312 = _$createTextNode(`
+`), _el$313 = _$createElement("span"), _el$315 = _$createElement("span"), _el$316 = _$createTextNode(`
+`), _el$317 = _$createElement("span"), _el$319 = _$createElement("span"), _el$321 = _$createElement("span"), _el$322 = _$createTextNode(`
+`), _el$323 = _$createElement("span"), _el$325 = _$createElement("span"), _el$327 = _$createElement("span"), _el$328 = _$createTextNode(` bytes`), _el$329 = _$createElement("span"), _el$330 = _$createTextNode(` \u2502 updated `), _el$331 = _$createTextNode(`
+`), _el$332 = _$createElement("span");
+            _$insertNode(_el$304, _el$305);
+            _$setProp(_el$304, "flexDirection", "column");
+            _$setProp(_el$304, "border", true);
+            _$setProp(_el$304, "padding", 1);
+            _$setProp(_el$304, "flexShrink", 0);
+            _$setProp(_el$304, "maxHeight", 8);
+            _$insertNode(_el$305, _el$306);
+            _$insertNode(_el$305, _el$308);
+            _$insertNode(_el$305, _el$310);
+            _$insertNode(_el$305, _el$312);
+            _$insertNode(_el$305, _el$313);
+            _$insertNode(_el$305, _el$315);
+            _$insertNode(_el$305, _el$316);
+            _$insertNode(_el$305, _el$317);
+            _$insertNode(_el$305, _el$319);
+            _$insertNode(_el$305, _el$321);
+            _$insertNode(_el$305, _el$322);
+            _$insertNode(_el$305, _el$323);
+            _$insertNode(_el$305, _el$325);
+            _$insertNode(_el$305, _el$327);
+            _$insertNode(_el$305, _el$329);
+            _$insertNode(_el$305, _el$331);
+            _$insertNode(_el$305, _el$332);
             _$insertNode(_el$306, _el$307);
-            _$insert(_el$306, () => commandStatusLabel(cmd().status).short, _el$307);
-            _$insert(_el$306, () => commandStatusLabel(cmd().status).hint, null);
-            _$insertNode(_el$309, _$createTextNode(`\u2B22 Spawn: `));
-            _$insert(_el$311, () => cmd().command);
-            _$insert(_el$301, (() => {
+            _$insert(_el$306, () => commandStatusIcon(cmd().status), _el$307);
+            _$insert(_el$306, () => cmd().title, null);
+            _$insertNode(_el$308, _$createTextNode(` Cmd `));
+            _$insertNode(_el$310, _el$311);
+            _$insert(_el$310, () => commandStatusLabel(cmd().status).short, _el$311);
+            _$insert(_el$310, () => commandStatusLabel(cmd().status).hint, null);
+            _$insertNode(_el$313, _$createTextNode(`\u2B22 Spawn: `));
+            _$insert(_el$315, () => cmd().command);
+            _$insert(_el$305, (() => {
               var _c$28 = _$memo(() => cmd().args.length > 0);
               return () => _c$28() && (() => {
-                var _el$330 = _$createElement("span"), _el$331 = _$createTextNode(` `);
-                _$insertNode(_el$330, _el$331);
-                _$insert(_el$330, () => cmd().args.join(" "), null);
-                _$effect((_$p) => _$setProp(_el$330, "style", {
-                  fg: theme().text
-                }, _$p));
-                return _el$330;
-              })();
-            })(), _el$312);
-            _$insertNode(_el$313, _$createTextNode(`\uD83D\uDCC1 `));
-            _$insertNode(_el$315, _$createTextNode(`Cwd: `));
-            _$insert(_el$317, () => cmd().cwd.replace(String(props.directory), "."));
-            _$insert(_el$301, (() => {
-              var _c$29 = _$memo(() => !!cmd().goalID);
-              return () => _c$29() && [(() => {
-                var _el$332 = _$createElement("span");
-                _$insertNode(_el$332, _$createTextNode(` \u2502 \uD83D\uDD17 linked goal `));
-                _$effect((_$p) => _$setProp(_el$332, "style", {
-                  fg: theme().textMuted
-                }, _$p));
-                return _el$332;
-              })(), (() => {
-                var _el$334 = _$createElement("span");
-                _$insert(_el$334, () => cmd().goalID.slice(0, 8));
+                var _el$334 = _$createElement("span"), _el$335 = _$createTextNode(` `);
+                _$insertNode(_el$334, _el$335);
+                _$insert(_el$334, () => cmd().args.join(" "), null);
                 _$effect((_$p) => _$setProp(_el$334, "style", {
                   fg: theme().text
                 }, _$p));
                 return _el$334;
+              })();
+            })(), _el$316);
+            _$insertNode(_el$317, _$createTextNode(`\uD83D\uDCC1 `));
+            _$insertNode(_el$319, _$createTextNode(`Cwd: `));
+            _$insert(_el$321, () => cmd().cwd.replace(String(props.directory), "."));
+            _$insert(_el$305, (() => {
+              var _c$29 = _$memo(() => !!cmd().goalID);
+              return () => _c$29() && [(() => {
+                var _el$336 = _$createElement("span");
+                _$insertNode(_el$336, _$createTextNode(` \u2502 \uD83D\uDD17 linked goal `));
+                _$effect((_$p) => _$setProp(_el$336, "style", {
+                  fg: theme().textMuted
+                }, _$p));
+                return _el$336;
+              })(), (() => {
+                var _el$338 = _$createElement("span");
+                _$insert(_el$338, () => cmd().goalID.slice(0, 8));
+                _$effect((_$p) => _$setProp(_el$338, "style", {
+                  fg: theme().text
+                }, _$p));
+                return _el$338;
               })()];
-            })(), _el$318);
-            _$insertNode(_el$319, _$createTextNode(`\uD83D\uDCBE `));
-            _$insertNode(_el$321, _$createTextNode(`Output: `));
-            _$insertNode(_el$323, _el$324);
-            _$insert(_el$323, () => cmd().outputBytes, _el$324);
-            _$insert(_el$301, (() => {
+            })(), _el$322);
+            _$insertNode(_el$323, _$createTextNode(`\uD83D\uDCBE `));
+            _$insertNode(_el$325, _$createTextNode(`Output: `));
+            _$insertNode(_el$327, _el$328);
+            _$insert(_el$327, () => cmd().outputBytes, _el$328);
+            _$insert(_el$305, (() => {
               var _c$30 = _$memo(() => !!cmd().truncated);
               return () => _c$30() && (() => {
-                var _el$335 = _$createElement("span");
-                _$insertNode(_el$335, _$createTextNode(` \xB7 \u26A0 truncated`));
-                _$effect((_$p) => _$setProp(_el$335, "style", {
+                var _el$339 = _$createElement("span");
+                _$insertNode(_el$339, _$createTextNode(` \xB7 \u26A0 truncated`));
+                _$effect((_$p) => _$setProp(_el$339, "style", {
                   fg: theme().warning,
                   bold: true
                 }, _$p));
-                return _el$335;
+                return _el$339;
               })();
-            })(), _el$325);
-            _$insertNode(_el$325, _el$326);
-            _$insert(_el$325, () => ageLabel(cmd().updatedAt, clock()), null);
-            _$insert(_el$301, (() => {
+            })(), _el$329);
+            _$insertNode(_el$329, _el$330);
+            _$insert(_el$329, () => ageLabel(cmd().updatedAt, clock()), null);
+            _$insert(_el$305, (() => {
               var _c$31 = _$memo(() => !!cmd().lastError);
               return () => _c$31() && [(() => {
-                var _el$337 = _$createElement("span"), _el$338 = _$createTextNode(`
+                var _el$341 = _$createElement("span"), _el$342 = _$createTextNode(`
 \u26A0 Error: `);
-                _$insertNode(_el$337, _el$338);
-                _$effect((_$p) => _$setProp(_el$337, "style", {
+                _$insertNode(_el$341, _el$342);
+                _$effect((_$p) => _$setProp(_el$341, "style", {
                   fg: theme().error,
                   bold: true
                 }, _$p));
-                return _el$337;
+                return _el$341;
               })(), (() => {
-                var _el$340 = _$createElement("span");
-                _$insert(_el$340, () => cmd().lastError.slice(0, 120));
-                _$effect((_$p) => _$setProp(_el$340, "style", {
+                var _el$344 = _$createElement("span");
+                _$insert(_el$344, () => cmd().lastError.slice(0, 120));
+                _$effect((_$p) => _$setProp(_el$344, "style", {
                   fg: theme().error
                 }, _$p));
-                return _el$340;
+                return _el$344;
               })()];
-            })(), _el$327);
-            _$insertNode(_el$328, _$createTextNode(`o fullscreen \xB7 :interrupt :terminate :remove \xB7 text + Enter writes stdin`));
+            })(), _el$331);
+            _$insertNode(_el$332, _$createTextNode(`o fullscreen \xB7 X kill \xB7 R restart \xB7 x remove-done \xB7 :interrupt :terminate :remove \xB7 text + Enter writes stdin`));
             _$effect((_p$) => {
-              var _v$65 = commandBorderColor(cmd().status, theme()), _v$66 = {
+              var _v$67 = commandBorderColor(cmd().status, theme()), _v$68 = {
                 fg: commandStatusColor(cmd().status, theme()),
                 bold: true
-              }, _v$67 = {
-                fg: theme().textMuted
-              }, _v$68 = {
-                fg: commandStatusColor(cmd().status, theme())
               }, _v$69 = {
+                fg: theme().textMuted
+              }, _v$70 = {
+                fg: commandStatusColor(cmd().status, theme())
+              }, _v$71 = {
                 fg: theme().primary,
                 bold: true
-              }, _v$70 = {
-                fg: theme().accent,
-                bold: true
-              }, _v$71 = {
-                fg: theme().textMuted
               }, _v$72 = {
                 fg: theme().accent,
                 bold: true
               }, _v$73 = {
                 fg: theme().textMuted
               }, _v$74 = {
-                fg: theme().warning,
+                fg: theme().accent,
                 bold: true
               }, _v$75 = {
+                fg: theme().textMuted
+              }, _v$76 = {
                 fg: theme().warning,
                 bold: true
-              }, _v$76 = {
-                fg: theme().text
               }, _v$77 = {
-                fg: theme().textMuted
+                fg: theme().warning,
+                bold: true
               }, _v$78 = {
+                fg: theme().text
+              }, _v$79 = {
+                fg: theme().textMuted
+              }, _v$80 = {
                 fg: theme().textMuted
               };
-              _v$65 !== _p$.e && (_p$.e = _$setProp(_el$300, "borderColor", _v$65, _p$.e));
-              _v$66 !== _p$.t && (_p$.t = _$setProp(_el$302, "style", _v$66, _p$.t));
-              _v$67 !== _p$.a && (_p$.a = _$setProp(_el$304, "style", _v$67, _p$.a));
-              _v$68 !== _p$.o && (_p$.o = _$setProp(_el$306, "style", _v$68, _p$.o));
-              _v$69 !== _p$.i && (_p$.i = _$setProp(_el$309, "style", _v$69, _p$.i));
-              _v$70 !== _p$.n && (_p$.n = _$setProp(_el$311, "style", _v$70, _p$.n));
-              _v$71 !== _p$.s && (_p$.s = _$setProp(_el$313, "style", _v$71, _p$.s));
-              _v$72 !== _p$.h && (_p$.h = _$setProp(_el$315, "style", _v$72, _p$.h));
-              _v$73 !== _p$.r && (_p$.r = _$setProp(_el$317, "style", _v$73, _p$.r));
-              _v$74 !== _p$.d && (_p$.d = _$setProp(_el$319, "style", _v$74, _p$.d));
-              _v$75 !== _p$.l && (_p$.l = _$setProp(_el$321, "style", _v$75, _p$.l));
-              _v$76 !== _p$.u && (_p$.u = _$setProp(_el$323, "style", _v$76, _p$.u));
-              _v$77 !== _p$.c && (_p$.c = _$setProp(_el$325, "style", _v$77, _p$.c));
-              _v$78 !== _p$.w && (_p$.w = _$setProp(_el$328, "style", _v$78, _p$.w));
+              _v$67 !== _p$.e && (_p$.e = _$setProp(_el$304, "borderColor", _v$67, _p$.e));
+              _v$68 !== _p$.t && (_p$.t = _$setProp(_el$306, "style", _v$68, _p$.t));
+              _v$69 !== _p$.a && (_p$.a = _$setProp(_el$308, "style", _v$69, _p$.a));
+              _v$70 !== _p$.o && (_p$.o = _$setProp(_el$310, "style", _v$70, _p$.o));
+              _v$71 !== _p$.i && (_p$.i = _$setProp(_el$313, "style", _v$71, _p$.i));
+              _v$72 !== _p$.n && (_p$.n = _$setProp(_el$315, "style", _v$72, _p$.n));
+              _v$73 !== _p$.s && (_p$.s = _$setProp(_el$317, "style", _v$73, _p$.s));
+              _v$74 !== _p$.h && (_p$.h = _$setProp(_el$319, "style", _v$74, _p$.h));
+              _v$75 !== _p$.r && (_p$.r = _$setProp(_el$321, "style", _v$75, _p$.r));
+              _v$76 !== _p$.d && (_p$.d = _$setProp(_el$323, "style", _v$76, _p$.d));
+              _v$77 !== _p$.l && (_p$.l = _$setProp(_el$325, "style", _v$77, _p$.l));
+              _v$78 !== _p$.u && (_p$.u = _$setProp(_el$327, "style", _v$78, _p$.u));
+              _v$79 !== _p$.c && (_p$.c = _$setProp(_el$329, "style", _v$79, _p$.c));
+              _v$80 !== _p$.w && (_p$.w = _$setProp(_el$332, "style", _v$80, _p$.w));
               return _p$;
             }, {
               e: undefined,
@@ -8783,7 +8862,7 @@ function LoopDashboard(props) {
               c: undefined,
               w: undefined
             });
-            return _el$300;
+            return _el$304;
           })()
         })];
       }
@@ -8811,29 +8890,29 @@ function LoopDashboard(props) {
           },
           children: (ev) => [`
 `, (() => {
-            var _el$341 = _$createElement("span");
-            _$insert(_el$341, () => String(ev.type));
-            _$effect((_$p) => _$setProp(_el$341, "style", {
+            var _el$345 = _$createElement("span");
+            _$insert(_el$345, () => String(ev.type));
+            _$effect((_$p) => _$setProp(_el$345, "style", {
               fg: eventColor(String(ev.type), theme()),
               bold: true
             }, _$p));
-            return _el$341;
+            return _el$345;
           })(), (() => {
-            var _el$342 = _$createElement("span"), _el$343 = _$createTextNode(` `);
-            _$insertNode(_el$342, _el$343);
-            _$insert(_el$342, () => ev.goalID?.slice(0, 8), null);
-            _$effect((_$p) => _$setProp(_el$342, "style", {
+            var _el$346 = _$createElement("span"), _el$347 = _$createTextNode(` `);
+            _$insertNode(_el$346, _el$347);
+            _$insert(_el$346, () => ev.goalID?.slice(0, 8), null);
+            _$effect((_$p) => _$setProp(_el$346, "style", {
               fg: theme().textMuted
             }, _$p));
-            return _el$342;
+            return _el$346;
           })(), _$memo(() => _$memo(() => !!ev.summary)() && (() => {
-            var _el$344 = _$createElement("span"), _el$345 = _$createTextNode(` \u2014 `);
-            _$insertNode(_el$344, _el$345);
-            _$insert(_el$344, () => String(ev.summary).slice(0, 60), null);
-            _$effect((_$p) => _$setProp(_el$344, "style", {
+            var _el$348 = _$createElement("span"), _el$349 = _$createTextNode(` \u2014 `);
+            _$insertNode(_el$348, _el$349);
+            _$insert(_el$348, () => String(ev.summary).slice(0, 60), null);
+            _$effect((_$p) => _$setProp(_el$348, "style", {
               fg: theme().text
             }, _$p));
-            return _el$344;
+            return _el$348;
           })())]
         }), null);
         _$effect((_p$) => {
@@ -9978,7 +10057,7 @@ function CommandPanel(props) {
   });
   const [insertMode, setInsertMode] = createSignal2(false);
   const [inputValue, setInputValue] = createSignal2("");
-  const [statusText, setStatusText] = createSignal2("commands: j/k move \xB7 o fullscreen \xB7 enter write-mode \xB7 ctrl-c interrupt \xB7 :terminate :remove :resize :await \xB7 q detach");
+  const [statusText, setStatusText] = createSignal2("commands: j/k move \xB7 o fullscreen \xB7 enter write-mode \xB7 ctrl-c interrupt \xB7 X kill \xB7 R restart \xB7 x remove-done \xB7 :terminate :remove :resize :await \xB7 q detach");
   let inputEl;
   const client = createControlClient(props.directory);
   const ownerSessionID = props.ownerSessionID ?? routeOwnerSessionID(props.api);
@@ -10325,6 +10404,26 @@ function CommandPanel(props) {
       commandID: id
     }, id);
   }
+  async function forceKill() {
+    const id = selectedID();
+    if (!id) {
+      setStatusText("No command selected.");
+      return;
+    }
+    await sendRaw("cmd_kill", {
+      commandID: id
+    }, id);
+  }
+  async function restart() {
+    const id = selectedID();
+    if (!id) {
+      setStatusText("No command selected.");
+      return;
+    }
+    await sendRaw("cmd_restart", {
+      commandID: id
+    }, id);
+  }
   async function remove() {
     const id = selectedID();
     if (!id) {
@@ -10334,6 +10433,20 @@ function CommandPanel(props) {
     await sendRaw("cmd_remove", {
       commandID: id
     }, id);
+  }
+  async function removeFinished() {
+    const sel = state().selectedCommand;
+    if (!sel) {
+      setStatusText("No command selected.");
+      return;
+    }
+    if (sel.status === "running") {
+      setStatusText(`"${sel.title}" is still running \u2014 X force kill \xB7 :terminate graceful \xB7 q detach (keeps running).`);
+      return;
+    }
+    await sendRaw("cmd_remove", {
+      commandID: sel.id
+    }, sel.id);
   }
   async function awaitExit(goalID) {
     const sel = state().selectedCommand;
@@ -10406,6 +10519,12 @@ function CommandPanel(props) {
       case "terminate":
         await terminate();
         break;
+      case "kill":
+        await forceKill();
+        break;
+      case "restart":
+        await restart();
+        break;
       case "remove":
         await remove();
         break;
@@ -10429,7 +10548,7 @@ function CommandPanel(props) {
         await awaitExit(rest[0]);
         break;
       default:
-        setStatusText(`Unknown :${verb}. Try :new, :terminate, :remove, :interrupt, :resize, :open-cmd, :await <goalID>`);
+        setStatusText(`Unknown :${verb}. Try :new, :terminate, :kill, :restart, :remove, :interrupt, :resize, :open-cmd, :await <goalID>`);
     }
   }
   function focusInput() {
@@ -10566,6 +10685,21 @@ function CommandPanel(props) {
       } catch {
         setStatusText("Fullscreen route unavailable on this host \u2014 staying in the monitor.");
       }
+      return;
+    }
+    if (key === "X") {
+      prevent2(evt);
+      forceKill();
+      return;
+    }
+    if (key === "R") {
+      prevent2(evt);
+      restart();
+      return;
+    }
+    if (key === "x") {
+      prevent2(evt);
+      removeFinished();
       return;
     }
     if (key === "q") {
@@ -10838,7 +10972,7 @@ function CommandPanel(props) {
       }, _v$5 = insertMode() ? theme().warning : theme().border, _v$6 = {
         fg: insertMode() ? theme().warning : theme().success,
         bold: true
-      }, _v$7 = insertMode() ? "type stdin, Enter sends (:new/:terminate/:remove/:interrupt/:resize/:open-cmd/:await)" : statusText() || "Press : to type, q to detach", _v$8 = theme().textMuted, _v$9 = theme().primary, _v$0 = theme().text, _v$1 = theme().background;
+      }, _v$7 = insertMode() ? "type stdin, Enter sends (:new/:terminate/:kill/:restart/:remove/:interrupt/:resize/:open-cmd/:await)" : statusText() || "Press : to type, q to detach", _v$8 = theme().textMuted, _v$9 = theme().primary, _v$0 = theme().text, _v$1 = theme().background;
       _v$ !== _p$.e && (_p$.e = _$setProp2(_el$2, "borderColor", _v$, _p$.e));
       _v$2 !== _p$.t && (_p$.t = _$setProp2(_el$5, "style", _v$2, _p$.t));
       _v$3 !== _p$.a && (_p$.a = _$setProp2(_el$7, "style", _v$3, _p$.a));

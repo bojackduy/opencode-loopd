@@ -59,6 +59,8 @@ export type CommandPanelAction =
   | { kind: "write"; input: string }
   | { kind: "interrupt" }
   | { kind: "terminate" }
+  | { kind: "kill" }
+  | { kind: "restart" }
   | { kind: "remove" }
   | { kind: "resize"; cols: number; rows: number }
   | { kind: "await"; goalID?: string }
@@ -69,6 +71,9 @@ export type CommandPanelAction =
  * Resolve a single-keypress panel key to an action. Detach ("q"/escape) is an
  * explicit no-op on the session: closing the view never terminates.
  * "ctrl-c" maps to interrupt (SIGINT delivery, never kill).
+ * "X" is force kill (SIGKILL now, no grace); "R" restarts with the same
+ * spec; "x" removes — but only finished commands (running ones are refused
+ * with a hint toward X/:terminate).
  */
 export function commandPanelKey(key: string, state: CommandPanelState): CommandPanelAction | undefined {
   switch (key) {
@@ -76,6 +81,12 @@ export function commandPanelKey(key: string, state: CommandPanelState): CommandP
       return state.selectedCommand ? { kind: "interrupt" } : undefined
     case "terminate":
       return state.selectedCommand ? { kind: "terminate" } : undefined
+    case "kill":
+    case "X":
+      return state.selectedCommand ? { kind: "kill" } : undefined
+    case "restart":
+    case "R":
+      return state.selectedCommand ? { kind: "restart" } : undefined
     case "remove":
       return state.selectedCommand ? { kind: "remove" } : undefined
     case "resize":

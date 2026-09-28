@@ -46,6 +46,10 @@ describe("Command panel controller", () => {
     const s = refreshCommandList(emptyCommandPanelState(), [session("a", "a")])
     expect(commandPanelKey("ctrl-c", s)).toEqual({ kind: "interrupt" })
     expect(commandPanelKey("terminate", s)).toEqual({ kind: "terminate" })
+    expect(commandPanelKey("kill", s)).toEqual({ kind: "kill" })
+    expect(commandPanelKey("X", s)).toEqual({ kind: "kill" })
+    expect(commandPanelKey("restart", s)).toEqual({ kind: "restart" })
+    expect(commandPanelKey("R", s)).toEqual({ kind: "restart" })
     expect(commandPanelKey("remove", s)).toEqual({ kind: "remove" })
     // Detach closes the view only — the action carries no session effect.
     expect(commandPanelKey("q", s)).toEqual({ kind: "detach" })
@@ -54,6 +58,8 @@ describe("Command panel controller", () => {
     // No selection → no session-targeting actions, detach still works.
     const empty = emptyCommandPanelState()
     expect(commandPanelKey("ctrl-c", empty)).toBeUndefined()
+    expect(commandPanelKey("X", empty)).toBeUndefined()
+    expect(commandPanelKey("R", empty)).toBeUndefined()
     expect(commandPanelKey("q", empty)).toEqual({ kind: "detach" })
   })
 

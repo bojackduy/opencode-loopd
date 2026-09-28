@@ -263,3 +263,105 @@ describe("CommandService owner-exit notification (the missing hop: no goal/await
     expect(calls).toHaveLength(1)
   })
 })
+
+describe("CommandService force kill + restart (Commands-tab helpers)", () => {
+  let dir: string
+  let host: ReturnType<typeof createFakeCommandHost>
+  let svc: ReturnType<typeof createCommandService>
+
+  beforeEach(async () => {
+    dir = tmpDir()
+    await fs.mkdir(dir, { recursive: true })
+    host = createFakeCommandHost()
+    svc = createCommandService(host)
+  })
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true })
+  })
+
+  it("kill SIGKILLs immediately with no SIGTERM grace", async () => {
+    const s = await svc.start(dir, { title: "hung", command: "sleep", ownerSessionID: "owner-1" })
+    const proc = [...host.procs.values()].at(-1)!
+    const r = await svc.kill(dir, s.id, "owner-1")
+    expect(r.ok).toBe(true)
+    expect(r.message).toMatch(/SIGKILL/)
+    // No grace: the ONLY signal is SIGKILL (terminate would send SIGTERM first).
+    expect(proc.signals).toEqual(["SIGKILL"])
+    const after = await svc.get(dir, s.id, "owner-1")
+    expect(after!.status).toBe("terminated")
+    expect(after!.signal).toBe("SIGKILL")
+    expect(after!.exitCode).toBe(137)
+    expect(after!.endReason).toBe("terminate")
+  })
+
+  it("kill refuses terminal and unknown commands", async () => {
+    const s = await svc.start(dir, { title: "once", command: "true", ownerSessionID: "owner-1" })
+    const proc = [...host.procs.values()].at(-1)!
+    proc.emitExit({ exitCode: 0 })
+    await new Promise((r) => setTimeout(r, 25))
+    expect((await svc.kill(dir, s.id, "owner-1")).ok).toBe(false)
+    expect((await svc.kill(dir, "nope", "owner-1")).ok).toBe(false)
+    expect((await svc.kill(dir, s.id, "owner-2")).ok).toBe(false)
+  })
+
+  it("kill stays silent under the auto policy, notifies with notifyOnExit:true", async () => {
+    const calls: unknown[] = []
+    const svc2 = createCommandService(host, { onOwnerNotify: async () => { calls.push(1) } })
+    const quiet = await svc2.start(dir, { title: "q", command: "sleep", ownerSessionID: "owner-1" })
+    await svc2.kill(dir, quiet.id, "owner-1")
+    expect(calls).toHaveLength(0)
+    const loud = await svc2.start(dir, { title: "l", command: "sleep", ownerSessionID: "owner-1", notifyOnExit: true })
+    await svc2.kill(dir, loud.id, "owner-1")
+    expect(calls).toHaveLength(1)
+  })
+
+  it("restart stops the running command and respawns the same spec under a new ID", async () => {
+    const s = await svc.start(dir, {
+      title: "dev", command: "npm", args: ["run", "dev"], cwd: "/tmp",
+      ownerSessionID: "owner-1", watchFilter: "ERROR",
+    })
+    const r = await svc.restart(dir, s.id, "owner-1")
+    expect(r.ok).toBe(true)
+    expect(r.command).toBeDefined()
+    expect(r.command!.id).not.toBe(s.id)
+    expect(r.message).toContain(r.command!.id.slice(0, 8))
+    // Old record kept, terminal, for log access.
+    const old = await svc.get(dir, s.id, "owner-1")
+    expect(old!.status).toBe("terminated")
+    // New command carries the spec (incl. the watch).
+    const next = await svc.get(dir, r.command!.id, "owner-1")
+    expect(next!.status).toBe("running")
+    expect(next!.title).toBe("dev")
+    expect([next!.command, ...next!.args]).toEqual(["npm", "run", "dev"])
+    expect(next!.cwd).toBe("/tmp")
+    expect(next!.watchFilter).toBe("ERROR")
+  })
+
+  it("restart on a terminal command just respawns (old record untouched)", async () => {
+    const s = await svc.start(dir, { title: "once", command: "true", ownerSessionID: "owner-1" })
+    const proc = [...host.procs.values()].at(-1)!
+    proc.emitExit({ exitCode: 0 })
+    await new Promise((r) => setTimeout(r, 25))
+    const r = await svc.restart(dir, s.id, "owner-1")
+    expect(r.ok).toBe(true)
+    expect(r.command!.status).toBe("running")
+    expect((await svc.get(dir, s.id, "owner-1"))!.status).toBe("exited")
+  })
+
+  it("restart says plainly when env values are dropped", async () => {
+    const s = await svc.start(dir, {
+      title: "envy", command: "sh", ownerSessionID: "owner-1", env: { SMOKE_SECRET: "s3cr3t" },
+    })
+    const r = await svc.restart(dir, s.id, "owner-1")
+    expect(r.ok).toBe(true)
+    expect(r.message).toMatch(/NOT restored/)
+    expect(r.message).toMatch(/SMOKE_SECRET/)
+  })
+
+  it("restart refuses unknown and foreign commands", async () => {
+    const s = await svc.start(dir, { title: "mine", command: "sleep", ownerSessionID: "owner-1" })
+    expect((await svc.restart(dir, "nope", "owner-1")).ok).toBe(false)
+    expect((await svc.restart(dir, s.id, "owner-2")).ok).toBe(false)
+  })
+})

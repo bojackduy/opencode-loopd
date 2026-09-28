@@ -126,7 +126,7 @@ export function CommandPanel(props: Props) {
   const [outputMeta, setOutputMeta] = createSignal({ startByte: 0, totalBytes: 0, live: false })
   const [insertMode, setInsertMode] = createSignal(false)
   const [inputValue, setInputValue] = createSignal("")
-  const [statusText, setStatusText] = createSignal("commands: j/k move · o fullscreen · enter write-mode · ctrl-c interrupt · :terminate :remove :resize :await · q detach")
+  const [statusText, setStatusText] = createSignal("commands: j/k move · o fullscreen · enter write-mode · ctrl-c interrupt · X kill · R restart · x remove-done · :terminate :remove :resize :await · q detach")
   let inputEl: InputRenderable | undefined
   const client = createControlClient(props.directory)
   const ownerSessionID = props.ownerSessionID ?? routeOwnerSessionID(props.api)
@@ -473,6 +473,29 @@ export function CommandPanel(props: Props) {
     await sendRaw("cmd_terminate", { commandID: id }, id)
   }
 
+  // "X"/":kill": SIGKILL now, no SIGTERM grace — for hung processes that
+  // trap or ignore SIGINT/SIGTERM. Same finalize as terminate otherwise.
+  async function forceKill() {
+    const id = selectedID()
+    if (!id) {
+      setStatusText("No command selected.")
+      return
+    }
+    await sendRaw("cmd_kill", { commandID: id }, id)
+  }
+
+  // "R"/":restart": gracefully stop (if running) and respawn with the same
+  // spec under a new ID. Env values are never persisted, so restarted env
+  // commands lose their env (the response message says so).
+  async function restart() {
+    const id = selectedID()
+    if (!id) {
+      setStatusText("No command selected.")
+      return
+    }
+    await sendRaw("cmd_restart", { commandID: id }, id)
+  }
+
   async function remove() {
     const id = selectedID()
     if (!id) {
@@ -480,6 +503,22 @@ export function CommandPanel(props: Props) {
       return
     }
     await sendRaw("cmd_remove", { commandID: id }, id)
+  }
+
+  // "x": remove, but only finished commands — running ones are refused
+  // locally with a hint (the service would refuse anyway; this saves the
+  // round trip and points at X/:terminate).
+  async function removeFinished() {
+    const sel = state().selectedCommand
+    if (!sel) {
+      setStatusText("No command selected.")
+      return
+    }
+    if (sel.status === "running") {
+      setStatusText(`"${sel.title}" is still running — X force kill · :terminate graceful · q detach (keeps running).`)
+      return
+    }
+    await sendRaw("cmd_remove", { commandID: sel.id }, sel.id)
   }
 
   // "await": explicit opt-in wake — the goal wakes once when the selected
@@ -547,7 +586,10 @@ export function CommandPanel(props: Props) {
   void writeInput
   void interrupt
   void terminate
+  void forceKill
+  void restart
   void remove
+  void removeFinished
   void resize
   void startNew
   void awaitExit
@@ -561,6 +603,12 @@ export function CommandPanel(props: Props) {
         break
       case "terminate":
         await terminate()
+        break
+      case "kill":
+        await forceKill()
+        break
+      case "restart":
+        await restart()
         break
       case "remove":
         await remove()
@@ -585,7 +633,7 @@ export function CommandPanel(props: Props) {
         await awaitExit(rest[0])
         break
       default:
-        setStatusText(`Unknown :${verb}. Try :new, :terminate, :remove, :interrupt, :resize, :open-cmd, :await <goalID>`)
+        setStatusText(`Unknown :${verb}. Try :new, :terminate, :kill, :restart, :remove, :interrupt, :resize, :open-cmd, :await <goalID>`)
     }
   }
 
@@ -729,6 +777,23 @@ export function CommandPanel(props: Props) {
       }
       return
     }
+    // "X": force kill (SIGKILL now). "R": restart with the same spec.
+    // "x": remove finished commands (running ones get a hint, not a kill).
+    if (key === "X") {
+      prevent(evt)
+      void forceKill()
+      return
+    }
+    if (key === "R") {
+      prevent(evt)
+      void restart()
+      return
+    }
+    if (key === "x") {
+      prevent(evt)
+      void removeFinished()
+      return
+    }
     // Detach: "q"/close only clears the view — the command keeps running.
     if (key === "q") {
       prevent(evt)
@@ -847,7 +912,7 @@ export function CommandPanel(props: Props) {
               inputEl = el
             }}
             flexGrow={1}
-            placeholder={insertMode() ? "type stdin, Enter sends (:new/:terminate/:remove/:interrupt/:resize/:open-cmd/:await)" : (statusText() || "Press : to type, q to detach")}
+            placeholder={insertMode() ? "type stdin, Enter sends (:new/:terminate/:kill/:restart/:remove/:interrupt/:resize/:open-cmd/:await)" : (statusText() || "Press : to type, q to detach")}
             placeholderColor={theme().textMuted}
             cursorColor={theme().primary}
             focusedTextColor={theme().text}

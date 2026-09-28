@@ -7,6 +7,8 @@ import { createControlWorker } from "../../src/application/control-worker"
 import { readState } from "../../src/infrastructure/state-repository"
 import { createFakeHost } from "../../src/server/host-adapter"
 import { createGoalService } from "../../src/application/goal-service"
+import { createCommandService } from "../../src/application/command-service"
+import { createFakeCommandHost } from "../../src/server/command-host"
 
 function tmpDir(): string {
   return path.join(os.tmpdir(), `loopd-bus-test-${crypto.randomUUID()}`)
@@ -211,6 +213,45 @@ describe("Control Bus", () => {
     const events = await client.getEvents()
     expect(events.length).toBeGreaterThan(0)
     expect(events.some((e) => e.type === "goal.created")).toBe(true)
+  })
+
+  it("routes cmd_kill and cmd_restart to the command service", async () => {
+    // The default worker has no commandService — stop it so it can't claim
+    // our cmd_* files first, then run a worker with one wired.
+    await worker.stop()
+    const cmdHost = createFakeCommandHost()
+    const cmdSvc = createCommandService(cmdHost)
+    worker = createControlWorker({
+      directory: dir,
+      goalService: createGoalService(host),
+      commandService: cmdSvc,
+      pollIntervalMs: 50,
+    })
+    worker.start()
+    try {
+      const s = await cmdSvc.start(dir, { title: "bus-cmd", command: "sleep", ownerSessionID: "owner-1" })
+      const bus = (command: string, extraArgs: Record<string, unknown> = {}) =>
+        client.execute({
+          version: 1,
+          requestID: crypto.randomUUID(),
+          requestedAt: new Date().toISOString(),
+          command: command as any,
+          args: { commandID: s.id, ownerSessionID: "owner-1", ...extraArgs },
+        })
+      const killed = await bus("cmd_kill")
+      expect(killed.ok).toBe(true)
+      expect(killed.message).toMatch(/SIGKILL/)
+      expect((await cmdSvc.get(dir, s.id, "owner-1"))!.status).toBe("terminated")
+      const restarted = await bus("cmd_restart")
+      expect(restarted.ok).toBe(true)
+      expect(restarted.message).toMatch(/restarted as/)
+      const state = await readState(dir)
+      const running = state.commands!.filter((c) => c.ownerSessionID === "owner-1" && c.status === "running")
+      expect(running).toHaveLength(1)
+      expect(running[0]!.title).toBe("bus-cmd")
+    } finally {
+      await worker.stop()
+    }
   })
 
   it("rejects unknown commands", async () => {

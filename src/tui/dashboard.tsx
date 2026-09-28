@@ -374,6 +374,16 @@ export function LoopDashboard(props: Props) {
     if (isColon) { prevent(evt); enterInsertMode(); debugLog("normal -> insert"); return }
     if (isQuestion) { prevent(evt); setShowHelp((value) => !value); debugLog("toggle help"); return }
     const key = raw || seq || name
+    // Ctrl-C on the Commands tab interrupts the selected command (SIGINT
+    // delivery, never a kill) — mirrors the fallback panel. Plain `c`
+    // (below) still toggles completed goals.
+    if (tab() === "commands" && Boolean(evt.ctrl) && name === "c") {
+      prevent(evt)
+      const sel = selectedCommand()
+      if (!sel) { setStatusText("No command selected."); return }
+      void executeCommandRaw("cmd_interrupt", { commandID: sel.id }, sel.id)
+      return
+    }
     if (key === "c") { prevent(evt); setShowCompleted((v) => !v); debugLog("toggle completed"); return }
     const currentGoals = state()?.goals.filter((goal) => showCompleted() || goal.status !== "complete") || []
     const currentCommands = ownerCommands()
@@ -405,8 +415,27 @@ export function LoopDashboard(props: Props) {
     if (name === "up" || key === "k") { prevent(evt); applyMove("up"); return }
     if (key === "g") { prevent(evt); applyMove("first"); return }
     if (key === "G") { prevent(evt); applyMove("last"); return }
+    // Commands-tab helpers are tab-scoped: X force-kills (SIGKILL now),
+    // R restarts with the same spec, x removes finished commands (running
+    // ones get a hint, never a kill). Goal keys R/x keep their Goals-tab
+    // meaning; only p/r/A/N are refused here.
+    if (tab() === "commands" && key === "X") {
+      prevent(evt)
+      void killSelectedCommand()
+      return
+    }
+    if (tab() === "commands" && key === "R") {
+      prevent(evt)
+      void restartSelectedCommand()
+      return
+    }
+    if (tab() === "commands" && key === "x") {
+      prevent(evt)
+      removeFinishedSelected()
+      return
+    }
     // Goal controls apply to goals only — never to a command selection.
-    const needsGoalsTab = ["p", "r", "R", "x", "A", "N"].includes(key)
+    const needsGoalsTab = ["p", "r", "A", "N"].includes(key)
     if (needsGoalsTab && tab() !== "goals") {
       prevent(evt)
       setStatusText("Goal controls need the Goals tab (Tab to switch).")
@@ -493,7 +522,30 @@ export function LoopDashboard(props: Props) {
     return ownerCommands()[cmdSelected()] ?? null
   }
 
-  /** Commands-tab colon commands: launch/open/interrupt/remove/write. */
+  /** Commands-tab process helpers (X/R keys + colon). */
+  async function killSelectedCommand() {
+    const sel = selectedCommand()
+    if (!sel) { setStatusText("No command selected."); return }
+    await executeCommandRaw("cmd_kill", { commandID: sel.id }, sel.id)
+  }
+
+  async function restartSelectedCommand() {
+    const sel = selectedCommand()
+    if (!sel) { setStatusText("No command selected."); return }
+    await executeCommandRaw("cmd_restart", { commandID: sel.id }, sel.id)
+  }
+
+  function removeFinishedSelected() {
+    const sel = selectedCommand()
+    if (!sel) { setStatusText("No command selected."); return }
+    if (sel.status === "running") {
+      setStatusText(`"${sel.title}" is still running — X force kill · :terminate graceful · q detach (keeps running).`)
+      return
+    }
+    void executeCommandRaw("cmd_remove", { commandID: sel.id }, sel.id)
+  }
+
+  /** Commands-tab colon commands: launch/open/interrupt/terminate/kill/restart/remove/write. */
   async function executeCommandTabCommand(verb: string, positional: string[], raw: string) {
     debugLog("commands-tab command", verb)
     switch (verb) {
@@ -517,6 +569,12 @@ export function LoopDashboard(props: Props) {
       case "terminate":
         if (!selectedCommand()) { setStatusText("No command selected."); return }
         await executeCommandRaw("cmd_terminate", { commandID: selectedCommand()!.id }, selectedCommand()!.id)
+        return
+      case "kill":
+        await killSelectedCommand()
+        return
+      case "restart":
+        await restartSelectedCommand()
         return
       case "remove":
         if (!selectedCommand()) { setStatusText("No command selected."); return }
@@ -885,7 +943,7 @@ export function LoopDashboard(props: Props) {
             <Show when={ownerCommands().length > 0} fallback={
               <box flexDirection="column" gap={1} padding={1}>
                 <text><span style={{ fg: theme().textMuted }}>No command sessions owned by this session. </span><span style={{ fg: theme().warning }}>:new &lt;command&gt;</span><span style={{ fg: theme().textMuted }}> to start one.</span></text>
-                <text><span style={{ fg: theme().textMuted }}>Tip: </span><span style={{ fg: theme().warning }}>o</span><span style={{ fg: theme().textMuted }}> fullscreen · </span><span style={{ fg: theme().warning }}>:interrupt :terminate :remove</span><span style={{ fg: theme().textMuted }}> manage · text + Enter writes stdin.</span></text>
+                <text><span style={{ fg: theme().textMuted }}>Tip: </span><span style={{ fg: theme().warning }}>o</span><span style={{ fg: theme().textMuted }}> fullscreen · </span><span style={{ fg: theme().warning }}>X kill · R restart · x remove-done</span><span style={{ fg: theme().textMuted }}> · </span><span style={{ fg: theme().warning }}>:interrupt :terminate :remove</span><span style={{ fg: theme().textMuted }}> manage · text + Enter writes stdin.</span></text>
               </box>
             }>
               <scrollbox height={Math.min(ownerCommands().length, 10)}>
@@ -939,7 +997,7 @@ export function LoopDashboard(props: Props) {
                     <span style={{ fg: theme().textMuted }}> │ updated {ageLabel(cmd().updatedAt, clock())}</span>
                     {cmd().lastError && <><span style={{ fg: theme().error, bold: true }}>{"\n"}⚠ Error: </span><span style={{ fg: theme().error }}>{cmd().lastError!.slice(0, 120)}</span></>}
                     {"\n"}
-                    <span style={{ fg: theme().textMuted }}>o fullscreen · :interrupt :terminate :remove · text + Enter writes stdin</span>
+                    <span style={{ fg: theme().textMuted }}>o fullscreen · X kill · R restart · x remove-done · :interrupt :terminate :remove · text + Enter writes stdin</span>
                   </text>
                 </box>
               )}

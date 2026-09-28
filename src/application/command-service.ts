@@ -152,6 +152,22 @@ export interface CommandService {
   resize(directory: string, id: string, ownerSessionID: string, cols: number, rows: number): Promise<{ ok: boolean; message: string; unsupported?: boolean }>
   interrupt(directory: string, id: string, ownerSessionID: string): Promise<{ ok: boolean; message: string }>
   terminate(directory: string, id: string, ownerSessionID: string, opts?: { remove?: boolean }): Promise<{ ok: boolean; message: string; removed?: boolean }>
+  /**
+   * Force kill: SIGKILL immediately, no SIGTERM grace. Same finalize path
+   * as terminate (endReason=terminate, signal=SIGKILL) — the only
+   * difference is skipping the grace wait, for hung processes that trap or
+   * ignore SIGTERM. Auto-notify policy identical to terminate (silent
+   * unless the command opted into notifyOnExit).
+   */
+  kill(directory: string, id: string, ownerSessionID: string): Promise<{ ok: boolean; message: string }>
+  /**
+   * Restart: gracefully terminate the old command if running, then respawn
+   * a NEW command (new ID) with the same spec — title/command/args/cwd/
+   * shell/timeout/notifyOnExit/goalID/watch spec. Env VALUES are never
+   * persisted, so a restarted env command loses its env (noted in the
+   * message). The old terminal record is kept for log access.
+   */
+  restart(directory: string, id: string, ownerSessionID: string): Promise<{ ok: boolean; message: string; command?: CommandSession }>
   remove(directory: string, id: string, ownerSessionID: string): Promise<{ ok: boolean; message: string }>
   /**
    * M3 watch: set/replace/clear a watch on an ALREADY-RUNNING command.
@@ -1244,6 +1260,115 @@ export function createCommandService(
         return { ok: true, message: `Command "${session.title}" ${status}; remove failed: ${removed.message}` }
       }
       return { ok: true, message: `Command "${session.title}" ${status}.` }
+    },
+
+    async kill(directory, id, ownerSessionID) {
+      rememberDir(id, directory)
+      const session = await service.get(directory, id, ownerSessionID)
+      if (!session) return { ok: false, message: "Command not found." }
+      if (session.status !== "running") {
+        return { ok: false, message: `Command is ${session.status}; nothing to kill.` }
+      }
+      // Claim BEFORE signaling (same race discipline as terminate): onExit
+      // honors the recorded SIGKILL and marks "terminated".
+      await mutateState(directory, `cmd.kill-claim:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id)
+        if (c && c.ownerSessionID === ownerSessionID && c.status === "running") {
+          c.signal = "SIGKILL"
+          c.updatedAt = new Date().toISOString()
+        }
+        return s
+      }).catch(() => {})
+      try {
+        const claimed = await readState(directory).then(
+          (st) => (st.commands ?? []).find((x) => x.id === id),
+        )
+        if (claimed) emitBroker(id, { type: "status", command: claimed })
+      } catch {}
+      const entry = live.get(id)
+      if (entry) {
+        // No grace: SIGKILL now. A dead handle reports honest exited below.
+        if (entry.handle.isAlive()) entry.handle.kill()
+        try {
+          await entry.handle.exited()
+        } catch {}
+        live.delete(id)
+      }
+      clearCommandTimeout(id)
+      clearWatchTimer(id)
+      await mutateState(directory, `cmd.kill:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id)
+        if (!c || c.ownerSessionID !== ownerSessionID) return s
+        if (c.status === "running") {
+          c.status = "terminated"
+          if (c.endReason !== "timeout") c.endReason = "terminate"
+          c.exitCode = c.exitCode ?? 137
+          c.signal = c.signal ?? "SIGKILL"
+          c.endedAt = new Date().toISOString()
+          c.updatedAt = c.endedAt
+        } else if (c.status === "terminated" && !c.endedAt) {
+          if (c.endReason !== "timeout" && !c.endReason) c.endReason = "terminate"
+          c.exitCode = c.exitCode ?? 137
+          c.endedAt = new Date().toISOString()
+          c.updatedAt = c.endedAt
+        }
+        // "exited" (natural death raced in) is left untouched — honest.
+        return s
+      })
+      try {
+        const fresh = await readState(directory).then(
+          (st) => (st.commands ?? []).find((x) => x.id === id),
+        )
+        if (fresh) emitBroker(id, { type: "status", command: fresh })
+      } catch {}
+      await fireAwaits(directory, id)
+      // Same silence rationale as terminate: the caller already has this
+      // synchronous result — notify only with notifyOnExit: true (or a
+      // timer-stamped timeout, which kill can never produce on a running
+      // command, guarded the same way for uniformity).
+      await notifyOwnerIfNeeded(directory, id)
+      return { ok: true, message: `Command "${session.title}" killed (SIGKILL).` }
+    },
+
+    async restart(directory, id, ownerSessionID) {
+      rememberDir(id, directory)
+      const session = await service.get(directory, id, ownerSessionID)
+      if (!session) return { ok: false, message: "Command not found." }
+      const spec: CommandStartInput = {
+        title: session.title,
+        command: session.command,
+        args: [...session.args],
+        cwd: session.cwd,
+        ownerSessionID,
+        ...(session.goalID !== undefined ? { goalID: session.goalID } : {}),
+        ...(session.notifyOnExit !== undefined ? { notifyOnExit: session.notifyOnExit } : {}),
+        ...(session.cols !== undefined ? { cols: session.cols } : {}),
+        ...(session.rows !== undefined ? { rows: session.rows } : {}),
+        ...(session.shell !== undefined ? { shell: session.shell } : {}),
+        ...(session.timeoutSeconds !== undefined ? { timeoutSeconds: session.timeoutSeconds } : {}),
+        // Env VALUES are never persisted (only envKeys) — a restarted env
+        // command loses its env. Said plainly in the message, not hidden.
+        ...(session.watchFilter !== undefined ? { watchFilter: session.watchFilter } : {}),
+        ...(session.watchUntil !== undefined ? { watchUntil: session.watchUntil } : {}),
+        ...(session.watchIgnoreCase !== undefined ? { watchIgnoreCase: session.watchIgnoreCase } : {}),
+        ...(session.watchUntilAction !== undefined ? { watchUntilAction: session.watchUntilAction } : {}),
+      }
+      if (session.status === "running") {
+        // Graceful restart: SIGTERM path first (hung processes: X/kill first).
+        const stopped = await service.terminate(directory, id, ownerSessionID)
+        if (!stopped.ok) {
+          return { ok: false, message: `Restart aborted: could not stop "${session.title}": ${stopped.message}` }
+        }
+      }
+      const next = await service.start(directory, spec)
+      const envNote = (session.envKeys?.length ?? 0) > 0
+        ? ` (env ${session.envKeys!.join(",")} NOT restored — values are never persisted)`
+        : ""
+      return {
+        ok: true,
+        message: `Command "${session.title}" restarted as ${next.id.slice(0, 8)}...${envNote}`,
+        command: next,
+      }
     },
 
     async remove(directory, id, ownerSessionID) {

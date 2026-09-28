@@ -262,7 +262,7 @@ On the Commands tab, `o` **never** opens a chat session or a dialog — it close
 - Paste forwards raw bytes immediately.
 - The viewport is measured and resizes both the emulator and the real PTY.
 
-Colon commands available directly on the Commands tab (before opening fullscreen): `:new <command> [args...]` (quoted args preserved, e.g. `:new bash -c "echo hi"`), `:interrupt`, `:terminate`, `:remove`, and bare text + Enter writes stdin to the selected command. Goal controls (`p`/`r`/`R`/`x`/`A`/`N`) never fire on the Commands tab.
+Single-key helpers on the Commands tab: `X` force-kill (SIGKILL now, no grace — for hung processes), `R` restart with the same spec (new ID, old record kept; env values are never persisted so restarted env commands lose their env), `x` remove finished (running commands get a hint, never a kill). Colon commands (before opening fullscreen): `:new <command> [args...]` (quoted args preserved, e.g. `:new bash -c "echo hi"`), `:interrupt`, `:terminate`, `:kill`, `:restart`, `:remove`, `:await <goalID>`, and bare text + Enter writes stdin to the selected command. Goal-only keys (`p`/`r`/`A`/`N`) never fire on the Commands tab; `R`/`x` are tab-scoped (retry/clear on Goals, restart/remove-done on Commands).
 
 ### Example: Watching a Dev Server
 
@@ -344,7 +344,17 @@ Open the shared dashboard with `/loop` (or `<leader>o`) — focuses the **Goals*
 | `h` | Select Goals directionally |
 | `l` | Select Commands directionally |
 
-`j`/`k`/`g`/`G` select within whichever tab is active. Goal controls (`p`/`r`/`R`/`x`/`A`/`N`) only fire on the Goals tab and are refused with a hint on Commands.
+`j`/`k`/`g`/`G` select within whichever tab is active. Goal controls (`p`/`r`/`A`/`N`) only fire on the Goals tab and are refused with a hint on Commands; `R`/`x` are tab-scoped (retry/clear on Goals, restart/remove-done on Commands).
+
+### Commands Tab — Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `X` | Force-kill selected command (SIGKILL now, no grace) |
+| `R` | Restart selected command with the same spec (new ID) |
+| `x` | Remove selected command — finished only (running gets a hint) |
+| `o` | Open fullscreen terminal page |
+| `Ctrl+C` | Interrupt selected command (SIGINT delivery, never a kill) |
 
 ### Goals Tab — Keyboard Shortcuts (Normal Mode)
 

@@ -429,6 +429,8 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
       case "cmd_write":
       case "cmd_interrupt":
       case "cmd_terminate":
+      case "cmd_kill":
+      case "cmd_restart":
       case "cmd_remove":
       case "cmd_resize":
       case "cmd_watch": {
@@ -482,6 +484,14 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
               response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision }
             } else if (request.command === "cmd_terminate") {
               const r = await cmdSvc.terminate(directory, id, ownerSessionID)
+              const state = await readState(directory)
+              response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision }
+            } else if (request.command === "cmd_kill") {
+              const r = await cmdSvc.kill(directory, id, ownerSessionID)
+              const state = await readState(directory)
+              response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision }
+            } else if (request.command === "cmd_restart") {
+              const r = await cmdSvc.restart(directory, id, ownerSessionID)
               const state = await readState(directory)
               response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision }
             } else if (request.command === "cmd_remove") {
