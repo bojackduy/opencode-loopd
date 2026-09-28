@@ -104,7 +104,8 @@ export interface LoopHost {
   abortSession(sessionID: string): Promise<void>
   readMessages(sessionID: string, limit?: number): Promise<SessionMessage[]>
   compactSession(sessionID: string): Promise<void>
-  notifyOwner(ownerSessionID: string, message: string, agent?: string): Promise<void>
+  /** True when the host accepted the prompt; false on a delivery error. */
+  notifyOwner(ownerSessionID: string, message: string, agent?: string): Promise<boolean | void>
 }
 
 const recentParentNotifies = new Map<string, number>()
@@ -113,12 +114,15 @@ function shouldDedupParentNotify(ownerSessionID: string, message: string): boole
   const now = Date.now()
   const last = recentParentNotifies.get(key)
   if (last !== undefined && now - last < 60_000) return true
-  recentParentNotifies.set(key, now)
   // prune old entries occasionally
   if (recentParentNotifies.size > 200) {
     for (const [k, t] of recentParentNotifies.entries()) if (now - t > 60_000) recentParentNotifies.delete(k)
   }
   return false
+}
+
+function markParentNotified(ownerSessionID: string, message: string): void {
+  recentParentNotifies.set(`${ownerSessionID}:${message.slice(0, 200)}`, Date.now())
 }
 
 // ─── Real Host (SDK-backed) ─────────────────────────────────────────────────
@@ -296,7 +300,7 @@ export function createRealHost(client: any, directory: string): LoopHost {
     async notifyOwner(ownerSessionID, message, agent) {
       if (shouldDedupParentNotify(ownerSessionID, message)) {
         await logServerEvent(directory, "parent.notify.deduped", { ownerSessionID, preview: message.slice(0, 160) })
-        return
+        return true
       }
       // Preserve the parent's identity: without an explicit agent the session
       // falls back to the global default (often Build), not the parent that
@@ -325,11 +329,15 @@ export function createRealHost(client: any, directory: string): LoopHost {
         )
         if (result?.error) {
           await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(result.error) })
+          return false
         } else {
+          markParentNotified(ownerSessionID, message)
           await logServerEvent(directory, "parent.notified", { ownerSessionID, preview: message.slice(0, 160) })
+          return true
         }
       } catch (error) {
         await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(error) })
+        return false
       }
     },
   }
@@ -579,8 +587,10 @@ export function createV2Host(
       try {
         await context.session.prompt({ sessionID: ownerSessionID, text: message })
         await logServerEvent(directory, "parent.notified", { ownerSessionID, preview: message.slice(0, 160) })
+        return true
       } catch (error) {
         await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(error) })
+        return false
       }
     },
   }

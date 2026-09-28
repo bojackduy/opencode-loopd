@@ -180,6 +180,29 @@ describe("terminal-session", () => {
     h.onStatus!(ownedCmd({ status: "exited", exitCode: 0 }) as never)
     await new Promise((r) => setTimeout(r, 200))
     expect(session.readView().live).toBe(false)
+    expect(session.readView().connectionDetail).toMatch(/saved output/)
+    session.dispose()
+  })
+
+  it("refuses input and Ctrl+C for an exited command but preserves its last screen", async () => {
+    const stream = makeStreamStub()
+    const control = makeControlStub()
+    const session = createTerminalSession({
+      ...baseOptions(),
+      createStreamClient: () => stream.client,
+      createControl: () => control.client as never,
+    })
+    await session.start()
+    const h = stream.handlers.get("cmd-1")!
+    h.onSnapshot!({ command: ownedCmd({ status: "exited", exitCode: 0 }) as never, data: "vite output", startOffset: 0, endOffset: 11 })
+    stream.live.add("cmd-1")
+    session.writeInput("x")
+    session.interrupt()
+    expect(stream.inputs).toEqual([])
+    expect(stream.interrupts).toEqual([])
+    expect(control.calls).toEqual([])
+    expect(session.readView().command?.status).toBe("exited")
+    expect(session.readView().live).toBe(false)
     session.dispose()
   })
 
@@ -387,56 +410,6 @@ describe("terminal-session", () => {
     // Lifetime end offset is byte-based, so a stream delta at totalBytes
     // continues exactly instead of overlapping by the char/byte difference.
     expect(session.readView().totalBytes).toBe(utf8ByteLength(text))
-    session.dispose()
-  })
-
-  it("kill sends cmd_kill over the control bus (fire-and-forget)", async () => {
-    const stream = makeStreamStub()
-    const control = makeControlStub()
-    const session = createTerminalSession({
-      ...baseOptions(),
-      createStreamClient: () => stream.client,
-      createControl: () => control.client as never,
-    })
-    session.kill()
-    expect(control.calls).toEqual([{
-      command: "cmd_kill",
-      goalID: "cmd-1",
-      args: { commandID: "cmd-1", ownerSessionID: "owner-1" },
-    }])
-    session.dispose()
-  })
-
-  it("restart resolves the control response message", async () => {
-    const stream = makeStreamStub()
-    const control = makeControlStub()
-    control.client.executeRaw = async (cmd) => {
-      control.calls.push(cmd)
-      return { ok: true, message: 'Command "repl" restarted as abc12345...' }
-    }
-    const session = createTerminalSession({
-      ...baseOptions(),
-      createStreamClient: () => stream.client,
-      createControl: () => control.client as never,
-    })
-    await expect(session.restart()).resolves.toMatch(/restarted as/)
-    expect(control.calls[0]!.command).toBe("cmd_restart")
-    session.dispose()
-  })
-
-  it("kill/restart refuse on invalid route (fail closed, like interrupt)", async () => {
-    const stream = makeStreamStub()
-    const control = makeControlStub()
-    const session = createTerminalSession({
-      ...baseOptions(),
-      routeData: { commandID: "", ownerSessionID: "owner-1" },
-      createStreamClient: () => stream.client,
-      createControl: () => control.client as never,
-    })
-    await session.start()
-    session.kill()
-    await expect(session.restart()).resolves.toMatch(/No command|Refused/)
-    expect(control.calls).toEqual([])
     session.dispose()
   })
 

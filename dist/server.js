@@ -576,10 +576,16 @@ function tailLastBytes(text, maxBytes = MAX_AWAIT_TAIL_BYTES) {
     return text;
   return buf.subarray(buf.length - maxBytes).toString("utf8");
 }
+function safeCommandText(text) {
+  return text.replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[PX^_][\s\S]*?\x1b\\|\x1b[\x20-\x2f]*[\x30-\x7e]/g, "").replace(/\r\n?/g, `
+`).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "").replace(/\n{3,}/g, `
+
+`);
+}
 function formatAwaitEvidence(input) {
-  const short = input.commandID.slice(0, 8);
-  const header = `[command "${input.title}" (${input.argv.join(" ") || input.title}) ${input.status}` + ` ${short}... exitCode=${input.exitCode ?? "unknown"} signal=${input.signal ?? "none"}]`;
-  const tail = tailLastBytes(input.tail);
+  const short = safeCommandText(input.commandID.slice(0, 8));
+  const header = `[command "${safeCommandText(input.title)}" (${safeCommandText(input.argv.join(" ") || input.title)}) ${input.status}` + ` ${short}... exitCode=${input.exitCode ?? "unknown"} signal=${safeCommandText(input.signal ?? "none")}]`;
+  const tail = tailLastBytes(safeCommandText(input.tail));
   return tail ? `${header}
 ${tail}` : header;
 }
@@ -1020,13 +1026,13 @@ async function fireUntilAwaits(directory, commandID, lines) {
       continue;
     }
     const short = commandID.slice(0, 8);
-    const header = `[command "${cmd.title}" (${[cmd.command, ...cmd.args].join(" ") || cmd.title}) ${cmd.status}` + ` ${short}... watch-until "${pattern}" matched]`;
-    const matchedText = tailLastBytes(matched.slice(0, 20).join(`
-`), MAX_AWAIT_TAIL_BYTES);
+    const header = `[command "${safeCommandText(cmd.title)}" (${safeCommandText([cmd.command, ...cmd.args].join(" ") || cmd.title)}) ${cmd.status}` + ` ${short}... watch-until "${safeCommandText(pattern)}" matched]`;
+    const matchedText = tailLastBytes(safeCommandText(matched.slice(0, 20).join(`
+`)), MAX_AWAIT_TAIL_BYTES);
     const evidence = tail ? `${header}
 ${matchedText}
 --- tail ---
-${tail}` : `${header}
+${tailLastBytes(safeCommandText(tail))}` : `${header}
 ${matchedText}`;
     await appendGoalInbox(directory, a.goalID, "worker", evidence);
     await appendEvent(directory, ledgerEvent({
@@ -2911,13 +2917,15 @@ function shouldDedupParentNotify(ownerSessionID, message) {
   const last = recentParentNotifies.get(key);
   if (last !== undefined && now - last < 60000)
     return true;
-  recentParentNotifies.set(key, now);
   if (recentParentNotifies.size > 200) {
     for (const [k, t] of recentParentNotifies.entries())
       if (now - t > 60000)
         recentParentNotifies.delete(k);
   }
   return false;
+}
+function markParentNotified2(ownerSessionID, message) {
+  recentParentNotifies.set(`${ownerSessionID}:${message.slice(0, 200)}`, Date.now());
 }
 function createRealHost(client, directory) {
   return {
@@ -3064,7 +3072,7 @@ function createRealHost(client, directory) {
     async notifyOwner(ownerSessionID, message, agent) {
       if (shouldDedupParentNotify(ownerSessionID, message)) {
         await logServerEvent(directory, "parent.notify.deduped", { ownerSessionID, preview: message.slice(0, 160) });
-        return;
+        return true;
       }
       let resolvedAgent = agent?.trim() || undefined;
       if (!resolvedAgent) {
@@ -3085,11 +3093,15 @@ function createRealHost(client, directory) {
         }), 1e4, "OpenCode parent notify");
         if (result?.error) {
           await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(result.error) });
+          return false;
         } else {
+          markParentNotified2(ownerSessionID, message);
           await logServerEvent(directory, "parent.notified", { ownerSessionID, preview: message.slice(0, 160) });
+          return true;
         }
       } catch (error) {
         await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(error) });
+        return false;
       }
     }
   };
@@ -3263,8 +3275,10 @@ function createV2Host(context, statuses, options = {}) {
       try {
         await context.session.prompt({ sessionID: ownerSessionID, text: message });
         await logServerEvent(directory, "parent.notified", { ownerSessionID, preview: message.slice(0, 160) });
+        return true;
       } catch (error) {
         await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(error) });
+        return false;
       }
     }
   };
@@ -4818,6 +4832,7 @@ function createCommandSession(input) {
     ownerSessionID: input.ownerSessionID,
     goalID: input.goalID,
     notifyOnExit: input.notifyOnExit,
+    notifySuccessfulExit: input.notifySuccessfulExit,
     status: "running",
     pid: input.pid,
     cols: input.cols,
@@ -4848,6 +4863,8 @@ function shouldNotifyOwnerOnExit(session) {
   if (session.status !== "exited")
     return false;
   if (session.exitCode !== undefined && session.exitCode !== 0)
+    return true;
+  if (session.notifySuccessfulExit === true)
     return true;
   const started = Date.parse(session.createdAt);
   const ended = session.endedAt ? Date.parse(session.endedAt) : Date.now();
@@ -5076,6 +5093,28 @@ function createCommandService(host, opts) {
   const commandDirs = new Map;
   const timeouts = new Map;
   const timeoutOwners = new Map;
+  const notifyInFlight = new Set;
+  const notifyRetries = new Map;
+  const notifyAttempts = new Map;
+  function clearNotifyRetry(id) {
+    const timer = notifyRetries.get(id);
+    if (timer)
+      clearTimeout(timer);
+    notifyRetries.delete(id);
+    notifyAttempts.delete(id);
+  }
+  function retryOwnerNotification(directory, id) {
+    const attempt = (notifyAttempts.get(id) ?? 0) + 1;
+    notifyAttempts.set(id, attempt);
+    if (attempt > 3 || notifyRetries.has(id))
+      return;
+    const timer = setTimeout(() => {
+      notifyRetries.delete(id);
+      notifyOwnerIfNeeded(directory, id);
+    }, 1000 * 2 ** (attempt - 1));
+    timer.unref?.();
+    notifyRetries.set(id, timer);
+  }
   const watchers = new Map;
   const watchTimers = new Map;
   const awaitAsm = new Map;
@@ -5224,23 +5263,12 @@ function createCommandService(host, opts) {
     } catch {}
   }
   async function notifyOwnerIfNeeded(directory, id) {
+    if (!opts?.onOwnerNotify || notifyInFlight.has(id))
+      return;
+    notifyInFlight.add(id);
     try {
-      let target;
-      await mutateState(directory, `cmd.notify-claim:${id}`, async (s) => {
-        const c = (s.commands ?? []).find((x) => x.id === id);
-        if (!c)
-          return s;
-        if (c.ownerNotifiedAt)
-          return s;
-        if (!isTerminalCommandStatus(c.status))
-          return s;
-        if (!shouldNotifyOwnerOnExit(c))
-          return s;
-        c.ownerNotifiedAt = new Date().toISOString();
-        target = { ...c };
-        return s;
-      });
-      if (!target)
+      const target = (await readState(directory)).commands?.find((c) => c.id === id);
+      if (!target || target.ownerNotifiedAt || !isTerminalCommandStatus(target.status) || !shouldNotifyOwnerOnExit(target))
         return;
       const tail = await readBoundedTail(directory, id);
       const message = formatAwaitEvidence({
@@ -5252,8 +5280,25 @@ function createCommandService(host, opts) {
         signal: target.signal,
         tail
       });
-      await opts?.onOwnerNotify?.(directory, target.ownerSessionID, message);
-    } catch {}
+      const accepted = await opts.onOwnerNotify(directory, target.ownerSessionID, message);
+      if (accepted === false)
+        throw new Error("host did not accept owner prompt");
+      await mutateState(directory, `cmd.notify-delivered:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id);
+        if (c && !c.ownerNotifiedAt)
+          c.ownerNotifiedAt = new Date().toISOString();
+        return s;
+      });
+      clearNotifyRetry(id);
+    } catch (error) {
+      await logServerEvent(directory, "command.owner-notify-failed", {
+        commandID: id,
+        detail: error instanceof Error ? error.message : String(error)
+      }).catch(() => {});
+      retryOwnerNotification(directory, id);
+    } finally {
+      notifyInFlight.delete(id);
+    }
   }
   async function flushWatch(directory, id) {
     const watcher = watchers.get(id);
@@ -5660,6 +5705,7 @@ function createCommandService(host, opts) {
         ownerSessionID: input.ownerSessionID,
         goalID: input.goalID,
         notifyOnExit: input.notifyOnExit,
+        notifySuccessfulExit: true,
         pid: handle.pid,
         cols: input.cols,
         rows: input.rows,
@@ -6047,6 +6093,7 @@ function createCommandService(host, opts) {
       if (session.status === "running") {
         return { ok: false, message: `Command "${session.title}" is still running \u2014 terminate it first (terminate \u2260 remove).` };
       }
+      clearNotifyRetry(id);
       deleteWatch(id);
       const lastKnown = { ...session };
       await mutateState(directory, `cmd.remove:${id}`, async (s) => {
@@ -6145,8 +6192,11 @@ function createCommandService(host, opts) {
         rememberDir(c.id, directory);
       let markedMissing = 0;
       for (const c of cmds) {
-        if (c.status !== "running")
+        if (c.status !== "running") {
+          if ((c.notifySuccessfulExit === true || c.notifyOnExit === true) && !c.ownerNotifiedAt)
+            await notifyOwnerIfNeeded(directory, c.id);
           continue;
+        }
         const entry = live.get(c.id);
         if (entry) {
           if (!entry.handle.isAlive()) {
@@ -6199,6 +6249,8 @@ function createCommandService(host, opts) {
       return { markedMissing };
     },
     async dispose(directory) {
+      for (const id of [...notifyRetries.keys()])
+        clearNotifyRetry(id);
       for (const id of [...watchTimers.keys()])
         clearWatchTimer(id);
       watchers.clear();
@@ -6222,6 +6274,8 @@ function createCommandService(host, opts) {
       }));
       for (const id of [...timeouts.keys()])
         clearCommandTimeout(id);
+      for (const id of [...notifyRetries.keys()])
+        clearNotifyRetry(id);
     }
   };
   return service;
@@ -8026,14 +8080,14 @@ function commandTools(options) {
   const sizeNote = capabilities.resize ? "applied live to the PTY winsize" : "stored; resize is unsupported by the pipe host";
   return {
     loopd_command_start: tool3({
-      description: "PREFER THIS over the built-in shell/bash tool whenever a command might take a while or never return: installs (npm/pip/brew/cargo...), builds, test suites, downloads, migrations, dev servers, watchers, log tails, REPLs, or anything interactive. The built-in shell BLOCKS your whole turn until the process exits \u2014 a long install freezes you (and can time out); this returns immediately with a command_id and pushes you a message on exit or pattern match, so you stay responsive and can do other work meanwhile. Only use the built-in shell for quick one-shots (ls, git status, a single fast test) that finish in seconds. " + "Start a standalone interactive OS process (arbitrary shell command) in the background \u2014 a dev server, `npm test --watch`, a REPL, a log tail, a build, or a one-off script. This is a raw process, NOT an AI worker: no agent, no checks, no turn loop. For multi-turn autonomous AI work with completion criteria, use loopd_create_goal instead. " + "Returns a command_id for loopd_command_get (read output)/loopd_command_write (send stdin)/loopd_command_interrupt (Ctrl+C)/loopd_command_terminate (kill)/loopd_command_remove (delete). " + "The user can also open it live: /loop or /commands \u2192 Tab/l to the Commands tab \u2192 select it \u2192 `o` opens a fullscreen interactive terminal page (type directly, Ctrl+C interrupts, Ctrl+] detaches without stopping it). " + "Independent from goals: an optional goal_id is display-only metadata and never couples lifecycles \u2014 pausing/clearing a goal never touches the command, and terminating a command never touches the goal. " + "To make a specific goal wake up when this command finishes, call loopd_command_await separately after starting it (linking alone does not wake anything). " + "The OWNER session (you) gets pushed a real message when the command reaches a terminal status \u2014 no polling required to find out: by default (auto) that fires on a non-zero exit, on 'missing' (host restarted mid-run), on 'timeout' (timeout_seconds deadline reached \u2014 always notifies), or once total runtime crosses ~2 minutes (the long-running/monitor case); quick successful commands stay silent. Override with notify_on_exit.",
+      description: "PREFER THIS over the built-in shell/bash tool whenever a command might take a while or never return: installs (npm/pip/brew/cargo...), builds, test suites, downloads, migrations, dev servers, watchers, log tails, REPLs, or anything interactive. The built-in shell BLOCKS your whole turn until the process exits \u2014 a long install freezes you (and can time out); this returns immediately with a command_id and pushes you a message on exit or pattern match, so you stay responsive and can do other work meanwhile. Only use the built-in shell for quick one-shots (ls, git status, a single fast test) that finish in seconds. " + "Start a standalone interactive OS process (arbitrary shell command) in the background \u2014 a dev server, `npm test --watch`, a REPL, a log tail, a build, or a one-off script. This is a raw process, NOT an AI worker: no agent, no checks, no turn loop. For multi-turn autonomous AI work with completion criteria, use loopd_create_goal instead. " + "Returns a command_id for loopd_command_get (read output)/loopd_command_write (send stdin)/loopd_command_interrupt (Ctrl+C)/loopd_command_terminate (kill)/loopd_command_remove (delete). " + "The user can also open it live: /loop or /commands \u2192 Tab/l to the Commands tab \u2192 select it \u2192 `o` opens a fullscreen interactive terminal page (type directly, Ctrl+C interrupts, Ctrl+] detaches without stopping it). " + "Independent from goals: an optional goal_id is display-only metadata and never couples lifecycles \u2014 pausing/clearing a goal never touches the command, and terminating a command never touches the goal. " + "To make a specific goal wake up when this command finishes, call loopd_command_await separately after starting it (linking alone does not wake anything). " + "The OWNER session gets a notification on natural exit (including code 0), missing process, or timeout \u2014 no polling required for completion. Manual terminate stays silent by default. Raw PTY output stays in the log; any short tail included in the notification is sanitized for chat. Set notify_on_exit:false to suppress owner exit notifications.",
       args: {
         title: tool3.schema.string().describe("Short human label for the session."),
         command: tool3.schema.string().describe('Executable to spawn (e.g. "bun", "python3").'),
         args: tool3.schema.array(tool3.schema.string()).optional().describe("Arguments for the command."),
         cwd: tool3.schema.string().optional().describe("Working directory. Defaults to the project root."),
         goal_id: tool3.schema.string().optional().describe("Optional goal linkage (display only \u2014 no lifecycle coupling)."),
-        notify_on_exit: tool3.schema.boolean().optional().describe("Owner-exit-notification override. true = always push a message to you when this command finishes. false = never (dashboard/loopd_command_get only). Omit for auto (failure, lost-host, timeout, or long-running success)."),
+        notify_on_exit: tool3.schema.boolean().optional().describe("Owner-exit-notification override. Omit to notify on natural exits (including quick success), missing or timeout; manual terminate stays silent. true also notifies on manual terminate; false disables owner exit notifications."),
         cols: tool3.schema.number().optional().describe(`Requested terminal width (${sizeNote}).`),
         rows: tool3.schema.number().optional().describe(`Requested terminal height (${sizeNote}).`),
         env: tool3.schema.record(tool3.schema.string(), tool3.schema.string()).optional().describe("Extra environment variables for the child. Values are passed to the host but never persisted \u2014 only names appear as envKeys in summaries."),
@@ -8316,10 +8370,15 @@ function createServerHooks(directory, host, defaults) {
       }
     },
     onOwnerNotify: async (dir, ownerSessionID, message) => {
-      await host.notifyOwner(ownerSessionID, message).catch((error) => logServerEvent(dir, "command.owner-notify-failed", {
-        ownerSessionID,
-        detail: describeError(error)
-      }));
+      try {
+        return await host.notifyOwner(ownerSessionID, message) !== false;
+      } catch (error) {
+        await logServerEvent(dir, "command.owner-notify-failed", {
+          ownerSessionID,
+          detail: describeError(error)
+        });
+        return false;
+      }
     },
     onWatchNotify: async (dir, ownerSessionID, message) => {
       await host.notifyOwner(ownerSessionID, message).catch((error) => logServerEvent(dir, "command.watch-notify-failed", {

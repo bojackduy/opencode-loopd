@@ -125,6 +125,22 @@ describe("LoopDashboard shared Goals/Commands (mounted)", () => {
     expect(setup.captureCharFrame()).not.toContain("foreign-cmd")
   })
 
+  it("? opens Commands help with kill/restart/remove instead of Goals help", async () => {
+    const dir = await seedDir()
+    const setup = await testRender(() => (
+      <LoopDashboard api={fakeApi([], { count: 0 }) as never} directory={dir} initialView="commands" ownerSessionID="ses-owner" />
+    ))
+    setups.push(setup as never)
+    await setup.flush()
+    setup.mockInput.pressKey("?")
+    await setup.waitFor(() => setup.captureCharFrame().includes("Commands tab (selected command only)"))
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("X / :kill")
+    expect(frame).toContain("R / :restart")
+    expect(frame).toContain("x / :remove")
+    expect(frame).not.toContain(":force")
+  })
+
   it("o on a command closes the popup and navigates to the terminal route", async () => {
     const dir = await seedDir()
     const navigated: Array<{ name: string; params?: unknown }> = []

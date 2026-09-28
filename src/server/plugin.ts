@@ -71,12 +71,15 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
     // as goal complete/blocked notifications) instead of dying silently at
     // the dashboard-only status update.
     onOwnerNotify: async (dir, ownerSessionID, message) => {
-      await host.notifyOwner(ownerSessionID, message).catch((error) =>
-        logServerEvent(dir, "command.owner-notify-failed", {
+      try {
+        return (await host.notifyOwner(ownerSessionID, message)) !== false
+      } catch (error) {
+        await logServerEvent(dir, "command.owner-notify-failed", {
           ownerSessionID,
           detail: describeError(error),
-        }),
-      )
+        })
+        return false
+      }
     },
     // M2 watch pushes: coalesced filter/until notices on the same owner
     // channel (never the goal inbox — watch is owner-scoped, not goal-scoped).

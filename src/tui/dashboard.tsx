@@ -12,7 +12,7 @@ import { createControlClient } from "../infrastructure/control-client"
 import type { StoreState } from "../infrastructure/state-repository"
 import type { Goal, GoalStatus } from "../domain/goal"
 import type { GoalRuntimeState, RuntimePhase } from "../domain/runtime"
-import { parseCommand, commandHelp } from "./command-parser"
+import { parseCommand, commandHelp, commandTabHelp } from "./command-parser"
 import { parseNewCommand } from "./command-controller"
 import { goalStatusLabel, phaseLabel, describeGoalState } from "../domain/status-labels"
 import { bugReportUrl, openBrowserUrl } from "../browser"
@@ -751,8 +751,8 @@ export function LoopDashboard(props: Props) {
           <Show when={showHelp()}>
             <box flexDirection="column" padding={1} border={true} borderColor="yellow" backgroundColor={theme().background} flexShrink={0} maxHeight={14} overflow="hidden">
               <text>
-                <span style={{ fg: "yellow", bold: true }}>━━━ Keys: ? toggle help  c toggle done  : insert  Ctrl+N normal  o open  A abort worker  N nudge  q close ━━━</span>
-                <For each={commandHelp().split("\n")}>{(line) => {
+                <span style={{ fg: "yellow", bold: true }}>{tab() === "commands" ? "━━━ Commands: ? help  : insert  X kill  R restart  x remove-done  o fullscreen  q close ━━━" : "━━━ Keys: ? toggle help  c toggle done  : insert  Ctrl+N normal  o open  A abort worker  N nudge  q close ━━━"}</span>
+                <For each={(tab() === "commands" ? commandTabHelp() : commandHelp()).split("\n")}>{(line) => {
                   // Modes / Nav — split into label + segments, color keys vs descs
                   if (line.startsWith("Modes:") || line.startsWith("Nav:")) {
                     const label = line.startsWith("Modes:") ? "Modes:" : "Nav:"

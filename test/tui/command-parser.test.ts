@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test"
-import { parseCommand, commandHelp } from "../../src/tui/command-parser"
+import { parseCommand, commandHelp, commandTabHelp } from "../../src/tui/command-parser"
 
 describe("Command Parser", () => {
   it("parses simple command", () => {
@@ -70,5 +70,14 @@ describe("Command Parser", () => {
     expect(help).toContain(":send")
     expect(help).toContain(":pause")
     expect(help).toContain(":help")
+  })
+
+  it("Commands-tab help lists the process helpers without goal actions", () => {
+    const help = commandTabHelp()
+    expect(help).toContain("X / :kill")
+    expect(help).toContain("R / :restart")
+    expect(help).toContain("x / :remove")
+    expect(help).toContain("Ctrl+C / :interrupt")
+    expect(help).not.toContain(":force")
   })
 })

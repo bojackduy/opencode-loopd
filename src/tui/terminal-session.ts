@@ -76,14 +76,6 @@ export interface TerminalSession {
   paste(text: string): void
   /** SIGINT delivery, never a kill. */
   interrupt(): void
-  /** SIGKILL now via the control bus (fire-and-forget; the view stays on the dead log). */
-  kill(): void
-  /**
-   * Restart via the control bus (terminate + respawn same spec, new ID).
-   * Resolves to the response message (names the new command) or an error
-   * summary — the caller decides whether to stay or detach.
-   */
-  restart(): Promise<string>
   /** Local detach: unsubscribe + cleanup, NEVER terminate. Then onDetach. */
   detach(): void
   /** Viewport-measured size; debounced to emulator + real PTY winsize. */
@@ -332,8 +324,8 @@ export function createTerminalSession(options: TerminalSessionOptions): Terminal
           }
           command = snap.command as CommandSession
           connection = "stream"
-          connectionDetail = "live"
           live = (snap.command as CommandSession).status === "running"
+          connectionDetail = live ? "live" : "saved output (process ended)"
           applySnapshotBytes(snap.data, snap.startOffset, snap.endOffset)
         },
         onDelta: (delta) => {
@@ -345,6 +337,7 @@ export function createTerminalSession(options: TerminalSessionOptions): Terminal
           if ((cmd as CommandSession).ownerSessionID !== data.ownerSessionID) return
           command = cmd as CommandSession
           live = (cmd as CommandSession).status === "running"
+          connectionDetail = live ? "live" : "saved output (process ended)"
           emitSoon()
         },
         onError: (message) => {
@@ -376,6 +369,7 @@ export function createTerminalSession(options: TerminalSessionOptions): Terminal
   function writeInput(bytes: string): void {
     if (disposed || !data || !bytes) return
     if (connection === "error") return // invalid/cross-owner: never write
+    if (command && command.status !== "running") return
     if (streamLive() && stream.sendInput(data.commandID, bytes).ok) return
     // Fallback to the control bus (never double-send on both paths).
     void control
@@ -392,34 +386,11 @@ export function createTerminalSession(options: TerminalSessionOptions): Terminal
   function interrupt(): void {
     if (disposed || !data) return
     if (connection === "error") return
+    if (command && command.status !== "running") return
     if (streamLive() && stream.sendInterrupt(data.commandID).ok) return
     void control
       .executeRaw({ command: "cmd_interrupt", goalID: data.commandID, args: { commandID: data.commandID, ownerSessionID: data.ownerSessionID } })
       .catch(() => {})
-  }
-
-  function kill(): void {
-    if (disposed || !data) return
-    if (connection === "error") return
-    // No stream equivalent — SIGKILL always goes over the control bus.
-    void control
-      .executeRaw({ command: "cmd_kill", goalID: data.commandID, args: { commandID: data.commandID, ownerSessionID: data.ownerSessionID } })
-      .catch(() => {})
-  }
-
-  async function restart(): Promise<string> {
-    if (disposed || !data) return "No command (view closed)."
-    if (connection === "error") return "Refused: command not owned by this session."
-    try {
-      const r = await control.executeRaw({
-        command: "cmd_restart",
-        goalID: data.commandID,
-        args: { commandID: data.commandID, ownerSessionID: data.ownerSessionID },
-      })
-      return r.ok ? r.message : `Restart failed: ${r.message}`
-    } catch (error) {
-      return `Restart failed: ${error instanceof Error ? error.message : String(error)}`
-    }
   }
 
   function applyResize(cols: number, rows: number): void {
@@ -534,8 +505,6 @@ export function createTerminalSession(options: TerminalSessionOptions): Terminal
     writeInput,
     paste,
     interrupt,
-    kill,
-    restart,
     detach,
     requestViewportSize,
     get appliedSize() {

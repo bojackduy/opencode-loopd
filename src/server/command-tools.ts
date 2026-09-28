@@ -104,14 +104,14 @@ export function commandTools(options: CommandToolsOptions) {
         "The user can also open it live: /loop or /commands → Tab/l to the Commands tab → select it → `o` opens a fullscreen interactive terminal page (type directly, Ctrl+C interrupts, Ctrl+] detaches without stopping it). " +
         "Independent from goals: an optional goal_id is display-only metadata and never couples lifecycles — pausing/clearing a goal never touches the command, and terminating a command never touches the goal. " +
         "To make a specific goal wake up when this command finishes, call loopd_command_await separately after starting it (linking alone does not wake anything). " +
-        "The OWNER session (you) gets pushed a real message when the command reaches a terminal status — no polling required to find out: by default (auto) that fires on a non-zero exit, on 'missing' (host restarted mid-run), on 'timeout' (timeout_seconds deadline reached — always notifies), or once total runtime crosses ~2 minutes (the long-running/monitor case); quick successful commands stay silent. Override with notify_on_exit.",
+        "The OWNER session gets a notification on natural exit (including code 0), missing process, or timeout — no polling required for completion. Manual terminate stays silent by default. Raw PTY output stays in the log; any short tail included in the notification is sanitized for chat. Set notify_on_exit:false to suppress owner exit notifications.",
       args: {
         title: tool.schema.string().describe("Short human label for the session."),
         command: tool.schema.string().describe("Executable to spawn (e.g. \"bun\", \"python3\")."),
         args: tool.schema.array(tool.schema.string()).optional().describe("Arguments for the command."),
         cwd: tool.schema.string().optional().describe("Working directory. Defaults to the project root."),
         goal_id: tool.schema.string().optional().describe("Optional goal linkage (display only — no lifecycle coupling)."),
-        notify_on_exit: tool.schema.boolean().optional().describe("Owner-exit-notification override. true = always push a message to you when this command finishes. false = never (dashboard/loopd_command_get only). Omit for auto (failure, lost-host, timeout, or long-running success)."),
+        notify_on_exit: tool.schema.boolean().optional().describe("Owner-exit-notification override. Omit to notify on natural exits (including quick success), missing or timeout; manual terminate stays silent. true also notifies on manual terminate; false disables owner exit notifications."),
         cols: tool.schema.number().optional().describe(`Requested terminal width (${sizeNote}).`),
         rows: tool.schema.number().optional().describe(`Requested terminal height (${sizeNote}).`),
         env: tool.schema.record(tool.schema.string(), tool.schema.string()).optional().describe("Extra environment variables for the child. Values are passed to the host but never persisted — only names appear as envKeys in summaries."),

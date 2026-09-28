@@ -48,6 +48,8 @@ export interface CommandSession {
    * be the long-running/monitor case). true = always notify. false = never.
    */
   notifyOnExit?: boolean
+  /** New commands notify on successful exit too; absent on legacy records. */
+  notifySuccessfulExit?: boolean
   /** Set once the owner has been pinged for this command's terminal status (exactly-once marker). */
   ownerNotifiedAt?: string
   // ─── M2 watch (line-level filter/until notifications) ────────────────────
@@ -140,6 +142,7 @@ export function createCommandSession(input: {
   ownerSessionID: string
   goalID?: string
   notifyOnExit?: boolean
+  notifySuccessfulExit?: boolean
   pid?: number
   cols?: number
   rows?: number
@@ -175,6 +178,7 @@ export function createCommandSession(input: {
     ownerSessionID: input.ownerSessionID,
     goalID: input.goalID,
     notifyOnExit: input.notifyOnExit,
+    notifySuccessfulExit: input.notifySuccessfulExit,
     status: "running",
     pid: input.pid,
     cols: input.cols,
@@ -231,6 +235,7 @@ export function shouldNotifyOwnerOnExit(session: CommandSession): boolean {
   if (session.status === "terminated") return false
   if (session.status !== "exited") return false
   if (session.exitCode !== undefined && session.exitCode !== 0) return true
+  if (session.notifySuccessfulExit === true) return true
   const started = Date.parse(session.createdAt)
   const ended = session.endedAt ? Date.parse(session.endedAt) : Date.now()
   if (!Number.isFinite(started) || !Number.isFinite(ended)) return false

@@ -53,6 +53,16 @@ export function tailLastBytes(text: string, maxBytes: number = MAX_AWAIT_TAIL_BY
   return buf.subarray(buf.length - maxBytes).toString("utf8")
 }
 
+/** PTY bytes are retained raw for the terminal, but must never enter a chat prompt raw. */
+export function safeCommandText(text: string): string {
+  return text
+    // CSI, OSC (BEL/ST terminated), DCS/APC/PM/SOS and short ESC sequences.
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[PX^_][\s\S]*?\x1b\\|\x1b[\x20-\x2f]*[\x30-\x7e]/g, "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+}
+
 export function awaitKey(a: Pick<CommandAwait, "goalID" | "commandID">): string {
   return `${a.goalID}:${a.commandID}`
 }
@@ -70,10 +80,10 @@ export function formatAwaitEvidence(input: {
   signal?: string
   tail: string
 }): string {
-  const short = input.commandID.slice(0, 8)
+  const short = safeCommandText(input.commandID.slice(0, 8))
   const header =
-    `[command "${input.title}" (${input.argv.join(" ") || input.title}) ${input.status}` +
-    ` ${short}... exitCode=${input.exitCode ?? "unknown"} signal=${input.signal ?? "none"}]`
-  const tail = tailLastBytes(input.tail)
+    `[command "${safeCommandText(input.title)}" (${safeCommandText(input.argv.join(" ") || input.title)}) ${input.status}` +
+    ` ${short}... exitCode=${input.exitCode ?? "unknown"} signal=${safeCommandText(input.signal ?? "none")}]`
+  const tail = tailLastBytes(safeCommandText(input.tail))
   return tail ? `${header}\n${tail}` : header
 }

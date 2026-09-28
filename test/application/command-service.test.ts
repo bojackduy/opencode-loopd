@@ -210,13 +210,48 @@ describe("CommandService owner-exit notification (the missing hop: no goal/await
     expect(after!.ownerNotifiedAt).toBeDefined()
   })
 
-  it("auto: a quick zero-exit success stays silent", async () => {
+  it("default: a quick zero-exit success notifies its owner", async () => {
     const { svc, calls } = svcWithNotify()
     await svc.start(dir, { title: "quick", command: "true", ownerSessionID: "owner-1" })
     const proc = [...host.procs.values()].at(-1)!
     proc.emitExit({ exitCode: 0 })
     await new Promise((r) => setTimeout(r, 25))
-    expect(calls).toHaveLength(0)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.message).toContain("exitCode=0")
+  })
+
+  it("never injects raw PTY escape/control bytes into an owner prompt", async () => {
+    const { svc, calls } = svcWithNotify()
+    const s = await svc.start(dir, { title: "dev", command: "vite", ownerSessionID: "owner-1" })
+    const proc = [...host.procs.values()].at(-1)!
+    proc.emitOutput("\u001b[1;1H\u001b[0J10:24:40 [vite] hmr update\r\n\u001b]0;window title\u0007")
+    proc.emitExit({ exitCode: 0 })
+    await new Promise((r) => setTimeout(r, 50))
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.message).toContain("[vite] hmr update")
+    expect(calls[0]!.message).not.toMatch(/[\u001b\u0007\r]/)
+    const raw = await svc.read(dir, s.id, "owner-1")
+    expect(raw!.text).toContain("\u001b[1;1H") // terminal replay stays raw
+  })
+
+  it("does not mark a rejected prompt delivered; reconciles and retries once", async () => {
+    let attempts = 0
+    const svc = createCommandService(host, {
+      onOwnerNotify: async () => ++attempts > 1,
+    })
+    const s = await svc.start(dir, { title: "compile", command: "true", ownerSessionID: "owner-1" })
+    const proc = [...host.procs.values()].at(-1)!
+    proc.emitExit({ exitCode: 0 })
+    await new Promise((r) => setTimeout(r, 50))
+    expect(attempts).toBe(1)
+    expect((await svc.get(dir, s.id, "owner-1"))!.ownerNotifiedAt).toBeUndefined()
+    const fresh = createCommandService(createFakeCommandHost(), { onOwnerNotify: async () => { attempts++; return true } })
+    await fresh.reconcile(dir)
+    expect(attempts).toBe(2)
+    expect((await fresh.get(dir, s.id, "owner-1"))!.ownerNotifiedAt).toBeDefined()
+    await fresh.reconcile(dir)
+    expect(attempts).toBe(2)
+    await svc.dispose(dir)
   })
 
   it("notify_on_exit: true overrides auto and always notifies, even a quick success", async () => {

@@ -2,6 +2,19 @@ import { describe, expect, it } from "bun:test"
 import { createRealHost, parseModelRef } from "../../src/server/host-adapter"
 
 describe("Real Host Adapter", () => {
+  it("reports rejected owner prompts as failures and permits a retry", async () => {
+    let calls = 0
+    const host = createRealHost({ session: {
+      promptAsync: async () => {
+        calls++
+        return calls === 1 ? { error: { message: "busy" } } : { data: {} }
+      },
+      get: async () => ({ data: { agent: "build" } }),
+    } }, "/tmp/loopd-host-test")
+    expect(await host.notifyOwner("retry-owner", "unique command-exit retry test")).toBe(false)
+    expect(await host.notifyOwner("retry-owner", "unique command-exit retry test")).toBe(true)
+    expect(calls).toBe(2)
+  })
   it("returns the created worker session ID", async () => {
     const host = createRealHost({
       session: {

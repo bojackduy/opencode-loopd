@@ -37,6 +37,7 @@ import { isTerminalCommandStatus, formatAwaitEvidence } from "../domain/command-
 import type { CommandHost, CommandProcessHandle } from "../server/command-host"
 import { utf8ByteLength, type CommandStreamMessage } from "../domain/command-events"
 import type { CommandEventBroker } from "./command-event-broker"
+import { logServerEvent } from "../infrastructure/server-log"
 import { clearAwaitsForCommand, fireCommandAwaits, fireUntilAwaits, readBoundedTail, type FiredAwait } from "./command-await"
 import {
   appendCommandLog,
@@ -54,7 +55,7 @@ export interface CommandStartInput {
   cwd?: string
   ownerSessionID: string
   goalID?: string
-  /** Owner-exit-notification policy. Undefined = auto (see shouldNotifyOwnerOnExit). */
+  /** Owner-exit-notification policy. Omitted = notify on exit (including success). */
   notifyOnExit?: boolean
   cols?: number
   rows?: number
@@ -212,7 +213,7 @@ export function createCommandService(
      * no linked goal and no await still reaches the owner here. Defaults to
      * a no-op — the exactly-once marker is still set either way.
      */
-    onOwnerNotify?: (directory: string, ownerSessionID: string, message: string) => Promise<void>
+    onOwnerNotify?: (directory: string, ownerSessionID: string, message: string) => Promise<boolean | void>
     /**
      * M2 watch pushes: coalesced `[watch "<title>"]` matched-lines messages,
      * flood/budget suspension notices, and until-match notices. Same channel
@@ -240,6 +241,29 @@ export function createCommandService(
   // honestly marks overdue commands missing instead of reviving a deadline.
   const timeouts = new Map<string, ReturnType<typeof setTimeout>>()
   const timeoutOwners = new Map<string, { directory: string; ownerSessionID: string }>()
+  const notifyInFlight = new Set<string>()
+  const notifyRetries = new Map<string, ReturnType<typeof setTimeout>>()
+  const notifyAttempts = new Map<string, number>()
+
+  function clearNotifyRetry(id: string): void {
+    const timer = notifyRetries.get(id)
+    if (timer) clearTimeout(timer)
+    notifyRetries.delete(id)
+    notifyAttempts.delete(id)
+  }
+
+  function retryOwnerNotification(directory: string, id: string): void {
+    const attempt = (notifyAttempts.get(id) ?? 0) + 1
+    notifyAttempts.set(id, attempt)
+    // Reconciliation retries any still-unnotified command after a restart.
+    if (attempt > 3 || notifyRetries.has(id)) return
+    const timer = setTimeout(() => {
+      notifyRetries.delete(id)
+      void notifyOwnerIfNeeded(directory, id)
+    }, 1000 * 2 ** (attempt - 1))
+    timer.unref?.()
+    notifyRetries.set(id, timer)
+  }
   // ─── M2 watch runtime (in-memory only) ───────────────────────────────────
   // Watchers never survive restart (commands don't either); the persisted
   // watchFilter/watchUntil/watchState fields are the durable half. Coalesce
@@ -431,26 +455,20 @@ export function createCommandService(
   }
 
   /**
-   * Owner-exit notification: independent of awaits/goal-linkage. Claims the
-   * exactly-once `ownerNotifiedAt` marker atomically (same terminal-claim
-   * pattern as terminate()), then delivers a bounded-tail evidence message.
+   * Owner-exit notification: independent of awaits/goal-linkage. Record the
+   * `ownerNotifiedAt` marker only AFTER the host accepts the prompt. A failed
+   * delivery stays pending for retry/reconciliation rather than pretending
+   * success. The in-memory guard prevents concurrent terminal paths from
+   * sending the same command twice.
    * A command with zero awaits and no goal still reaches the owner here —
    * this is the edge that was previously silent (dashboard-only).
    */
   async function notifyOwnerIfNeeded(directory: string, id: string): Promise<void> {
+    if (!opts?.onOwnerNotify || notifyInFlight.has(id)) return
+    notifyInFlight.add(id)
     try {
-      let target: CommandSession | undefined
-      await mutateState(directory, `cmd.notify-claim:${id}`, async (s) => {
-        const c = (s.commands ?? []).find((x) => x.id === id)
-        if (!c) return s
-        if (c.ownerNotifiedAt) return s
-        if (!isTerminalCommandStatus(c.status)) return s
-        if (!shouldNotifyOwnerOnExit(c)) return s
-        c.ownerNotifiedAt = new Date().toISOString()
-        target = { ...c }
-        return s
-      })
-      if (!target) return
+      const target = (await readState(directory)).commands?.find((c) => c.id === id)
+      if (!target || target.ownerNotifiedAt || !isTerminalCommandStatus(target.status) || !shouldNotifyOwnerOnExit(target)) return
       const tail = await readBoundedTail(directory, id)
       const message = formatAwaitEvidence({
         title: target.title,
@@ -461,9 +479,22 @@ export function createCommandService(
         signal: target.signal,
         tail,
       })
-      await opts?.onOwnerNotify?.(directory, target.ownerSessionID, message)
-    } catch {
-      // Notify delivery never breaks command persistence.
+      const accepted = await opts.onOwnerNotify(directory, target.ownerSessionID, message)
+      if (accepted === false) throw new Error("host did not accept owner prompt")
+      await mutateState(directory, `cmd.notify-delivered:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id)
+        if (c && !c.ownerNotifiedAt) c.ownerNotifiedAt = new Date().toISOString()
+        return s
+      })
+      clearNotifyRetry(id)
+    } catch (error) {
+      await logServerEvent(directory, "command.owner-notify-failed", {
+        commandID: id,
+        detail: error instanceof Error ? error.message : String(error),
+      }).catch(() => {})
+      retryOwnerNotification(directory, id)
+    } finally {
+      notifyInFlight.delete(id)
     }
   }
 
@@ -947,6 +978,9 @@ export function createCommandService(
         ownerSessionID: input.ownerSessionID,
         goalID: input.goalID,
         notifyOnExit: input.notifyOnExit,
+        // Preserve explicit notifyOnExit:true semantics for termination;
+        // new default includes quick exit-0 without replaying legacy records.
+        notifySuccessfulExit: true,
         pid: handle.pid,
         cols: input.cols,
         rows: input.rows,
@@ -1378,6 +1412,7 @@ export function createCommandService(
       if (session.status === "running") {
         return { ok: false, message: `Command "${session.title}" is still running — terminate it first (terminate ≠ remove).` }
       }
+      clearNotifyRetry(id)
       deleteWatch(id)
       // Capture pre-delete metadata for the post-persistence status emit.
       const lastKnown = { ...session }
@@ -1483,7 +1518,13 @@ export function createCommandService(
       for (const c of cmds) rememberDir(c.id, directory)
       let markedMissing = 0
       for (const c of cmds) {
-        if (c.status !== "running") continue
+        if (c.status !== "running") {
+          // A failed owner prompt remains pending in persisted state. Retry
+          // after a server restart; don't replay legacy terminal records
+          // that predate the explicit default-notify policy.
+          if ((c.notifySuccessfulExit === true || c.notifyOnExit === true) && !c.ownerNotifiedAt) await notifyOwnerIfNeeded(directory, c.id)
+          continue
+        }
         const entry = live.get(c.id)
         if (entry) {
           if (!entry.handle.isAlive()) {
@@ -1549,6 +1590,7 @@ export function createCommandService(
     },
 
     async dispose(directory) {
+      for (const id of [...notifyRetries.keys()]) clearNotifyRetry(id)
       for (const id of [...watchTimers.keys()]) clearWatchTimer(id)
       watchers.clear()
       awaitAsm.clear()
@@ -1569,6 +1611,7 @@ export function createCommandService(
         live.delete(id)
       }))
       for (const id of [...timeouts.keys()]) clearCommandTimeout(id)
+      for (const id of [...notifyRetries.keys()]) clearNotifyRetry(id)
     },
   }
 

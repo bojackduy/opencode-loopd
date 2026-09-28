@@ -204,7 +204,7 @@ Owner-side equivalents of TUI `:force` / `:block`. Bypass checks — use only wh
 
 ## Command Sessions (Standalone Interactive Processes)
 
-A **command session** is a raw OS process (spawned via `bun-pty`, falling back to a plain pipe) — no agent, no turns, no checks. It is completely independent from goals: starting/stopping one never pauses, blocks, or completes any goal, and vice versa. Use it whenever the request is "run X and let me watch/type into it" rather than "figure out/build X".
+A **command session** is a raw OS process (spawned via `bun-pty`, falling back to a plain pipe) — no agent, no turns, no checks. It is completely independent from goals: starting/stopping one never pauses, blocks, or completes any goal, and vice versa. Use it whenever the request is "run X and let me watch/type into it" rather than "figure out/build X". By default, natural exits (including code 0), timeouts, and missing processes notify the owner; manual termination stays silent. Notification tails are sanitized for chat, while the retained terminal log remains raw. A finished command can still be opened to read its saved output; Ctrl+C/input cannot affect it.
 
 Typical uses: dev servers (`npm run dev`), watch mode (`npm test -- --watch`), REPLs (`python3`, `node`), log tails (`tail -f`), one-off scripts, interactive shells.
 
@@ -403,7 +403,7 @@ Open the shared dashboard with `/loop` (or `<leader>o`) — focuses the **Goals*
 | bare text + Enter | Write that line as stdin to the selected command | `loopd_command_write` |
 | `q` | Detach (view closes; command keeps running) | — |
 
-Inside the **fullscreen terminal page** (reached via `o`): every keystroke forwards immediately as raw input (no line-submit box), `Ctrl+C` is interrupt input to the process. `Ctrl+]` is a tmux-style prefix (single keys can't be helpers here — typing `x` must type `x`): `Ctrl+],x` force-kills (stay on the dead log), `Ctrl+],r` restarts (detaches to the list with the new command), `Ctrl+],q` (or another `Ctrl+]`) detaches back to where you came from without stopping the process. Anything else (or 1.5s of silence) cancels the prefix and the key forwards as input — no keystroke is ever swallowed.
+Inside the **fullscreen terminal page** (reached via `o`): every keystroke forwards immediately as raw input (no line-submit box), `Ctrl+C` is interrupt input to the process, `Ctrl+]` detaches back to where you came from without stopping the process. Press `?` on the Commands tab to see force-kill, restart, and removal shortcuts before opening the terminal.
 
 **Scrolling:** both lists are a `<scrollbox>` capped at 10 rows — short lists sit compact with no gap, long lists scroll and follow `j`/`k`/`g`/`G` via `scrollChildIntoView`. Detail + input stay pinned below in both cases. Empty list shows the fallback tip.
 

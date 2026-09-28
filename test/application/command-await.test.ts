@@ -11,7 +11,7 @@ import {
   wakeGoalForAwait,
   type FiredAwait,
 } from "../../src/application/command-await"
-import { MAX_AWAIT_TAIL_BYTES } from "../../src/domain/command-await"
+import { MAX_AWAIT_TAIL_BYTES, safeCommandText, formatAwaitEvidence } from "../../src/domain/command-await"
 import {
   mutateState,
   peekGoalInbox,
@@ -33,6 +33,20 @@ async function waitFor(cond: () => Promise<boolean> | boolean, timeoutMs = 5000)
     await new Promise((r) => setTimeout(r, 10))
   }
 }
+
+describe("PTY evidence safety", () => {
+  it("strips cursor control, OSC titles and C0 codes without altering the stored log", () => {
+    const raw = "\x1b[1;1H\x1b[0J[vite] hmr update\r\n\x1b]0;title\x07done\x00"
+    expect(safeCommandText(raw)).toBe("[vite] hmr update\ndone")
+    expect(raw).toContain("\x1b[0J")
+    const evidence = formatAwaitEvidence({
+      title: "\x1b[31mdev\x1b[0m", argv: ["npm", "run", "dev"],
+      commandID: "12345678", status: "exited", exitCode: 0, tail: raw,
+    })
+    expect(evidence).toContain("[vite] hmr update")
+    expect(evidence).not.toMatch(/[\x00-\x09\x0b-\x1f\x7f-\x9f]/) // LF is allowed
+  })
+})
 
 describe("Command await (opt-in goal wake on exit)", () => {
   let dir: string

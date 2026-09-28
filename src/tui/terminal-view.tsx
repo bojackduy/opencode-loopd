@@ -25,7 +25,7 @@ import {
   type TerminalSessionOptions,
   type TerminalSessionSnapshot,
 } from "./terminal-session"
-import { encodeTerminalKey, isDetachChord, isInterruptChord, resolvePrefixKey, type TerminalKeyEvent } from "./terminal-keys"
+import { encodeTerminalKey, isDetachChord, isInterruptChord, type TerminalKeyEvent } from "./terminal-keys"
 import type { ScreenCell } from "./terminal-screen"
 
 /** Namespaced input mode pushed while the fullscreen terminal is mounted. */
@@ -212,7 +212,6 @@ export function TerminalView(props: Props) {
   })
 
   onCleanup(() => {
-    clearPrefix()
     if (measureTimer) clearInterval(measureTimer)
     measureTimer = undefined
     viewportEl = undefined
@@ -224,66 +223,23 @@ export function TerminalView(props: Props) {
     session.dispose()
   })
 
-  // tmux-style Ctrl+] prefix: the chord arms local actions instead of
-  // detaching immediately (single keys can't be helpers here — typing "x"
-  // must type x). x = force kill (stay on the dead log), r = restart
-  // (detach to the list, where the new command appears), q/]/esc = detach
-  // (unchanged), timeout or any other key = cancel prefix, forward input.
-  let prefixTimer: ReturnType<typeof setTimeout> | undefined
-  const [prefixPending, setPrefixPending] = createSignal(false)
-  const [notice, setNotice] = createSignal("")
-  function clearPrefix() {
-    if (prefixTimer) clearTimeout(prefixTimer)
-    prefixTimer = undefined
-    setPrefixPending(false)
-  }
-
   useKeyboard((evt: ParsedKey) => {
     if (isDetachChord(toKeyEvent(evt))) {
       prevent(evt)
-      clearPrefix()
-      setPrefixPending(true)
-      setNotice("")
-      prefixTimer = setTimeout(() => {
-        prefixTimer = undefined
-        setPrefixPending(false)
-      }, 1500)
+      session.detach()
       return
-    }
-    if (prefixPending()) {
-      clearPrefix()
-      const action = resolvePrefixKey(toKeyEvent(evt))
-      if (action === "kill") {
-        prevent(evt)
-        session.kill()
-        setNotice("SIGKILL sent — staying on the log.")
-        return
-      }
-      if (action === "restart") {
-        prevent(evt)
-        setNotice("Restarting…")
-        void session.restart().then((message) => {
-          setNotice(message)
-          if (!message.startsWith("Restart failed")) session.detach()
-        })
-        return
-      }
-      if (action === "detach") {
-        prevent(evt)
-        session.detach()
-        return
-      }
-      // "forward": fall through to normal input below (prefix cancelled).
     }
     if (isInterruptChord(toKeyEvent(evt))) {
       // Ctrl+C is interrupt INPUT to the PTY — prevent it from closing OpenCode.
       prevent(evt)
+      if (view()?.command && view()?.command?.status !== "running") return
       session.interrupt()
       return
     }
     const bytes = encodeTerminalKey(toKeyEvent(evt))
     if (bytes !== undefined) {
       prevent(evt)
+      if (view()?.command && view()?.command?.status !== "running") return
       session.writeInput(bytes)
     }
   })
@@ -296,6 +252,7 @@ export function TerminalView(props: Props) {
   })
 
   const cmd = () => view()?.command
+  const processRunning = () => cmd()?.status === "running" && view()?.live === true
   const dims = () => {
     const v = view()
     if (!v) return `${TERMINAL_FALLBACK_COLS}x${TERMINAL_FALLBACK_ROWS}`
@@ -312,7 +269,7 @@ export function TerminalView(props: Props) {
             <span style={{ fg: theme().textMuted }}> │ {[cmd()!.command, ...cmd()!.args].join(" ")} │ {cmd()!.status}{cmd()!.exitCode !== undefined ? ` (${cmd()!.exitCode})` : ""}</span>
           </Show>
           <span style={{ fg: theme().textMuted }}> │ </span>
-          <span style={{ fg: view()?.connection === "stream" ? theme().success : view()?.connection === "polling" ? theme().warning : theme().error }}>
+          <span style={{ fg: cmd() && !processRunning() ? theme().warning : view()?.connection === "stream" ? theme().success : view()?.connection === "polling" ? theme().warning : theme().error }}>
             {view()?.connectionDetail ?? "connecting…"}
           </span>
           <Show when={(view()?.activeBuffer ?? "normal") === "alternate"}>
@@ -320,7 +277,7 @@ export function TerminalView(props: Props) {
           </Show>
         </text>
         <text>
-          <span style={{ fg: theme().textMuted }}>{dims()}{view()?.live ? " · live" : ""}</span>
+          <span style={{ fg: theme().textMuted }}>{dims()}{processRunning() ? " · live" : ""}</span>
         </text>
       </box>
 
@@ -331,6 +288,12 @@ export function TerminalView(props: Props) {
             <span style={{ fg: theme().error, bold: true }}>Invalid terminal route: {view()?.invalid}</span>
             <span style={{ fg: theme().textMuted }}>{"\n"}Press Ctrl+] to go back. Nothing was subscribed or written.</span>
           </text>
+        </box>
+      </Show>
+
+      <Show when={cmd() && !processRunning()}>
+        <box border={true} borderColor={theme().warning} paddingLeft={1} paddingRight={1} flexShrink={0}>
+          <text><span style={{ fg: theme().warning, bold: true }}>PROCESS {cmd()!.status.toUpperCase()}{cmd()!.exitCode !== undefined ? ` (exit ${cmd()!.exitCode})` : ""} — saved output only. Ctrl+C/input cannot affect it; Ctrl+] returns to Commands.</span></text>
         </box>
       </Show>
 
@@ -356,7 +319,7 @@ export function TerminalView(props: Props) {
             </text>
           }
         >
-          <For each={buildTerminalRows(view()!.rows, view()!.cols, view()!.viewportRows, view()!.cursor)}>
+          <For each={buildTerminalRows(view()!.rows, view()!.cols, view()!.viewportRows, { ...view()!.cursor, visible: processRunning() && view()!.cursor.visible })}>
             {(runs) => (
               <text wrapMode="none" truncate={true}>
                 <For each={runs}>
@@ -394,15 +357,11 @@ export function TerminalView(props: Props) {
       {/* Footer — controls + dimensions */}
       <box flexDirection="row" justifyContent="space-between" flexShrink={0}>
         <text>
-          <span style={{ fg: theme().textMuted }}>type to write · </span>
+          <span style={{ fg: theme().textMuted }}>{processRunning() ? "type to write · " : "saved log · "}</span>
           <span style={{ fg: theme().warning, bold: true }}>Ctrl+C</span>
           <span style={{ fg: theme().textMuted }}> interrupt · </span>
-          {prefixPending() ? (
-            <span style={{ fg: theme().warning, bold: true }}>Ctrl+] x kill · r restart · q detach</span>
-          ) : (
-            <span style={{ fg: theme().textMuted }}>Ctrl+],q detach (keeps running)</span>
-          )}
-          {notice() && <span style={{ fg: theme().text }}> · {notice()}</span>}
+          <span style={{ fg: theme().warning, bold: true }}>Ctrl+]</span>
+          <span style={{ fg: theme().textMuted }}> detach (keeps running)</span>
         </text>
         <text>
           <span style={{ fg: theme().textMuted }}>{dims()} · {view()?.totalBytes ?? 0} bytes</span>

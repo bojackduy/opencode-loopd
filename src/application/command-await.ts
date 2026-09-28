@@ -17,6 +17,7 @@ import type { CommandSession } from "../domain/command-session"
 import {
   MAX_AWAIT_TAIL_BYTES,
   formatAwaitEvidence,
+  safeCommandText,
   isTerminalCommandStatus,
   tailLastBytes,
   type CommandAwait,
@@ -307,11 +308,11 @@ export async function fireUntilAwaits(
     }
     const short = commandID.slice(0, 8)
     const header =
-      `[command "${cmd.title}" (${[cmd.command, ...cmd.args].join(" ") || cmd.title}) ${cmd.status}` +
-      ` ${short}... watch-until "${pattern}" matched]`
-    const matchedText = tailLastBytes(matched.slice(0, 20).join("\n"), MAX_AWAIT_TAIL_BYTES)
+      `[command "${safeCommandText(cmd.title)}" (${safeCommandText([cmd.command, ...cmd.args].join(" ") || cmd.title)}) ${cmd.status}` +
+      ` ${short}... watch-until "${safeCommandText(pattern)}" matched]`
+    const matchedText = tailLastBytes(safeCommandText(matched.slice(0, 20).join("\n")), MAX_AWAIT_TAIL_BYTES)
     const evidence = tail
-      ? `${header}\n${matchedText}\n--- tail ---\n${tail}`
+      ? `${header}\n${matchedText}\n--- tail ---\n${tailLastBytes(safeCommandText(tail))}`
       : `${header}\n${matchedText}`
     await appendGoalInbox(directory, a.goalID, "worker", evidence)
     await appendEvent(directory, ledgerEvent({

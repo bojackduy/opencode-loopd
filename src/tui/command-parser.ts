@@ -83,7 +83,7 @@ function tokenize(input: string): string[] {
 export function commandHelp(): string {
   return [
     "Modes: : insert → send/commands | Ctrl+N → normal | ? toggle help | Shift+B bug report",
-    "Nav: j/k move | g/G top/bottom | o open child | c toggle done | p/r/R/x pause/resume/retry/clear (Goals) · X kill/R restart/x remove-done (Commands) | A abort worker | N nudge | L logs | q close",
+    "Nav: j/k move | g/G top/bottom | o open child | c toggle done | p/r/R/x pause/resume/retry/clear | A abort worker | N nudge | L logs | q close",
     "Goal (ownership): Active=loopd owns it | Blocked/Paused=needs you | Out of budget=resume to spend | Waiting for capacity=auto-resumes | Done=verified",
     "Worker (activity now): Running=acting now | Idle=between turns | Retrying=backing off | Queued/Compacting/Stopping=transitional",
     "Commands (insert mode, : prefix):",
@@ -97,5 +97,20 @@ export function commandHelp(): string {
     "  :bug / :report                            Open prefilled GitHub bug report",
     "  :logs / :help / :q                        Toggle logs / help / close",
     "  Tip: create goals via /goal in the parent chat (agent clarifies first).",
+  ].join("\n")
+}
+
+export function commandTabHelp(): string {
+  return [
+    "Nav: j/k select | o fullscreen | q close",
+    "Commands tab (selected command only):",
+    "  Ctrl+C / :interrupt  Send SIGINT",
+    "  :terminate           Graceful stop (SIGTERM→SIGKILL)",
+    "  X / :kill            Force kill now (SIGKILL)",
+    "  R / :restart         Restart; old log retained",
+    "  x / :remove          Remove finished command + log",
+    "  :new <cmd> [args]    Start (quoted args supported)",
+    "  bare text + Enter    Write stdin line",
+    "  ? toggle help | : insert | Ctrl+N normal",
   ].join("\n")
 }
