@@ -76,6 +76,14 @@ export interface TerminalSession {
   paste(text: string): void
   /** SIGINT delivery, never a kill. */
   interrupt(): void
+  /** SIGKILL now via the control bus (fire-and-forget; the view stays on the dead log). */
+  kill(): void
+  /**
+   * Restart via the control bus (terminate + respawn same spec, new ID).
+   * Resolves to the response message (names the new command) or an error
+   * summary — the caller decides whether to stay or detach.
+   */
+  restart(): Promise<string>
   /** Local detach: unsubscribe + cleanup, NEVER terminate. Then onDetach. */
   detach(): void
   /** Viewport-measured size; debounced to emulator + real PTY winsize. */
@@ -390,6 +398,30 @@ export function createTerminalSession(options: TerminalSessionOptions): Terminal
       .catch(() => {})
   }
 
+  function kill(): void {
+    if (disposed || !data) return
+    if (connection === "error") return
+    // No stream equivalent — SIGKILL always goes over the control bus.
+    void control
+      .executeRaw({ command: "cmd_kill", goalID: data.commandID, args: { commandID: data.commandID, ownerSessionID: data.ownerSessionID } })
+      .catch(() => {})
+  }
+
+  async function restart(): Promise<string> {
+    if (disposed || !data) return "No command (view closed)."
+    if (connection === "error") return "Refused: command not owned by this session."
+    try {
+      const r = await control.executeRaw({
+        command: "cmd_restart",
+        goalID: data.commandID,
+        args: { commandID: data.commandID, ownerSessionID: data.ownerSessionID },
+      })
+      return r.ok ? r.message : `Restart failed: ${r.message}`
+    } catch (error) {
+      return `Restart failed: ${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+
   function applyResize(cols: number, rows: number): void {
     if (disposed || !data) return
     appliedSize = { cols, rows }
@@ -502,6 +534,8 @@ export function createTerminalSession(options: TerminalSessionOptions): Terminal
     writeInput,
     paste,
     interrupt,
+    kill,
+    restart,
     detach,
     requestViewportSize,
     get appliedSize() {

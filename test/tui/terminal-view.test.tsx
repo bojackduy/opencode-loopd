@@ -77,6 +77,9 @@ interface FakeDriver {
   inputs: string[]
   pastes: string[]
   interrupts: number
+  kills: number
+  restarts: number
+  restartMessage: string
   detaches: number
   starts: number
   resizes: Array<{ cols: number; rows: number }>
@@ -90,6 +93,9 @@ function makeFakeDriver(): FakeDriver & { create: (opts: TerminalSessionOptions)
     inputs: [],
     pastes: [],
     interrupts: 0,
+    kills: 0,
+    restarts: 0,
+    restartMessage: "restarted",
     detaches: 0,
     starts: 0,
     resizes: [],
@@ -113,6 +119,13 @@ function makeFakeDriver(): FakeDriver & { create: (opts: TerminalSessionOptions)
     },
     interrupt: () => {
       fake.interrupts += 1
+    },
+    kill: () => {
+      fake.kills += 1
+    },
+    restart: async () => {
+      fake.restarts += 1
+      return fake.restartMessage
     },
     detach: () => {
       fake.detaches += 1
@@ -194,7 +207,7 @@ describe("TerminalView (mounted)", () => {
     expect(frame).toContain("Ctrl+]")
     // Footer wraps at full width ("...keeps running20x6..."), so assert the
     // fragments separately.
-    expect(frame).toContain("detach (keeps running")
+    expect(frame).toContain("Ctrl+],q detach")
     expect(frame).toContain("20x6")
     setup.renderer.destroy()
   })
@@ -229,7 +242,7 @@ describe("TerminalView (mounted)", () => {
     setup.renderer.destroy()
   })
 
-  it("Ctrl+] detaches and never interrupts or terminates", async () => {
+  it("Ctrl+] arms the prefix (no detach yet); q detaches, nothing forwarded", async () => {
     const fake = makeFakeDriver()
     const { setup, detached } = await renderView(
       { commandID: "cmd-1", ownerSessionID: "owner-1", returnSessionID: "s" },
@@ -238,12 +251,79 @@ describe("TerminalView (mounted)", () => {
     fake.emit(snapshot())
     await setup.flush()
     setup.mockInput.pressKey("]", { ctrl: true })
+    await setup.mockInput.pressKeys(["q"])
     await setup.waitFor(() => fake.detaches === 1)
     expect(fake.interrupts).toBe(0)
+    expect(fake.kills).toBe(0)
     expect(fake.inputs).toEqual([])
     expect(detached.count).toBe(1)
-    // Detach-not-terminate: the fake driver exposes no terminate path at
-    // all; the headless session test asserts cmd_terminate is never sent.
+    setup.renderer.destroy()
+  })
+
+  it("Ctrl+],x force-kills and stays on the page", async () => {
+    const fake = makeFakeDriver()
+    const { setup, detached } = await renderView(
+      { commandID: "cmd-1", ownerSessionID: "owner-1", returnSessionID: "s" },
+      fake,
+    )
+    fake.emit(snapshot())
+    await setup.flush()
+    setup.mockInput.pressKey("]", { ctrl: true })
+    await setup.mockInput.pressKeys(["x"])
+    await setup.waitFor(() => fake.kills === 1)
+    expect(detached.count).toBe(0)
+    expect(fake.interrupts).toBe(0)
+    expect(fake.inputs).toEqual([])
+    setup.renderer.destroy()
+  })
+
+  it("Ctrl+],r restarts then detaches to the list", async () => {
+    const fake = makeFakeDriver()
+    const { setup, detached } = await renderView(
+      { commandID: "cmd-1", ownerSessionID: "owner-1", returnSessionID: "s" },
+      fake,
+    )
+    fake.emit(snapshot())
+    await setup.flush()
+    setup.mockInput.pressKey("]", { ctrl: true })
+    await setup.mockInput.pressKeys(["r"])
+    await setup.waitFor(() => fake.restarts === 1)
+    await setup.waitFor(() => detached.count === 1)
+    expect(fake.kills).toBe(0)
+    setup.renderer.destroy()
+  })
+
+  it("failed restart stays on the page (no silent detach)", async () => {
+    const fake = makeFakeDriver()
+    fake.restartMessage = "Restart failed: boom"
+    const { setup, detached } = await renderView(
+      { commandID: "cmd-1", ownerSessionID: "owner-1", returnSessionID: "s" },
+      fake,
+    )
+    fake.emit(snapshot())
+    await setup.flush()
+    setup.mockInput.pressKey("]", { ctrl: true })
+    await setup.mockInput.pressKeys(["r"])
+    await setup.waitFor(() => fake.restarts === 1)
+    await new Promise((r) => setTimeout(r, 100))
+    expect(detached.count).toBe(0)
+    setup.renderer.destroy()
+  })
+
+  it("unrecognized prefix key forwards as input (never swallowed)", async () => {
+    const fake = makeFakeDriver()
+    const { setup, detached } = await renderView(
+      { commandID: "cmd-1", ownerSessionID: "owner-1", returnSessionID: "s" },
+      fake,
+    )
+    fake.emit(snapshot())
+    await setup.flush()
+    setup.mockInput.pressKey("]", { ctrl: true })
+    await setup.mockInput.pressKeys(["a"])
+    await setup.waitFor(() => fake.inputs.join("") === "a")
+    expect(fake.inputs).toEqual(["a"])
+    expect(detached.count).toBe(0)
+    expect(fake.kills).toBe(0)
     setup.renderer.destroy()
   })
 

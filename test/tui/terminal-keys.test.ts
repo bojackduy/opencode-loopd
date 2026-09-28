@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { encodeTerminalKey, isDetachChord, isInterruptChord } from "../../src/tui/terminal-keys"
+import { encodeTerminalKey, isDetachChord, isInterruptChord, resolvePrefixKey } from "../../src/tui/terminal-keys"
 
 describe("encodeTerminalKey", () => {
   test("releases are ignored", () => {
@@ -82,5 +82,28 @@ describe("encodeTerminalKey", () => {
     expect(encodeTerminalKey({ name: "up", source: "kitty" })).toBe("\x1b[A")
     expect(encodeTerminalKey({ name: "f1", sequence: "\x1bOP", source: "kitty" })).toBeUndefined()
     expect(encodeTerminalKey({ name: "b", text: "b", option: true })).toBe("\x1bb")
+  })
+})
+
+describe("resolvePrefixKey (Ctrl+] prefix on the fullscreen page)", () => {
+  test("x kills, r restarts (case-insensitive, text or name)", () => {
+    expect(resolvePrefixKey({ name: "x", text: "x" })).toBe("kill")
+    expect(resolvePrefixKey({ name: "X", text: "X", shift: true })).toBe("kill")
+    expect(resolvePrefixKey({ name: "r", text: "r" })).toBe("restart")
+    expect(resolvePrefixKey({ name: "R", text: "R", shift: true })).toBe("restart")
+  })
+
+  test("q / ] / escape detach (unchanged default)", () => {
+    expect(resolvePrefixKey({ name: "q", text: "q" })).toBe("detach")
+    expect(resolvePrefixKey({ name: "]", text: "]", ctrl: true })).toBe("detach")
+    expect(resolvePrefixKey({ name: "escape" })).toBe("detach")
+    expect(resolvePrefixKey({ name: "esc" })).toBe("detach")
+  })
+
+  test("everything else forwards (no keystroke swallowed)", () => {
+    expect(resolvePrefixKey({ name: "a", text: "a" })).toBe("forward")
+    expect(resolvePrefixKey({ name: "return" })).toBe("forward")
+    expect(resolvePrefixKey({ name: "up" })).toBe("forward")
+    expect(resolvePrefixKey({ name: "c", text: "c", ctrl: true })).toBe("forward")
   })
 })

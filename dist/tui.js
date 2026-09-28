@@ -11288,6 +11288,29 @@ function createTerminalSession(options) {
       return;
     control.executeRaw({ command: "cmd_interrupt", goalID: data.commandID, args: { commandID: data.commandID, ownerSessionID: data.ownerSessionID } }).catch(() => {});
   }
+  function kill() {
+    if (disposed || !data)
+      return;
+    if (connection === "error")
+      return;
+    control.executeRaw({ command: "cmd_kill", goalID: data.commandID, args: { commandID: data.commandID, ownerSessionID: data.ownerSessionID } }).catch(() => {});
+  }
+  async function restart() {
+    if (disposed || !data)
+      return "No command (view closed).";
+    if (connection === "error")
+      return "Refused: command not owned by this session.";
+    try {
+      const r = await control.executeRaw({
+        command: "cmd_restart",
+        goalID: data.commandID,
+        args: { commandID: data.commandID, ownerSessionID: data.ownerSessionID }
+      });
+      return r.ok ? r.message : `Restart failed: ${r.message}`;
+    } catch (error) {
+      return `Restart failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
   function applyResize(cols, rows) {
     if (disposed || !data)
       return;
@@ -11401,6 +11424,8 @@ function createTerminalSession(options) {
     writeInput,
     paste,
     interrupt,
+    kill,
+    restart,
     detach,
     requestViewportSize,
     get appliedSize() {
@@ -11426,6 +11451,18 @@ function isInterruptChord(evt) {
   if (!evt.ctrl)
     return false;
   return (evt.name ?? "").toLowerCase() === "c";
+}
+function resolvePrefixKey(evt) {
+  const name = (evt.name ?? "").toLowerCase();
+  const text = (evt.text ?? "").toLowerCase();
+  const ch = text.length === 1 ? text : name.length === 1 ? name : "";
+  if (ch === "x")
+    return "kill";
+  if (ch === "r")
+    return "restart";
+  if (ch === "q" || ch === "]" || name === "escape" || name === "esc")
+    return "detach";
+  return "forward";
 }
 var CSI = "\x1B[";
 function isKittyEncoding(name, sequence) {
@@ -11704,6 +11741,7 @@ function TerminalView(props) {
     measureTimer = setInterval(measureViewport, 1000);
   });
   onCleanup3(() => {
+    clearPrefix();
     if (measureTimer)
       clearInterval(measureTimer);
     measureTimer = undefined;
@@ -11714,11 +11752,51 @@ function TerminalView(props) {
     popTerminalMode = undefined;
     session.dispose();
   });
+  let prefixTimer;
+  const [prefixPending, setPrefixPending] = createSignal3(false);
+  const [notice, setNotice] = createSignal3("");
+  function clearPrefix() {
+    if (prefixTimer)
+      clearTimeout(prefixTimer);
+    prefixTimer = undefined;
+    setPrefixPending(false);
+  }
   useKeyboard3((evt) => {
     if (isDetachChord(toKeyEvent(evt))) {
       prevent3(evt);
-      session.detach();
+      clearPrefix();
+      setPrefixPending(true);
+      setNotice("");
+      prefixTimer = setTimeout(() => {
+        prefixTimer = undefined;
+        setPrefixPending(false);
+      }, 1500);
       return;
+    }
+    if (prefixPending()) {
+      clearPrefix();
+      const action = resolvePrefixKey(toKeyEvent(evt));
+      if (action === "kill") {
+        prevent3(evt);
+        session.kill();
+        setNotice("SIGKILL sent \u2014 staying on the log.");
+        return;
+      }
+      if (action === "restart") {
+        prevent3(evt);
+        setNotice("Restarting\u2026");
+        session.restart().then((message) => {
+          setNotice(message);
+          if (!message.startsWith("Restart failed"))
+            session.detach();
+        });
+        return;
+      }
+      if (action === "detach") {
+        prevent3(evt);
+        session.detach();
+        return;
+      }
     }
     if (isInterruptChord(toKeyEvent(evt))) {
       prevent3(evt);
@@ -11746,7 +11824,7 @@ function TerminalView(props) {
     return `${v.cols}x${v.viewportRows}`;
   };
   return (() => {
-    var _el$ = _$createElement3("box"), _el$2 = _$createElement3("box"), _el$3 = _$createElement3("text"), _el$4 = _$createElement3("span"), _el$5 = _$createTextNode3(`\u2B22 `), _el$9 = _$createElement3("span"), _el$1 = _$createElement3("span"), _el$12 = _$createElement3("text"), _el$13 = _$createElement3("span"), _el$21 = _$createElement3("box"), _el$22 = _$createElement3("box"), _el$23 = _$createElement3("text"), _el$24 = _$createElement3("span"), _el$26 = _$createElement3("span"), _el$28 = _$createElement3("span"), _el$30 = _$createElement3("span"), _el$32 = _$createElement3("span"), _el$34 = _$createElement3("text"), _el$35 = _$createElement3("span"), _el$36 = _$createTextNode3(` \xB7 `), _el$37 = _$createTextNode3(` bytes`);
+    var _el$ = _$createElement3("box"), _el$2 = _$createElement3("box"), _el$3 = _$createElement3("text"), _el$4 = _$createElement3("span"), _el$5 = _$createTextNode3(`\u2B22 `), _el$9 = _$createElement3("span"), _el$1 = _$createElement3("span"), _el$12 = _$createElement3("text"), _el$13 = _$createElement3("span"), _el$21 = _$createElement3("box"), _el$22 = _$createElement3("box"), _el$23 = _$createElement3("text"), _el$24 = _$createElement3("span"), _el$26 = _$createElement3("span"), _el$28 = _$createElement3("span"), _el$30 = _$createElement3("text"), _el$31 = _$createElement3("span"), _el$32 = _$createTextNode3(` \xB7 `), _el$33 = _$createTextNode3(` bytes`);
     _$insertNode3(_el$, _el$2);
     _$insertNode3(_el$, _el$21);
     _$insertNode3(_el$, _el$22);
@@ -11855,13 +11933,13 @@ Press Ctrl+] to go back. Nothing was subscribed or written.`);
       },
       get fallback() {
         return (() => {
-          var _el$38 = _$createElement3("text"), _el$39 = _$createElement3("span");
-          _$insertNode3(_el$38, _el$39);
-          _$insert3(_el$39, () => view()?.invalid ? "" : "(no output yet)");
-          _$effect3((_$p) => _$setProp3(_el$39, "style", {
+          var _el$34 = _$createElement3("text"), _el$35 = _$createElement3("span");
+          _$insertNode3(_el$34, _el$35);
+          _$insert3(_el$35, () => view()?.invalid ? "" : "(no output yet)");
+          _$effect3((_$p) => _$setProp3(_el$35, "style", {
             fg: theme().textMuted
           }, _$p));
-          return _el$38;
+          return _el$34;
         })();
       },
       get children() {
@@ -11870,48 +11948,75 @@ Press Ctrl+] to go back. Nothing was subscribed or written.`);
             return buildTerminalRows(view().rows, view().cols, view().viewportRows, view().cursor);
           },
           children: (runs) => (() => {
-            var _el$40 = _$createElement3("text");
-            _$setProp3(_el$40, "wrapMode", "none");
-            _$setProp3(_el$40, "truncate", true);
-            _$insert3(_el$40, _$createComponent3(For3, {
+            var _el$36 = _$createElement3("text");
+            _$setProp3(_el$36, "wrapMode", "none");
+            _$setProp3(_el$36, "truncate", true);
+            _$insert3(_el$36, _$createComponent3(For3, {
               each: runs,
               children: (run) => (() => {
-                var _el$41 = _$createElement3("span");
-                _$insert3(_el$41, () => run.text);
-                _$effect3((_$p) => _$setProp3(_el$41, "style", {
+                var _el$37 = _$createElement3("span");
+                _$insert3(_el$37, () => run.text);
+                _$effect3((_$p) => _$setProp3(_el$37, "style", {
                   fg: run.cursor ? theme().background : run.inverse ? run.fg ?? theme().background : run.fg ?? theme().text,
                   bg: run.cursor ? theme().primary : run.inverse ? run.bg ?? theme().text : run.bg,
                   bold: run.bold ?? run.cursor,
                   underline: run.underline
                 }, _$p));
-                return _el$41;
+                return _el$37;
               })()
             }));
-            return _el$40;
+            return _el$36;
           })()
         });
       }
     }));
     _$insertNode3(_el$22, _el$23);
-    _$insertNode3(_el$22, _el$34);
+    _$insertNode3(_el$22, _el$30);
     _$setProp3(_el$22, "flexDirection", "row");
     _$setProp3(_el$22, "justifyContent", "space-between");
     _$setProp3(_el$22, "flexShrink", 0);
     _$insertNode3(_el$23, _el$24);
     _$insertNode3(_el$23, _el$26);
     _$insertNode3(_el$23, _el$28);
-    _$insertNode3(_el$23, _el$30);
-    _$insertNode3(_el$23, _el$32);
     _$insertNode3(_el$24, _$createTextNode3(`type to write \xB7 `));
     _$insertNode3(_el$26, _$createTextNode3(`Ctrl+C`));
     _$insertNode3(_el$28, _$createTextNode3(` interrupt \xB7 `));
-    _$insertNode3(_el$30, _$createTextNode3(`Ctrl+]`));
-    _$insertNode3(_el$32, _$createTextNode3(` detach (keeps running)`));
-    _$insertNode3(_el$34, _el$35);
-    _$insertNode3(_el$35, _el$36);
-    _$insertNode3(_el$35, _el$37);
-    _$insert3(_el$35, dims, _el$36);
-    _$insert3(_el$35, () => view()?.totalBytes ?? 0, _el$37);
+    _$insert3(_el$23, (() => {
+      var _c$2 = _$memo3(() => !!prefixPending());
+      return () => _c$2() ? (() => {
+        var _el$38 = _$createElement3("span");
+        _$insertNode3(_el$38, _$createTextNode3(`Ctrl+] x kill \xB7 r restart \xB7 q detach`));
+        _$effect3((_$p) => _$setProp3(_el$38, "style", {
+          fg: theme().warning,
+          bold: true
+        }, _$p));
+        return _el$38;
+      })() : (() => {
+        var _el$40 = _$createElement3("span");
+        _$insertNode3(_el$40, _$createTextNode3(`Ctrl+],q detach (keeps running)`));
+        _$effect3((_$p) => _$setProp3(_el$40, "style", {
+          fg: theme().textMuted
+        }, _$p));
+        return _el$40;
+      })();
+    })(), null);
+    _$insert3(_el$23, (() => {
+      var _c$3 = _$memo3(() => !!notice());
+      return () => _c$3() && (() => {
+        var _el$42 = _$createElement3("span"), _el$43 = _$createTextNode3(` \xB7 `);
+        _$insertNode3(_el$42, _el$43);
+        _$insert3(_el$42, notice, null);
+        _$effect3((_$p) => _$setProp3(_el$42, "style", {
+          fg: theme().text
+        }, _$p));
+        return _el$42;
+      })();
+    })(), null);
+    _$insertNode3(_el$30, _el$31);
+    _$insertNode3(_el$31, _el$32);
+    _$insertNode3(_el$31, _el$33);
+    _$insert3(_el$31, dims, _el$32);
+    _$insert3(_el$31, () => view()?.totalBytes ?? 0, _el$33);
     _$effect3((_p$) => {
       var _v$4 = {
         fg: theme().primary,
@@ -11930,11 +12035,6 @@ Press Ctrl+] to go back. Nothing was subscribed or written.`);
       }, _v$0 = {
         fg: theme().textMuted
       }, _v$1 = {
-        fg: theme().warning,
-        bold: true
-      }, _v$10 = {
-        fg: theme().textMuted
-      }, _v$11 = {
         fg: theme().textMuted
       };
       _v$4 !== _p$.e && (_p$.e = _$setProp3(_el$4, "style", _v$4, _p$.e));
@@ -11944,9 +12044,7 @@ Press Ctrl+] to go back. Nothing was subscribed or written.`);
       _v$8 !== _p$.i && (_p$.i = _$setProp3(_el$24, "style", _v$8, _p$.i));
       _v$9 !== _p$.n && (_p$.n = _$setProp3(_el$26, "style", _v$9, _p$.n));
       _v$0 !== _p$.s && (_p$.s = _$setProp3(_el$28, "style", _v$0, _p$.s));
-      _v$1 !== _p$.h && (_p$.h = _$setProp3(_el$30, "style", _v$1, _p$.h));
-      _v$10 !== _p$.r && (_p$.r = _$setProp3(_el$32, "style", _v$10, _p$.r));
-      _v$11 !== _p$.d && (_p$.d = _$setProp3(_el$35, "style", _v$11, _p$.d));
+      _v$1 !== _p$.h && (_p$.h = _$setProp3(_el$31, "style", _v$1, _p$.h));
       return _p$;
     }, {
       e: undefined,
@@ -11956,9 +12054,7 @@ Press Ctrl+] to go back. Nothing was subscribed or written.`);
       i: undefined,
       n: undefined,
       s: undefined,
-      h: undefined,
-      r: undefined,
-      d: undefined
+      h: undefined
     });
     return _el$;
   })();

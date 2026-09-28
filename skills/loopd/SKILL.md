@@ -397,11 +397,13 @@ Open the shared dashboard with `/loop` (or `<leader>o`) — focuses the **Goals*
 | `:new <command> [args...]` | Start a new command (quoted args preserved) | `loopd_command_start` |
 | `:interrupt` | SIGINT the selected command | `loopd_command_interrupt` |
 | `:terminate` | SIGTERM→SIGKILL the selected command | `loopd_command_terminate` |
+| `:kill` | SIGKILL now, no grace (same as `X`) | — (no agent equivalent; agents use `loopd_command_terminate`) |
+| `:restart` | Stop + respawn same spec, new ID (same as `R`) | — (no agent equivalent) |
 | `:remove` | Delete a finished command's record + log | `loopd_command_remove` |
 | bare text + Enter | Write that line as stdin to the selected command | `loopd_command_write` |
 | `q` | Detach (view closes; command keeps running) | — |
 
-Inside the **fullscreen terminal page** (reached via `o`): every keystroke forwards immediately as raw input (no line-submit box), `Ctrl+C` is interrupt input to the process, `Ctrl+]` detaches back to where you came from without stopping the process.
+Inside the **fullscreen terminal page** (reached via `o`): every keystroke forwards immediately as raw input (no line-submit box), `Ctrl+C` is interrupt input to the process. `Ctrl+]` is a tmux-style prefix (single keys can't be helpers here — typing `x` must type `x`): `Ctrl+],x` force-kills (stay on the dead log), `Ctrl+],r` restarts (detaches to the list with the new command), `Ctrl+],q` (or another `Ctrl+]`) detaches back to where you came from without stopping the process. Anything else (or 1.5s of silence) cancels the prefix and the key forwards as input — no keystroke is ever swallowed.
 
 **Scrolling:** both lists are a `<scrollbox>` capped at 10 rows — short lists sit compact with no gap, long lists scroll and follow `j`/`k`/`g`/`G` via `scrollChildIntoView`. Detail + input stay pinned below in both cases. Empty list shows the fallback tip.
 

@@ -390,6 +390,56 @@ describe("terminal-session", () => {
     session.dispose()
   })
 
+  it("kill sends cmd_kill over the control bus (fire-and-forget)", async () => {
+    const stream = makeStreamStub()
+    const control = makeControlStub()
+    const session = createTerminalSession({
+      ...baseOptions(),
+      createStreamClient: () => stream.client,
+      createControl: () => control.client as never,
+    })
+    session.kill()
+    expect(control.calls).toEqual([{
+      command: "cmd_kill",
+      goalID: "cmd-1",
+      args: { commandID: "cmd-1", ownerSessionID: "owner-1" },
+    }])
+    session.dispose()
+  })
+
+  it("restart resolves the control response message", async () => {
+    const stream = makeStreamStub()
+    const control = makeControlStub()
+    control.client.executeRaw = async (cmd) => {
+      control.calls.push(cmd)
+      return { ok: true, message: 'Command "repl" restarted as abc12345...' }
+    }
+    const session = createTerminalSession({
+      ...baseOptions(),
+      createStreamClient: () => stream.client,
+      createControl: () => control.client as never,
+    })
+    await expect(session.restart()).resolves.toMatch(/restarted as/)
+    expect(control.calls[0]!.command).toBe("cmd_restart")
+    session.dispose()
+  })
+
+  it("kill/restart refuse on invalid route (fail closed, like interrupt)", async () => {
+    const stream = makeStreamStub()
+    const control = makeControlStub()
+    const session = createTerminalSession({
+      ...baseOptions(),
+      routeData: { commandID: "", ownerSessionID: "owner-1" },
+      createStreamClient: () => stream.client,
+      createControl: () => control.client as never,
+    })
+    await session.start()
+    session.kill()
+    await expect(session.restart()).resolves.toMatch(/No command|Refused/)
+    expect(control.calls).toEqual([])
+    session.dispose()
+  })
+
   it("rapid snapshot+delta converges on the latest content", async () => {
     const stream = makeStreamStub()
     const session = createTerminalSession({ ...baseOptions(), createStreamClient: () => stream.client })

@@ -43,6 +43,24 @@ export function isInterruptChord(evt: TerminalKeyEvent): boolean {
   return (evt.name ?? "").toLowerCase() === "c"
 }
 
+/**
+ * tmux-style Ctrl+] prefix: after the detach chord, the next key selects a
+ * LOCAL action instead of reaching the PTY — single keys are impossible
+ * here (typing "x" must type x). `x` = force kill (stay on the dead log),
+ * `r` = restart (detach to the list with the new command), `q` / `]` /
+ * escape = detach (unchanged default), anything else = forward as input
+ * (no keystroke is ever swallowed).
+ */
+export function resolvePrefixKey(evt: TerminalKeyEvent): "kill" | "restart" | "detach" | "forward" {
+  const name = (evt.name ?? "").toLowerCase()
+  const text = (evt.text ?? "").toLowerCase()
+  const ch = text.length === 1 ? text : name.length === 1 ? name : ""
+  if (ch === "x") return "kill"
+  if (ch === "r") return "restart"
+  if (ch === "q" || ch === "]" || name === "escape" || name === "esc") return "detach"
+  return "forward"
+}
+
 const CSI = "\x1b["
 
 /** Kitty keyboard protocol (CSI u / CSI … u with modifiers) — never forward. */
