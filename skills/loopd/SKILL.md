@@ -60,8 +60,8 @@ Every goal has an **immutable contract** at creation — the source of truth for
 
 * **Objective** — semantic requirements (free text, self-contained). The worker derives concrete requirements from it.
 * **Checks** — deterministic shell commands that **must pass** for `complete_goal` to be accepted. For `workspaceWrite:true` goals they are **mandatory** (explicit `checks` or plugin `defaultChecks`), and they run from `checkCwd` (writers default to project root; artifact-only jobs run from their `artifactDir`).
-* **Agent** — any OpenCode agent name: built-in (`build`, `plan`, `explore`, `general`), file `~/.config/opencode/agents/*.md`, or `opencode.jsonc` `agent.*`. Discover with `opencode agent list`. Prefer `subagent`-mode agents for workers; `primary`-mode agents work but may expect user interaction. Resolution: explicit arg → **calling session's live agent** (read at creation) → `defaultAgent` → OpenCode global default. So a parent in Plan spawns a Plan worker unless told otherwise.
-* **Model** — any model as `"providerID/modelID"` (e.g. `openai/gpt-5.6-sol`, `ollama/qwen3.8:27b`, `openrouter/google/gemma-4-31b-it:free`). Discover with `opencode models [provider]`. Sent on every worker prompt. Resolution: explicit arg → **calling session's live model** → `defaultModel` → agent config → session history → global default. Caveat: OpenCode exposes no live-model field for history-derived models, so those fall through to agent config.
+* **Agent** — any OpenCode agent name: built-in (`build`, `plan`, `explore`, `general`), file `~/.config/opencode/agents/*.md`, or `opencode.jsonc` `agent.*`. Discover with `opencode agent list`. Prefer `subagent`-mode agents for workers; `primary`-mode agents work but may expect user interaction. Resolution: explicit arg → **calling session's live agent** (read at creation) → `defaultAgent` → OpenCode global default. So a parent in Plan spawns a Plan worker unless told otherwise. **Omit by default — inherit.** Do NOT pass `agent` unless the caller explicitly requests a different identity or the task needs it; explicit values freeze identity and break session upgrades.
+* **Model** — any model as `"providerID/modelID"` (e.g. `openai/gpt-5.6-sol`, `ollama/qwen3.8:27b`, `openrouter/google/gemma-4-31b-it:free`). Discover with `opencode models [provider]`. Sent on every worker prompt. Resolution: explicit arg → **calling session's live model** → `defaultModel` → agent config → session history → global default. Caveat: OpenCode exposes no live-model field for history-derived models, so those fall through to agent config. **Omit by default — inherit.** Do NOT pass `model` unless explicitly requested.
 * **WorkspaceWrite** — `true` (default) = may touch the shared repo; **only one active writer at a time** is allowed (enforced on `start`/`resume`/`retry` with rollback). Set `false` explicitly for artifact-only/read-only work to allow concurrency.
 * **Budgets** — `tokenBudget` (tokens) and `costBudget` (dollars, e.g. `0.5`). When either is exceeded the engine aborts the worker mid-turn and sets `budget_limited`. The worker is stopped immediately, not just at the next turn boundary.
 * **Limits** — `maxTurns` (default 50), `maxNoProgress`, `maxFailures`, `maxEvaluatorRejections` (default 3), `timeoutMs`, `compactEvery`, `progressFile`.
@@ -87,8 +87,9 @@ Use `loopd_create_goal` **after** clarifying the objective with the user (what /
 loopd_create_goal({
   name: "short-name",
   objective: "Detailed description of what the goal should accomplish.",
-  agent: "researcher",                    // any agent name; optional, inherits calling session then defaultAgent
-  model: "openai/gpt-5.6-sol",            // any provider/model; optional, inherits calling session then defaultModel
+  // agent/model: omit by default to inherit calling session — only pass when explicitly requested
+  // agent: "researcher",
+  // model: "openai/gpt-5.6-sol",
   costBudget: 0.5,                         // optional dollars; aborts worker when exceeded
   checks: ["npm test"],                    // mandatory if workspaceWrite:true (or configure defaultChecks)
   checkCwd: "/project/root",               // optional; writers default to project root, readers to artifactDir
@@ -437,8 +438,7 @@ Agent: Got it — creating with a contract.
 loopd_create_goal({
   name: "docs-write",
   objective: "Write a README.md covering: what it is, install, usage, architecture, and examples. Then create CHANGELOG.md with a v1.0.0 entry.",
-  agent: "researcher",
-  model: "openai/gpt-5.6-sol",
+  // omit agent/model to inherit calling session — only pass when explicitly requested
   costBudget: 0.5,
   checks: ["test -f README.md", "test -f CHANGELOG.md"],
   checkCwd: "/Users/you/project",           // explicit for writers; defaults to project root

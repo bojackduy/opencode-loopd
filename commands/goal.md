@@ -16,8 +16,8 @@ When you have enough to write a concrete contract:
 1. Call `loopd_create_goal` with:
     - `name` — a short slug (e.g. "pdf-notes")
     - `objective` — a precise, self-contained statement including verification criteria
-    - `agent` — any OpenCode agent name: built-in (`general`, `explore`), `~/.config/opencode/agents/*.md`, or `opencode.jsonc` `agent.*`. Discover with `opencode agent list`. Prefer `subagent`-mode agents for workers; `primary`-mode agents work but may expect user interaction. Optional unless no `defaultAgent` is configured.
-    - `model` — any model as `"providerID/modelID"` (e.g. `openai/gpt-5.6-sol`, `ollama/qwen3.8:27b`). Discover with `opencode models [provider]`. Sent on every worker prompt; omit to use the agent/session default, or configure `defaultModel` in `opencode.jsonc`.
+    - `agent` — any OpenCode agent name: built-in (`general`, `explore`), `~/.config/opencode/agents/*.md`, or `opencode.jsonc` `agent.*`. Discover with `opencode agent list`. Prefer `subagent`-mode agents for workers; `primary`-mode agents work but may expect user interaction. **Omit by default — inherits calling session's live agent, then `defaultAgent`.** Only pass when explicitly requested.
+    - `model` — any model as `"providerID/modelID"` (e.g. `openai/gpt-5.6-sol`, `ollama/qwen3.8:27b`). Discover with `opencode models [provider]`. Sent on every worker prompt. **Omit by default — inherits calling session's live model, then `defaultModel`.** Only pass when explicitly requested.
     - `checks` — shell commands that must pass before `complete_goal` is accepted; **mandatory when `workspaceWrite:true`** (the default) — or configure `defaultChecks` in `opencode.jsonc`
     - `workspaceWrite` — default `true` (safe — may touch the shared repo; only one active writer allowed — second `start`/`resume` fails with `already active`); set `false` explicitly for artifact-only/read-only work to allow concurrency
     - `checkCwd` — optional directory where `checks` run; writers default to project root, artifact-only jobs default to their `artifactDir`
