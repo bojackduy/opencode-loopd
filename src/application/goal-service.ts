@@ -49,6 +49,8 @@ export interface GoalService {
     costBudget?: number
     parentAgent?: string
     parentModel?: string
+    /** Manual mode: engine never starts turns (see Goal.interactive). */
+    interactive?: boolean
   }): Promise<{ goal: Goal; worker: WorkerSession }>
 
   /** Drive one continuation turn for a goal. */
@@ -78,6 +80,12 @@ export interface GoalService {
    * the accountedMessageIDs watermark. Returns the deltas that were applied.
    */
   accountUsage(directory: string, goalID: GoalID): Promise<{ tokenDelta: number; costDelta: number; timeDeltaSeconds: number; counted: string[] }>
+
+  /**
+   * Toggle manual/interactive mode. Engine never starts turns for interactive
+   * goals; explicit owner actions (:send, nudge, resume, retry) still work.
+   */
+  setInteractive(directory: string, goalID: GoalID, interactive: boolean): Promise<{ ok: boolean; message: string }>
 
   /** Pause a goal and abort its worker. */
   pause(directory: string, goalID: GoalID): Promise<void>
@@ -267,6 +275,7 @@ export function createGoalService(host: LoopHost): GoalService {
     costBudget?: number
     parentAgent?: string
     parentModel?: string
+    interactive?: boolean
   }, id: GoalID) {
     // Inherit the calling session's live identity when the caller didn't
     // snapshot it (TUI path). Best-effort: failure falls back to existing
@@ -297,6 +306,7 @@ export function createGoalService(host: LoopHost): GoalService {
       },
     })
     if (typeof input.costBudget === "number") goal.costBudget = input.costBudget
+    if (input.interactive === true) goal.interactive = true
     if (parentAgent) goal.parentAgent = parentAgent
     if (parentModel) goal.parentModel = parentModel
     const artifactDir = goalArtifactDir(directory, id)
@@ -644,6 +654,38 @@ export function createGoalService(host: LoopHost): GoalService {
       await recordPromptFailure(directory, goalID, error)
       throw error
     }
+  }
+
+  async function setInteractiveUnlocked(directory: string, goalID: GoalID, interactive: boolean) {
+    const state = await mutateState(directory, `goal.interactive:${goalID}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goalID)
+      if (!g) return s
+      if (interactive) g.interactive = true
+      else delete g.interactive
+      g.updatedAt = new Date().toISOString()
+      return s
+    })
+    const goal = state.goals.find((g) => g.id === goalID)
+    if (!goal) return { ok: false, message: "Goal not found." }
+    await appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID(),
+      goalID,
+      type: "goal.interactive_changed",
+      interactive,
+      timestamp: new Date().toISOString(),
+      revision: state.revision,
+    } satisfies LoopEvent).catch(() => {})
+    return {
+      ok: true,
+      message: interactive
+        ? `Goal "${goal.name}" is now manual: the engine will not start turns — steer it with :send/nudge.`
+        : `Goal "${goal.name}" is back on auto: the engine resumes idle recovery and retries.`,
+    }
+  }
+
+  function setInteractive(directory: string, goalID: GoalID, interactive: boolean) {
+    return withGoalOperation(goalID, () => setInteractiveUnlocked(directory, goalID, interactive))
   }
 
   async function pauseUnlocked(directory: string, goalID: GoalID) {
@@ -1057,5 +1099,5 @@ export function createGoalService(host: LoopHost): GoalService {
     return withGoalOperation(goalID, () => accountUsageUnlocked(directory, goalID))
   }
 
-  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage }
+  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive }
 }

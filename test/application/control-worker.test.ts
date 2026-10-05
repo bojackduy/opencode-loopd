@@ -4,7 +4,7 @@ import path from "path"
 import os from "os"
 import { createControlClient } from "../../src/infrastructure/control-client"
 import { createControlWorker } from "../../src/application/control-worker"
-import { readState } from "../../src/infrastructure/state-repository"
+import { readState, readEvents } from "../../src/infrastructure/state-repository"
 import { createFakeHost } from "../../src/server/host-adapter"
 import { createGoalService } from "../../src/application/goal-service"
 import { createCommandService } from "../../src/application/command-service"
@@ -252,6 +252,42 @@ describe("Control Bus", () => {
     } finally {
       await worker.stop()
     }
+  })
+
+  it("routes set_interactive and validates its args", async () => {
+    const started = await client.execute({
+      version: 1,
+      requestID: crypto.randomUUID(),
+      requestedAt: new Date().toISOString(),
+      command: "start",
+      args: { name: "toggle-me", objective: "do something", config: {}, ownerSessionID: "owner-1" },
+    })
+    expect(started.ok).toBe(true)
+    const goalID = (await readState(dir)).goals[0]!.id
+
+    const bus = (command: string, goal: string | undefined, extraArgs: Record<string, unknown> = {}) =>
+      client.execute({
+        version: 1,
+        requestID: crypto.randomUUID(),
+        requestedAt: new Date().toISOString(),
+        command: command as any,
+        goalID: goal as any,
+        args: extraArgs,
+      })
+    const on = await bus("set_interactive", goalID, { interactive: true })
+    expect(on.ok).toBe(true)
+    expect(on.message).toMatch(/manual/)
+    expect((await readState(dir)).goals[0]!.interactive).toBe(true)
+    const events = await readEvents(dir, 50)
+    expect(events.some((e) => e.type === "goal.interactive_changed")).toBe(true)
+
+    const off = await bus("set_interactive", goalID, { interactive: false })
+    expect(off.ok).toBe(true)
+    expect((await readState(dir)).goals[0]!.interactive).toBeUndefined()
+
+    expect((await bus("set_interactive", goalID, { interactive: "yes" })).ok).toBe(false)
+    expect((await bus("set_interactive", undefined, { interactive: true })).ok).toBe(false)
+    await worker.stop()
   })
 
   it("rejects unknown commands", async () => {

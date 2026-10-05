@@ -1545,6 +1545,26 @@ function createControlWorker(options) {
         };
         break;
       }
+      case "set_interactive": {
+        if (!request.goalID) {
+          response = { ...base, ok: false, message: "goalID is required", errorCode: "bad_request" };
+          break;
+        }
+        const interactive = request.args?.interactive;
+        if (typeof interactive !== "boolean") {
+          response = { ...base, ok: false, message: "interactive (boolean) is required", errorCode: "bad_request" };
+          break;
+        }
+        const result = await goalSvc.setInteractive(directory, request.goalID, interactive);
+        const state = await readState(directory);
+        response = {
+          ...base,
+          ok: result.ok,
+          message: result.message,
+          stateRevision: state.revision
+        };
+        break;
+      }
       case "send": {
         const args = request.args;
         const text = String(args.message || "").trim();
@@ -1956,6 +1976,8 @@ function createLoopEngine(options) {
     if (goal.workerSessionID)
       knownWorkerSessions.add(goal.workerSessionID);
     if (goal.status !== "active")
+      return false;
+    if (goal.interactive === true && type === "session.idle")
       return false;
     switch (type) {
       case "session.idle":
@@ -2568,7 +2590,8 @@ function createLoopEngine(options) {
         if (stopped)
           continue;
       }
-      if (runtime.phase === "waiting_retry" && runtime.retryAfter) {
+      const manual = goal.interactive === true;
+      if (!manual && runtime.phase === "waiting_retry" && runtime.retryAfter) {
         if (Date.now() >= Date.parse(runtime.retryAfter)) {
           await mutateState(directory, `retry-ready:${goal.id}`, async (s) => {
             const rt = s.runtimes.find((r) => r.goalID === goal.id);
@@ -2581,7 +2604,7 @@ function createLoopEngine(options) {
           goalService.continueTurn(directory, goal.id).catch(() => {});
         }
       }
-      if ((runtime.phase === "running" || runtime.phase === "idle") && goal.workerSessionID) {
+      if (!manual && (runtime.phase === "running" || runtime.phase === "idle") && goal.workerSessionID) {
         if (runtime.phase === "idle" && runtime.activeRunID) {
           await mutateState(directory, `maintenance.clear-stale-run:${goal.id}`, async (s) => {
             const rt = s.runtimes.find((r) => r.goalID === goal.id);
@@ -3598,6 +3621,8 @@ function createGoalService(host) {
     });
     if (typeof input.costBudget === "number")
       goal.costBudget = input.costBudget;
+    if (input.interactive === true)
+      goal.interactive = true;
     if (parentAgent)
       goal.parentAgent = parentAgent;
     if (parentModel)
@@ -3901,6 +3926,38 @@ function createGoalService(host) {
       await recordPromptFailure(directory, goalID, error);
       throw error;
     }
+  }
+  async function setInteractiveUnlocked(directory, goalID, interactive) {
+    const state = await mutateState(directory, `goal.interactive:${goalID}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goalID);
+      if (!g)
+        return s;
+      if (interactive)
+        g.interactive = true;
+      else
+        delete g.interactive;
+      g.updatedAt = new Date().toISOString();
+      return s;
+    });
+    const goal = state.goals.find((g) => g.id === goalID);
+    if (!goal)
+      return { ok: false, message: "Goal not found." };
+    await appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID5(),
+      goalID,
+      type: "goal.interactive_changed",
+      interactive,
+      timestamp: new Date().toISOString(),
+      revision: state.revision
+    }).catch(() => {});
+    return {
+      ok: true,
+      message: interactive ? `Goal "${goal.name}" is now manual: the engine will not start turns \u2014 steer it with :send/nudge.` : `Goal "${goal.name}" is back on auto: the engine resumes idle recovery and retries.`
+    };
+  }
+  function setInteractive(directory, goalID, interactive) {
+    return withGoalOperation(goalID, () => setInteractiveUnlocked(directory, goalID, interactive));
   }
   async function pauseUnlocked(directory, goalID) {
     const preState = await readState(directory);
@@ -4264,7 +4321,7 @@ function createGoalService(host) {
   function accountUsage(directory, goalID) {
     return withGoalOperation(goalID, () => accountUsageUnlocked(directory, goalID));
   }
-  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage };
+  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive };
 }
 
 // src/application/schedule-worker.ts
@@ -6787,12 +6844,12 @@ var execAsync = promisify(execChild);
 function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
   return {
     loopd_create_goal: tool({
-      description: "Create a new background loop GOAL: an autonomous AI worker that loops turn-by-turn on a multi-step objective until deterministic checks pass or it needs you (contract: objective + checks + agent/model + workspaceWrite). " + "The engine spawns a dedicated worker session that does the work autonomously \u2014 it never runs in this chat. " + "Use this for AI reasoning work spanning multiple turns (implement a feature, fix a failing suite, research and write a report) \u2014 NOT for running a single process you just want to start, watch, and type into. " + "For that (dev servers, `npm test --watch`, REPLs, log tails, one-off scripts, interactive shells with a fullscreen terminal UI), use loopd_command_start instead: it is lighter-weight, has no agent/checks/turn loop, and is a raw OS process, not an AI worker. " + "Call this after clarifying the contract with the user. " + "Worker identity is free-form: agent is any OpenCode agent name (built-in, ~/.config/opencode/agents/*.md, or opencode.jsonc agent.* \u2014 discover with `opencode agent list`), " + 'model is any "providerID/modelID" (discover with `opencode models [provider]`). When omitted, both inherit the CALLING session\'s live agent/model (read at creation), then plugin defaultAgent/defaultModel. ' + "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " + "Workspace-writing goals are serialized (only one active writer) and require checks. " + "Monitor with the /loop dashboard's Goals tab (Tab/h to switch there if Commands is focused).",
+      description: "Create a new background loop GOAL: an autonomous AI worker that loops turn-by-turn on a multi-step objective until deterministic checks pass or it needs you (contract: objective + checks + agent/model + workspaceWrite). " + "The engine spawns a dedicated worker session that does the work autonomously \u2014 it never runs in this chat. " + "Use this for AI reasoning work spanning multiple turns (implement a feature, fix a failing suite, research and write a report) \u2014 NOT for running a single process you just want to start, watch, and type into. " + "For that (dev servers, `npm test --watch`, REPLs, log tails, one-off scripts, interactive shells with a fullscreen terminal UI), use loopd_command_start instead: it is lighter-weight, has no agent/checks/turn loop, and is a raw OS process, not an AI worker. " + "Call this after clarifying the contract with the user. " + "Worker identity is free-form: agent is any OpenCode agent name (built-in, ~/.config/opencode/agents/*.md, or opencode.jsonc agent.* \u2014 discover with `opencode agent list`), " + 'model is any "providerID/modelID" (discover with `opencode models [provider]`). Omit both by default \u2014 when omitted, both inherit the CALLING session\'s live agent/model (read at creation), then plugin defaultAgent/defaultModel. ' + "Only pass agent/model when the caller explicitly requests a different identity or the task needs it; explicit values freeze identity and break session upgrades. " + "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " + "Workspace-writing goals are serialized (only one active writer) and require checks. " + "Monitor with the /loop dashboard's Goals tab (Tab/h to switch there if Commands is focused).",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
-        agent: tool.schema.string().optional().describe(`Agent to run the worker as (e.g. "researcher", "smart-agent"). Optional \u2014 inherits the calling session's agent if omitted, else plugin defaultAgent.`),
-        model: tool.schema.string().optional().describe(`Model to run the worker as, as "providerID/modelID" (e.g. "openai/gpt-5.6-sol", "ollama/qwen3.8:27b"). Optional \u2014 inherits the calling session's live model if omitted, else plugin defaultModel.`),
+        agent: tool.schema.string().optional().describe(`Agent to run the worker as (e.g. "researcher", "smart-agent"). Prefer omit \u2014 inherits the calling session's agent if omitted, else plugin defaultAgent. Only pass when explicitly requested.`),
+        model: tool.schema.string().optional().describe(`Model to run the worker as, as "providerID/modelID" (e.g. "openai/gpt-5.6-sol", "ollama/qwen3.8:27b"). Prefer omit \u2014 inherits the calling session's live model if omitted, else plugin defaultModel. Only pass when explicitly requested.`),
         costBudget: tool.schema.number().optional().describe("Max provider cost in dollars before the engine stops the goal as budget_limited (e.g. 0.5). Optional \u2014 unlimited if omitted."),
         checks: tool.schema.array(tool.schema.string()).optional().describe('Shell commands that must pass for completion to be accepted. E.g. ["npm test"].'),
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
@@ -6804,7 +6861,8 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         compactEvery: tool.schema.number().optional().describe("Compact the worker session every N turns."),
         timeoutMs: tool.schema.number().optional().describe("Per-turn timeout in ms."),
         scheduleEveryMs: tool.schema.number().optional().describe("Interval in ms to auto-requeue the same goal after each completion. Minimum 1000. Enables repetitive dialogue reduction."),
-        scheduleMaxRuns: tool.schema.number().optional().describe("Maximum total runs including the initial run. Undefined = unlimited. Requires scheduleEveryMs.")
+        scheduleMaxRuns: tool.schema.number().optional().describe("Maximum total runs including the initial run. Undefined = unlimited. Requires scheduleEveryMs."),
+        interactive: tool.schema.boolean().optional().describe("Manual mode: the engine never starts turns on its own (no idle recovery, no retries). Every turn comes from explicit steering (:send, nudge, resume, retry). Use for interactive tasks where the worker stops and waits for the next input \u2014 the tick forcing a turn there wastes tokens and breaks the wait. Toggleable later via the dashboard :interactive command.")
       },
       execute: async (args, context) => {
         const sessionID = context?.sessionID || hostSessionID;
@@ -6899,7 +6957,8 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
             config: resolution.config,
             costBudget,
             parentAgent: parentDefaults.parentAgent,
-            parentModel: parentDefaults.parentModel
+            parentModel: parentDefaults.parentModel,
+            ...args.interactive === true ? { interactive: true } : {}
           });
           return {
             title: "Goal created",
@@ -6913,6 +6972,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
               agent: resolution.config.agent,
               model: resolution.config.model,
               costBudget: goal.costBudget,
+              interactive: goal.interactive === true,
               checks: resolution.config.checks || [],
               workspaceWrite: resolution.config.workspaceWrite,
               defaultsApplied: resolution.defaultsApplied,
@@ -8341,7 +8401,7 @@ function commandTools(options) {
 // src/server/plugin.ts
 init_state_repository();
 // package.json
-var version = "1.10.4";
+var version = "1.10.5";
 
 // src/server/plugin.ts
 var PLUGIN_ID = "opencode-loopd.server";

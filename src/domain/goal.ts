@@ -58,6 +58,17 @@ export interface Goal {
   /** Parent session agent at creation, for display/fallback only. */
   parentAgent?: string
 
+  /**
+   * Manual/interactive mode. When true the engine never starts turns on its
+   * own — no idle-event continuation, no maintenance recovery, no retry-due
+   * turns. Every turn comes from an explicit owner action (:send, nudge,
+   * resume, retry). For tasks where the worker stops and waits for the next
+   * input: the tick forcing a turn there burns tokens and breaks the wait.
+   * Budget enforcement and unreachable/stuck notifications still run.
+   * Toggleable at runtime; surfaced in inspect + dashboard.
+   */
+  interactive?: boolean
+
   /** Tokens consumed so far. */
   tokensUsed: number
 

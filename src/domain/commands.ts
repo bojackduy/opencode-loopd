@@ -53,6 +53,15 @@ export interface UpdateGoalCommand extends BaseCommand {
   }
 }
 
+/**
+ * Toggle manual/interactive mode. Engine never starts turns for interactive
+ * goals; explicit owner actions (:send, nudge, resume, retry) still work.
+ */
+export interface SetInteractiveCommand extends BaseCommand {
+  command: "set_interactive"
+  args: { interactive: boolean }
+}
+
 // ─── Worker Interaction ──────────────────────────────────────────────────────
 
 export interface SendCommand extends BaseCommand {
@@ -111,6 +120,7 @@ export type LoopCommand =
   | ForceCompleteCommand
   | ForceBlockCommand
   | UpdateGoalCommand
+  | SetInteractiveCommand
   | CompactCommand
   | InspectCommand
   | OpenWorkerCommand

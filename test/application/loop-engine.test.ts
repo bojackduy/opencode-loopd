@@ -89,6 +89,26 @@ describe("Loop Engine", () => {
       expect(result).toBe(false)
     })
 
+    it("ignores session.idle for interactive (manual) goals", async () => {
+      const { goal } = await goalService.start(dir, {
+        name: "manual",
+        objective: "wait for input",
+        ownerSessionID: "owner-1",
+        interactive: true,
+      })
+
+      await engine.preloadWorkerSessions()
+
+      const result = await engine.handleEvent({
+        type: "session.idle",
+        properties: { sessionID: goal.workerSessionID },
+      })
+
+      expect(result).toBe(false)
+      // Only the initial turn prompt — no engine-started continuation.
+      expect(host.prompts.length).toBe(1)
+    })
+
     it("handles session.error and increments failures", async () => {
       const { goal } = await goalService.start(dir, {
         name: "test",
@@ -412,6 +432,40 @@ describe("Loop Engine", () => {
       expect((host.sessions as any).notifications ?? []).toHaveLength(0)
       // Idle maintenance should keep driving the goal forward.
       expect(host.prompts.length).toBeGreaterThan(1)
+    })
+
+    it("never auto-continues an interactive goal; toggling back resumes auto", async () => {
+      engine.stop()
+      host = createFakeHost()
+      goalService = createGoalService(host)
+      engine = createLoopEngine({ directory: dir, host, goalService, pollIntervalMs: 10, confirmIdleMs: 0 })
+      engine.start()
+
+      const { goal } = await goalService.start(dir, {
+        name: "manual",
+        objective: "wait for input",
+        ownerSessionID: "owner-1",
+        config: { workspaceWrite: false },
+        interactive: true,
+      })
+      expect((await readState(dir)).goals.find((g) => g.id === goal.id)?.interactive).toBe(true)
+
+      await new Promise((resolve) => setTimeout(resolve, 120))
+      // Only the initial turn — maintenance never starts another.
+      expect(host.prompts.length).toBe(1)
+
+      const toggled = await goalService.setInteractive(dir, goal.id, false)
+      expect(toggled.ok).toBe(true)
+      expect((await readState(dir)).goals.find((g) => g.id === goal.id)?.interactive).toBeUndefined()
+
+      await new Promise((resolve) => setTimeout(resolve, 120))
+      // Auto mode resumes: idle maintenance drives the goal forward again.
+      expect(host.prompts.length).toBeGreaterThan(1)
+    })
+
+    it("setInteractive rejects unknown goals", async () => {
+      const result = await goalService.setInteractive(dir, "nope" as GoalID, true)
+      expect(result.ok).toBe(false)
     })
 
     it("stops a goal as budget_limited when costUsed reaches costBudget", async () => {

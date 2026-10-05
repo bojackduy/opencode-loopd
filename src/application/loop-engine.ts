@@ -167,6 +167,11 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     // for an explicit owner transition.
     if (goal.status !== "active") return false
 
+    // Interactive (manual) goals: the engine never starts turns. Idle events
+    // from a worker waiting for input must not force a continuation — every
+    // turn comes from :send/nudge/resume/retry. Other events are bookkeeping.
+    if (goal.interactive === true && type === "session.idle") return false
+
     switch (type) {
       case "session.idle":
         return await handleSessionIdle(state, goal)
@@ -923,8 +928,12 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
         if (stopped) continue
       }
 
+      // Manual goals never get engine-started turns — retry-due included.
+      // The owner retries explicitly when ready.
+      const manual = goal.interactive === true
+
       // Handle waiting_retry: check if retry time has passed
-      if (runtime.phase === "waiting_retry" && runtime.retryAfter) {
+      if (!manual && runtime.phase === "waiting_retry" && runtime.retryAfter) {
         if (Date.now() >= Date.parse(runtime.retryAfter)) {
           await mutateState(directory, `retry-ready:${goal.id}`, async (s) => {
             const rt = s.runtimes.find((r) => r.goalID === goal.id)
@@ -941,7 +950,9 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       // Some OpenCode transports miss the idle event. Poll active workers so a
       // completed turn is continued on the maintenance cadence, not lease expiry.
       // Also poll idle-phase goals that missed the idle event entirely.
-      if ((runtime.phase === "running" || runtime.phase === "idle") && goal.workerSessionID) {
+      // Manual goals skip the lease/state churn below (unknown-status and
+      // stuck notifications further down still run — they notify, never turn).
+      if (!manual && (runtime.phase === "running" || runtime.phase === "idle") && goal.workerSessionID) {
         if (runtime.phase === "idle" && runtime.activeRunID) {
           await mutateState(directory, `maintenance.clear-stale-run:${goal.id}`, async (s) => {
             const rt = s.runtimes.find((r) => r.goalID === goal.id)

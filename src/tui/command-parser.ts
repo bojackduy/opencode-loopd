@@ -94,6 +94,7 @@ export function commandHelp(): string {
     "  :pause / :resume / :retry / :clear        Quick controls (also p/r/R/x)",
     "  :abort                                   Abort worker session now (status unchanged; A)",
     "  :nudge                                   Force re-prompt now with full steering (N)",
+    "  :interactive                             Toggle manual mode (engine never starts turns)",
     "  :bug / :report                            Open prefilled GitHub bug report",
     "  :logs / :help / :q                        Toggle logs / help / close",
     "  Tip: create goals via /goal in the parent chat (agent clarifies first).",

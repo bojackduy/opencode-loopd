@@ -52,6 +52,8 @@ created → active → complete
 
 Only `active` goals own live worker runs. `blocked`/`paused`/`budget_limited` wait for an explicit owner transition (`resume`/`retry`/`nudge`). The loop is engine-driven, not parent-driven.
 
+**Manual (`interactive`) mode:** pass `interactive: true` to `loopd_create_goal` (or `:interactive` on the dashboard) for tasks where the worker stops and waits for the next input — the engine then never starts turns on its own (no idle recovery, no retry-due turns). Every turn comes from explicit steering (`:send`, nudge, resume, retry). Budget enforcement still runs. Dashboard shows `✋ MANUAL`. Toggle back with `:interactive` to re-enable auto.
+
 `abort_goal_worker` (TUI `A` / `abort_goal_worker` tool) aborts the worker *session only* — status stays the same, transcript remains browsable, the next active turn reuses the same session. Use it for compaction-spin or stuck runs that keep burning tokens without progress.
 
 ## Contract & Evaluation Semantics

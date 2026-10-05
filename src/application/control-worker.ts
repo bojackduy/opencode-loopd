@@ -267,6 +267,27 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
         break
       }
 
+      case "set_interactive": {
+        if (!request.goalID) {
+          response = { ...base, ok: false, message: "goalID is required", errorCode: "bad_request" }
+          break
+        }
+        const interactive = (request.args as { interactive?: unknown } | undefined)?.interactive
+        if (typeof interactive !== "boolean") {
+          response = { ...base, ok: false, message: "interactive (boolean) is required", errorCode: "bad_request" }
+          break
+        }
+        const result = await goalSvc.setInteractive(directory, request.goalID as any, interactive)
+        const state = await readState(directory)
+        response = {
+          ...base,
+          ok: result.ok,
+          message: result.message,
+          stateRevision: state.revision,
+        }
+        break
+      }
+
       case "send": {
         const args = request.args as { message: string }
         const text = String(args.message || "").trim()

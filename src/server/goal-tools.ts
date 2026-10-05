@@ -65,6 +65,7 @@ export function goalTools(
         timeoutMs: tool.schema.number().optional().describe("Per-turn timeout in ms."),
         scheduleEveryMs: tool.schema.number().optional().describe("Interval in ms to auto-requeue the same goal after each completion. Minimum 1000. Enables repetitive dialogue reduction."),
         scheduleMaxRuns: tool.schema.number().optional().describe("Maximum total runs including the initial run. Undefined = unlimited. Requires scheduleEveryMs."),
+        interactive: tool.schema.boolean().optional().describe("Manual mode: the engine never starts turns on its own (no idle recovery, no retries). Every turn comes from explicit steering (:send, nudge, resume, retry). Use for interactive tasks where the worker stops and waits for the next input — the tick forcing a turn there wastes tokens and breaks the wait. Toggleable later via the dashboard :interactive command."),
       },
       execute: async (args, context) => {
         const sessionID = context?.sessionID || hostSessionID
@@ -152,6 +153,7 @@ export function goalTools(
             costBudget,
             parentAgent: parentDefaults.parentAgent,
             parentModel: parentDefaults.parentModel,
+            ...(args.interactive === true ? { interactive: true as const } : {}),
           })
           return {
             title: "Goal created",
@@ -165,6 +167,7 @@ export function goalTools(
               agent: resolution.config.agent,
               model: resolution.config.model,
               costBudget: goal.costBudget,
+              interactive: goal.interactive === true,
               checks: resolution.config.checks || [],
               workspaceWrite: resolution.config.workspaceWrite,
               defaultsApplied: resolution.defaultsApplied,
