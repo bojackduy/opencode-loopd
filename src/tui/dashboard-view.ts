@@ -4,6 +4,7 @@
 // component (dashboard.tsx) stays a thin renderer. No OpenCode TUI imports.
 
 import { filterCommandsByOwner, resolveOpenTarget, type OpenTarget } from "./terminal-route"
+import { TERMINAL_COMMAND_STATUSES } from "../domain/command-await"
 import type { CommandSession } from "../domain/command-session"
 import type { Goal } from "../domain/goal"
 
@@ -106,10 +107,20 @@ export function resolveDashboardOpen(
   )
 }
 
-/** Commands view is always owner-scoped; empty owner shows nothing. */
+/**
+ * Commands view is always owner-scoped; empty owner shows nothing.
+ *
+ * Finished commands (exited/terminated/missing) are hidden by default so the
+ * list shows live work — the same rule the Goals tab applies to `complete`
+ * goals via the `c` toggle. Pass showCompleted=true to reveal them.
+ */
 export function visibleOwnerCommands(
   commands: CommandSession[] | undefined,
   ownerSessionID: string | undefined,
+  showCompleted = false,
 ): CommandSession[] {
-  return filterCommandsByOwner(commands ?? [], ownerSessionID)
+  const owned = filterCommandsByOwner(commands ?? [], ownerSessionID)
+  if (showCompleted) return owned
+  const terminal = TERMINAL_COMMAND_STATUSES as readonly string[]
+  return owned.filter((c) => !terminal.includes(c.status))
 }

@@ -107,4 +107,24 @@ describe("dashboard-view", () => {
     expect(visibleOwnerCommands(list, undefined)).toEqual([])
     expect(visibleOwnerCommands(undefined, "owner-1")).toEqual([])
   })
+
+  test("finished commands are hidden until the c toggle reveals them", () => {
+    const live = { ...cmd("live", "owner-1"), status: "running" as const }
+    const done = { ...cmd("done", "owner-1"), status: "exited" as const, exitCode: 0 }
+    const killed = { ...cmd("killed", "owner-1"), status: "terminated" as const }
+    const lost = { ...cmd("lost", "owner-1"), status: "missing" as const }
+    const list = [live, done, killed, lost]
+
+    // Default: only live work is listed.
+    expect(visibleOwnerCommands(list, "owner-1").map((c) => c.id)).toEqual(["live"])
+    // showCompleted=true reveals every terminal status.
+    expect(visibleOwnerCommands(list, "owner-1", true).map((c) => c.id)).toEqual([
+      "live",
+      "done",
+      "killed",
+      "lost",
+    ])
+    // Owner scoping still applies when revealing.
+    expect(visibleOwnerCommands([done, { ...done, id: "other", ownerSessionID: "owner-2" }], "owner-1", true).map((c) => c.id)).toEqual(["done"])
+  })
 })

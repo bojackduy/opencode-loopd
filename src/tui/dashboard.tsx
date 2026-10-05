@@ -257,7 +257,15 @@ export function LoopDashboard(props: Props) {
   const [tab, setTab] = createSignal<DashboardView>(props.initialView ?? "goals")
   const [cmdSelected, setCmdSelected] = createSignal(0)
   const ownerSessionID = () => props.ownerSessionID ?? currentRouteSessionID(props.api)
-  const ownerCommands = () => visibleOwnerCommands(state()?.commands, ownerSessionID())
+  const ownerCommands = () => visibleOwnerCommands(state()?.commands, ownerSessionID(), showCompleted())
+  /** Owned-but-finished commands hidden by the `c` toggle — surfaced in the empty state. */
+  const hiddenFinishedCommands = () => {
+    if (showCompleted()) return 0
+    const terminal = ["exited", "terminated", "missing"]
+    return (state()?.commands ?? []).filter(
+      (c) => c.ownerSessionID === ownerSessionID() && terminal.includes(c.status),
+    ).length
+  }
   const [state, setState] = createSignal<StoreState | null>(null)
   const [events, setEvents] = createSignal<Record<string, unknown>[]>([])
   const [selectedGoal, setSelectedGoal] = createSignal<Goal | null>(null)
@@ -288,7 +296,7 @@ export function LoopDashboard(props: Props) {
       const goals = s.goals.filter((g) => showCompleted() || g.status !== "complete")
       if (goals.length > 0 && selected() >= goals.length) setSelected(goals.length - 1)
       setSelectedGoal(goals[selected()] || null)
-      const cmds = visibleOwnerCommands(s.commands, ownerSessionID())
+      const cmds = visibleOwnerCommands(s.commands, ownerSessionID(), showCompleted())
       if (cmds.length > 0 && cmdSelected() >= cmds.length) setCmdSelected(cmds.length - 1)
       setEvents(await client.getEvents(20))
     } catch (e) {
@@ -384,7 +392,20 @@ export function LoopDashboard(props: Props) {
       void executeCommandRaw("cmd_interrupt", { commandID: sel.id }, sel.id)
       return
     }
-    if (key === "c") { prevent(evt); setShowCompleted((v) => !v); debugLog("toggle completed"); return }
+    if (key === "c") {
+      prevent(evt)
+      setShowCompleted((v) => {
+        const next = !v
+        // Same toggle on both tabs: goals hide `complete`, commands hide
+        // exited/terminated/missing.
+        setStatusText(next
+          ? `Showing finished ${tab() === "commands" ? "commands" : "goals"}.`
+          : `Hiding finished ${tab() === "commands" ? "commands" : "goals"}.`)
+        return next
+      })
+      debugLog("toggle completed")
+      return
+    }
     const currentGoals = state()?.goals.filter((goal) => showCompleted() || goal.status !== "complete") || []
     const currentCommands = ownerCommands()
     // Tab toggles the Goals/Commands tabs; h selects Goals and l selects
@@ -756,9 +777,9 @@ export function LoopDashboard(props: Props) {
         <box flexDirection="column" flexShrink={1} minHeight={0} overflow="hidden">
           {/* Help panel — single text to avoid flex overlap */}
           <Show when={showHelp()}>
-            <box flexDirection="column" padding={1} border={true} borderColor="yellow" backgroundColor={theme().background} flexShrink={0} maxHeight={14} overflow="hidden">
+            <box flexDirection="column" padding={1} border={true} borderColor="yellow" backgroundColor={theme().background} flexShrink={0} maxHeight={17} overflow="hidden">
               <text>
-                <span style={{ fg: "yellow", bold: true }}>{tab() === "commands" ? "━━━ Commands: ? help  : insert  X kill  R restart  x remove-done  o fullscreen  q close ━━━" : "━━━ Keys: ? toggle help  c toggle done  : insert  Ctrl+N normal  o open  A abort worker  N nudge  q close ━━━"}</span>
+                <span style={{ fg: "yellow", bold: true }}>{tab() === "commands" ? "━━━ Commands: ? help  : insert  c toggle done  X kill  R restart  x remove-done  o fullscreen  q close ━━━" : "━━━ Keys: ? toggle help  c toggle done  : insert  Ctrl+N normal  o open  A abort worker  N nudge  q close ━━━"}</span>
                 <For each={(tab() === "commands" ? commandTabHelp() : commandHelp()).split("\n")}>{(line) => {
                   // Modes / Nav — split into label + segments, color keys vs descs
                   if (line.startsWith("Modes:") || line.startsWith("Nav:")) {
@@ -951,7 +972,7 @@ export function LoopDashboard(props: Props) {
           <Show when={tab() === "commands"}>
             <Show when={ownerCommands().length > 0} fallback={
               <box flexDirection="column" gap={1} padding={1}>
-                <text><span style={{ fg: theme().textMuted }}>No command sessions owned by this session. </span><span style={{ fg: theme().warning }}>:new &lt;command&gt;</span><span style={{ fg: theme().textMuted }}> to start one.</span></text>
+                <text><span style={{ fg: theme().textMuted }}>No live command sessions{hiddenFinishedCommands() > 0 ? ` — ${hiddenFinishedCommands()} finished hidden` : ""}. </span><span style={{ fg: theme().warning }}>:new &lt;command&gt;</span><span style={{ fg: theme().textMuted }}> to start one{hiddenFinishedCommands() > 0 ? ", or " : "; "}</span>{hiddenFinishedCommands() > 0 && <span><span style={{ fg: theme().warning }}>c</span><span style={{ fg: theme().textMuted }}> to show finished.</span></span>}</text>
                 <text><span style={{ fg: theme().textMuted }}>Tip: </span><span style={{ fg: theme().warning }}>o</span><span style={{ fg: theme().textMuted }}> fullscreen · </span><span style={{ fg: theme().warning }}>X kill · R restart · x remove-done</span><span style={{ fg: theme().textMuted }}> · </span><span style={{ fg: theme().warning }}>:interrupt :terminate :remove</span><span style={{ fg: theme().textMuted }}> manage · text + Enter writes stdin.</span></text>
               </box>
             }>

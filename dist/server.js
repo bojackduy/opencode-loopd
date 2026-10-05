@@ -8401,7 +8401,7 @@ function commandTools(options) {
 // src/server/plugin.ts
 init_state_repository();
 // package.json
-var version = "1.10.5";
+var version = "1.10.6";
 
 // src/server/plugin.ts
 var PLUGIN_ID = "opencode-loopd.server";

@@ -83,6 +83,21 @@ async function seedDir(): Promise<string> {
   return dir
 }
 
+/** Same as seedDir plus one finished owned command (hidden by default). */
+async function seedDirWithFinishedCommand(): Promise<string> {
+  const dir = await seedDir()
+  const finished = {
+    ...createCommandSession({ id: "cmd-done", title: "done-cmd", command: "true", cwd: "/tmp", ownerSessionID: "ses-owner" }),
+    status: "exited",
+    exitCode: 0,
+  }
+  await mutateState(dir, "seed-finished", async (s) => ({
+    ...s,
+    commands: [...(s.commands ?? []), finished as never],
+  }))
+  return dir
+}
+
 describe("LoopDashboard shared Goals/Commands (mounted)", () => {
   it("renders tabs; Tab switches between Goals and Commands", async () => {
     const dir = await seedDir()
@@ -108,7 +123,7 @@ describe("LoopDashboard shared Goals/Commands (mounted)", () => {
   })
 
   it("/commands entry opens focused on Commands", async () => {
-    const dir = await seedDir()
+    const dir = await seedDirWithFinishedCommand()
     const navigated: Array<{ name: string; params?: unknown }> = []
     const cleared = { count: 0 }
     const setup = await testRender(() => (
@@ -123,6 +138,30 @@ describe("LoopDashboard shared Goals/Commands (mounted)", () => {
     await setup.flush()
     await setup.waitFor(() => setup.captureCharFrame().includes("owned-cmd"))
     expect(setup.captureCharFrame()).not.toContain("foreign-cmd")
+    // Finished commands are hidden until `c` reveals them.
+    expect(setup.captureCharFrame()).not.toContain("done-cmd")
+    setup.mockInput.pressKey("c")
+    await setup.waitFor(() => setup.captureCharFrame().includes("done-cmd"))
+    expect(setup.captureCharFrame()).toContain("Showing finished commands.")
+    // Toggle back hides them again.
+    setup.mockInput.pressKey("c")
+    await setup.waitFor(() => !setup.captureCharFrame().includes("done-cmd"))
+    expect(setup.captureCharFrame()).toContain("Hiding finished commands.")
+  })
+
+  it("Commands empty state tells you how many finished commands are hidden", async () => {
+    const dir = await seedDirWithFinishedCommand()
+    await mutateState(dir, "kill-live", async (s) => ({
+      ...s,
+      commands: (s.commands ?? []).map((c) => (c.id === "cmd-owned" ? { ...c, status: "exited" } : c)),
+    }))
+    const setup = await testRender(() => (
+      <LoopDashboard api={fakeApi([], { count: 0 }) as never} directory={dir} initialView="commands" ownerSessionID="ses-owner" />
+    ))
+    setups.push(setup as never)
+    await setup.flush()
+    await setup.waitFor(() => setup.captureCharFrame().includes("finished hidden"))
+    expect(setup.captureCharFrame()).toContain("2 finished hidden")
   })
 
   it("? opens Commands help with kill/restart/remove instead of Goals help", async () => {

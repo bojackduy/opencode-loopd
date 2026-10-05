@@ -105,13 +105,12 @@ export function commandTabHelp(): string {
   return [
     "Nav: j/k select | o fullscreen | q close",
     "Commands tab (selected command only):",
-    "  Ctrl+C / :interrupt  Send SIGINT",
-    "  :terminate           Graceful stop (SIGTERM→SIGKILL)",
-    "  X / :kill            Force kill now (SIGKILL)",
-    "  R / :restart         Restart; old log retained",
-    "  x / :remove          Remove finished command + log",
-    "  :new <cmd> [args]    Start (quoted args supported)",
-    "  bare text + Enter    Write stdin line",
-    "  ? toggle help | : insert | Ctrl+N normal",
+    "  c / Ctrl+C              Toggle finished / send SIGINT",
+    "  :terminate              Graceful stop (SIGTERM→SIGKILL)",
+    "  X / :kill               Force kill now (SIGKILL)",
+    "  R / :restart            Restart; old log kept",
+    "  x / :remove             Remove finished + log",
+    "  :new <cmd> [args]       Start a command",
+    "  bare text + Enter       Write stdin line",
   ].join("\n")
 }

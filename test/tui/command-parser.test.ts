@@ -77,7 +77,7 @@ describe("Command Parser", () => {
     expect(help).toContain("X / :kill")
     expect(help).toContain("R / :restart")
     expect(help).toContain("x / :remove")
-    expect(help).toContain("Ctrl+C / :interrupt")
+    expect(help).toContain("Toggle finished")
     expect(help).not.toContain(":force")
   })
 })
