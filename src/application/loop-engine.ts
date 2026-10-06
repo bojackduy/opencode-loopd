@@ -627,6 +627,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     } satisfies LoopEvent)
 
     const updatedGoal = newState.goals.find((g) => g.id === goal.id)
+    await goalService.observeProviderError(directory, goal.id, error, "session-error", goal.config.model)
     if (updatedGoal?.status === "blocked") {
       await appendEvent(directory, {
         version: 1,
@@ -769,7 +770,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     } satisfies LoopEvent)
 
     try {
-      await host.compactSession(goal.workerSessionID)
+      await goalService.compact(directory, goal.id)
     } catch {
       // Best-effort compaction
     }

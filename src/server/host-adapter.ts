@@ -8,6 +8,7 @@ import type { Plugin as V2Plugin } from "@opencode/plugin"
 import type { BridgeOutcome } from "../v2/native-bridge"
 import type { NativeForkChild, WorkerTopology } from "../v2/native-rpc"
 import { resolveNativeParentID } from "../v2/native-rpc"
+import { emptyCatalog, normalizeV1Catalog, normalizeV2Catalog, type ModelCatalog } from "./model-catalog"
 
 export interface ModelRef {
   providerID: string
@@ -81,6 +82,10 @@ export function isV2PromptMessageID(messageID: string): boolean {
 }
 
 export interface LoopHost {
+  /** Public catalog only; credentials and quota guesses must never escape. */
+  listModels?(): Promise<ModelCatalog>
+  /** v1 uses explicit next-prompt identity; v2 can update the idle session. */
+  switchSessionModel?(sessionID: string, model: ModelRef): Promise<"applied" | "next-prompt" | "unsupported">
   /**
    * Create a worker session. Returns the session ID (v1 + legacy callers) or
    * a WorkerCreation carrying the ID plus v2 topology metadata. v1 and fake
@@ -103,7 +108,7 @@ export interface LoopHost {
   sessionStatus(sessionID: string): Promise<SessionStatusType>
   abortSession(sessionID: string): Promise<void>
   readMessages(sessionID: string, limit?: number): Promise<SessionMessage[]>
-  compactSession(sessionID: string): Promise<void>
+  compactSession(sessionID: string, model?: ModelRef): Promise<void>
   /** True when the host accepted the prompt; false on a delivery error. */
   notifyOwner(ownerSessionID: string, message: string, agent?: string): Promise<boolean | void>
 }
@@ -129,6 +134,21 @@ function markParentNotified(ownerSessionID: string, message: string): void {
 
 export function createRealHost(client: any, directory: string): LoopHost {
   return {
+    async listModels() {
+      if (typeof client.provider?.list !== "function") return emptyCatalog("v1 provider.list", "next-prompt")
+      try {
+        const result = await withTimeout<any>(client.provider.list({ query: { directory } }), 10_000, "OpenCode provider.list")
+        if (result?.error) return emptyCatalog("v1 provider.list", "next-prompt", "unavailable")
+        return normalizeV1Catalog(result?.data)
+      } catch {
+        return emptyCatalog("v1 provider.list", "next-prompt", "unavailable")
+      }
+    },
+    async switchSessionModel() {
+      // Installed v1 SDK has no session.switchModel. A validated assignment
+      // takes effect via promptAsync's supported explicit model argument.
+      return "next-prompt"
+    },
     async createWorker({ parentID, title, agent, model }) {
       try {
         const body: any = { parentID, title }
@@ -184,7 +204,7 @@ export function createRealHost(client: any, directory: string): LoopHost {
       if (result?.error) {
         const detail = describeError(result.error)
         await logServerEvent(directory, "worker.prompt.failed", { sessionID, detail })
-        throw new Error(`OpenCode session.promptAsync failed for worker "${sessionID}": ${detail}`)
+        throw new Error(`OpenCode session.promptAsync failed for worker "${sessionID}": ${detail}`, { cause: result.error })
       }
       await logServerEvent(directory, "worker.prompted", { sessionID })
       // SDK may return the created message ID in response headers or body
@@ -289,9 +309,13 @@ export function createRealHost(client: any, directory: string): LoopHost {
       }
     },
 
-    async compactSession(sessionID) {
+    async compactSession(sessionID, model) {
       try {
-        await client.session.compact({ sessionID })
+        // Installed SDK exposes summarize with an explicit provider/model,
+        // not session.compact. Never reuse the old session identity after switch.
+        const identity = model ?? (await this.readSession(sessionID))?.model
+        if (!identity || typeof client.session.summarize !== "function") return
+        await client.session.summarize({ path: { id: sessionID }, body: identity })
       } catch {
         // Best-effort compaction
       }
@@ -387,6 +411,27 @@ export function createV2Host(
   const directory = context.location.directory
 
   return {
+    async listModels() {
+      if (typeof context.provider?.list !== "function" || typeof context.model?.list !== "function") {
+        return emptyCatalog("v2 provider.list + model.list", typeof context.session.switchModel === "function" ? "session" : "unsupported")
+      }
+      try {
+        const [providers, models] = await Promise.all([
+          context.provider.list({ location: { directory } }),
+          context.model.list({ location: { directory } }),
+        ])
+        const catalog = normalizeV2Catalog(providers, models)
+        if (typeof context.session.switchModel !== "function") catalog.switching = "unsupported"
+        return catalog
+      } catch {
+        return emptyCatalog("v2 provider.list + model.list", typeof context.session.switchModel === "function" ? "session" : "unsupported", "unavailable")
+      }
+    },
+    async switchSessionModel(sessionID, model) {
+      if (typeof context.session.switchModel !== "function") return "unsupported"
+      await context.session.switchModel({ sessionID, model: { id: model.modelID, providerID: model.providerID } })
+      return "applied"
+    },
     async createWorker({ parentID, title, agent, model, goalID }) {
       // Native path: ask exactly one attached TUI to fork a real child of
       // the parent session. Unclaimed / pre-creation-failed requests fall
@@ -575,8 +620,12 @@ export function createV2Host(
       }
     },
 
-    async compactSession(sessionID) {
+    async compactSession(sessionID, model) {
       try {
+        if (model) {
+          if (typeof context.session.switchModel !== "function") return
+          await context.session.switchModel({ sessionID, model: { id: model.modelID, providerID: model.providerID } })
+        }
         await context.session.command({ sessionID, name: "compact", text: "" })
       } catch {
         // Best-effort compaction

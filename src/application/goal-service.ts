@@ -14,7 +14,9 @@ import { promises as fs } from "fs"
 import type { StoreState } from "../infrastructure/state-repository"
 import { cancelAwaitsForGoal } from "./command-await"
 import type { LoopHost, SessionMessage } from "../server/host-adapter"
-import { newPromptMessageID } from "../server/host-adapter"
+import { newPromptMessageID, parseModelRef } from "../server/host-adapter"
+import { emptyCatalog, type ModelCatalog } from "../server/model-catalog"
+import { observeProviderLimit, type ProviderLimitObservation } from "../domain/provider-limit"
 import { createWorkerManager, type WorkerManager, type WorkerSession, type ContinuationContext } from "../server/worker-session"
 import type { LoopEvent } from "../domain/events"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
@@ -40,6 +42,11 @@ export class GoalStartError extends Error {
 }
 
 export interface GoalService {
+  listModels(): Promise<ModelCatalog>
+  /** Owner-only; busy/unknown sessions defer without aborting or waking. */
+  switchModel(directory: string, goalID: GoalID, ownerSessionID: string, model: string, opts?: { resume?: boolean }): Promise<{ outcome: "applied" | "deferred" | "unsupported"; model: string; resumed?: boolean }>
+  observeProviderError(directory: string, goalID: GoalID, error: unknown, source: ProviderLimitObservation["source"], expectedModel?: string): Promise<void>
+  compact(directory: string, goalID: GoalID): Promise<void>
   /** Start a goal: create goal + worker session + first continuation. */
   start(directory: string, input: {
     name: string
@@ -154,6 +161,204 @@ export function createGoalService(host: LoopHost): GoalService {
     }
   }
 
+  async function listModels(): Promise<ModelCatalog> {
+    return host.listModels ? host.listModels() : emptyCatalog("host catalog capability absent", "unsupported")
+  }
+
+  async function validateModel(value: string): Promise<{ model: string; catalog: ModelCatalog }> {
+    const ref = parseModelRef(value)
+    if (!ref) throw new Error("Model is required: providerID/modelID.")
+    const model = `${ref.providerID}/${ref.modelID}`
+    const catalog = await listModels()
+    if (catalog.capability !== "supported" || catalog.switching === "unsupported" || !host.switchSessionModel) {
+      return { model, catalog }
+    }
+    if (!catalog.models.some((m) => m.providerID === ref.providerID && m.modelID === ref.modelID && m.usable === true)) {
+      throw new Error("Model is unavailable or not positively known usable. Discover models with loopd_list_models first.")
+    }
+    return { model, catalog }
+  }
+
+  async function applyModel(directory: string, goal: Goal, model: string, reason: "owner" | "quota") {
+    if (!goal.workerSessionID || !host.switchSessionModel) return "unsupported" as const
+    const previousModel = parseModelRef(goal.config.model) ?? (await host.readSession(goal.workerSessionID))?.model
+    const outcome = await host.switchSessionModel(goal.workerSessionID, parseModelRef(model)!)
+    if (outcome === "unsupported") return outcome
+    try {
+      await mutateState(directory, `goal.model-switch:${goal.id}`, async (s) => {
+        const current = s.goals.find((g) => g.id === goal.id)
+        if (!current) throw new Error("Goal removed during model switch.")
+        current.config.model = model
+        current.modelSwitch = {
+          ...current.modelSwitch, pending: undefined, lastFailure: undefined,
+          last: { from: goal.config.model, to: model, at: new Date().toISOString(), outcome, reason },
+        }
+        current.updatedAt = new Date().toISOString()
+        return s
+      })
+    } catch (error) {
+      // Restore host identity if persistence fails after a session-level switch.
+      // If there was no explicit assignment, restore the pre-switch live model.
+      if (outcome === "applied") {
+        if (!previousModel) throw new Error("Host accepted model switch but persistence failed; previous host model unknown, rollback unavailable.")
+        await host.switchSessionModel(goal.workerSessionID, previousModel)
+      }
+      throw error
+    }
+    await logServerEvent(directory, "goal.model-switched", { goalID: goal.id, workerSessionID: goal.workerSessionID, from: goal.config.model, to: model, reason, outcome })
+    return outcome
+  }
+
+  function switchModel(directory: string, goalID: GoalID, ownerSessionID: string, value: string, opts?: { resume?: boolean }) {
+    return withGoalOperation(goalID, async () => {
+      const state = await readState(directory)
+      const goal = state.goals.find((g) => g.id === goalID)
+      if (!goal || !ownerSessionID || goal.ownerSessionID !== ownerSessionID) throw new Error("Goal not found or not owned by this session.")
+      if (goal.status === "complete") throw new Error("Cannot switch a completed goal.")
+      if (opts?.resume && (goal.status !== "blocked" || goal.blocker?.kind !== "provider-limit")) {
+        throw new Error("resume is only valid for a provider-limit-blocked goal.")
+      }
+      if (opts?.resume) assertWorkspaceWriteAvailable(state, goal, ownerSessionID)
+      const { model, catalog } = await validateModel(value)
+      if (catalog.capability !== "supported" || catalog.switching === "unsupported" || !host.switchSessionModel || !goal.workerSessionID) {
+        return { outcome: "unsupported" as const, model }
+      }
+      const runtime = state.runtimes.find((r) => r.goalID === goalID)
+      const status = await host.sessionStatus(goal.workerSessionID)
+      if (status !== "idle" || (runtime?.phase === "running" && leaseIsValid(runtime))) {
+        await mutateState(directory, `goal.model-deferred:${goalID}`, async (s) => {
+          const current = s.goals.find((g) => g.id === goalID)
+          if (current) {
+            current.modelSwitch = { ...current.modelSwitch, pending: { model, requestedAt: new Date().toISOString(), reason: "owner" } }
+            current.updatedAt = new Date().toISOString()
+          }
+          return s
+        })
+        return { outcome: "deferred" as const, model }
+      }
+      const applied = await applyModel(directory, goal, model, "owner")
+      if (opts?.resume && applied !== "unsupported") {
+        await mutateState(directory, `goal.model-resume:${goalID}`, async (s) => {
+          const g = s.goals.find((g) => g.id === goalID)
+          if (g?.status === "blocked" && g.blocker?.kind === "provider-limit") {
+            assertWorkspaceWriteAvailable(s, g, ownerSessionID)
+            g.status = "active"
+            g.blocker = undefined
+            g.updatedAt = new Date().toISOString()
+          }
+          return s
+        })
+        // Explicit resume is an owner turn, including for interactive goals.
+        // No rejection/turn/cost counters are reset by switching.
+        await continueTurnUnlocked(directory, goalID)
+      }
+      return { outcome: applied === "next-prompt" ? "deferred" as const : applied, model, ...(opts?.resume && applied !== "unsupported" ? { resumed: true } : {}) }
+    })
+  }
+
+  async function applyPendingModel(directory: string, goal: Goal): Promise<void> {
+    const pending = goal.modelSwitch?.pending
+    if (!pending) return
+    let reason: "host-rejected" | "catalog-unavailable" = "catalog-unavailable"
+    try {
+      const { catalog } = await validateModel(pending.model)
+      if (catalog.capability !== "supported" || catalog.switching === "unsupported") throw new Error("Pending model switch catalog unavailable.")
+      reason = "host-rejected"
+      const result = await applyModel(directory, goal, pending.model, pending.reason)
+      if (result === "unsupported") throw new Error("Pending model switching unsupported by host.")
+    } catch {
+      // Stop rather than maintenance-retrying an unaccepted identity forever.
+      // Raw provider rejection may contain request secrets: persist only a tag.
+      await mutateState(directory, `goal.model-switch-failed:${goal.id}`, async (s) => {
+        const g = s.goals.find((g) => g.id === goal.id)
+        const rt = s.runtimes.find((r) => r.goalID === goal.id)
+        if (g) {
+          g.modelSwitch = { ...g.modelSwitch, pending: undefined, lastFailure: { at: new Date().toISOString(), reason } }
+          if (g.status === "active") {
+            g.status = "blocked"
+            g.blocker = { reason: "Pending model switch was not accepted.", needed: "Discover available models, switch the same goal explicitly, then retry when safe.", at: new Date().toISOString() }
+          }
+          g.updatedAt = new Date().toISOString()
+        }
+        if (rt) { Object.assign(rt, releaseLease(rt)); rt.retryAfter = undefined }
+        return s
+      })
+      throw new Error("Pending model switch was not accepted; goal blocked without replacing its worker.")
+    }
+  }
+
+  async function observeProviderErrorUnlocked(directory: string, goalID: GoalID, error: unknown, source: ProviderLimitObservation["source"], expectedModel?: string) {
+    const state = await readState(directory)
+    const goal = state.goals.find((g) => g.id === goalID)
+    if (!goal) return
+    const observation = observeProviderLimit(error, source, expectedModel ?? goal.config.model)
+    if (!observation) return
+    const fallbackModels = goal.config.fallbackModels ?? []
+    const attempted = new Set(goal.modelFallback?.attempted ?? [])
+    if (goal.config.model) attempted.add(goal.config.model)
+    let pending: { model: string; requestedAt: string; reason: "quota" } | undefined
+    let status: NonNullable<Goal["modelFallback"]>["status"] = "disabled"
+    // A late event must not override a user pause or a manual pending switch.
+    const runtime = state.runtimes.find((r) => r.goalID === goalID)
+    const quotaBlocked = goal.status === "blocked" && runtime?.lastError === describeError(error)
+    const sameModel = expectedModel === undefined || expectedModel === goal.config.model
+    const eligible = sameModel && (goal.status === "active" || quotaBlocked) && (!goal.modelSwitch?.pending || goal.modelSwitch.pending.reason === "quota")
+    if (eligible && goal.modelSwitch?.pending?.reason === "quota") {
+      pending = { ...goal.modelSwitch.pending, reason: "quota" }
+      status = "prepared"
+    } else if (eligible && fallbackModels.length) {
+      const catalog = await listModels()
+      if (catalog.capability === "unsupported" || catalog.switching === "unsupported" || !host.switchSessionModel) status = "unsupported"
+      else if (catalog.capability !== "supported") status = "unavailable"
+      else {
+        status = "exhausted"
+        for (const value of fallbackModels) {
+          if (attempted.has(value)) continue
+          attempted.add(value)
+          const ref = parseModelRef(value)
+          if (ref && catalog.models.some((m) => m.providerID === ref.providerID && m.modelID === ref.modelID && m.usable === true)) {
+            pending = { model: value, requestedAt: new Date().toISOString(), reason: "quota" }
+            status = "prepared"
+            break
+          }
+        }
+      }
+    }
+    await mutateState(directory, `goal.provider-limit:${goalID}`, async (s) => {
+      const g = s.goals.find((g) => g.id === goalID)
+      const rt = s.runtimes.find((r) => r.goalID === goalID)
+      if (!g) return s
+      g.lastProviderLimit = observation
+      if (sameModel && g.status === "blocked" && g.blocker && rt?.lastError === describeError(error)) g.blocker.kind = "provider-limit"
+      if (eligible) {
+        g.modelFallback = { attempted: [...attempted], status }
+        if (pending && (!g.modelSwitch?.pending || g.modelSwitch.pending.reason === "quota")) {
+          g.modelSwitch = { ...g.modelSwitch, pending }
+        }
+      }
+      if (rt?.phase === "waiting_retry" && observation.retryAt && Date.parse(observation.retryAt) > Date.parse(rt.retryAfter ?? "")) rt.retryAfter = observation.retryAt
+      g.updatedAt = new Date().toISOString()
+      return s
+    })
+    await logServerEvent(directory, "goal.provider-limit", { goalID, model: goal.config.model, kind: observation.kind, source, fallbackStatus: status, to: pending?.model })
+  }
+
+  function observeProviderError(directory: string, goalID: GoalID, error: unknown, source: ProviderLimitObservation["source"], expectedModel?: string) {
+    return withGoalOperation(goalID, () => observeProviderErrorUnlocked(directory, goalID, error, source, expectedModel))
+  }
+
+  function compact(directory: string, goalID: GoalID) {
+    return withGoalOperation(goalID, async () => {
+      const state = await readState(directory)
+      const goal = state.goals.find((g) => g.id === goalID)
+      if (!goal?.workerSessionID || goal.status !== "active") return
+      if (await host.sessionStatus(goal.workerSessionID) !== "idle") return
+      await applyPendingModel(directory, goal)
+      const fresh = (await readState(directory)).goals.find((g) => g.id === goalID)
+      if (fresh?.workerSessionID) await host.compactSession(fresh.workerSessionID, parseModelRef(fresh.config.model))
+    })
+  }
+
   async function recordPromptFailure(
     directory: string,
     goalID: GoalID,
@@ -221,6 +426,7 @@ export function createGoalService(host: LoopHost): GoalService {
         revision: state.revision,
       } satisfies LoopEvent)
     }
+    await observeProviderErrorUnlocked(directory, goalID, error, "prompt-delivery")
   }
 
   async function ensureWorkerSession(directory: string, goal: Goal): Promise<WorkerSession> {
@@ -277,6 +483,19 @@ export function createGoalService(host: LoopHost): GoalService {
     parentModel?: string
     interactive?: boolean
   }, id: GoalID) {
+    // Reject malformed/unavailable alternatives before any worker or goal exists.
+    if (input.config?.fallbackModels?.length) {
+      if (input.config.fallbackModels.length > 16) throw new Error("At most 16 ordered fallback models are allowed.")
+      const catalog = await listModels()
+      for (const value of input.config.fallbackModels) {
+        const ref = parseModelRef(value)
+        if (!ref) throw new Error("Fallback model must be providerID/modelID.")
+        if (catalog.capability === "supported" && !catalog.models.some((m) => m.providerID === ref.providerID && m.modelID === ref.modelID && m.usable === true)) {
+          throw new Error("Fallback model is unavailable or not positively known usable.")
+        }
+      }
+      input.config.fallbackModels = [...new Set(input.config.fallbackModels.map((m) => m.trim()))]
+    }
     // Inherit the calling session's live identity when the caller didn't
     // snapshot it (TUI path). Best-effort: failure falls back to existing
     // defaults/global behavior. Keep this outside the state lock.
@@ -528,6 +747,13 @@ export function createGoalService(host: LoopHost): GoalService {
 
     // Check worker idle — unless force is set (nudge/re-prompt)
     if (!opts?.force && !(await workers.isIdle(session.workerSessionID))) return
+
+    // Never change a running session even when an explicit nudge bypasses idle.
+    // The nudge path interrupts first; require confirmed idle for pending identity.
+    if (goal.modelSwitch?.pending) {
+      if (await host.sessionStatus(session.workerSessionID) !== "idle") return
+      await applyPendingModel(directory, goal)
+    }
 
     // Acquire lease and increment run count atomically
     let acquired = false
@@ -1099,5 +1325,5 @@ export function createGoalService(host: LoopHost): GoalService {
     return withGoalOperation(goalID, () => accountUsageUnlocked(directory, goalID))
   }
 
-  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive }
+  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, observeProviderError, compact }
 }

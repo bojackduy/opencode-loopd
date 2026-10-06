@@ -53,6 +53,7 @@ export function goalTools(
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
         agent: tool.schema.string().optional().describe("Agent to run the worker as (e.g. \"researcher\", \"smart-agent\"). Prefer omit — inherits the calling session's agent if omitted, else plugin defaultAgent. Only pass when explicitly requested."),
         model: tool.schema.string().optional().describe("Model to run the worker as, as \"providerID/modelID\" (e.g. \"openai/gpt-5.6-sol\", \"ollama/qwen3.8:27b\"). Prefer omit — inherits the calling session's live model if omitted, else plugin defaultModel. Only pass when explicitly requested."),
+        fallbackModels: tool.schema.array(tool.schema.string()).optional().describe("Explicit ordered providerID/modelID alternatives for provider quota/rate-limit failures only. Default empty: no automatic paid/provider switch. Discover with loopd_list_models; same worker/session retained. Interactive goals never auto-wake."),
         costBudget: tool.schema.number().optional().describe("Max provider cost in dollars before the engine stops the goal as budget_limited (e.g. 0.5). Optional — unlimited if omitted."),
         checks: tool.schema.array(tool.schema.string()).optional().describe("Shell commands that must pass for completion to be accepted. E.g. [\"npm test\"]."),
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
@@ -83,6 +84,7 @@ export function goalTools(
         }
         if (args.agent) config.agent = args.agent
         if (args.model) config.model = args.model
+        if (args.fallbackModels) config.fallbackModels = args.fallbackModels
         if (args.checks) config.checks = args.checks
         if (args.checkCwd) config.checkCwd = args.checkCwd
         if (args.workspaceWrite !== undefined) config.workspaceWrite = args.workspaceWrite

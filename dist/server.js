@@ -2367,6 +2367,7 @@ function createLoopEngine(options) {
       revision: newState.revision
     });
     const updatedGoal = newState.goals.find((g) => g.id === goal.id);
+    await goalService.observeProviderError(directory, goal.id, error, "session-error", goal.config.model);
     if (updatedGoal?.status === "blocked") {
       await appendEvent(directory, {
         version: 1,
@@ -2475,7 +2476,7 @@ function createLoopEngine(options) {
       revision: state.revision
     });
     try {
-      await host.compactSession(goal.workerSessionID);
+      await goalService.compact(directory, goal.id);
     } catch {}
     await mutateState(directory, `compact.end:${goal.id}`, async (s) => {
       const rt = s.runtimes.find((r) => r.goalID === goal.id);
@@ -2909,6 +2910,92 @@ var nativeRpcDefinition = {
   }
 };
 
+// src/server/model-catalog.ts
+function emptyCatalog(source, switching, capability = "unsupported") {
+  const observedAt = new Date().toISOString();
+  return {
+    capability,
+    source,
+    observedAt,
+    switching,
+    providers: [],
+    models: [],
+    quota: {
+      status: "unknown",
+      capability: "unsupported",
+      source,
+      observedAt,
+      limitation: "Host catalog does not report remaining quota or reset time. Connected/enabled does not prove remaining balance; local rate-limit observations are not balance data."
+    }
+  };
+}
+function record(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+function model(raw, providerID, usable) {
+  const value = record(raw);
+  if (typeof value.id !== "string" || !value.id)
+    return;
+  const limit = record(value.limit);
+  return {
+    providerID,
+    modelID: value.id,
+    name: typeof value.name === "string" ? value.name : value.id,
+    usable,
+    ...typeof limit.context === "number" && Number.isFinite(limit.context) ? { contextLimit: limit.context } : {},
+    ...typeof limit.output === "number" && Number.isFinite(limit.output) ? { outputLimit: limit.output } : {}
+  };
+}
+function normalizeV1Catalog(raw) {
+  const result = emptyCatalog("v1 provider.list", "next-prompt", "unavailable");
+  const value = record(raw);
+  if (!Array.isArray(value.all) || !Array.isArray(value.connected))
+    return result;
+  result.capability = "supported";
+  const connected = new Set(value.connected.filter((id) => typeof id === "string"));
+  for (const rawProvider of value.all) {
+    const p = record(rawProvider);
+    if (typeof p.id !== "string")
+      continue;
+    const available = connected.has(p.id);
+    result.providers.push({ providerID: p.id, name: typeof p.name === "string" ? p.name : p.id, connected: available });
+    for (const rawModel of Object.values(record(p.models))) {
+      const m = model(rawModel, p.id, available);
+      if (m)
+        result.models.push(m);
+    }
+  }
+  return result;
+}
+function normalizeV2Catalog(rawProviders, rawModels) {
+  const result = emptyCatalog("v2 provider.list + model.list", "session", "unavailable");
+  const providers = record(rawProviders).data;
+  const models = record(rawModels).data;
+  if (!Array.isArray(providers) || !Array.isArray(models))
+    return result;
+  result.capability = "supported";
+  const disabled = new Set;
+  for (const rawProvider of providers) {
+    const p = record(rawProvider);
+    if (typeof p.id !== "string")
+      continue;
+    if (p.activation === "disabled")
+      disabled.add(p.id);
+    result.providers.push({ providerID: p.id, name: typeof p.name === "string" ? p.name : p.id, connected: "unknown" });
+  }
+  const knownProviders = new Set(result.providers.map((p) => p.providerID));
+  for (const rawModel of models) {
+    const value = record(rawModel);
+    if (typeof value.providerID !== "string" || !knownProviders.has(value.providerID))
+      continue;
+    const usable = disabled.has(value.providerID) || value.enabled === false ? false : value.enabled === true ? true : "unknown";
+    const m = model(value, value.providerID, usable);
+    if (m)
+      result.models.push(m);
+  }
+  return result;
+}
+
 // src/server/host-adapter.ts
 function parseModelRef(value) {
   if (value === undefined)
@@ -2952,6 +3039,21 @@ function markParentNotified2(ownerSessionID, message) {
 }
 function createRealHost(client, directory) {
   return {
+    async listModels() {
+      if (typeof client.provider?.list !== "function")
+        return emptyCatalog("v1 provider.list", "next-prompt");
+      try {
+        const result = await withTimeout(client.provider.list({ query: { directory } }), 1e4, "OpenCode provider.list");
+        if (result?.error)
+          return emptyCatalog("v1 provider.list", "next-prompt", "unavailable");
+        return normalizeV1Catalog(result?.data);
+      } catch {
+        return emptyCatalog("v1 provider.list", "next-prompt", "unavailable");
+      }
+    },
+    async switchSessionModel() {
+      return "next-prompt";
+    },
     async createWorker({ parentID, title, agent, model }) {
       try {
         const body = { parentID, title };
@@ -2994,7 +3096,7 @@ function createRealHost(client, directory) {
       if (result?.error) {
         const detail = describeError(result.error);
         await logServerEvent(directory, "worker.prompt.failed", { sessionID, detail });
-        throw new Error(`OpenCode session.promptAsync failed for worker "${sessionID}": ${detail}`);
+        throw new Error(`OpenCode session.promptAsync failed for worker "${sessionID}": ${detail}`, { cause: result.error });
       }
       await logServerEvent(directory, "worker.prompted", { sessionID });
       return { messageID: result?.data?.messageID };
@@ -3087,9 +3189,12 @@ function createRealHost(client, directory) {
         return [];
       }
     },
-    async compactSession(sessionID) {
+    async compactSession(sessionID, model) {
       try {
-        await client.session.compact({ sessionID });
+        const identity = model ?? (await this.readSession(sessionID))?.model;
+        if (!identity || typeof client.session.summarize !== "function")
+          return;
+        await client.session.summarize({ path: { id: sessionID }, body: identity });
       } catch {}
     },
     async notifyOwner(ownerSessionID, message, agent) {
@@ -3135,6 +3240,29 @@ function toWorkerCreation(result) {
 function createV2Host(context, statuses, options = {}) {
   const directory = context.location.directory;
   return {
+    async listModels() {
+      if (typeof context.provider?.list !== "function" || typeof context.model?.list !== "function") {
+        return emptyCatalog("v2 provider.list + model.list", typeof context.session.switchModel === "function" ? "session" : "unsupported");
+      }
+      try {
+        const [providers, models] = await Promise.all([
+          context.provider.list({ location: { directory } }),
+          context.model.list({ location: { directory } })
+        ]);
+        const catalog = normalizeV2Catalog(providers, models);
+        if (typeof context.session.switchModel !== "function")
+          catalog.switching = "unsupported";
+        return catalog;
+      } catch {
+        return emptyCatalog("v2 provider.list + model.list", typeof context.session.switchModel === "function" ? "session" : "unsupported", "unavailable");
+      }
+    },
+    async switchSessionModel(sessionID, model) {
+      if (typeof context.session.switchModel !== "function")
+        return "unsupported";
+      await context.session.switchModel({ sessionID, model: { id: model.modelID, providerID: model.providerID } });
+      return "applied";
+    },
     async createWorker({ parentID, title, agent, model, goalID }) {
       if (options.native) {
         let outcome;
@@ -3289,8 +3417,13 @@ function createV2Host(context, statuses, options = {}) {
         return [];
       }
     },
-    async compactSession(sessionID) {
+    async compactSession(sessionID, model) {
       try {
+        if (model) {
+          if (typeof context.session.switchModel !== "function")
+            return;
+          await context.session.switchModel({ sessionID, model: { id: model.modelID, providerID: model.providerID } });
+        }
         await context.session.command({ sessionID, name: "compact", text: "" });
       } catch {}
     },
@@ -3319,6 +3452,40 @@ async function withTimeout(promise, timeoutMs, operation) {
     if (timer)
       clearTimeout(timer);
   }
+}
+
+// src/domain/provider-limit.ts
+function object(value) {
+  return value !== null && typeof value === "object" ? value : {};
+}
+function observeProviderLimit(error, source, model) {
+  const wrapper = object(error);
+  const root = wrapper.cause ? object(wrapper.cause) : wrapper;
+  const data = object(root.data);
+  const status = root.statusCode ?? root.status ?? data.statusCode ?? data.status;
+  const statusCode = typeof status === "number" ? status : undefined;
+  const code = root.code ?? data.code;
+  const message = [root.message, data.message, typeof error === "string" ? error : undefined].filter((s) => typeof s === "string").join(" ");
+  if (statusCode === 401 || statusCode === 403 || /context.{0,20}(length|window|overflow)|maximum context|invalid.{0,10}(key|token)|unauthori[sz]ed|authentication|network|ECONN|ENOTFOUND|max.?turn|cost.?budget|budget.?limit/i.test(message))
+    return;
+  const quota = code === "insufficient_quota" || code === "quota_exceeded" || /\b(insufficient quota|quota (exceeded|exhausted)|exceeded.{0,20}quota|usage limit reached|credit balance.{0,20}(low|exhausted|insufficient))\b/i.test(message);
+  const rate = statusCode === 429 || code === "rate_limit_exceeded" || /\b(rate[ -]limit(ed| exceeded| reached| hit)|too many requests)\b/i.test(message);
+  if (!quota && !rate)
+    return;
+  const observedAt = new Date().toISOString();
+  const headers = object(root.responseHeaders ?? data.responseHeaders);
+  const retryAfter = root.retryAfter ?? data.retryAfter ?? headers["retry-after"];
+  let retryAt;
+  if (typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter >= 0) {
+    retryAt = new Date(Date.now() + Math.min(retryAfter, 31536000) * 1000).toISOString();
+  } else if (typeof retryAfter === "string") {
+    if (/^\d+(\.\d+)?$/.test(retryAfter)) {
+      retryAt = new Date(Date.now() + Math.min(Number(retryAfter), 31536000) * 1000).toISOString();
+    } else if (Number.isFinite(Date.parse(retryAfter))) {
+      retryAt = new Date(retryAfter).toISOString();
+    }
+  }
+  return { kind: quota ? "quota" : "rate-limit", source, observedAt, ...model ? { model } : {}, ...statusCode !== undefined ? { statusCode } : {}, ...retryAt ? { retryAt } : {} };
 }
 
 // src/server/worker-session.ts
@@ -3504,6 +3671,217 @@ function createGoalService(host) {
       throw new Error(`Workspace-writing goal "${activeWriter.name}" (${activeWriter.id}) is already active` + (ownedElsewhere ? ` (owned by session ${activeWriter.ownerSessionID}, not this session)` : "") + ". Pause, block, complete, or clear it before activating another workspace-writing goal." + (ownedElsewhere ? " Note: list_background_goals shows only this session's goals; clear/pause it from its owning session." : ""));
     }
   }
+  async function listModels() {
+    return host.listModels ? host.listModels() : emptyCatalog("host catalog capability absent", "unsupported");
+  }
+  async function validateModel(value) {
+    const ref = parseModelRef(value);
+    if (!ref)
+      throw new Error("Model is required: providerID/modelID.");
+    const model = `${ref.providerID}/${ref.modelID}`;
+    const catalog = await listModels();
+    if (catalog.capability !== "supported" || catalog.switching === "unsupported" || !host.switchSessionModel) {
+      return { model, catalog };
+    }
+    if (!catalog.models.some((m) => m.providerID === ref.providerID && m.modelID === ref.modelID && m.usable === true)) {
+      throw new Error("Model is unavailable or not positively known usable. Discover models with loopd_list_models first.");
+    }
+    return { model, catalog };
+  }
+  async function applyModel(directory, goal, model, reason) {
+    if (!goal.workerSessionID || !host.switchSessionModel)
+      return "unsupported";
+    const previousModel = parseModelRef(goal.config.model) ?? (await host.readSession(goal.workerSessionID))?.model;
+    const outcome = await host.switchSessionModel(goal.workerSessionID, parseModelRef(model));
+    if (outcome === "unsupported")
+      return outcome;
+    try {
+      await mutateState(directory, `goal.model-switch:${goal.id}`, async (s) => {
+        const current = s.goals.find((g) => g.id === goal.id);
+        if (!current)
+          throw new Error("Goal removed during model switch.");
+        current.config.model = model;
+        current.modelSwitch = {
+          ...current.modelSwitch,
+          pending: undefined,
+          lastFailure: undefined,
+          last: { from: goal.config.model, to: model, at: new Date().toISOString(), outcome, reason }
+        };
+        current.updatedAt = new Date().toISOString();
+        return s;
+      });
+    } catch (error) {
+      if (outcome === "applied") {
+        if (!previousModel)
+          throw new Error("Host accepted model switch but persistence failed; previous host model unknown, rollback unavailable.");
+        await host.switchSessionModel(goal.workerSessionID, previousModel);
+      }
+      throw error;
+    }
+    await logServerEvent(directory, "goal.model-switched", { goalID: goal.id, workerSessionID: goal.workerSessionID, from: goal.config.model, to: model, reason, outcome });
+    return outcome;
+  }
+  function switchModel(directory, goalID, ownerSessionID, value, opts) {
+    return withGoalOperation(goalID, async () => {
+      const state = await readState(directory);
+      const goal = state.goals.find((g) => g.id === goalID);
+      if (!goal || !ownerSessionID || goal.ownerSessionID !== ownerSessionID)
+        throw new Error("Goal not found or not owned by this session.");
+      if (goal.status === "complete")
+        throw new Error("Cannot switch a completed goal.");
+      if (opts?.resume && (goal.status !== "blocked" || goal.blocker?.kind !== "provider-limit")) {
+        throw new Error("resume is only valid for a provider-limit-blocked goal.");
+      }
+      if (opts?.resume)
+        assertWorkspaceWriteAvailable(state, goal, ownerSessionID);
+      const { model, catalog } = await validateModel(value);
+      if (catalog.capability !== "supported" || catalog.switching === "unsupported" || !host.switchSessionModel || !goal.workerSessionID) {
+        return { outcome: "unsupported", model };
+      }
+      const runtime = state.runtimes.find((r) => r.goalID === goalID);
+      const status = await host.sessionStatus(goal.workerSessionID);
+      if (status !== "idle" || runtime?.phase === "running" && leaseIsValid(runtime)) {
+        await mutateState(directory, `goal.model-deferred:${goalID}`, async (s) => {
+          const current = s.goals.find((g) => g.id === goalID);
+          if (current) {
+            current.modelSwitch = { ...current.modelSwitch, pending: { model, requestedAt: new Date().toISOString(), reason: "owner" } };
+            current.updatedAt = new Date().toISOString();
+          }
+          return s;
+        });
+        return { outcome: "deferred", model };
+      }
+      const applied = await applyModel(directory, goal, model, "owner");
+      if (opts?.resume && applied !== "unsupported") {
+        await mutateState(directory, `goal.model-resume:${goalID}`, async (s) => {
+          const g = s.goals.find((g) => g.id === goalID);
+          if (g?.status === "blocked" && g.blocker?.kind === "provider-limit") {
+            assertWorkspaceWriteAvailable(s, g, ownerSessionID);
+            g.status = "active";
+            g.blocker = undefined;
+            g.updatedAt = new Date().toISOString();
+          }
+          return s;
+        });
+        await continueTurnUnlocked(directory, goalID);
+      }
+      return { outcome: applied === "next-prompt" ? "deferred" : applied, model, ...opts?.resume && applied !== "unsupported" ? { resumed: true } : {} };
+    });
+  }
+  async function applyPendingModel(directory, goal) {
+    const pending = goal.modelSwitch?.pending;
+    if (!pending)
+      return;
+    let reason = "catalog-unavailable";
+    try {
+      const { catalog } = await validateModel(pending.model);
+      if (catalog.capability !== "supported" || catalog.switching === "unsupported")
+        throw new Error("Pending model switch catalog unavailable.");
+      reason = "host-rejected";
+      const result = await applyModel(directory, goal, pending.model, pending.reason);
+      if (result === "unsupported")
+        throw new Error("Pending model switching unsupported by host.");
+    } catch {
+      await mutateState(directory, `goal.model-switch-failed:${goal.id}`, async (s) => {
+        const g = s.goals.find((g) => g.id === goal.id);
+        const rt = s.runtimes.find((r) => r.goalID === goal.id);
+        if (g) {
+          g.modelSwitch = { ...g.modelSwitch, pending: undefined, lastFailure: { at: new Date().toISOString(), reason } };
+          if (g.status === "active") {
+            g.status = "blocked";
+            g.blocker = { reason: "Pending model switch was not accepted.", needed: "Discover available models, switch the same goal explicitly, then retry when safe.", at: new Date().toISOString() };
+          }
+          g.updatedAt = new Date().toISOString();
+        }
+        if (rt) {
+          Object.assign(rt, releaseLease(rt));
+          rt.retryAfter = undefined;
+        }
+        return s;
+      });
+      throw new Error("Pending model switch was not accepted; goal blocked without replacing its worker.");
+    }
+  }
+  async function observeProviderErrorUnlocked(directory, goalID, error, source, expectedModel) {
+    const state = await readState(directory);
+    const goal = state.goals.find((g) => g.id === goalID);
+    if (!goal)
+      return;
+    const observation = observeProviderLimit(error, source, expectedModel ?? goal.config.model);
+    if (!observation)
+      return;
+    const fallbackModels = goal.config.fallbackModels ?? [];
+    const attempted = new Set(goal.modelFallback?.attempted ?? []);
+    if (goal.config.model)
+      attempted.add(goal.config.model);
+    let pending;
+    let status = "disabled";
+    const runtime = state.runtimes.find((r) => r.goalID === goalID);
+    const quotaBlocked = goal.status === "blocked" && runtime?.lastError === describeError(error);
+    const sameModel = expectedModel === undefined || expectedModel === goal.config.model;
+    const eligible = sameModel && (goal.status === "active" || quotaBlocked) && (!goal.modelSwitch?.pending || goal.modelSwitch.pending.reason === "quota");
+    if (eligible && goal.modelSwitch?.pending?.reason === "quota") {
+      pending = { ...goal.modelSwitch.pending, reason: "quota" };
+      status = "prepared";
+    } else if (eligible && fallbackModels.length) {
+      const catalog = await listModels();
+      if (catalog.capability === "unsupported" || catalog.switching === "unsupported" || !host.switchSessionModel)
+        status = "unsupported";
+      else if (catalog.capability !== "supported")
+        status = "unavailable";
+      else {
+        status = "exhausted";
+        for (const value of fallbackModels) {
+          if (attempted.has(value))
+            continue;
+          attempted.add(value);
+          const ref = parseModelRef(value);
+          if (ref && catalog.models.some((m) => m.providerID === ref.providerID && m.modelID === ref.modelID && m.usable === true)) {
+            pending = { model: value, requestedAt: new Date().toISOString(), reason: "quota" };
+            status = "prepared";
+            break;
+          }
+        }
+      }
+    }
+    await mutateState(directory, `goal.provider-limit:${goalID}`, async (s) => {
+      const g = s.goals.find((g) => g.id === goalID);
+      const rt = s.runtimes.find((r) => r.goalID === goalID);
+      if (!g)
+        return s;
+      g.lastProviderLimit = observation;
+      if (sameModel && g.status === "blocked" && g.blocker && rt?.lastError === describeError(error))
+        g.blocker.kind = "provider-limit";
+      if (eligible) {
+        g.modelFallback = { attempted: [...attempted], status };
+        if (pending && (!g.modelSwitch?.pending || g.modelSwitch.pending.reason === "quota")) {
+          g.modelSwitch = { ...g.modelSwitch, pending };
+        }
+      }
+      if (rt?.phase === "waiting_retry" && observation.retryAt && Date.parse(observation.retryAt) > Date.parse(rt.retryAfter ?? ""))
+        rt.retryAfter = observation.retryAt;
+      g.updatedAt = new Date().toISOString();
+      return s;
+    });
+    await logServerEvent(directory, "goal.provider-limit", { goalID, model: goal.config.model, kind: observation.kind, source, fallbackStatus: status, to: pending?.model });
+  }
+  function observeProviderError(directory, goalID, error, source, expectedModel) {
+    return withGoalOperation(goalID, () => observeProviderErrorUnlocked(directory, goalID, error, source, expectedModel));
+  }
+  function compact(directory, goalID) {
+    return withGoalOperation(goalID, async () => {
+      const state = await readState(directory);
+      const goal = state.goals.find((g) => g.id === goalID);
+      if (!goal?.workerSessionID || goal.status !== "active")
+        return;
+      if (await host.sessionStatus(goal.workerSessionID) !== "idle")
+        return;
+      await applyPendingModel(directory, goal);
+      const fresh = (await readState(directory)).goals.find((g) => g.id === goalID);
+      if (fresh?.workerSessionID)
+        await host.compactSession(fresh.workerSessionID, parseModelRef(fresh.config.model));
+    });
+  }
   async function recordPromptFailure(directory, goalID, error, blockImmediately = false) {
     const detail = describeError(error);
     let runID = "unknown";
@@ -3562,6 +3940,7 @@ function createGoalService(host) {
         revision: state.revision
       });
     }
+    await observeProviderErrorUnlocked(directory, goalID, error, "prompt-delivery");
   }
   async function ensureWorkerSession(directory, goal) {
     let session = sessions.get(goal.id);
@@ -3596,6 +3975,20 @@ function createGoalService(host) {
     return withGoalOperation(id, () => startUnlocked(directory, input, id));
   }
   async function startUnlocked(directory, input, id) {
+    if (input.config?.fallbackModels?.length) {
+      if (input.config.fallbackModels.length > 16)
+        throw new Error("At most 16 ordered fallback models are allowed.");
+      const catalog = await listModels();
+      for (const value of input.config.fallbackModels) {
+        const ref = parseModelRef(value);
+        if (!ref)
+          throw new Error("Fallback model must be providerID/modelID.");
+        if (catalog.capability === "supported" && !catalog.models.some((m) => m.providerID === ref.providerID && m.modelID === ref.modelID && m.usable === true)) {
+          throw new Error("Fallback model is unavailable or not positively known usable.");
+        }
+      }
+      input.config.fallbackModels = [...new Set(input.config.fallbackModels.map((m) => m.trim()))];
+    }
     let parentAgent = input.parentAgent;
     let parentModel = input.parentModel;
     if ((!parentAgent || !parentModel) && host.readSession) {
@@ -3825,6 +4218,11 @@ function createGoalService(host) {
       return;
     if (!opts?.force && !await workers.isIdle(session.workerSessionID))
       return;
+    if (goal.modelSwitch?.pending) {
+      if (await host.sessionStatus(session.workerSessionID) !== "idle")
+        return;
+      await applyPendingModel(directory, goal);
+    }
     let acquired = false;
     const state = await mutateState(directory, `turn.acquire:${goalID}`, async (s) => {
       const g = s.goals.find((item) => item.id === goalID);
@@ -4321,7 +4719,7 @@ function createGoalService(host) {
   function accountUsage(directory, goalID) {
     return withGoalOperation(goalID, () => accountUsageUnlocked(directory, goalID));
   }
-  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive };
+  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, observeProviderError, compact };
 }
 
 // src/application/schedule-worker.ts
@@ -6850,6 +7248,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
         agent: tool.schema.string().optional().describe(`Agent to run the worker as (e.g. "researcher", "smart-agent"). Prefer omit \u2014 inherits the calling session's agent if omitted, else plugin defaultAgent. Only pass when explicitly requested.`),
         model: tool.schema.string().optional().describe(`Model to run the worker as, as "providerID/modelID" (e.g. "openai/gpt-5.6-sol", "ollama/qwen3.8:27b"). Prefer omit \u2014 inherits the calling session's live model if omitted, else plugin defaultModel. Only pass when explicitly requested.`),
+        fallbackModels: tool.schema.array(tool.schema.string()).optional().describe("Explicit ordered providerID/modelID alternatives for provider quota/rate-limit failures only. Default empty: no automatic paid/provider switch. Discover with loopd_list_models; same worker/session retained. Interactive goals never auto-wake."),
         costBudget: tool.schema.number().optional().describe("Max provider cost in dollars before the engine stops the goal as budget_limited (e.g. 0.5). Optional \u2014 unlimited if omitted."),
         checks: tool.schema.array(tool.schema.string()).optional().describe('Shell commands that must pass for completion to be accepted. E.g. ["npm test"].'),
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
@@ -6882,6 +7281,8 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
           config.agent = args.agent;
         if (args.model)
           config.model = args.model;
+        if (args.fallbackModels)
+          config.fallbackModels = args.fallbackModels;
         if (args.checks)
           config.checks = args.checks;
         if (args.checkCwd)
@@ -7517,6 +7918,53 @@ function withTimeout2(promise, ms) {
 function ownerTools(options) {
   const { directory, host, goalService } = options;
   return {
+    loopd_list_models: tool2({
+      description: "Discover host providers/models usable by this agent and inspect quota limitations plus assigned identities of this session's existing goals. " + "Remaining quota is unknown unless a supported integration reports it; connected/enabled is not remaining balance. " + "Workflow: discover -> inspect_background_goal for last local quota error -> switch_goal_model on the SAME goal, never create a duplicate to change provider. No secrets/auth data are returned.",
+      args: {},
+      execute: async (_args, context) => {
+        if (!context?.sessionID)
+          return { title: "No session", output: JSON.stringify({ ok: false, message: "No session context available." }) };
+        const [catalog, state] = await Promise.all([goalService.listModels(), readState(directory)]);
+        return {
+          title: "Provider/model capabilities",
+          output: JSON.stringify({
+            ok: true,
+            ...catalog,
+            assignedGoals: state.goals.filter((g) => g.ownerSessionID === context.sessionID).map((g) => ({
+              id: g.id,
+              model: g.config.model,
+              workerSessionID: g.workerSessionID,
+              modelSwitch: g.modelSwitch,
+              modelFallback: g.modelFallback,
+              fallbackModels: g.config.fallbackModels ?? [],
+              lastProviderLimit: g.lastProviderLimit
+            }))
+          }, null, 2)
+        };
+      }
+    }),
+    switch_goal_model: tool2({
+      description: "Switch provider/model for an EXISTING goal owned by this session, preserving goal ID, worker session, transcript, checks and budgets. " + "First discover usable models with loopd_list_models, then inspect_background_goal for quota/error information. " + "Busy workers defer to the next safe turn; v1 changes apply on the next prompt. No abort, duplicate worker, budget reset, unpause or interactive wake. " + "Returns applied/deferred/unsupported honestly; an unsupported catalog cannot validate a switch. resume=true explicitly resumes ONLY a provider-limit-blocked goal and requests its next turn (including interactive); never resets budgets.",
+      args: {
+        goal_id: tool2.schema.string().describe("Existing owned goal ID; never create a replacement goal to switch models."),
+        model: tool2.schema.string().describe("Available providerID/modelID from loopd_list_models."),
+        resume: tool2.schema.boolean().optional().describe("Explicitly resume only a quota/rate-limit-blocked goal after a safe switch. Default false. Paused/budget-limited/unrelated-blocked goals are not resumed.")
+      },
+      execute: async (args, context) => {
+        if (!context?.sessionID)
+          return { title: "No session", output: JSON.stringify({ ok: false, message: "No session context available." }) };
+        const state = await readState(directory);
+        if (!state.goals.some((g) => g.id === args.goal_id && g.ownerSessionID === context.sessionID)) {
+          return { title: "Switch denied", output: JSON.stringify({ ok: false, message: "Goal not found or not owned by this session." }) };
+        }
+        try {
+          const result = await goalService.switchModel(directory, args.goal_id, context.sessionID, args.model, { resume: args.resume });
+          return { title: `Model switch: ${result.outcome}`, output: JSON.stringify({ ok: result.outcome !== "unsupported", ...result, goalID: args.goal_id, message: "Same goal and worker retained. Deferred requests require the next permitted turn; no automatic interactive wake." }) };
+        } catch {
+          return { title: "Model switch failed", output: JSON.stringify({ ok: false, message: "Switch rejected: verify ownership, model availability and host capability with loopd_list_models and inspect_background_goal. Existing goal/session retained." }) };
+        }
+      }
+    }),
     list_background_goals: tool2({
       description: "List all active background goals owned by this session. Shows contract (name, status, phase, turn, last progress, blocker) \u2014 only goals with your ownerSessionID appear.",
       args: {},
@@ -7558,6 +8006,11 @@ function ownerTools(options) {
             maxTurns: g.config.maxTurns,
             agent: g.config.agent,
             model: g.config.model,
+            modelSwitch: g.modelSwitch,
+            modelFallback: g.modelFallback,
+            lastProviderLimit: g.lastProviderLimit,
+            fallbackModels: g.config.fallbackModels ?? [],
+            quotaLimitation: "Remaining provider quota unknown; connected/enabled is not balance data. See loopd_list_models.",
             lastProgress: g.lastProgress?.summary?.slice(0, 120),
             lastProgressAt: g.lastProgress?.at,
             blocker: g.blocker?.reason?.slice(0, 120),
@@ -7654,11 +8107,16 @@ function ownerTools(options) {
               workspaceWrite: goal.config.workspaceWrite,
               agent: goal.config.agent,
               model: goal.config.model,
+              fallbackModels: goal.config.fallbackModels ?? [],
               parentAgent: goal.parentAgent,
               parentModel: goal.parentModel,
               schedule: goal.config.schedule
             },
             lastProgress: goal.lastProgress,
+            modelSwitch: goal.modelSwitch,
+            modelFallback: goal.modelFallback,
+            lastProviderLimit: goal.lastProviderLimit,
+            quotaLimitation: "Remaining provider quota unknown; local quota errors are observations, not balance data. See loopd_list_models.",
             completionEvidence: goal.completionEvidence,
             blocker: goal.blocker,
             tokensUsed: goal.tokensUsed,

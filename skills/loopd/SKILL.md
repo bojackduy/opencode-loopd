@@ -58,7 +58,7 @@ Only `active` goals own live worker runs. `blocked`/`paused`/`budget_limited` wa
 
 ## Contract & Evaluation Semantics
 
-Every goal has an **immutable contract** at creation — the source of truth for completion:
+Every goal has a **completion contract** at creation — the source of truth for completion. Model identity can be changed safely via owner tools without resetting that contract or its budgets:
 
 * **Objective** — semantic requirements (free text, self-contained). The worker derives concrete requirements from it.
 * **Checks** — deterministic shell commands that **must pass** for `complete_goal` to be accepted. For `workspaceWrite:true` goals they are **mandatory** (explicit `checks` or plugin `defaultChecks`), and they run from `checkCwd` (writers default to project root; artifact-only jobs run from their `artifactDir`).
@@ -109,6 +109,40 @@ loopd_create_goal({
 Returns `ok:true` with `goalID`, `workerSessionID`, `artifactDir`, `agent`, `model`, `costBudget`, `checks`, `workspaceWrite`, `defaultsApplied:{agent,model,checks}`. On contract violation you get `ok:false` with `errorCode: "missing_agent"` or `"missing_checks"` or `"already active"` (writer serialization) or `"invalid_cost_budget"`.
 
 The goal starts immediately. The user can monitor it via `/loop` (<leader>o). Plugin options `defaultAgent` / `defaultModel` / `defaultChecks` in `opencode.jsonc` can supply defaults so callers don’t have to repeat them.
+
+## Owner Agent: Discover Models and Recover the Same Goal
+
+Use agent tools, not a new goal or a human dashboard action, to change a worker's provider/model:
+
+1. `loopd_list_models({})` returns public provider/model IDs, names, usable/connected status, context/output limits, host switching capability, and identities of **this owner session's** goals.
+2. `inspect_background_goal({goal_id, includeTranscript:false})` shows assigned model, `modelSwitch` (pending/last/failure), `modelFallback` (attempted/status), and `lastProviderLimit` (local observation source/time/model/status/retryAt).
+3. Select a positively usable catalog model and call `switch_goal_model({goal_id, model:"provider/model"})`. Keep the existing goal ID and worker session. **Never spawn a duplicate goal to switch providers.**
+
+**Quota caveat:** the inspected v1/v2 host catalogs do not expose remaining provider quota or reset times. Results explicitly say `quota.status:"unknown"` and `quota.capability:"unsupported"`, with source and observation time. Connected/enabled credentials do **not** establish balance. `lastProviderLimit` is an observed 429/quota failure, not live balance data; `retryAt` is derived only from a supplied Retry-After value, not a fabricated quota reset. Request headers, auth tokens, keys, and raw provider records are not returned. Older/missing host APIs report unsupported; failed catalog requests report unavailable and cannot validate switches.
+
+### Manual recovery through tools
+
+```text
+loopd_list_models({})
+inspect_background_goal({goal_id:"existing-goal", includeTranscript:false})
+switch_goal_model({goal_id:"existing-goal", model:"connected-provider/usable-model"})
+# If and only if the goal is blocked by a provider quota/rate limit:
+switch_goal_model({goal_id:"existing-goal", model:"connected-provider/usable-model", resume:true})
+```
+
+Switch results distinguish `applied`, `deferred`, and `unsupported`. Busy/retrying/unconfirmable workers defer until a confirmed-idle continuation; there is no implicit abort. v1 supports explicit model identity on the **next prompt** (reported deferred); v2 supports an idle-session model switch. Future prompts and compaction use the switched assignment. Default switching does not unpause, resume, or wake interactive goals. `resume:true` explicitly starts a permitted turn only for a provider-limit-blocked goal, never paused, budget-limited, or unrelated-blocked goals. If the worker is still busy, the switch remains deferred and resume must be requested again when safe. Budgets, failure/rejection counters, checks, progress, inbox, topology, transcript, and session ID are preserved.
+
+### Opt-in ordered fallback
+
+```text
+loopd_create_goal({
+  name:"research", objective:"Research and verify the report", workspaceWrite:false,
+  fallbackModels:["provider-b/usable-model", "provider-c/usable-model"],
+  interactive:true
+})
+```
+
+First discover and validate the desired alternatives. `fallbackModels` defaults empty; at most 16 entries, deduplicated in order. No arbitrary paid/provider switch is made. Only positively classified provider quota/rate-limit failures prepare an alternative; network/authentication/context errors, loop turn/cost limits, and user pauses do not. Each configured alternative is considered once across restarts, avoiding depleted-provider cycles. Unsupported/unavailable/exhausted fallback status is visible in inspection. Normal active goals apply a prepared alternative on the next permitted retry; blocked goals still require explicit retry/resume. Interactive goals may record/prepare fallback but **never automatically start another turn**: the owner must send input, nudge, retry, or explicitly resume. A rejected pending switch blocks safely rather than endlessly retrying or creating a replacement worker; inspect, select a usable model, switch, and retry the same goal.
 
 ## Worker Tools (Running Inside the Goal)
 

@@ -1,5 +1,6 @@
 // ─── Domain: Goal ────────────────────────────────────────────────────────────
 // Core goal model, statuses, and transition rules.
+import type { ProviderLimitObservation } from "./provider-limit"
 
 export type GoalStatus =
   | "active"
@@ -69,6 +70,18 @@ export interface Goal {
    */
   interactive?: boolean
 
+  /** Persisted switching state; assignment changes never replace the worker. */
+  modelSwitch?: {
+    pending?: { model: string; requestedAt: string; reason: "owner" | "quota" }
+    last?: { from?: string; to: string; at: string; outcome: "applied" | "next-prompt"; reason: "owner" | "quota" }
+    lastFailure?: { at: string; reason: "host-rejected" | "catalog-unavailable" }
+  }
+  lastProviderLimit?: ProviderLimitObservation
+  modelFallback?: {
+    attempted: string[]
+    status: "prepared" | "exhausted" | "unsupported" | "unavailable" | "disabled"
+  }
+
   /** Tokens consumed so far. */
   tokensUsed: number
 
@@ -97,6 +110,7 @@ export interface Goal {
 
   /** Blocker details persisted by the model. */
   blocker?: {
+    kind?: "provider-limit"
     reason: string
     needed: string
     at: string
@@ -155,6 +169,9 @@ export interface GoalConfig {
    * Optional — omits the field and OpenCode uses the agent/session default.
    */
   model?: string
+
+  /** Explicit ordered opt-in only; empty/absent means no provider fallback. */
+  fallbackModels?: string[]
 
   /** Optional interval schedule — requeue the same goal periodically. */
   schedule?: ScheduleConfig

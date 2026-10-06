@@ -137,6 +137,8 @@ describe("Server Plugin V2", () => {
       "report_goal_progress",
       "complete_goal",
       "block_goal",
+      "loopd_list_models",
+      "switch_goal_model",
       "list_background_goals",
       "inspect_background_goal",
       "read_goal_transcript",
