@@ -62,6 +62,17 @@ export interface SetInteractiveCommand extends BaseCommand {
   args: { interactive: boolean }
 }
 
+/** Owner-scoped provider/model inventory for the dashboard `:models`. */
+export interface ListModelsCommand extends BaseCommand {
+  command: "list_models"
+}
+
+/** Owner-scoped same-goal model switch for the dashboard `:model`. */
+export interface SwitchGoalModelCommand extends BaseCommand {
+  command: "switch_goal_model"
+  args: { model: string; resume?: boolean }
+}
+
 // ─── Worker Interaction ──────────────────────────────────────────────────────
 
 export interface SendCommand extends BaseCommand {
@@ -121,6 +132,8 @@ export type LoopCommand =
   | ForceBlockCommand
   | UpdateGoalCommand
   | SetInteractiveCommand
+  | ListModelsCommand
+  | SwitchGoalModelCommand
   | CompactCommand
   | InspectCommand
   | OpenWorkerCommand

@@ -267,6 +267,57 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
         break
       }
 
+      case "switch_goal_model": {
+        if (!request.goalID) {
+          response = { ...base, ok: false, message: "goalID is required", errorCode: "bad_request" }
+          break
+        }
+        const args = request.args as { model?: unknown; resume?: unknown } | undefined
+        const model = args?.model
+        if (typeof model !== "string" || model.trim().length === 0) {
+          response = { ...base, ok: false, message: "model (providerID/modelID) is required", errorCode: "bad_request" }
+          break
+        }
+        // The control bus is local (TUI → server on the same machine) and
+        // carries no ownerSessionID; switchModel verifies ownership against
+        // the goal's persisted owner, so source it from state.
+        const ownerForSwitch = (await readState(directory)).goals.find(
+          (g) => g.id === request.goalID,
+        )?.ownerSessionID ?? ""
+        const result = await goalSvc.switchModel(
+          directory,
+          request.goalID as any,
+          ownerForSwitch,
+          model.trim(),
+          { resume: args?.resume === true },
+        )
+        const state = await readState(directory)
+        const outcomeMessage: Record<string, string> = {
+          applied: `Model switched to ${result.model} on the same worker/session.`,
+          deferred: `Worker busy — switch to ${result.model} queued; applies on the next turn.`,
+          unsupported: `Model switch unsupported on this host (see loopd_list_models). Goal/session retained.`,
+        }
+        response = {
+          ...base,
+          ok: result.outcome !== "unsupported",
+          message: outcomeMessage[result.outcome] ?? `Model switch ${result.outcome}.`,
+          stateRevision: state.revision,
+        }
+        break
+      }
+
+      case "list_models": {
+        const catalog = await goalSvc.listModels()
+        const state = await readState(directory)
+        response = {
+          ...base,
+          ok: catalog.capability !== "unavailable",
+          message: `Models: ${catalog.models.length} across ${catalog.providers.length} provider(s) [${catalog.capability}/${catalog.switching}]. Quota: ${catalog.quota.status} — ${catalog.quota.limitation}`,
+          stateRevision: state.revision,
+        }
+        break
+      }
+
       case "set_interactive": {
         if (!request.goalID) {
           response = { ...base, ok: false, message: "goalID is required", errorCode: "bad_request" }

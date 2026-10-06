@@ -1545,6 +1545,44 @@ function createControlWorker(options) {
         };
         break;
       }
+      case "switch_goal_model": {
+        if (!request.goalID) {
+          response = { ...base, ok: false, message: "goalID is required", errorCode: "bad_request" };
+          break;
+        }
+        const args = request.args;
+        const model = args?.model;
+        if (typeof model !== "string" || model.trim().length === 0) {
+          response = { ...base, ok: false, message: "model (providerID/modelID) is required", errorCode: "bad_request" };
+          break;
+        }
+        const ownerForSwitch = (await readState(directory)).goals.find((g) => g.id === request.goalID)?.ownerSessionID ?? "";
+        const result = await goalSvc.switchModel(directory, request.goalID, ownerForSwitch, model.trim(), { resume: args?.resume === true });
+        const state = await readState(directory);
+        const outcomeMessage = {
+          applied: `Model switched to ${result.model} on the same worker/session.`,
+          deferred: `Worker busy \u2014 switch to ${result.model} queued; applies on the next turn.`,
+          unsupported: `Model switch unsupported on this host (see loopd_list_models). Goal/session retained.`
+        };
+        response = {
+          ...base,
+          ok: result.outcome !== "unsupported",
+          message: outcomeMessage[result.outcome] ?? `Model switch ${result.outcome}.`,
+          stateRevision: state.revision
+        };
+        break;
+      }
+      case "list_models": {
+        const catalog = await goalSvc.listModels();
+        const state = await readState(directory);
+        response = {
+          ...base,
+          ok: catalog.capability !== "unavailable",
+          message: `Models: ${catalog.models.length} across ${catalog.providers.length} provider(s) [${catalog.capability}/${catalog.switching}]. Quota: ${catalog.quota.status} \u2014 ${catalog.quota.limitation}`,
+          stateRevision: state.revision
+        };
+        break;
+      }
       case "set_interactive": {
         if (!request.goalID) {
           response = { ...base, ok: false, message: "goalID is required", errorCode: "bad_request" };
