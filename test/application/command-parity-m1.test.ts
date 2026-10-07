@@ -131,6 +131,9 @@ describe("M1 service: endReason transitions + timeout engine + shell + env", () 
     expect(s.timeoutSeconds).toBe(1)
     expect(s.deadlineAt).toBeDefined()
     await waitFor(async () => (await svc2.get(dir, s.id, "owner-1"))?.endReason === "timeout")
+    // Owner notify is async (readState + tail + callback) after the timeout
+    // stamp — wait for it instead of assuming it landed before the poll.
+    await waitFor(async () => calls.length === 1)
     const after = await svc2.get(dir, s.id, "owner-1")
     expect(after!.status).toBe("terminated")
     expect(after!.endReason).toBe("timeout")
