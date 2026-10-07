@@ -104,7 +104,14 @@ export function commandTools(options: CommandToolsOptions) {
         "The user can also open it live: /loop or /commands → Tab/l to the Commands tab → select it → `o` opens a fullscreen interactive terminal page (type directly, Ctrl+C interrupts, Ctrl+] detaches without stopping it). " +
         "Independent from goals: an optional goal_id is display-only metadata and never couples lifecycles — pausing/clearing a goal never touches the command, and terminating a command never touches the goal. " +
         "To make a specific goal wake up when this command finishes, call loopd_command_await separately after starting it (linking alone does not wake anything). " +
-        "The OWNER session gets a notification on natural exit (including code 0), missing process, or timeout — no polling required for completion. Manual terminate stays silent by default. Raw PTY output stays in the log; any short tail included in the notification is sanitized for chat. Set notify_on_exit:false to suppress owner exit notifications.",
+        "The OWNER session gets a notification on natural exit (including code 0), missing process, or timeout — no polling required for completion. Manual terminate stays silent by default. Raw PTY output stays in the log; any short tail included in the notification is sanitized for chat. Set notify_on_exit:false to suppress owner exit notifications." +
+        " HOW TO WAIT — declare your wake upfront, then go do other work; you will be pushed. Never poll loopd_command_get in a loop and never sleep-then-read: quick one-shot finishing in seconds → built-in bash, or start here and read once. " +
+        "Minutes-long or never-exiting where only FINISHING matters → just start it; the automatic exit/timeout notification is your wake. " +
+        "Never-exiting where a LINE appearing matters (dev-server READY, deploy COMPLETED) → pass watch_until (+ watch_filter to cut noise); stop (default) ends the command with exactly one message, keep lets it run on. " +
+        "A GOAL worker that must block until that happens → call loopd_command_await (passing goal_id alone never wakes anything). " +
+        "Polling the WORLD inside the command (a shell loop curling an endpoint until it flips) is fine and costs no turns; polling loopd from YOUR side is the forbidden pattern — one mid-run peek is fine, a timer loop is not. " +
+        "Emit a printed marker line for EVERY outcome (DONE and FAILED), or a silent failure wakes nobody. " +
+        "Watches longer than ~30min are fragile (in-memory only, die on restart) — prefer a scheduled goal that checks state and completes.",
       args: {
         title: tool.schema.string().describe("Short human label for the session."),
         command: tool.schema.string().describe("Executable to spawn (e.g. \"bun\", \"python3\")."),
