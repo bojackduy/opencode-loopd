@@ -112,6 +112,21 @@ The goal starts immediately. The user can monitor it via `/loop` (<leader>o). Pl
 
 ## Owner Agent: Discover Models and Recover the Same Goal
 
+### Agent listing and same-goal switching
+
+`loopd_list_models({})` also returns `agents` (public name, description, mode: `primary`, `subagent`, or OpenCode's `all`) and independent `agentCatalog` capability/source/switching metadata. `assignedGoals` includes this owner's assigned agents and `agentSwitch` pending/last/failure state. Missing v1 `client.agent.list` reports an empty inventory with capability `unsupported`; failed discovery reports `unavailable`. Neither permits an unvalidated switch.
+
+```text
+loopd_list_models({})
+switch_goal_agent({goal_id:"existing-goal", agent:"researcher"})
+# Only when explicitly resuming a blocked goal:
+switch_goal_agent({goal_id:"existing-goal", agent:"researcher", resume:true})
+```
+
+Agent switching is owner-only and validates the exact available name. It retains goal ID, worker session, transcript, progress, inbox, checks, budgets, counters, interactive mode and topology. Busy/unknown workers queue a persisted request until the next permitted confirmed-idle turn. v2 switches the idle session via `session.switchAgent`; v1 uses that SDK API if present, otherwise reports `deferred` and sends the assignment on the next prompt. Switching alone never wakes an interactive goal, unpauses or resumes. `resume:true` is valid only for blocked goals; if still busy, it remains deferred and blocked until an explicit retry/resume when safe. Completed goals cannot switch. Pending failures block once without creating a replacement worker.
+
+On the dashboard **Goals tab**, `:agents` lists names/modes and `:agent <name>` changes the selected goal's agent. Both are refused on the Commands tab (never forwarded as process stdin). Goal rows display `🤖 agent-name` alongside the model.
+
 Use agent tools, not a new goal or a human dashboard action, to change a worker's provider/model:
 
 1. `loopd_list_models({})` returns public provider/model IDs, names, usable/connected status, context/output limits, host switching capability, and identities of **this owner session's** goals.
@@ -423,6 +438,8 @@ Open the shared dashboard with `/loop` (or `<leader>o`) — focuses the **Goals*
 | `:interactive` | Toggle manual mode (engine never starts turns) | `interactive: true` at creation |
 | `:model <provider/model>` | Switch this goal's model (same worker/session) | `switch_goal_model` |
 | `:models` | Show provider/model inventory + quota status | `loopd_list_models` |
+| `:agent <name>` | Switch this goal's agent (same worker/session; Goals tab only) | `switch_goal_agent` |
+| `:agents` | List available agent names/modes and host capabilities (Goals tab only) | `loopd_list_models` |
 | `:logs` / `:help` / `:q` | Toggle logs / help / close | — |
 
 > Goal creation (`:goal start`) was removed from the dashboard — create goals via `/goal` in the parent chat so the agent can clarify the objective first.

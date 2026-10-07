@@ -30,22 +30,44 @@ export function ownerTools(options: OwnerToolsOptions) {
   return {
     loopd_list_models: tool({
       description:
-        "Discover host providers/models usable by this agent and inspect quota limitations plus assigned identities of this session's existing goals. " +
+        "Discover host providers/models and available OpenCode agents, inspect quota limitations plus assigned identities of this session's existing goals. " +
         "Remaining quota is unknown unless a supported integration reports it; connected/enabled is not remaining balance. " +
         "Workflow: discover -> inspect_background_goal for last local quota error -> switch_goal_model on the SAME goal, never create a duplicate to change provider. No secrets/auth data are returned.",
       args: {},
       execute: async (_args, context) => {
         if (!context?.sessionID) return { title: "No session", output: JSON.stringify({ ok: false, message: "No session context available." }) }
-        const [catalog, state] = await Promise.all([goalService.listModels(), readState(directory)])
+        const [catalog, agentCatalog, state] = await Promise.all([goalService.listModels(), goalService.listAgents(), readState(directory)])
         return {
           title: "Provider/model capabilities",
           output: JSON.stringify({
-            ok: true, ...catalog,
+            ok: true, ...catalog, agents: agentCatalog.agents, agentCatalog,
             assignedGoals: state.goals.filter((g) => g.ownerSessionID === context.sessionID).map((g) => ({
-              id: g.id, model: g.config.model, workerSessionID: g.workerSessionID,
+              id: g.id, model: g.config.model, agent: g.config.agent, agentSwitch: g.agentSwitch, workerSessionID: g.workerSessionID,
               modelSwitch: g.modelSwitch, modelFallback: g.modelFallback, fallbackModels: g.config.fallbackModels ?? [], lastProviderLimit: g.lastProviderLimit,
             })),
           }, null, 2),
+        }
+      },
+    }),
+
+    switch_goal_agent: tool({
+      description: "Switch an EXISTING owned goal's agent, preserving the same worker/session, transcript, progress, inbox, checks, budgets and topology. Discover agents with loopd_list_models first. Busy workers defer until the next permitted idle turn; legacy hosts apply on the next prompt. No implicit unpause or interactive wake. resume=true explicitly resumes only a blocked goal after a safe switch; busy requests remain blocked until explicitly retried/resumed when idle.",
+      args: {
+        goal_id: tool.schema.string().describe("Existing owned goal ID."),
+        agent: tool.schema.string().describe("Available agent name from loopd_list_models."),
+        resume: tool.schema.boolean().optional().describe("Explicitly resume a blocked goal after a safe switch. Default false."),
+      },
+      execute: async (args, context) => {
+        if (!context?.sessionID) return { title: "No session", output: JSON.stringify({ ok: false, message: "No session context available." }) }
+        const state = await readState(directory)
+        if (!state.goals.some((g) => g.id === args.goal_id && g.ownerSessionID === context.sessionID)) {
+          return { title: "Switch denied", output: JSON.stringify({ ok: false, message: "Goal not found or not owned by this session." }) }
+        }
+        try {
+          const result = await goalService.switchAgent(directory, args.goal_id as GoalID, context.sessionID, args.agent, { resume: args.resume })
+          return { title: `Agent switch: ${result.outcome}`, output: JSON.stringify({ ok: result.outcome !== "unsupported", ...result, goalID: args.goal_id, message: "Same goal and worker retained. Deferred requests require the next permitted idle turn; no automatic interactive wake." }) }
+        } catch {
+          return { title: "Agent switch failed", output: JSON.stringify({ ok: false, message: "Switch rejected: verify ownership, agent availability, resume eligibility and host capability with loopd_list_models and inspect_background_goal. Existing goal/session retained." }) }
         }
       },
     }),
@@ -125,6 +147,7 @@ export function ownerTools(options: OwnerToolsOptions) {
             agent: g.config.agent,
             model: g.config.model,
             modelSwitch: g.modelSwitch,
+            agentSwitch: g.agentSwitch,
             modelFallback: g.modelFallback,
             lastProviderLimit: g.lastProviderLimit,
             fallbackModels: g.config.fallbackModels ?? [],
@@ -255,6 +278,7 @@ export function ownerTools(options: OwnerToolsOptions) {
             },
             lastProgress: goal.lastProgress,
             modelSwitch: goal.modelSwitch,
+            agentSwitch: goal.agentSwitch,
             modelFallback: goal.modelFallback,
             lastProviderLimit: goal.lastProviderLimit,
             quotaLimitation: "Remaining provider quota unknown; local quota errors are observations, not balance data. See loopd_list_models.",

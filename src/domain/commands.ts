@@ -73,6 +73,15 @@ export interface SwitchGoalModelCommand extends BaseCommand {
   args: { model: string; resume?: boolean }
 }
 
+export interface ListAgentsCommand extends BaseCommand {
+  command: "list_agents"
+}
+
+export interface SwitchGoalAgentCommand extends BaseCommand {
+  command: "switch_goal_agent"
+  args: { agent: string; resume?: boolean }
+}
+
 // ─── Worker Interaction ──────────────────────────────────────────────────────
 
 export interface SendCommand extends BaseCommand {
@@ -134,6 +143,8 @@ export type LoopCommand =
   | SetInteractiveCommand
   | ListModelsCommand
   | SwitchGoalModelCommand
+  | ListAgentsCommand
+  | SwitchGoalAgentCommand
   | CompactCommand
   | InspectCommand
   | OpenWorkerCommand

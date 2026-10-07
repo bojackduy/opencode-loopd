@@ -138,6 +138,7 @@ describe("Server Plugin V2", () => {
       "complete_goal",
       "block_goal",
       "loopd_list_models",
+      "switch_goal_agent",
       "switch_goal_model",
       "list_background_goals",
       "inspect_background_goal",

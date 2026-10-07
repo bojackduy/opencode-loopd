@@ -96,6 +96,7 @@ export function commandHelp(): string {
     "  :nudge                                   Force re-prompt now with full steering (N)",
     "  :interactive                             Toggle manual mode (engine never starts turns)",
     "  :model <provider/model>                Switch this goal's model (same worker; :models lists options)",
+    "  :agent <name> / :agents                 Switch this goal's agent / list agents (Goals tab only)",
     "  :bug / :report                            Open prefilled GitHub bug report",
     "  :logs / :help / :q                        Toggle logs / help / close",
     "  Tip: create goals via /goal in the parent chat (agent clarifies first).",

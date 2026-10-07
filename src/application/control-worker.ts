@@ -267,6 +267,29 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
         break
       }
 
+      case "switch_goal_agent": {
+        const args = request.args as { agent?: unknown; resume?: unknown } | undefined
+        if (!request.goalID || typeof args?.agent !== "string" || !args.agent.trim()) {
+          response = { ...base, ok: false, message: "goalID and agent are required", errorCode: "bad_request" }
+          break
+        }
+        const owner = (await readState(directory)).goals.find((g) => g.id === request.goalID)?.ownerSessionID ?? ""
+        const result = await goalSvc.switchAgent(directory, request.goalID as any, owner, args.agent, { resume: args.resume === true })
+        const state = await readState(directory)
+        response = {
+          ...base, ok: result.outcome !== "unsupported", stateRevision: state.revision,
+          message: result.outcome === "applied" ? `Agent switched to ${result.agent} on the same worker/session.` : result.outcome === "deferred" ? `Agent switch to ${result.agent} deferred until the next permitted idle turn/prompt; no implicit wake.` : "Agent switch unsupported on this host. Goal/session retained.",
+        }
+        break
+      }
+
+      case "list_agents": {
+        const catalog = await goalSvc.listAgents()
+        const state = await readState(directory)
+        response = { ...base, ok: catalog.capability === "supported", stateRevision: state.revision, message: `Agents [${catalog.capability}/${catalog.switching}]: ${catalog.agents.map((a) => `${a.name} (${a.mode})`).join(", ") || "none"}` }
+        break
+      }
+
       case "switch_goal_model": {
         if (!request.goalID) {
           response = { ...base, ok: false, message: "goalID is required", errorCode: "bad_request" }

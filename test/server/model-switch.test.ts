@@ -19,7 +19,7 @@ describe("same-goal model switching", () => {
   beforeEach(async () => {
     const root = path.join(import.meta.dir, "../../.opencode/loopd/goals/943fc8d8-6d51-41fc-a99d-efc4d5f1662a")
     await fs.mkdir(root, { recursive: true })
-    dir = await fs.mkdtemp(path.join(root, "model-test-"))
+    dir = path.relative(process.cwd(), await fs.mkdtemp(path.join(root, "model-test-")))
     host = createFakeHost()
     switched = []
     host.listModels = async () => ({

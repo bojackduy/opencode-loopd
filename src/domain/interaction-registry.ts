@@ -127,6 +127,24 @@ export const INTERACTIONS: InteractionDef[] = [
 
   // ── Read-only / inspection ────────────────────────────────────────
   {
+    command: "switch_goal_agent",
+    agentTools: ["switch_goal_agent"],
+    tuiKeys: ["agent"],
+    label: "Switch agent",
+    description: "Switch the assigned agent on the same goal and worker; busy workers defer",
+    needsGoal: true,
+    transport: "both",
+  },
+  {
+    command: "list_agents",
+    agentTools: ["loopd_list_models"],
+    tuiKeys: ["agents"],
+    label: "List agents",
+    description: "Discover available agents and host switching capability",
+    needsGoal: false,
+    transport: "both",
+  },
+  {
     command: "—",
     agentTools: ["list_background_goals", "inspect_background_goal", "read_goal_transcript"],
     tuiKeys: ["o", "open"],

@@ -71,6 +71,11 @@ export interface Goal {
   interactive?: boolean
 
   /** Persisted switching state; assignment changes never replace the worker. */
+  agentSwitch?: {
+    pending?: { agent: string; requestedAt: string }
+    last?: { from?: string; to: string; at: string; outcome: "applied" | "next-prompt" }
+    lastFailure?: { at: string; reason: "host-rejected" | "catalog-unavailable" }
+  }
   modelSwitch?: {
     pending?: { model: string; requestedAt: string; reason: "owner" | "quota" }
     last?: { from?: string; to: string; at: string; outcome: "applied" | "next-prompt"; reason: "owner" | "quota" }

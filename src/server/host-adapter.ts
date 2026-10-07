@@ -9,6 +9,7 @@ import type { BridgeOutcome } from "../v2/native-bridge"
 import type { NativeForkChild, WorkerTopology } from "../v2/native-rpc"
 import { resolveNativeParentID } from "../v2/native-rpc"
 import { emptyCatalog, normalizeV1Catalog, normalizeV2Catalog, type ModelCatalog } from "./model-catalog"
+import { emptyAgentCatalog, normalizeAgentCatalog, type AgentCatalog } from "./agent-catalog"
 
 export interface ModelRef {
   providerID: string
@@ -82,6 +83,8 @@ export function isV2PromptMessageID(messageID: string): boolean {
 }
 
 export interface LoopHost {
+  listAgents?(): Promise<AgentCatalog>
+  switchSessionAgent?(sessionID: string, agent: string): Promise<"applied" | "next-prompt" | "unsupported">
   /** Public catalog only; credentials and quota guesses must never escape. */
   listModels?(): Promise<ModelCatalog>
   /** v1 uses explicit next-prompt identity; v2 can update the idle session. */
@@ -134,6 +137,23 @@ function markParentNotified(ownerSessionID: string, message: string): void {
 
 export function createRealHost(client: any, directory: string): LoopHost {
   return {
+    async listAgents() {
+      const switching = typeof client.session?.switchAgent === "function" ? "session" : "next-prompt"
+      if (typeof client.agent?.list !== "function") return emptyAgentCatalog("v1 agent.list", switching)
+      try {
+        const result = await withTimeout<any>(client.agent.list({ query: { directory } }), 10_000, "OpenCode agent.list")
+        if (result?.error) return emptyAgentCatalog("v1 agent.list", switching, "unavailable")
+        return normalizeAgentCatalog(result?.data, "v1 agent.list", switching)
+      } catch {
+        return emptyAgentCatalog("v1 agent.list", switching, "unavailable")
+      }
+    },
+    async switchSessionAgent(sessionID, agent) {
+      if (typeof client.session?.switchAgent !== "function") return "next-prompt"
+      const result = await withTimeout<any>(client.session.switchAgent({ path: { id: sessionID }, body: { agent } }), 10_000, "OpenCode session.switchAgent")
+      if (result?.error) throw new Error("OpenCode session.switchAgent rejected the agent.")
+      return "applied"
+    },
     async listModels() {
       if (typeof client.provider?.list !== "function") return emptyCatalog("v1 provider.list", "next-prompt")
       try {
@@ -411,6 +431,21 @@ export function createV2Host(
   const directory = context.location.directory
 
   return {
+    async listAgents() {
+      const switching = typeof context.session.switchAgent === "function" ? "session" : "unsupported"
+      if (typeof context.agent?.list !== "function") return emptyAgentCatalog("v2 agent.list", switching)
+      try {
+        const result = await context.agent.list({ location: { directory } })
+        return normalizeAgentCatalog(result.data, "v2 agent.list", switching)
+      } catch {
+        return emptyAgentCatalog("v2 agent.list", switching, "unavailable")
+      }
+    },
+    async switchSessionAgent(sessionID, agent) {
+      if (typeof context.session.switchAgent !== "function") return "unsupported"
+      await context.session.switchAgent({ sessionID, agent })
+      return "applied"
+    },
     async listModels() {
       if (typeof context.provider?.list !== "function" || typeof context.model?.list !== "function") {
         return emptyCatalog("v2 provider.list + model.list", typeof context.session.switchModel === "function" ? "session" : "unsupported")

@@ -458,7 +458,7 @@ export function LoopDashboard(props: Props) {
     // Goal controls apply to goals only — never to a command selection.
     // Model controls (model/models) are goal verbs too: on the Commands tab
     // they would otherwise be written into a command's stdin.
-    const needsGoalsTab = ["p", "r", "A", "N", "model", "models"].includes(key)
+    const needsGoalsTab = ["p", "r", "A", "N", "model", "models", "agent", "agents"].includes(key)
     if (needsGoalsTab && tab() !== "goals") {
       prevent(evt)
       setStatusText("Goal controls need the Goals tab (Tab to switch).")
@@ -572,6 +572,9 @@ export function LoopDashboard(props: Props) {
   async function executeCommandTabCommand(verb: string, positional: string[], raw: string) {
     debugLog("commands-tab command", verb)
     switch (verb) {
+      case "model": case "models": case "agent": case "agents":
+        setStatusText(`:${verb} is only available on the Goals tab.`)
+        return
       case "new": {
         // Parse the raw tail after `new` (not the re-joined positionals) so
         // quoted/escaped boundaries survive: :new bash -c "echo hi" spawns
@@ -680,6 +683,19 @@ export function LoopDashboard(props: Props) {
           const next = !(selectedGoal()!.interactive === true)
           const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "set_interactive", goalID: selectedGoal()!.id, args: { interactive: next } })
           setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh()
+          break
+        }
+        case "agent": {
+          if (!selectedGoal()) { setStatusText("No goal selected"); break }
+          const agent = parsed.positional.join(" ").trim()
+          if (!agent) { setStatusText("Usage: :agent <name> — :agents lists available agents."); break }
+          const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "switch_goal_agent", goalID: selectedGoal()!.id, args: { agent } })
+          setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh()
+          break
+        }
+        case "agents": {
+          const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "list_agents" })
+          setStatusText(r.ok ? r.message : `Error: ${r.message}`)
           break
         }
         case "model": {
@@ -907,6 +923,7 @@ export function LoopDashboard(props: Props) {
                         {runtime() && runtime()!.phase === "idle" && (runtime() as any).activeRunID && <span style={{ fg: theme().error, bold: true }}> │ ⚠️ STALE LEASE</span>}
                         {goal.interactive === true && <span style={{ fg: theme().accent, bold: true }}> │ ✋ MANUAL</span>}
                         {goal.config.model && <span style={{ fg: theme().info }}> │ 🧠 {goal.config.model}</span>}
+                        {goal.config.agent && <span style={{ fg: theme().info }}> │ 🤖 {goal.config.agent}</span>}
                         {runtime() && (runtime() as any).retryAfter && <span style={{ fg: theme().accent }}> │ ↻ {countdownLabel((runtime() as any).retryAfter, clock())}</span>}
                         {runtime() && (runtime() as any).nextRunAt && <span style={{ fg: theme().accent }}> │ ⏰ {countdownLabel((runtime() as any).nextRunAt, clock())}</span>}
                       </text>
@@ -971,6 +988,7 @@ export function LoopDashboard(props: Props) {
                     {goal().workerTopology && <><span style={{ fg: theme().textMuted }}>{"\n"}🌿 Worker: </span><span style={{ fg: theme().text }}>{goal().workerTopology === "v2-native-child" ? "native child" : goal().workerTopology === "v2-root-fallback" ? "root fallback" : "v1 child"}</span>{goal().nativeParentID ? <span style={{ fg: theme().textMuted }}> of {(goal().nativeParentID as string).slice(0, 12)}…</span> : null}</>}
                     {goal().interactive === true && <><span style={{ fg: theme().accent, bold: true }}>{"\n"}✋ Manual: </span><span style={{ fg: theme().textMuted }}>engine never starts turns — steer with :send/nudge (:interactive to re-enable auto)</span></>}
                     {goal().config.model && <><span style={{ fg: theme().info, bold: true }}>{"\n"}🧠 Model: </span><span style={{ fg: theme().text }}>{goal().config.model}</span>{goal().modelSwitch?.pending ? <span style={{ fg: theme().warning }}> → pending {goal().modelSwitch?.pending?.model} (applies next turn)</span> : null}</>}
+                    {goal().config.agent && <><span style={{ fg: theme().info, bold: true }}>{"\n"}🤖 Agent: </span><span style={{ fg: theme().text }}>{goal().config.agent}</span>{goal().agentSwitch?.pending ? <span style={{ fg: theme().warning }}> → pending {goal().agentSwitch?.pending?.agent} (applies next turn)</span> : null}</>}
                     {(goal().config.checks?.length ?? 0) > 0 ? <><span style={{ fg: theme().warning }}>{"\n"}▣ </span><span style={{ fg: theme().warning, bold: true }}>Checks: </span><span style={{ fg: theme().textMuted }}>{(goal().config.checks as string[]).join(", ").slice(0, 100)}</span></> : null}
                     {(rt() as any)?.evaluatorRejectionCount > 0 && <><span style={{ fg: theme().warning }}>{"\n"}⚠ rejections: </span><span style={{ fg: theme().warning }}>{String((rt() as any).evaluatorRejectionCount)} — {String((rt() as any).lastRejectionDetails || "").slice(0, 80)}</span></>}
                     {(rt() as any)?.unknownStatusCount > 0 && <><span style={{ fg: theme().error }}>{"\n"}⚠️ unreachable: </span><span style={{ fg: theme().error }}>{String((rt() as any).unknownStatusCount)}/3</span><span style={{ fg: theme().textMuted }}> — nudge to recover</span></>}

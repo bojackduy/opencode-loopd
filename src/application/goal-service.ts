@@ -16,6 +16,7 @@ import { cancelAwaitsForGoal } from "./command-await"
 import type { LoopHost, SessionMessage } from "../server/host-adapter"
 import { newPromptMessageID, parseModelRef } from "../server/host-adapter"
 import { emptyCatalog, type ModelCatalog } from "../server/model-catalog"
+import { emptyAgentCatalog, type AgentCatalog } from "../server/agent-catalog"
 import { observeProviderLimit, type ProviderLimitObservation } from "../domain/provider-limit"
 import { createWorkerManager, type WorkerManager, type WorkerSession, type ContinuationContext } from "../server/worker-session"
 import type { LoopEvent } from "../domain/events"
@@ -42,6 +43,8 @@ export class GoalStartError extends Error {
 }
 
 export interface GoalService {
+  listAgents(): Promise<AgentCatalog>
+  switchAgent(directory: string, goalID: GoalID, ownerSessionID: string, agent: string, opts?: { resume?: boolean }): Promise<{ outcome: "applied" | "deferred" | "unsupported"; agent: string; resumed?: boolean }>
   listModels(): Promise<ModelCatalog>
   /** Owner-only; busy/unknown sessions defer without aborting or waking. */
   switchModel(directory: string, goalID: GoalID, ownerSessionID: string, model: string, opts?: { resume?: boolean }): Promise<{ outcome: "applied" | "deferred" | "unsupported"; model: string; resumed?: boolean }>
@@ -163,6 +166,115 @@ export function createGoalService(host: LoopHost): GoalService {
 
   async function listModels(): Promise<ModelCatalog> {
     return host.listModels ? host.listModels() : emptyCatalog("host catalog capability absent", "unsupported")
+  }
+
+  async function listAgents(): Promise<AgentCatalog> {
+    return host.listAgents ? host.listAgents() : emptyAgentCatalog("host agent catalog capability absent", "unsupported")
+  }
+
+  async function validateAgent(value: string) {
+    const agent = value.trim()
+    if (!agent) throw new Error("Agent name is required.")
+    const catalog = await listAgents()
+    if (catalog.capability === "supported" && !catalog.agents.some((a) => a.name === agent)) {
+      throw new Error("Agent is unavailable. Discover agents with loopd_list_models first.")
+    }
+    return { agent, catalog }
+  }
+
+  async function applyAgent(directory: string, goal: Goal, agent: string) {
+    if (!goal.workerSessionID || !host.switchSessionAgent) return "unsupported" as const
+    const previousAgent = goal.config.agent ?? (await host.readSession(goal.workerSessionID))?.agent
+    const outcome = await host.switchSessionAgent(goal.workerSessionID, agent)
+    if (outcome === "unsupported") return outcome
+    try {
+      await mutateState(directory, `goal.agent-switch:${goal.id}`, async (s) => {
+        const current = s.goals.find((g) => g.id === goal.id)
+        if (!current) throw new Error("Goal removed during agent switch.")
+        current.config.agent = agent
+        current.agentSwitch = { pending: undefined, lastFailure: undefined, last: { from: goal.config.agent, to: agent, at: new Date().toISOString(), outcome } }
+        current.updatedAt = new Date().toISOString()
+        return s
+      })
+    } catch (error) {
+      if (outcome === "applied") {
+        if (!previousAgent) throw new Error("Host accepted agent switch but persistence failed; previous host agent unknown, rollback unavailable.")
+        await host.switchSessionAgent(goal.workerSessionID, previousAgent)
+      }
+      throw error
+    }
+    await logServerEvent(directory, "goal.agent-switched", { goalID: goal.id, workerSessionID: goal.workerSessionID, from: goal.config.agent, to: agent, outcome })
+    return outcome
+  }
+
+  function switchAgent(directory: string, goalID: GoalID, ownerSessionID: string, value: string, opts?: { resume?: boolean }) {
+    return withGoalOperation(goalID, async () => {
+      const state = await readState(directory)
+      const goal = state.goals.find((g) => g.id === goalID)
+      if (!goal || !ownerSessionID || goal.ownerSessionID !== ownerSessionID) throw new Error("Goal not found or not owned by this session.")
+      if (goal.status === "complete") throw new Error("Cannot switch a completed goal.")
+      if (opts?.resume && goal.status !== "blocked") throw new Error("resume is only valid for a blocked goal.")
+      if (opts?.resume) assertWorkspaceWriteAvailable(state, goal, ownerSessionID)
+      const { agent, catalog } = await validateAgent(value)
+      if (catalog.capability !== "supported" || catalog.switching === "unsupported" || !host.switchSessionAgent || !goal.workerSessionID) {
+        return { outcome: "unsupported" as const, agent }
+      }
+      const runtime = state.runtimes.find((r) => r.goalID === goalID)
+      if (await host.sessionStatus(goal.workerSessionID) !== "idle" || (runtime?.phase === "running" && leaseIsValid(runtime))) {
+        await mutateState(directory, `goal.agent-deferred:${goalID}`, async (s) => {
+          const current = s.goals.find((g) => g.id === goalID)
+          if (current) {
+            current.agentSwitch = { ...current.agentSwitch, pending: { agent, requestedAt: new Date().toISOString() } }
+            current.updatedAt = new Date().toISOString()
+          }
+          return s
+        })
+        return { outcome: "deferred" as const, agent }
+      }
+      const applied = await applyAgent(directory, goal, agent)
+      if (opts?.resume && applied !== "unsupported") {
+        await mutateState(directory, `goal.agent-resume:${goalID}`, async (s) => {
+          const current = s.goals.find((g) => g.id === goalID)
+          if (current?.status === "blocked") {
+            assertWorkspaceWriteAvailable(s, current, ownerSessionID)
+            current.status = "active"
+            current.blocker = undefined
+            current.updatedAt = new Date().toISOString()
+          }
+          return s
+        })
+        await continueTurnUnlocked(directory, goalID)
+      }
+      return { outcome: applied === "next-prompt" ? "deferred" as const : applied, agent, ...(opts?.resume && applied !== "unsupported" ? { resumed: true } : {}) }
+    })
+  }
+
+  async function applyPendingAgent(directory: string, goal: Goal): Promise<void> {
+    const pending = goal.agentSwitch?.pending
+    if (!pending) return
+    let reason: "host-rejected" | "catalog-unavailable" = "catalog-unavailable"
+    try {
+      const { catalog } = await validateAgent(pending.agent)
+      if (catalog.capability !== "supported" || catalog.switching === "unsupported") throw new Error("Agent catalog unavailable.")
+      reason = "host-rejected"
+      if (await applyAgent(directory, goal, pending.agent) === "unsupported") throw new Error("Agent switching unsupported.")
+    } catch {
+      await mutateState(directory, `goal.agent-switch-failed:${goal.id}`, async (s) => {
+        const current = s.goals.find((g) => g.id === goal.id)
+        const runtime = s.runtimes.find((r) => r.goalID === goal.id)
+        if (current) {
+          current.agentSwitch = { ...current.agentSwitch, pending: undefined, lastFailure: { at: new Date().toISOString(), reason } }
+          if (current.status === "active") {
+            current.status = "blocked"
+            current.blocker = { reason: "Pending agent switch was not accepted.", needed: "Discover agents, switch the same goal explicitly, then retry when safe.", at: new Date().toISOString() }
+          }
+          current.updatedAt = new Date().toISOString()
+        }
+        if (runtime) { Object.assign(runtime, releaseLease(runtime)); runtime.retryAfter = undefined }
+        return s
+      })
+      throw new Error("Pending agent switch was not accepted; goal blocked without replacing its worker.")
+    }
   }
 
   async function validateModel(value: string): Promise<{ model: string; catalog: ModelCatalog }> {
@@ -354,6 +466,7 @@ export function createGoalService(host: LoopHost): GoalService {
       if (!goal?.workerSessionID || goal.status !== "active") return
       if (await host.sessionStatus(goal.workerSessionID) !== "idle") return
       await applyPendingModel(directory, goal)
+      await applyPendingAgent(directory, goal)
       const fresh = (await readState(directory)).goals.find((g) => g.id === goalID)
       if (fresh?.workerSessionID) await host.compactSession(fresh.workerSessionID, parseModelRef(fresh.config.model))
     })
@@ -750,9 +863,10 @@ export function createGoalService(host: LoopHost): GoalService {
 
     // Never change a running session even when an explicit nudge bypasses idle.
     // The nudge path interrupts first; require confirmed idle for pending identity.
-    if (goal.modelSwitch?.pending) {
+    if (goal.modelSwitch?.pending || goal.agentSwitch?.pending) {
       if (await host.sessionStatus(session.workerSessionID) !== "idle") return
       await applyPendingModel(directory, goal)
+      await applyPendingAgent(directory, goal)
     }
 
     // Acquire lease and increment run count atomically
@@ -1325,5 +1439,5 @@ export function createGoalService(host: LoopHost): GoalService {
     return withGoalOperation(goalID, () => accountUsageUnlocked(directory, goalID))
   }
 
-  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, observeProviderError, compact }
+  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, observeProviderError, compact }
 }
