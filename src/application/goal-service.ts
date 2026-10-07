@@ -43,6 +43,7 @@ export class GoalStartError extends Error {
 }
 
 export interface GoalService {
+  switchIdentity(directory: string, goalID: GoalID, ownerSessionID: string, opts: { model?: string; agent?: string; resume?: boolean }): Promise<{ outcome: "applied" | "deferred" | "unsupported"; model?: string; agent?: string; resumed?: boolean }>
   listAgents(): Promise<AgentCatalog>
   switchAgent(directory: string, goalID: GoalID, ownerSessionID: string, agent: string, opts?: { resume?: boolean }): Promise<{ outcome: "applied" | "deferred" | "unsupported"; agent: string; resumed?: boolean }>
   listModels(): Promise<ModelCatalog>
@@ -182,11 +183,12 @@ export function createGoalService(host: LoopHost): GoalService {
     return { agent, catalog }
   }
 
-  async function applyAgent(directory: string, goal: Goal, agent: string) {
+  async function applyAgent(directory: string, goal: Goal, agent: string, persist = true) {
     if (!goal.workerSessionID || !host.switchSessionAgent) return "unsupported" as const
     const previousAgent = goal.config.agent ?? (await host.readSession(goal.workerSessionID))?.agent
     const outcome = await host.switchSessionAgent(goal.workerSessionID, agent)
     if (outcome === "unsupported") return outcome
+    if (!persist) return outcome
     try {
       await mutateState(directory, `goal.agent-switch:${goal.id}`, async (s) => {
         const current = s.goals.find((g) => g.id === goal.id)
@@ -208,7 +210,10 @@ export function createGoalService(host: LoopHost): GoalService {
   }
 
   function switchAgent(directory: string, goalID: GoalID, ownerSessionID: string, value: string, opts?: { resume?: boolean }) {
-    return withGoalOperation(goalID, async () => {
+    return withGoalOperation(goalID, () => switchAgentUnlocked(directory, goalID, ownerSessionID, value, opts))
+  }
+
+  async function switchAgentUnlocked(directory: string, goalID: GoalID, ownerSessionID: string, value: string, opts?: { resume?: boolean; persist?: boolean }) {
       const state = await readState(directory)
       const goal = state.goals.find((g) => g.id === goalID)
       if (!goal || !ownerSessionID || goal.ownerSessionID !== ownerSessionID) throw new Error("Goal not found or not owned by this session.")
@@ -221,6 +226,7 @@ export function createGoalService(host: LoopHost): GoalService {
       }
       const runtime = state.runtimes.find((r) => r.goalID === goalID)
       if (await host.sessionStatus(goal.workerSessionID) !== "idle" || (runtime?.phase === "running" && leaseIsValid(runtime))) {
+        if (opts?.persist === false) throw new Error("Worker became busy during identity switch.")
         await mutateState(directory, `goal.agent-deferred:${goalID}`, async (s) => {
           const current = s.goals.find((g) => g.id === goalID)
           if (current) {
@@ -231,7 +237,7 @@ export function createGoalService(host: LoopHost): GoalService {
         })
         return { outcome: "deferred" as const, agent }
       }
-      const applied = await applyAgent(directory, goal, agent)
+      const applied = await applyAgent(directory, goal, agent, opts?.persist !== false)
       if (opts?.resume && applied !== "unsupported") {
         await mutateState(directory, `goal.agent-resume:${goalID}`, async (s) => {
           const current = s.goals.find((g) => g.id === goalID)
@@ -246,7 +252,6 @@ export function createGoalService(host: LoopHost): GoalService {
         await continueTurnUnlocked(directory, goalID)
       }
       return { outcome: applied === "next-prompt" ? "deferred" as const : applied, agent, ...(opts?.resume && applied !== "unsupported" ? { resumed: true } : {}) }
-    })
   }
 
   async function applyPendingAgent(directory: string, goal: Goal): Promise<void> {
@@ -291,11 +296,12 @@ export function createGoalService(host: LoopHost): GoalService {
     return { model, catalog }
   }
 
-  async function applyModel(directory: string, goal: Goal, model: string, reason: "owner" | "quota") {
+  async function applyModel(directory: string, goal: Goal, model: string, reason: "owner" | "quota", persist = true) {
     if (!goal.workerSessionID || !host.switchSessionModel) return "unsupported" as const
     const previousModel = parseModelRef(goal.config.model) ?? (await host.readSession(goal.workerSessionID))?.model
     const outcome = await host.switchSessionModel(goal.workerSessionID, parseModelRef(model)!)
     if (outcome === "unsupported") return outcome
+    if (!persist) return outcome
     try {
       await mutateState(directory, `goal.model-switch:${goal.id}`, async (s) => {
         const current = s.goals.find((g) => g.id === goal.id)
@@ -322,7 +328,10 @@ export function createGoalService(host: LoopHost): GoalService {
   }
 
   function switchModel(directory: string, goalID: GoalID, ownerSessionID: string, value: string, opts?: { resume?: boolean }) {
-    return withGoalOperation(goalID, async () => {
+    return withGoalOperation(goalID, () => switchModelUnlocked(directory, goalID, ownerSessionID, value, opts))
+  }
+
+  async function switchModelUnlocked(directory: string, goalID: GoalID, ownerSessionID: string, value: string, opts?: { resume?: boolean; persist?: boolean }) {
       const state = await readState(directory)
       const goal = state.goals.find((g) => g.id === goalID)
       if (!goal || !ownerSessionID || goal.ownerSessionID !== ownerSessionID) throw new Error("Goal not found or not owned by this session.")
@@ -338,6 +347,7 @@ export function createGoalService(host: LoopHost): GoalService {
       const runtime = state.runtimes.find((r) => r.goalID === goalID)
       const status = await host.sessionStatus(goal.workerSessionID)
       if (status !== "idle" || (runtime?.phase === "running" && leaseIsValid(runtime))) {
+        if (opts?.persist === false) throw new Error("Worker became busy during identity switch.")
         await mutateState(directory, `goal.model-deferred:${goalID}`, async (s) => {
           const current = s.goals.find((g) => g.id === goalID)
           if (current) {
@@ -348,7 +358,7 @@ export function createGoalService(host: LoopHost): GoalService {
         })
         return { outcome: "deferred" as const, model }
       }
-      const applied = await applyModel(directory, goal, model, "owner")
+      const applied = await applyModel(directory, goal, model, "owner", opts?.persist !== false)
       if (opts?.resume && applied !== "unsupported") {
         await mutateState(directory, `goal.model-resume:${goalID}`, async (s) => {
           const g = s.goals.find((g) => g.id === goalID)
@@ -365,7 +375,112 @@ export function createGoalService(host: LoopHost): GoalService {
         await continueTurnUnlocked(directory, goalID)
       }
       return { outcome: applied === "next-prompt" ? "deferred" as const : applied, model, ...(opts?.resume && applied !== "unsupported" ? { resumed: true } : {}) }
-    })
+  }
+
+  function switchIdentity(directory: string, goalID: GoalID, ownerSessionID: string, opts: { model?: string; agent?: string; resume?: boolean }) {
+    return withGoalOperation(goalID, () => switchIdentityUnlocked(directory, goalID, ownerSessionID, opts))
+  }
+
+  async function switchIdentityUnlocked(directory: string, goalID: GoalID, ownerSessionID: string, opts: { model?: string; agent?: string; resume?: boolean }) {
+    if (opts.model === undefined && opts.agent === undefined) throw new Error("At least one of model or agent is required.")
+    const pending = (await readState(directory)).goals.find((g) => g.id === goalID)?.pendingIdentity
+    if (pending) opts = { model: opts.model ?? pending.model, agent: opts.agent ?? pending.agent, resume: opts.resume }
+    if (opts.agent === undefined) return switchModelUnlocked(directory, goalID, ownerSessionID, opts.model!, opts)
+    if (opts.model === undefined) return switchAgentUnlocked(directory, goalID, ownerSessionID, opts.agent, opts)
+    const state = await readState(directory)
+    const goal = state.goals.find((g) => g.id === goalID)
+    if (!goal || !ownerSessionID || goal.ownerSessionID !== ownerSessionID) throw new Error("Goal not found or not owned by this session.")
+    if (goal.status === "complete") throw new Error("Cannot switch a completed goal.")
+    if (opts.resume && goal.status !== "blocked") throw new Error("resume is only valid for a blocked goal.")
+    if (opts.resume) assertWorkspaceWriteAvailable(state, goal, ownerSessionID)
+    const { model, catalog: models } = await validateModel(opts.model)
+    const { agent, catalog: agents } = await validateAgent(opts.agent)
+    if (models.capability !== "supported" || models.switching === "unsupported" || agents.capability !== "supported" || agents.switching === "unsupported" || !host.switchSessionModel || !host.switchSessionAgent || !goal.workerSessionID) {
+      return { outcome: "unsupported" as const, model, agent }
+    }
+    const runtime = state.runtimes.find((r) => r.goalID === goalID)
+    if (await host.sessionStatus(goal.workerSessionID) !== "idle" || (runtime?.phase === "running" && leaseIsValid(runtime))) {
+      await mutateState(directory, `goal.identity-deferred:${goalID}`, async (s) => {
+        const current = s.goals.find((g) => g.id === goalID)!
+        current.pendingIdentity = { model, agent }
+        current.modelSwitch = { ...current.modelSwitch, pending: undefined }
+        current.agentSwitch = { ...current.agentSwitch, pending: undefined }
+        current.updatedAt = new Date().toISOString()
+        return s
+      })
+      return { outcome: "deferred" as const, model, agent }
+    }
+    const live = await host.readSession(goal.workerSessionID)
+    const previousModel = parseModelRef(goal.config.model) ?? live?.model
+    const previousAgent = goal.config.agent ?? live?.agent
+    if (!previousModel || !previousAgent) throw new Error("Combined switch requires a known previous identity for rollback.")
+    let modelChanged = false
+    let agentChanged = false
+    let outcome: "applied" | "deferred" = "applied"
+    try {
+      const changedModel = await switchModelUnlocked(directory, goalID, ownerSessionID, model, { persist: false })
+      if (changedModel.outcome === "unsupported") return { outcome: "unsupported" as const, model, agent }
+      modelChanged = true
+      const changedAgent = await switchAgentUnlocked(directory, goalID, ownerSessionID, agent, { persist: false })
+      if (changedAgent.outcome === "unsupported") throw new Error("Agent switch unsupported after model switch.")
+      agentChanged = true
+      if (changedModel.outcome === "deferred" || changedAgent.outcome === "deferred") outcome = "deferred"
+      await mutateState(directory, `goal.identity-switched:${goalID}`, async (s) => {
+        const current = s.goals.find((g) => g.id === goalID)!
+        const at = new Date().toISOString()
+        current.config.model = model
+        current.config.agent = agent
+        current.modelSwitch = { ...current.modelSwitch, pending: undefined, lastFailure: undefined, last: { from: goal.config.model, to: model, at, outcome: changedModel.outcome === "deferred" ? "next-prompt" : "applied", reason: "owner" } }
+        current.agentSwitch = { pending: undefined, lastFailure: undefined, last: { from: goal.config.agent, to: agent, at, outcome: changedAgent.outcome === "deferred" ? "next-prompt" : "applied" } }
+        current.pendingIdentity = undefined
+        current.updatedAt = at
+        return s
+      })
+    } catch (error) {
+      // Persisted assignments stay unchanged on failure. Restore accepted host
+      // changes, including next-prompt hosts, without an intervening prompt.
+      const rollbacks = await Promise.allSettled([
+        ...(agentChanged ? [host.switchSessionAgent(goal.workerSessionID, previousAgent)] : []),
+        ...(modelChanged ? [host.switchSessionModel(goal.workerSessionID, previousModel)] : []),
+      ])
+      if (rollbacks.some((result) => result.status === "rejected" || result.value === "unsupported")) {
+        throw new Error("Identity switch failed and host rollback failed; inspect the existing session before retrying.")
+      }
+      throw error
+    }
+    if (opts.resume) {
+      await mutateState(directory, `goal.identity-resume:${goalID}`, async (s) => {
+        const current = s.goals.find((g) => g.id === goalID)!
+        assertWorkspaceWriteAvailable(s, current, ownerSessionID)
+        current.status = "active"
+        current.blocker = undefined
+        current.updatedAt = new Date().toISOString()
+        return s
+      })
+      await continueTurnUnlocked(directory, goalID)
+    }
+    return { outcome, model, agent, ...(opts.resume ? { resumed: true } : {}) }
+  }
+
+  async function applyPendingIdentity(directory: string, goal: Goal) {
+    if (!goal.pendingIdentity) return
+    try {
+      const result = await switchIdentityUnlocked(directory, goal.id, goal.ownerSessionID!, goal.pendingIdentity)
+      if (result.outcome === "unsupported") throw new Error("Identity switching unsupported.")
+    } catch {
+      await mutateState(directory, `goal.identity-switch-failed:${goal.id}`, async (s) => {
+        const current = s.goals.find((g) => g.id === goal.id)!
+        current.pendingIdentity = undefined
+        if (current.status === "active") {
+          current.status = "blocked"
+          current.blocker = { reason: "Pending identity switch was not accepted.", needed: "Inspect the existing session, switch identity explicitly, then retry when safe.", at: new Date().toISOString() }
+        }
+        const runtime = s.runtimes.find((r) => r.goalID === goal.id)
+        if (runtime) { Object.assign(runtime, releaseLease(runtime)); runtime.retryAfter = undefined }
+        return s
+      })
+      throw new Error("Pending identity switch was not accepted; goal blocked without replacing its worker.")
+    }
   }
 
   async function applyPendingModel(directory: string, goal: Goal): Promise<void> {
@@ -414,7 +529,7 @@ export function createGoalService(host: LoopHost): GoalService {
     const runtime = state.runtimes.find((r) => r.goalID === goalID)
     const quotaBlocked = goal.status === "blocked" && runtime?.lastError === describeError(error)
     const sameModel = expectedModel === undefined || expectedModel === goal.config.model
-    const eligible = sameModel && (goal.status === "active" || quotaBlocked) && (!goal.modelSwitch?.pending || goal.modelSwitch.pending.reason === "quota")
+    const eligible = sameModel && !goal.pendingIdentity && (goal.status === "active" || quotaBlocked) && (!goal.modelSwitch?.pending || goal.modelSwitch.pending.reason === "quota")
     if (eligible && goal.modelSwitch?.pending?.reason === "quota") {
       pending = { ...goal.modelSwitch.pending, reason: "quota" }
       status = "prepared"
@@ -465,6 +580,7 @@ export function createGoalService(host: LoopHost): GoalService {
       const goal = state.goals.find((g) => g.id === goalID)
       if (!goal?.workerSessionID || goal.status !== "active") return
       if (await host.sessionStatus(goal.workerSessionID) !== "idle") return
+      await applyPendingIdentity(directory, goal)
       await applyPendingModel(directory, goal)
       await applyPendingAgent(directory, goal)
       const fresh = (await readState(directory)).goals.find((g) => g.id === goalID)
@@ -863,8 +979,9 @@ export function createGoalService(host: LoopHost): GoalService {
 
     // Never change a running session even when an explicit nudge bypasses idle.
     // The nudge path interrupts first; require confirmed idle for pending identity.
-    if (goal.modelSwitch?.pending || goal.agentSwitch?.pending) {
+    if (goal.pendingIdentity || goal.modelSwitch?.pending || goal.agentSwitch?.pending) {
       if (await host.sessionStatus(session.workerSessionID) !== "idle") return
+      await applyPendingIdentity(directory, goal)
       await applyPendingModel(directory, goal)
       await applyPendingAgent(directory, goal)
     }
@@ -1439,5 +1556,5 @@ export function createGoalService(host: LoopHost): GoalService {
     return withGoalOperation(goalID, () => accountUsageUnlocked(directory, goalID))
   }
 
-  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, observeProviderError, compact }
+  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, observeProviderError, compact }
 }

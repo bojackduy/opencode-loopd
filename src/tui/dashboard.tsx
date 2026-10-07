@@ -689,7 +689,7 @@ export function LoopDashboard(props: Props) {
           if (!selectedGoal()) { setStatusText("No goal selected"); break }
           const agent = parsed.positional.join(" ").trim()
           if (!agent) { setStatusText("Usage: :agent <name> — :agents lists available agents."); break }
-          const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "switch_goal_agent", goalID: selectedGoal()!.id, args: { agent } })
+          const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "switch_goal_identity", goalID: selectedGoal()!.id, args: { agent } })
           setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh()
           break
         }
@@ -702,7 +702,7 @@ export function LoopDashboard(props: Props) {
           if (!selectedGoal()) { setStatusText("No goal selected"); break }
           const target = parsed.positional.join(" ").trim()
           if (!target) { setStatusText("Usage: :model <provider/model> — e.g. :model openai/gpt-5.6-sol. :models lists what's available."); break }
-          const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "switch_goal_model", goalID: selectedGoal()!.id, args: { model: target } })
+          const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "switch_goal_identity", goalID: selectedGoal()!.id, args: { model: target } })
           setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh()
           break
         }

@@ -267,22 +267,6 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
         break
       }
 
-      case "switch_goal_agent": {
-        const args = request.args as { agent?: unknown; resume?: unknown } | undefined
-        if (!request.goalID || typeof args?.agent !== "string" || !args.agent.trim()) {
-          response = { ...base, ok: false, message: "goalID and agent are required", errorCode: "bad_request" }
-          break
-        }
-        const owner = (await readState(directory)).goals.find((g) => g.id === request.goalID)?.ownerSessionID ?? ""
-        const result = await goalSvc.switchAgent(directory, request.goalID as any, owner, args.agent, { resume: args.resume === true })
-        const state = await readState(directory)
-        response = {
-          ...base, ok: result.outcome !== "unsupported", stateRevision: state.revision,
-          message: result.outcome === "applied" ? `Agent switched to ${result.agent} on the same worker/session.` : result.outcome === "deferred" ? `Agent switch to ${result.agent} deferred until the next permitted idle turn/prompt; no implicit wake.` : "Agent switch unsupported on this host. Goal/session retained.",
-        }
-        break
-      }
-
       case "list_agents": {
         const catalog = await goalSvc.listAgents()
         const state = await readState(directory)
@@ -290,40 +274,40 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
         break
       }
 
-      case "switch_goal_model": {
+      case "switch_goal_identity": {
         if (!request.goalID) {
           response = { ...base, ok: false, message: "goalID is required", errorCode: "bad_request" }
           break
         }
-        const args = request.args as { model?: unknown; resume?: unknown } | undefined
-        const model = args?.model
-        if (typeof model !== "string" || model.trim().length === 0) {
-          response = { ...base, ok: false, message: "model (providerID/modelID) is required", errorCode: "bad_request" }
+        const args = request.args as { model?: unknown; agent?: unknown; resume?: unknown } | undefined
+        if ((args?.model === undefined && args?.agent === undefined) ||
+            (args?.model !== undefined && (typeof args.model !== "string" || !args.model.trim())) ||
+            (args?.agent !== undefined && (typeof args.agent !== "string" || !args.agent.trim()))) {
+          response = { ...base, ok: false, message: "At least one of model (providerID/modelID) or agent is required; provided fields must be non-empty strings.", errorCode: "bad_request" }
           break
         }
         // The control bus is local (TUI → server on the same machine) and
-        // carries no ownerSessionID; switchModel verifies ownership against
+        // carries no ownerSessionID; switchIdentity verifies ownership against
         // the goal's persisted owner, so source it from state.
         const ownerForSwitch = (await readState(directory)).goals.find(
           (g) => g.id === request.goalID,
         )?.ownerSessionID ?? ""
-        const result = await goalSvc.switchModel(
+        const result = await goalSvc.switchIdentity(
           directory,
           request.goalID as any,
           ownerForSwitch,
-          model.trim(),
-          { resume: args?.resume === true },
+          { model: args?.model as string | undefined, agent: args?.agent as string | undefined, resume: args?.resume === true },
         )
         const state = await readState(directory)
         const outcomeMessage: Record<string, string> = {
-          applied: `Model switched to ${result.model} on the same worker/session.`,
-          deferred: `Worker busy — switch to ${result.model} queued; applies on the next turn.`,
-          unsupported: `Model switch unsupported on this host (see loopd_list_models). Goal/session retained.`,
+          applied: `Identity switched to ${[result.model, result.agent].filter(Boolean).join(" / ")} on the same worker/session.`,
+          deferred: `Identity switch deferred until the next permitted idle turn/prompt; no implicit wake.`,
+          unsupported: `Identity switch unsupported on this host (see loopd_list_models). Goal/session retained.`,
         }
         response = {
           ...base,
           ok: result.outcome !== "unsupported",
-          message: outcomeMessage[result.outcome] ?? `Model switch ${result.outcome}.`,
+          message: outcomeMessage[result.outcome] ?? `Identity switch ${result.outcome}.`,
           stateRevision: state.revision,
         }
         break

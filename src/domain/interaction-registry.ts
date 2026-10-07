@@ -127,11 +127,11 @@ export const INTERACTIONS: InteractionDef[] = [
 
   // ── Read-only / inspection ────────────────────────────────────────
   {
-    command: "switch_goal_agent",
-    agentTools: ["switch_goal_agent"],
-    tuiKeys: ["agent"],
-    label: "Switch agent",
-    description: "Switch the assigned agent on the same goal and worker; busy workers defer",
+    command: "switch_goal_identity",
+    agentTools: ["switch_goal_identity"],
+    tuiKeys: ["model", "agent"],
+    label: "Switch identity",
+    description: "Switch the assigned model, agent, or both on the same goal and worker; busy workers defer",
     needsGoal: true,
     transport: "both",
   },

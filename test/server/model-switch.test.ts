@@ -137,7 +137,7 @@ describe("same-goal model switching", () => {
     expect(inventory.assignedGoals[0].id).toBe(id)
     expect(inventory.assignedGoals[0].model).toBe("p/old")
     const before = JSON.parse((await tools.inspect_background_goal.execute({ goal_id: id, includeTranscript: false }, context)).output)
-    const changed = JSON.parse((await tools.switch_goal_model.execute({ goal_id: id, model: "p/new", resume: false }, context)).output)
+    const changed = JSON.parse((await tools.switch_goal_identity.execute({ goal_id: id, model: "p/new", resume: false }, context)).output)
     expect(changed.outcome).toBe("applied")
     const after = JSON.parse((await tools.inspect_background_goal.execute({ goal_id: id, includeTranscript: false }, context)).output)
     expect(after.workerSessionID).toBe(before.workerSessionID)
@@ -150,11 +150,11 @@ describe("same-goal model switching", () => {
   it("tools deny foreign goal/worker access and missing session context", async () => {
     const tools = ownerTools({ directory: dir, host, goalService: service })
     for (const sessionID of ["stranger", (await readState(dir)).goals[0]!.workerSessionID]) {
-      expect(JSON.parse((await tools.switch_goal_model.execute({ goal_id: id, model: "p/new", resume: false }, { sessionID } as any)).output).ok).toBe(false)
+      expect(JSON.parse((await tools.switch_goal_identity.execute({ goal_id: id, model: "p/new", resume: false }, { sessionID } as any)).output).ok).toBe(false)
       expect(JSON.parse((await tools.loopd_list_models.execute({}, { sessionID } as any)).output).assignedGoals).toEqual([])
     }
     expect(JSON.parse((await tools.loopd_list_models.execute({}, {} as any)).output).ok).toBe(false)
-    expect(JSON.parse((await tools.switch_goal_model.execute({ goal_id: id, model: "p/new", resume: false }, {} as any)).output).ok).toBe(false)
+    expect(JSON.parse((await tools.switch_goal_identity.execute({ goal_id: id, model: "p/new", resume: false }, {} as any)).output).ok).toBe(false)
     expect(switched).toEqual([])
   })
 
@@ -162,7 +162,7 @@ describe("same-goal model switching", () => {
     await idle()
     host.switchSessionModel = async () => { throw new Error("Authorization: SUPER-SECRET") }
     const tools = ownerTools({ directory: dir, host, goalService: service })
-    const result = await tools.switch_goal_model.execute({ goal_id: id, model: "p/new", resume: false }, { sessionID: "owner" } as any)
+    const result = await tools.switch_goal_identity.execute({ goal_id: id, model: "p/new", resume: false }, { sessionID: "owner" } as any)
     expect(result.output).not.toContain("SUPER-SECRET")
     expect(JSON.parse(result.output).ok).toBe(false)
   })

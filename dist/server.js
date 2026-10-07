@@ -1545,52 +1545,34 @@ function createControlWorker(options) {
         };
         break;
       }
-      case "switch_goal_agent": {
-        const args = request.args;
-        if (!request.goalID || typeof args?.agent !== "string" || !args.agent.trim()) {
-          response = { ...base, ok: false, message: "goalID and agent are required", errorCode: "bad_request" };
-          break;
-        }
-        const owner = (await readState(directory)).goals.find((g) => g.id === request.goalID)?.ownerSessionID ?? "";
-        const result = await goalSvc.switchAgent(directory, request.goalID, owner, args.agent, { resume: args.resume === true });
-        const state = await readState(directory);
-        response = {
-          ...base,
-          ok: result.outcome !== "unsupported",
-          stateRevision: state.revision,
-          message: result.outcome === "applied" ? `Agent switched to ${result.agent} on the same worker/session.` : result.outcome === "deferred" ? `Agent switch to ${result.agent} deferred until the next permitted idle turn/prompt; no implicit wake.` : "Agent switch unsupported on this host. Goal/session retained."
-        };
-        break;
-      }
       case "list_agents": {
         const catalog = await goalSvc.listAgents();
         const state = await readState(directory);
         response = { ...base, ok: catalog.capability === "supported", stateRevision: state.revision, message: `Agents [${catalog.capability}/${catalog.switching}]: ${catalog.agents.map((a) => `${a.name} (${a.mode})`).join(", ") || "none"}` };
         break;
       }
-      case "switch_goal_model": {
+      case "switch_goal_identity": {
         if (!request.goalID) {
           response = { ...base, ok: false, message: "goalID is required", errorCode: "bad_request" };
           break;
         }
         const args = request.args;
-        const model = args?.model;
-        if (typeof model !== "string" || model.trim().length === 0) {
-          response = { ...base, ok: false, message: "model (providerID/modelID) is required", errorCode: "bad_request" };
+        if (args?.model === undefined && args?.agent === undefined || args?.model !== undefined && (typeof args.model !== "string" || !args.model.trim()) || args?.agent !== undefined && (typeof args.agent !== "string" || !args.agent.trim())) {
+          response = { ...base, ok: false, message: "At least one of model (providerID/modelID) or agent is required; provided fields must be non-empty strings.", errorCode: "bad_request" };
           break;
         }
         const ownerForSwitch = (await readState(directory)).goals.find((g) => g.id === request.goalID)?.ownerSessionID ?? "";
-        const result = await goalSvc.switchModel(directory, request.goalID, ownerForSwitch, model.trim(), { resume: args?.resume === true });
+        const result = await goalSvc.switchIdentity(directory, request.goalID, ownerForSwitch, { model: args?.model, agent: args?.agent, resume: args?.resume === true });
         const state = await readState(directory);
         const outcomeMessage = {
-          applied: `Model switched to ${result.model} on the same worker/session.`,
-          deferred: `Worker busy \u2014 switch to ${result.model} queued; applies on the next turn.`,
-          unsupported: `Model switch unsupported on this host (see loopd_list_models). Goal/session retained.`
+          applied: `Identity switched to ${[result.model, result.agent].filter(Boolean).join(" / ")} on the same worker/session.`,
+          deferred: `Identity switch deferred until the next permitted idle turn/prompt; no implicit wake.`,
+          unsupported: `Identity switch unsupported on this host (see loopd_list_models). Goal/session retained.`
         };
         response = {
           ...base,
           ok: result.outcome !== "unsupported",
-          message: outcomeMessage[result.outcome] ?? `Model switch ${result.outcome}.`,
+          message: outcomeMessage[result.outcome] ?? `Identity switch ${result.outcome}.`,
           stateRevision: state.revision
         };
         break;
@@ -3805,12 +3787,14 @@ function createGoalService(host) {
     }
     return { agent, catalog };
   }
-  async function applyAgent(directory, goal, agent) {
+  async function applyAgent(directory, goal, agent, persist = true) {
     if (!goal.workerSessionID || !host.switchSessionAgent)
       return "unsupported";
     const previousAgent = goal.config.agent ?? (await host.readSession(goal.workerSessionID))?.agent;
     const outcome = await host.switchSessionAgent(goal.workerSessionID, agent);
     if (outcome === "unsupported")
+      return outcome;
+    if (!persist)
       return outcome;
     try {
       await mutateState(directory, `goal.agent-switch:${goal.id}`, async (s) => {
@@ -3834,49 +3818,52 @@ function createGoalService(host) {
     return outcome;
   }
   function switchAgent(directory, goalID, ownerSessionID, value, opts) {
-    return withGoalOperation(goalID, async () => {
-      const state = await readState(directory);
-      const goal = state.goals.find((g) => g.id === goalID);
-      if (!goal || !ownerSessionID || goal.ownerSessionID !== ownerSessionID)
-        throw new Error("Goal not found or not owned by this session.");
-      if (goal.status === "complete")
-        throw new Error("Cannot switch a completed goal.");
-      if (opts?.resume && goal.status !== "blocked")
-        throw new Error("resume is only valid for a blocked goal.");
-      if (opts?.resume)
-        assertWorkspaceWriteAvailable(state, goal, ownerSessionID);
-      const { agent, catalog } = await validateAgent(value);
-      if (catalog.capability !== "supported" || catalog.switching === "unsupported" || !host.switchSessionAgent || !goal.workerSessionID) {
-        return { outcome: "unsupported", agent };
-      }
-      const runtime = state.runtimes.find((r) => r.goalID === goalID);
-      if (await host.sessionStatus(goal.workerSessionID) !== "idle" || runtime?.phase === "running" && leaseIsValid(runtime)) {
-        await mutateState(directory, `goal.agent-deferred:${goalID}`, async (s) => {
-          const current = s.goals.find((g) => g.id === goalID);
-          if (current) {
-            current.agentSwitch = { ...current.agentSwitch, pending: { agent, requestedAt: new Date().toISOString() } };
-            current.updatedAt = new Date().toISOString();
-          }
-          return s;
-        });
-        return { outcome: "deferred", agent };
-      }
-      const applied = await applyAgent(directory, goal, agent);
-      if (opts?.resume && applied !== "unsupported") {
-        await mutateState(directory, `goal.agent-resume:${goalID}`, async (s) => {
-          const current = s.goals.find((g) => g.id === goalID);
-          if (current?.status === "blocked") {
-            assertWorkspaceWriteAvailable(s, current, ownerSessionID);
-            current.status = "active";
-            current.blocker = undefined;
-            current.updatedAt = new Date().toISOString();
-          }
-          return s;
-        });
-        await continueTurnUnlocked(directory, goalID);
-      }
-      return { outcome: applied === "next-prompt" ? "deferred" : applied, agent, ...opts?.resume && applied !== "unsupported" ? { resumed: true } : {} };
-    });
+    return withGoalOperation(goalID, () => switchAgentUnlocked(directory, goalID, ownerSessionID, value, opts));
+  }
+  async function switchAgentUnlocked(directory, goalID, ownerSessionID, value, opts) {
+    const state = await readState(directory);
+    const goal = state.goals.find((g) => g.id === goalID);
+    if (!goal || !ownerSessionID || goal.ownerSessionID !== ownerSessionID)
+      throw new Error("Goal not found or not owned by this session.");
+    if (goal.status === "complete")
+      throw new Error("Cannot switch a completed goal.");
+    if (opts?.resume && goal.status !== "blocked")
+      throw new Error("resume is only valid for a blocked goal.");
+    if (opts?.resume)
+      assertWorkspaceWriteAvailable(state, goal, ownerSessionID);
+    const { agent, catalog } = await validateAgent(value);
+    if (catalog.capability !== "supported" || catalog.switching === "unsupported" || !host.switchSessionAgent || !goal.workerSessionID) {
+      return { outcome: "unsupported", agent };
+    }
+    const runtime = state.runtimes.find((r) => r.goalID === goalID);
+    if (await host.sessionStatus(goal.workerSessionID) !== "idle" || runtime?.phase === "running" && leaseIsValid(runtime)) {
+      if (opts?.persist === false)
+        throw new Error("Worker became busy during identity switch.");
+      await mutateState(directory, `goal.agent-deferred:${goalID}`, async (s) => {
+        const current = s.goals.find((g) => g.id === goalID);
+        if (current) {
+          current.agentSwitch = { ...current.agentSwitch, pending: { agent, requestedAt: new Date().toISOString() } };
+          current.updatedAt = new Date().toISOString();
+        }
+        return s;
+      });
+      return { outcome: "deferred", agent };
+    }
+    const applied = await applyAgent(directory, goal, agent, opts?.persist !== false);
+    if (opts?.resume && applied !== "unsupported") {
+      await mutateState(directory, `goal.agent-resume:${goalID}`, async (s) => {
+        const current = s.goals.find((g) => g.id === goalID);
+        if (current?.status === "blocked") {
+          assertWorkspaceWriteAvailable(s, current, ownerSessionID);
+          current.status = "active";
+          current.blocker = undefined;
+          current.updatedAt = new Date().toISOString();
+        }
+        return s;
+      });
+      await continueTurnUnlocked(directory, goalID);
+    }
+    return { outcome: applied === "next-prompt" ? "deferred" : applied, agent, ...opts?.resume && applied !== "unsupported" ? { resumed: true } : {} };
   }
   async function applyPendingAgent(directory, goal) {
     const pending = goal.agentSwitch?.pending;
@@ -3925,12 +3912,14 @@ function createGoalService(host) {
     }
     return { model, catalog };
   }
-  async function applyModel(directory, goal, model, reason) {
+  async function applyModel(directory, goal, model, reason, persist = true) {
     if (!goal.workerSessionID || !host.switchSessionModel)
       return "unsupported";
     const previousModel = parseModelRef(goal.config.model) ?? (await host.readSession(goal.workerSessionID))?.model;
     const outcome = await host.switchSessionModel(goal.workerSessionID, parseModelRef(model));
     if (outcome === "unsupported")
+      return outcome;
+    if (!persist)
       return outcome;
     try {
       await mutateState(directory, `goal.model-switch:${goal.id}`, async (s) => {
@@ -3959,51 +3948,172 @@ function createGoalService(host) {
     return outcome;
   }
   function switchModel(directory, goalID, ownerSessionID, value, opts) {
-    return withGoalOperation(goalID, async () => {
-      const state = await readState(directory);
-      const goal = state.goals.find((g) => g.id === goalID);
-      if (!goal || !ownerSessionID || goal.ownerSessionID !== ownerSessionID)
-        throw new Error("Goal not found or not owned by this session.");
-      if (goal.status === "complete")
-        throw new Error("Cannot switch a completed goal.");
-      if (opts?.resume && (goal.status !== "blocked" || goal.blocker?.kind !== "provider-limit")) {
-        throw new Error("resume is only valid for a provider-limit-blocked goal.");
+    return withGoalOperation(goalID, () => switchModelUnlocked(directory, goalID, ownerSessionID, value, opts));
+  }
+  async function switchModelUnlocked(directory, goalID, ownerSessionID, value, opts) {
+    const state = await readState(directory);
+    const goal = state.goals.find((g) => g.id === goalID);
+    if (!goal || !ownerSessionID || goal.ownerSessionID !== ownerSessionID)
+      throw new Error("Goal not found or not owned by this session.");
+    if (goal.status === "complete")
+      throw new Error("Cannot switch a completed goal.");
+    if (opts?.resume && (goal.status !== "blocked" || goal.blocker?.kind !== "provider-limit")) {
+      throw new Error("resume is only valid for a provider-limit-blocked goal.");
+    }
+    if (opts?.resume)
+      assertWorkspaceWriteAvailable(state, goal, ownerSessionID);
+    const { model, catalog } = await validateModel(value);
+    if (catalog.capability !== "supported" || catalog.switching === "unsupported" || !host.switchSessionModel || !goal.workerSessionID) {
+      return { outcome: "unsupported", model };
+    }
+    const runtime = state.runtimes.find((r) => r.goalID === goalID);
+    const status = await host.sessionStatus(goal.workerSessionID);
+    if (status !== "idle" || runtime?.phase === "running" && leaseIsValid(runtime)) {
+      if (opts?.persist === false)
+        throw new Error("Worker became busy during identity switch.");
+      await mutateState(directory, `goal.model-deferred:${goalID}`, async (s) => {
+        const current = s.goals.find((g) => g.id === goalID);
+        if (current) {
+          current.modelSwitch = { ...current.modelSwitch, pending: { model, requestedAt: new Date().toISOString(), reason: "owner" } };
+          current.updatedAt = new Date().toISOString();
+        }
+        return s;
+      });
+      return { outcome: "deferred", model };
+    }
+    const applied = await applyModel(directory, goal, model, "owner", opts?.persist !== false);
+    if (opts?.resume && applied !== "unsupported") {
+      await mutateState(directory, `goal.model-resume:${goalID}`, async (s) => {
+        const g = s.goals.find((g) => g.id === goalID);
+        if (g?.status === "blocked" && g.blocker?.kind === "provider-limit") {
+          assertWorkspaceWriteAvailable(s, g, ownerSessionID);
+          g.status = "active";
+          g.blocker = undefined;
+          g.updatedAt = new Date().toISOString();
+        }
+        return s;
+      });
+      await continueTurnUnlocked(directory, goalID);
+    }
+    return { outcome: applied === "next-prompt" ? "deferred" : applied, model, ...opts?.resume && applied !== "unsupported" ? { resumed: true } : {} };
+  }
+  function switchIdentity(directory, goalID, ownerSessionID, opts) {
+    return withGoalOperation(goalID, () => switchIdentityUnlocked(directory, goalID, ownerSessionID, opts));
+  }
+  async function switchIdentityUnlocked(directory, goalID, ownerSessionID, opts) {
+    if (opts.model === undefined && opts.agent === undefined)
+      throw new Error("At least one of model or agent is required.");
+    const pending = (await readState(directory)).goals.find((g) => g.id === goalID)?.pendingIdentity;
+    if (pending)
+      opts = { model: opts.model ?? pending.model, agent: opts.agent ?? pending.agent, resume: opts.resume };
+    if (opts.agent === undefined)
+      return switchModelUnlocked(directory, goalID, ownerSessionID, opts.model, opts);
+    if (opts.model === undefined)
+      return switchAgentUnlocked(directory, goalID, ownerSessionID, opts.agent, opts);
+    const state = await readState(directory);
+    const goal = state.goals.find((g) => g.id === goalID);
+    if (!goal || !ownerSessionID || goal.ownerSessionID !== ownerSessionID)
+      throw new Error("Goal not found or not owned by this session.");
+    if (goal.status === "complete")
+      throw new Error("Cannot switch a completed goal.");
+    if (opts.resume && goal.status !== "blocked")
+      throw new Error("resume is only valid for a blocked goal.");
+    if (opts.resume)
+      assertWorkspaceWriteAvailable(state, goal, ownerSessionID);
+    const { model, catalog: models } = await validateModel(opts.model);
+    const { agent, catalog: agents } = await validateAgent(opts.agent);
+    if (models.capability !== "supported" || models.switching === "unsupported" || agents.capability !== "supported" || agents.switching === "unsupported" || !host.switchSessionModel || !host.switchSessionAgent || !goal.workerSessionID) {
+      return { outcome: "unsupported", model, agent };
+    }
+    const runtime = state.runtimes.find((r) => r.goalID === goalID);
+    if (await host.sessionStatus(goal.workerSessionID) !== "idle" || runtime?.phase === "running" && leaseIsValid(runtime)) {
+      await mutateState(directory, `goal.identity-deferred:${goalID}`, async (s) => {
+        const current = s.goals.find((g) => g.id === goalID);
+        current.pendingIdentity = { model, agent };
+        current.modelSwitch = { ...current.modelSwitch, pending: undefined };
+        current.agentSwitch = { ...current.agentSwitch, pending: undefined };
+        current.updatedAt = new Date().toISOString();
+        return s;
+      });
+      return { outcome: "deferred", model, agent };
+    }
+    const live = await host.readSession(goal.workerSessionID);
+    const previousModel = parseModelRef(goal.config.model) ?? live?.model;
+    const previousAgent = goal.config.agent ?? live?.agent;
+    if (!previousModel || !previousAgent)
+      throw new Error("Combined switch requires a known previous identity for rollback.");
+    let modelChanged = false;
+    let agentChanged = false;
+    let outcome = "applied";
+    try {
+      const changedModel = await switchModelUnlocked(directory, goalID, ownerSessionID, model, { persist: false });
+      if (changedModel.outcome === "unsupported")
+        return { outcome: "unsupported", model, agent };
+      modelChanged = true;
+      const changedAgent = await switchAgentUnlocked(directory, goalID, ownerSessionID, agent, { persist: false });
+      if (changedAgent.outcome === "unsupported")
+        throw new Error("Agent switch unsupported after model switch.");
+      agentChanged = true;
+      if (changedModel.outcome === "deferred" || changedAgent.outcome === "deferred")
+        outcome = "deferred";
+      await mutateState(directory, `goal.identity-switched:${goalID}`, async (s) => {
+        const current = s.goals.find((g) => g.id === goalID);
+        const at = new Date().toISOString();
+        current.config.model = model;
+        current.config.agent = agent;
+        current.modelSwitch = { ...current.modelSwitch, pending: undefined, lastFailure: undefined, last: { from: goal.config.model, to: model, at, outcome: changedModel.outcome === "deferred" ? "next-prompt" : "applied", reason: "owner" } };
+        current.agentSwitch = { pending: undefined, lastFailure: undefined, last: { from: goal.config.agent, to: agent, at, outcome: changedAgent.outcome === "deferred" ? "next-prompt" : "applied" } };
+        current.pendingIdentity = undefined;
+        current.updatedAt = at;
+        return s;
+      });
+    } catch (error) {
+      const rollbacks = await Promise.allSettled([
+        ...agentChanged ? [host.switchSessionAgent(goal.workerSessionID, previousAgent)] : [],
+        ...modelChanged ? [host.switchSessionModel(goal.workerSessionID, previousModel)] : []
+      ]);
+      if (rollbacks.some((result) => result.status === "rejected" || result.value === "unsupported")) {
+        throw new Error("Identity switch failed and host rollback failed; inspect the existing session before retrying.");
       }
-      if (opts?.resume)
-        assertWorkspaceWriteAvailable(state, goal, ownerSessionID);
-      const { model, catalog } = await validateModel(value);
-      if (catalog.capability !== "supported" || catalog.switching === "unsupported" || !host.switchSessionModel || !goal.workerSessionID) {
-        return { outcome: "unsupported", model };
-      }
-      const runtime = state.runtimes.find((r) => r.goalID === goalID);
-      const status = await host.sessionStatus(goal.workerSessionID);
-      if (status !== "idle" || runtime?.phase === "running" && leaseIsValid(runtime)) {
-        await mutateState(directory, `goal.model-deferred:${goalID}`, async (s) => {
-          const current = s.goals.find((g) => g.id === goalID);
-          if (current) {
-            current.modelSwitch = { ...current.modelSwitch, pending: { model, requestedAt: new Date().toISOString(), reason: "owner" } };
-            current.updatedAt = new Date().toISOString();
-          }
-          return s;
-        });
-        return { outcome: "deferred", model };
-      }
-      const applied = await applyModel(directory, goal, model, "owner");
-      if (opts?.resume && applied !== "unsupported") {
-        await mutateState(directory, `goal.model-resume:${goalID}`, async (s) => {
-          const g = s.goals.find((g) => g.id === goalID);
-          if (g?.status === "blocked" && g.blocker?.kind === "provider-limit") {
-            assertWorkspaceWriteAvailable(s, g, ownerSessionID);
-            g.status = "active";
-            g.blocker = undefined;
-            g.updatedAt = new Date().toISOString();
-          }
-          return s;
-        });
-        await continueTurnUnlocked(directory, goalID);
-      }
-      return { outcome: applied === "next-prompt" ? "deferred" : applied, model, ...opts?.resume && applied !== "unsupported" ? { resumed: true } : {} };
-    });
+      throw error;
+    }
+    if (opts.resume) {
+      await mutateState(directory, `goal.identity-resume:${goalID}`, async (s) => {
+        const current = s.goals.find((g) => g.id === goalID);
+        assertWorkspaceWriteAvailable(s, current, ownerSessionID);
+        current.status = "active";
+        current.blocker = undefined;
+        current.updatedAt = new Date().toISOString();
+        return s;
+      });
+      await continueTurnUnlocked(directory, goalID);
+    }
+    return { outcome, model, agent, ...opts.resume ? { resumed: true } : {} };
+  }
+  async function applyPendingIdentity(directory, goal) {
+    if (!goal.pendingIdentity)
+      return;
+    try {
+      const result = await switchIdentityUnlocked(directory, goal.id, goal.ownerSessionID, goal.pendingIdentity);
+      if (result.outcome === "unsupported")
+        throw new Error("Identity switching unsupported.");
+    } catch {
+      await mutateState(directory, `goal.identity-switch-failed:${goal.id}`, async (s) => {
+        const current = s.goals.find((g) => g.id === goal.id);
+        current.pendingIdentity = undefined;
+        if (current.status === "active") {
+          current.status = "blocked";
+          current.blocker = { reason: "Pending identity switch was not accepted.", needed: "Inspect the existing session, switch identity explicitly, then retry when safe.", at: new Date().toISOString() };
+        }
+        const runtime = s.runtimes.find((r) => r.goalID === goal.id);
+        if (runtime) {
+          Object.assign(runtime, releaseLease(runtime));
+          runtime.retryAfter = undefined;
+        }
+        return s;
+      });
+      throw new Error("Pending identity switch was not accepted; goal blocked without replacing its worker.");
+    }
   }
   async function applyPendingModel(directory, goal) {
     const pending = goal.modelSwitch?.pending;
@@ -4056,7 +4166,7 @@ function createGoalService(host) {
     const runtime = state.runtimes.find((r) => r.goalID === goalID);
     const quotaBlocked = goal.status === "blocked" && runtime?.lastError === describeError(error);
     const sameModel = expectedModel === undefined || expectedModel === goal.config.model;
-    const eligible = sameModel && (goal.status === "active" || quotaBlocked) && (!goal.modelSwitch?.pending || goal.modelSwitch.pending.reason === "quota");
+    const eligible = sameModel && !goal.pendingIdentity && (goal.status === "active" || quotaBlocked) && (!goal.modelSwitch?.pending || goal.modelSwitch.pending.reason === "quota");
     if (eligible && goal.modelSwitch?.pending?.reason === "quota") {
       pending = { ...goal.modelSwitch.pending, reason: "quota" };
       status = "prepared";
@@ -4113,6 +4223,7 @@ function createGoalService(host) {
         return;
       if (await host.sessionStatus(goal.workerSessionID) !== "idle")
         return;
+      await applyPendingIdentity(directory, goal);
       await applyPendingModel(directory, goal);
       await applyPendingAgent(directory, goal);
       const fresh = (await readState(directory)).goals.find((g) => g.id === goalID);
@@ -4456,9 +4567,10 @@ function createGoalService(host) {
       return;
     if (!opts?.force && !await workers.isIdle(session.workerSessionID))
       return;
-    if (goal.modelSwitch?.pending || goal.agentSwitch?.pending) {
+    if (goal.pendingIdentity || goal.modelSwitch?.pending || goal.agentSwitch?.pending) {
       if (await host.sessionStatus(session.workerSessionID) !== "idle")
         return;
+      await applyPendingIdentity(directory, goal);
       await applyPendingModel(directory, goal);
       await applyPendingAgent(directory, goal);
     }
@@ -4958,7 +5070,7 @@ function createGoalService(host) {
   function accountUsage(directory, goalID) {
     return withGoalOperation(goalID, () => accountUsageUnlocked(directory, goalID));
   }
-  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, observeProviderError, compact };
+  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, observeProviderError, compact };
 }
 
 // src/application/schedule-worker.ts
@@ -8158,7 +8270,7 @@ function ownerTools(options) {
   const { directory, host, goalService } = options;
   return {
     loopd_list_models: tool2({
-      description: "Discover host providers/models and available OpenCode agents, inspect quota limitations plus assigned identities of this session's existing goals. " + "Remaining quota is unknown unless a supported integration reports it; connected/enabled is not remaining balance. " + "Workflow: discover -> inspect_background_goal for last local quota error -> switch_goal_model on the SAME goal, never create a duplicate to change provider. No secrets/auth data are returned.",
+      description: "Discover host providers/models and available OpenCode agents, inspect quota limitations plus assigned identities of this session's existing goals. " + "Remaining quota is unknown unless a supported integration reports it; connected/enabled is not remaining balance. " + "Workflow: discover -> inspect_background_goal for last local quota error -> switch_goal_identity on the SAME goal, never create a duplicate to change provider. No secrets/auth data are returned.",
       args: {},
       execute: async (_args, context) => {
         if (!context?.sessionID)
@@ -8176,6 +8288,7 @@ function ownerTools(options) {
               model: g.config.model,
               agent: g.config.agent,
               agentSwitch: g.agentSwitch,
+              pendingIdentity: g.pendingIdentity,
               workerSessionID: g.workerSessionID,
               modelSwitch: g.modelSwitch,
               modelFallback: g.modelFallback,
@@ -8186,47 +8299,28 @@ function ownerTools(options) {
         };
       }
     }),
-    switch_goal_agent: tool2({
-      description: "Switch an EXISTING owned goal's agent, preserving the same worker/session, transcript, progress, inbox, checks, budgets and topology. Discover agents with loopd_list_models first. Busy workers defer until the next permitted idle turn; legacy hosts apply on the next prompt. No implicit unpause or interactive wake. resume=true explicitly resumes only a blocked goal after a safe switch; busy requests remain blocked until explicitly retried/resumed when idle.",
+    switch_goal_identity: tool2({
+      description: "Switch an EXISTING owned goal's model, agent, or both atomically, preserving the same worker/session, transcript, progress, inbox, checks, budgets and topology. At least one of model or agent is required. Discover identities with loopd_list_models first. Busy workers defer until the next permitted idle turn; legacy hosts apply on the next prompt. No implicit unpause or interactive wake. resume=true explicitly resumes only a blocked goal after a safe switch (model-only requires a provider-limit blocker); busy requests remain blocked until explicitly retried/resumed when idle. Combined host failures roll back successful changes; rollback failure requires inspecting the existing session.",
       args: {
         goal_id: tool2.schema.string().describe("Existing owned goal ID."),
-        agent: tool2.schema.string().describe("Available agent name from loopd_list_models."),
+        agent: tool2.schema.string().optional().describe("Available agent name from loopd_list_models."),
+        model: tool2.schema.string().optional().describe("Available providerID/modelID from loopd_list_models. Provide model, agent, or both."),
         resume: tool2.schema.boolean().optional().describe("Explicitly resume a blocked goal after a safe switch. Default false.")
       },
       execute: async (args, context) => {
         if (!context?.sessionID)
           return { title: "No session", output: JSON.stringify({ ok: false, message: "No session context available." }) };
+        if (args.model === undefined && args.agent === undefined)
+          return { title: "Identity switch failed", output: JSON.stringify({ ok: false, message: "At least one of model or agent is required." }) };
         const state = await readState(directory);
         if (!state.goals.some((g) => g.id === args.goal_id && g.ownerSessionID === context.sessionID)) {
           return { title: "Switch denied", output: JSON.stringify({ ok: false, message: "Goal not found or not owned by this session." }) };
         }
         try {
-          const result = await goalService.switchAgent(directory, args.goal_id, context.sessionID, args.agent, { resume: args.resume });
-          return { title: `Agent switch: ${result.outcome}`, output: JSON.stringify({ ok: result.outcome !== "unsupported", ...result, goalID: args.goal_id, message: "Same goal and worker retained. Deferred requests require the next permitted idle turn; no automatic interactive wake." }) };
+          const result = await goalService.switchIdentity(directory, args.goal_id, context.sessionID, args);
+          return { title: `Identity switch: ${result.outcome}`, output: JSON.stringify({ ok: result.outcome !== "unsupported", ...result, goalID: args.goal_id, message: "Same goal and worker retained. Deferred requests require the next permitted idle turn; no automatic interactive wake." }) };
         } catch {
-          return { title: "Agent switch failed", output: JSON.stringify({ ok: false, message: "Switch rejected: verify ownership, agent availability, resume eligibility and host capability with loopd_list_models and inspect_background_goal. Existing goal/session retained." }) };
-        }
-      }
-    }),
-    switch_goal_model: tool2({
-      description: "Switch provider/model for an EXISTING goal owned by this session, preserving goal ID, worker session, transcript, checks and budgets. " + "First discover usable models with loopd_list_models, then inspect_background_goal for quota/error information. " + "Busy workers defer to the next safe turn; v1 changes apply on the next prompt. No abort, duplicate worker, budget reset, unpause or interactive wake. " + "Returns applied/deferred/unsupported honestly; an unsupported catalog cannot validate a switch. resume=true explicitly resumes ONLY a provider-limit-blocked goal and requests its next turn (including interactive); never resets budgets.",
-      args: {
-        goal_id: tool2.schema.string().describe("Existing owned goal ID; never create a replacement goal to switch models."),
-        model: tool2.schema.string().describe("Available providerID/modelID from loopd_list_models."),
-        resume: tool2.schema.boolean().optional().describe("Explicitly resume only a quota/rate-limit-blocked goal after a safe switch. Default false. Paused/budget-limited/unrelated-blocked goals are not resumed.")
-      },
-      execute: async (args, context) => {
-        if (!context?.sessionID)
-          return { title: "No session", output: JSON.stringify({ ok: false, message: "No session context available." }) };
-        const state = await readState(directory);
-        if (!state.goals.some((g) => g.id === args.goal_id && g.ownerSessionID === context.sessionID)) {
-          return { title: "Switch denied", output: JSON.stringify({ ok: false, message: "Goal not found or not owned by this session." }) };
-        }
-        try {
-          const result = await goalService.switchModel(directory, args.goal_id, context.sessionID, args.model, { resume: args.resume });
-          return { title: `Model switch: ${result.outcome}`, output: JSON.stringify({ ok: result.outcome !== "unsupported", ...result, goalID: args.goal_id, message: "Same goal and worker retained. Deferred requests require the next permitted turn; no automatic interactive wake." }) };
-        } catch {
-          return { title: "Model switch failed", output: JSON.stringify({ ok: false, message: "Switch rejected: verify ownership, model availability and host capability with loopd_list_models and inspect_background_goal. Existing goal/session retained." }) };
+          return { title: "Identity switch failed", output: JSON.stringify({ ok: false, message: "Switch rejected: verify ownership, identity availability, resume eligibility and host capability with loopd_list_models and inspect_background_goal. Existing goal/session retained. Inspect live session identity before retrying if host rollback failed." }) };
         }
       }
     }),
@@ -8273,6 +8367,7 @@ function ownerTools(options) {
             model: g.config.model,
             modelSwitch: g.modelSwitch,
             agentSwitch: g.agentSwitch,
+            pendingIdentity: g.pendingIdentity,
             modelFallback: g.modelFallback,
             lastProviderLimit: g.lastProviderLimit,
             fallbackModels: g.config.fallbackModels ?? [],
@@ -8381,6 +8476,7 @@ function ownerTools(options) {
             lastProgress: goal.lastProgress,
             modelSwitch: goal.modelSwitch,
             agentSwitch: goal.agentSwitch,
+            pendingIdentity: goal.pendingIdentity,
             modelFallback: goal.modelFallback,
             lastProviderLimit: goal.lastProviderLimit,
             quotaLimitation: "Remaining provider quota unknown; local quota errors are observations, not balance data. See loopd_list_models.",

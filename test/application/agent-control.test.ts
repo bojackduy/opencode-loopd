@@ -6,6 +6,7 @@ import { createControlWorker } from "../../src/application/control-worker"
 import { createGoalService } from "../../src/application/goal-service"
 import { createFakeHost } from "../../src/server/host-adapter"
 import { emptyAgentCatalog } from "../../src/server/agent-catalog"
+import { emptyCatalog } from "../../src/server/model-catalog"
 import { mutateState, readState } from "../../src/infrastructure/state-repository"
 import { commandHelp, parseCommand } from "../../src/tui/command-parser"
 
@@ -36,7 +37,7 @@ describe("agent dashboard/control integration", () => {
     expect(catalog.message).toContain("Research Agent (subagent)")
     const { goal } = await service.start(dir, { name: "control", objective: "test", ownerSessionID: "owner", interactive: true, config: { agent: "old", workspaceWrite: false } })
     await mutateState(dir, "idle", async (s) => { s.runtimes[0]!.phase = "idle"; s.runtimes[0]!.activeRunID = undefined; return s })
-    const changed = await client.execute({ version: 1, requestID: crypto.randomUUID(), requestedAt: new Date().toISOString(), command: "switch_goal_agent", goalID: goal.id, args: { agent: "Research Agent" } })
+    const changed = await client.execute({ version: 1, requestID: crypto.randomUUID(), requestedAt: new Date().toISOString(), command: "switch_goal_identity", goalID: goal.id, args: { agent: "Research Agent" } })
     expect(changed.ok).toBe(true)
     expect(changed.message).toContain("same worker/session")
     const after = (await readState(dir)).goals[0]!
@@ -46,13 +47,32 @@ describe("agent dashboard/control integration", () => {
   })
 
   it("rejects missing targets and exposes unsupported agent inventory", async () => {
-    const changed = await client.executeRaw({ command: "switch_goal_agent", args: { agent: "Research Agent" } })
+    const changed = await client.executeRaw({ command: "switch_goal_identity", args: { agent: "Research Agent" } })
     expect(changed.ok).toBe(false)
     expect(changed.errorCode).toBe("bad_request")
     host.listAgents = undefined
     const catalog = await client.execute({ version: 1, requestID: crypto.randomUUID(), requestedAt: new Date().toISOString(), command: "list_agents" })
     expect(catalog.ok).toBe(false)
     expect(catalog.message).toContain("unsupported")
+  })
+
+  it("switches both fields through the unified bus and rejects neither or malformed fields", async () => {
+    host.listModels = async () => ({ ...emptyCatalog("test", "session", "supported"), models: [{ providerID: "p", modelID: "new", name: "new", usable: true }] })
+    host.switchSessionModel = async () => "applied"
+    const { goal } = await service.start(dir, { name: "combined", objective: "test", ownerSessionID: "owner", interactive: true, config: { agent: "old", model: "p/old", workspaceWrite: false } })
+    await mutateState(dir, "idle", async (s) => { s.runtimes[0]!.phase = "idle"; s.runtimes[0]!.activeRunID = undefined; return s })
+    for (const args of [{}, { model: 1 }, { agent: "" }, { model: "p/new", agent: false }]) {
+      const rejected = await client.executeRaw({ command: "switch_goal_identity", goalID: goal.id, args })
+      expect(rejected.ok).toBe(false)
+      expect(rejected.errorCode).toBe("bad_request")
+    }
+    const changed = await client.execute({ version: 1, requestID: crypto.randomUUID(), requestedAt: new Date().toISOString(), command: "switch_goal_identity", goalID: goal.id, args: { model: "p/new", agent: "Research Agent" } })
+    expect(changed.ok).toBe(true)
+    const after = (await readState(dir)).goals[0]!
+    expect(after.config.model).toBe("p/new")
+    expect(after.config.agent).toBe("Research Agent")
+    expect(after.workerSessionID).toBe(goal.workerSessionID)
+    expect(host.promptCalls).toHaveLength(1)
   })
 
   it("wires parser/help, Goals-tab-only commands and agent row identity", async () => {
@@ -62,7 +82,7 @@ describe("agent dashboard/control integration", () => {
     const commandTab = source.slice(source.indexOf("async function executeCommandTabCommand"), source.indexOf("async function executeCommand(cmd"))
     expect(commandTab).toContain('case "agent": case "agents":')
     expect(commandTab).toContain("only available on the Goals tab")
-    expect(source).toContain('command: "switch_goal_agent"')
+    expect(source).toContain('command: "switch_goal_identity"')
     expect(source).toContain('command: "list_agents"')
     expect(source).toContain("🤖 {goal.config.agent}")
   })

@@ -22,7 +22,7 @@
 - **Scheduled intervals** — `scheduleEveryMs`/`scheduleMaxRuns` auto-requeues the same goal every N ms (e.g., `10s` monitor, `1h` report) without manual `/goal` spam — `5s` poll, `skip-if-running`, `workspaceWrite` serialization, inbox `Scheduled tick N/M`.
 - **Modal TUI dashboard** — `<leader>o` or `/loop` opens a focused dialog (no leak to chat prompt). Vim-style navigation, live running indicator, per-status borders.
 - **Command sessions, not blocked shells** — run installs, builds, dev servers, and REPLs as background OS processes with a fullscreen terminal, owner exit notifications, line-level `filter`/`until` watches, and timeouts — instead of freezing the agent turn in `bash`.
-- **Switch models mid-run** — `loopd_list_models` discovers providers/models and quota status; `switch_goal_model` moves a goal to another model on the *same* worker/session when a provider hits quota. Optional ordered `fallbackModels` switch automatically on 429s. Dashboard: `:model`/`:models`.
+- **Switch identity mid-run** — `loopd_list_models` discovers models and agents; `switch_goal_identity` changes a goal's model, agent, or both on the *same* worker/session. Combined changes persist atomically and roll back on partial failure. Optional ordered `fallbackModels` switch automatically on 429s. Dashboard: `:model`/`:agent` and `:models`/`:agents`.
 - **Manual mode for interactive work** — `interactive: true` (or `:interactive`) stops the engine from starting turns on its own; every turn comes from your `:send`/nudge. For tasks where the worker waits for input.
 
 Keywords: `opencode` `opencode-plugin` `background-agent` `autonomous` `subagent` `loop` `goal` `tui` `codex` `claude-code` `worker`
@@ -180,7 +180,7 @@ read_goal_transcript()           — last N worker messages (what it's doing)
 send_goal_input(goalID, msg)     — steer: "skip appendix PDFs"
 pause_goal(goalID) / resume / clear
 loopd_list_models()              — providers/models, quota status (unknown where hosts can't report it)
-switch_goal_model(goalID, model) — same goal, new model (same worker/session)
+switch_goal_identity({goal_id, model?, agent?}) — same goal, new identity (same worker/session; at least one field required)
 loopd_command_start(...)         — installs/builds/servers as background processes (never block the turn in bash)
 ```
 
@@ -309,7 +309,7 @@ When a provider hits quota or rate limits mid-run:
 
 ```
 loopd_list_models()                                   — what's connected, quota status (or honestly unknown)
-switch_goal_model(goalID, "other-provider/good-model") — same goal, same worker/session, transcript kept
+switch_goal_identity({goal_id, model:"other-provider/good-model"}) — same goal, same worker/session, transcript kept
 ```
 
 - Busy workers defer the switch to the next turn (`→ pending … applies next turn`); idle ones switch immediately. On v1 the new model takes effect from the next prompt (no mid-stream session switch API); v2 switches the live session where supported, else reports `unsupported` without touching anything.

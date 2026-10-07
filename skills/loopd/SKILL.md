@@ -118,9 +118,9 @@ The goal starts immediately. The user can monitor it via `/loop` (<leader>o). Pl
 
 ```text
 loopd_list_models({})
-switch_goal_agent({goal_id:"existing-goal", agent:"researcher"})
+switch_goal_identity({goal_id:"existing-goal", agent:"researcher"})
 # Only when explicitly resuming a blocked goal:
-switch_goal_agent({goal_id:"existing-goal", agent:"researcher", resume:true})
+switch_goal_identity({goal_id:"existing-goal", agent:"researcher", resume:true})
 ```
 
 Agent switching is owner-only and validates the exact available name. It retains goal ID, worker session, transcript, progress, inbox, checks, budgets, counters, interactive mode and topology. Busy/unknown workers queue a persisted request until the next permitted confirmed-idle turn. v2 switches the idle session via `session.switchAgent`; v1 uses that SDK API if present, otherwise reports `deferred` and sends the assignment on the next prompt. Switching alone never wakes an interactive goal, unpauses or resumes. `resume:true` is valid only for blocked goals; if still busy, it remains deferred and blocked until an explicit retry/resume when safe. Completed goals cannot switch. Pending failures block once without creating a replacement worker.
@@ -131,7 +131,7 @@ Use agent tools, not a new goal or a human dashboard action, to change a worker'
 
 1. `loopd_list_models({})` returns public provider/model IDs, names, usable/connected status, context/output limits, host switching capability, and identities of **this owner session's** goals.
 2. `inspect_background_goal({goal_id, includeTranscript:false})` shows assigned model, `modelSwitch` (pending/last/failure), `modelFallback` (attempted/status), and `lastProviderLimit` (local observation source/time/model/status/retryAt).
-3. Select a positively usable catalog model and call `switch_goal_model({goal_id, model:"provider/model"})`. Keep the existing goal ID and worker session. **Never spawn a duplicate goal to switch providers.**
+3. Select a positively usable catalog model and call `switch_goal_identity({goal_id, model:"provider/model"})`. Keep the existing goal ID and worker session. **Never spawn a duplicate goal to switch providers.**
 
 **Quota caveat:** the inspected v1/v2 host catalogs do not expose remaining provider quota or reset times. Results explicitly say `quota.status:"unknown"` and `quota.capability:"unsupported"`, with source and observation time. Connected/enabled credentials do **not** establish balance. `lastProviderLimit` is an observed 429/quota failure, not live balance data; `retryAt` is derived only from a supplied Retry-After value, not a fabricated quota reset. Request headers, auth tokens, keys, and raw provider records are not returned. Older/missing host APIs report unsupported; failed catalog requests report unavailable and cannot validate switches.
 
@@ -140,12 +140,22 @@ Use agent tools, not a new goal or a human dashboard action, to change a worker'
 ```text
 loopd_list_models({})
 inspect_background_goal({goal_id:"existing-goal", includeTranscript:false})
-switch_goal_model({goal_id:"existing-goal", model:"connected-provider/usable-model"})
+switch_goal_identity({goal_id:"existing-goal", model:"connected-provider/usable-model"})
 # If and only if the goal is blocked by a provider quota/rate limit:
-switch_goal_model({goal_id:"existing-goal", model:"connected-provider/usable-model", resume:true})
+switch_goal_identity({goal_id:"existing-goal", model:"connected-provider/usable-model", resume:true})
 ```
 
 Switch results distinguish `applied`, `deferred`, and `unsupported`. Busy/retrying/unconfirmable workers defer until a confirmed-idle continuation; there is no implicit abort. v1 supports explicit model identity on the **next prompt** (reported deferred); v2 supports an idle-session model switch. Future prompts and compaction use the switched assignment. Default switching does not unpause, resume, or wake interactive goals. `resume:true` explicitly starts a permitted turn only for a provider-limit-blocked goal, never paused, budget-limited, or unrelated-blocked goals. If the worker is still busy, the switch remains deferred and resume must be requested again when safe. Budgets, failure/rejection counters, checks, progress, inbox, topology, transcript, and session ID are preserved.
+
+### Combined identity switching
+
+`switch_goal_identity` replaces the separate model/agent tools. Provide at least one of `model` or `agent`; omitted fields stay unchanged. To change both together:
+
+```text
+switch_goal_identity({goal_id:"existing-goal", model:"connected-provider/usable-model", agent:"researcher"})
+```
+
+Combined switches validate both catalogs before touching the host, serialize with all goal operations, and persist both assignments in one state mutation. If the second host change fails, the first is rolled back, including next-prompt assignments. If the host itself rejects rollback, the operation reports failure: inspect the existing live session before retrying; do not create a replacement. Hosts cannot expose a single atomic two-field API, so live host changes are sequential under the goal lock, with no intervening worker prompt. Busy workers persist the pair as `pendingIdentity` and apply it together at the next permitted idle turn. Discovery exposes `assignedGoals[].pendingIdentity`. A later single-field request updates that field of the pending pair. Combined `resume:true` is explicit and valid only for blocked goals; model-only resume retains the provider-limit requirement. No switch resets budgets or failure counters, replaces a worker, or implicitly wakes an interactive goal. Dashboard `:model` and `:agent` both dispatch the unified bus operation.
 
 ### Opt-in ordered fallback
 
@@ -436,9 +446,9 @@ Open the shared dashboard with `/loop` (or `<leader>o`) — focuses the **Goals*
 | `:abort` | Abort worker session now (status unchanged; A) | `abort_goal_worker` |
 | `:pause` / `:resume` / `:retry` / `:clear` | Quick controls (also p/r/R/x) | `pause_goal` / `resume_goal` / `clear_goal` |
 | `:interactive` | Toggle manual mode (engine never starts turns) | `interactive: true` at creation |
-| `:model <provider/model>` | Switch this goal's model (same worker/session) | `switch_goal_model` |
+| `:model <provider/model>` | Switch this goal's model (same worker/session) | `switch_goal_identity` |
 | `:models` | Show provider/model inventory + quota status | `loopd_list_models` |
-| `:agent <name>` | Switch this goal's agent (same worker/session; Goals tab only) | `switch_goal_agent` |
+| `:agent <name>` | Switch this goal's agent (same worker/session; Goals tab only) | `switch_goal_identity` |
 | `:agents` | List available agent names/modes and host capabilities (Goals tab only) | `loopd_list_models` |
 | `:logs` / `:help` / `:q` | Toggle logs / help / close | — |
 

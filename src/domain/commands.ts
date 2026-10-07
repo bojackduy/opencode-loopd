@@ -67,19 +67,14 @@ export interface ListModelsCommand extends BaseCommand {
   command: "list_models"
 }
 
-/** Owner-scoped same-goal model switch for the dashboard `:model`. */
-export interface SwitchGoalModelCommand extends BaseCommand {
-  command: "switch_goal_model"
-  args: { model: string; resume?: boolean }
+/** Owner-scoped same-goal identity switch for `:model` and `:agent`. */
+export interface SwitchGoalIdentityCommand extends BaseCommand {
+  command: "switch_goal_identity"
+  args: { model?: string; agent?: string; resume?: boolean }
 }
 
 export interface ListAgentsCommand extends BaseCommand {
   command: "list_agents"
-}
-
-export interface SwitchGoalAgentCommand extends BaseCommand {
-  command: "switch_goal_agent"
-  args: { agent: string; resume?: boolean }
 }
 
 // ─── Worker Interaction ──────────────────────────────────────────────────────
@@ -142,9 +137,8 @@ export type LoopCommand =
   | UpdateGoalCommand
   | SetInteractiveCommand
   | ListModelsCommand
-  | SwitchGoalModelCommand
+  | SwitchGoalIdentityCommand
   | ListAgentsCommand
-  | SwitchGoalAgentCommand
   | CompactCommand
   | InspectCommand
   | OpenWorkerCommand

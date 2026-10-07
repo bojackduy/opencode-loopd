@@ -70,6 +70,8 @@ export interface Goal {
    */
   interactive?: boolean
 
+  /** Combined owner switch, applied as one transaction at the next idle turn. */
+  pendingIdentity?: { model: string; agent: string }
   /** Persisted switching state; assignment changes never replace the worker. */
   agentSwitch?: {
     pending?: { agent: string; requestedAt: string }

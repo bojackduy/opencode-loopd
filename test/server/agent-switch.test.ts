@@ -47,7 +47,7 @@ describe("same-goal agent switching", () => {
     expect(inventory.agents.map((a: any) => a.name)).toEqual(["old", "new", "last"])
     expect(inventory.agentCatalog.capability).toBe("supported")
     expect(inventory.assignedGoals[0].agent).toBe("old")
-    const changed = JSON.parse((await tools.switch_goal_agent.execute({ goal_id: id, agent: "new" }, context)).output)
+    const changed = JSON.parse((await tools.switch_goal_identity.execute({ goal_id: id, agent: "new" }, context)).output)
     expect(changed.outcome).toBe("applied")
     const inspected = JSON.parse((await tools.inspect_background_goal.execute({ goal_id: id, includeTranscript: false }, context)).output)
     expect(inspected.config.agent).toBe("new")
@@ -60,14 +60,14 @@ describe("same-goal agent switching", () => {
     const tools = ownerTools({ directory: dir, host, goalService: service })
     for (const sessionID of ["stranger", (await readState(dir)).goals[0]!.workerSessionID, undefined]) {
       const context = { sessionID } as any
-      expect(JSON.parse((await tools.switch_goal_agent.execute({ goal_id: id, agent: "new" }, context)).output).ok).toBe(false)
+      expect(JSON.parse((await tools.switch_goal_identity.execute({ goal_id: id, agent: "new" }, context)).output).ok).toBe(false)
       const catalog = JSON.parse((await tools.loopd_list_models.execute({}, context)).output)
       if (sessionID) expect(catalog.assignedGoals).toEqual([])
       else expect(catalog.ok).toBe(false)
     }
-    expect(JSON.parse((await tools.switch_goal_agent.execute({ goal_id: id, agent: "missing" }, { sessionID: "owner" } as any)).output).ok).toBe(false)
+    expect(JSON.parse((await tools.switch_goal_identity.execute({ goal_id: id, agent: "missing" }, { sessionID: "owner" } as any)).output).ok).toBe(false)
     host.switchSessionAgent = async () => { throw new Error("SUPER-SECRET") }
-    const result = await tools.switch_goal_agent.execute({ goal_id: id, agent: "new" }, { sessionID: "owner" } as any)
+    const result = await tools.switch_goal_identity.execute({ goal_id: id, agent: "new" }, { sessionID: "owner" } as any)
     expect(result.output).not.toContain("SUPER-SECRET")
     expect(JSON.parse(result.output).ok).toBe(false)
   })

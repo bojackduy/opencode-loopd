@@ -7363,7 +7363,7 @@ function LoopDashboard(props) {
             version: 1,
             requestID: randomUUID2(),
             requestedAt: new Date().toISOString(),
-            command: "switch_goal_agent",
+            command: "switch_goal_identity",
             goalID: selectedGoal().id,
             args: {
               agent
@@ -7398,7 +7398,7 @@ function LoopDashboard(props) {
             version: 1,
             requestID: randomUUID2(),
             requestedAt: new Date().toISOString(),
-            command: "switch_goal_model",
+            command: "switch_goal_identity",
             goalID: selectedGoal().id,
             args: {
               model: target
