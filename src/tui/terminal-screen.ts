@@ -12,7 +12,7 @@
 // Snapshot/resync reset the emulator and re-feed from the snapshot start, so
 // divergence never accumulates across resyncs.
 
-import { Terminal } from "@xterm/headless"
+import type { Terminal as XtermTerminal } from "@xterm/headless"
 
 export interface ScreenCell {
   /** Single visible character (space for empty cells). */
@@ -93,7 +93,12 @@ function paletteToHex(index: number): string | undefined {
 export function createTerminalScreen(cols: number, rows: number): TerminalScreen {
   // allowProposedApi unlocks the buffer namespace (cell/cursor/alt-screen
   // readout) — verified against @xterm/headless 6.0.0 types + probe script.
-  function makeTerm(nextCols: number, nextRows: number): InstanceType<typeof Terminal> {
+  // Loaded lazily (not at module top-level) so merely importing the TUI
+  // plugin never evaluates the xterm bundle — that cost hits only when a
+  // terminal screen is actually created.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { Terminal } = require("@xterm/headless") as typeof import("@xterm/headless")
+  function makeTerm(nextCols: number, nextRows: number): InstanceType<typeof XtermTerminal> {
     return new Terminal({
       cols: nextCols,
       rows: nextRows,

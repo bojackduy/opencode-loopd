@@ -30,13 +30,6 @@ import { TERMINAL_ROUTE_NAME, currentRouteSessionID, terminalRoutePayload } from
 import type { CommandSession } from "../domain/command-session"
 import { randomUUID } from "crypto"
 
-const LOG_FILE = "/tmp/loopd-tui.log"
-function debugLog(...args: unknown[]) {
-  try {
-    const { appendFileSync } = require("node:fs") as typeof import("node:fs")
-    appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${args.map((a) => typeof a === "string" ? a : JSON.stringify(a)).join(" ")}\n`)
-  } catch { }
-}
 function prevent(evt: ParsedKey) {
   const e = evt as ParsedKey & { preventDefault?: () => void; stopPropagation?: () => void }
   e.preventDefault?.()
@@ -327,11 +320,9 @@ export function LoopDashboard(props: Props) {
   })
 
   onMount(() => {
-    try { const { appendFileSync } = require("node:fs") as typeof import("node:fs"); appendFileSync(LOG_FILE, `[${new Date().toISOString()}] dashboard mounted dir=${props.directory} mode=${mode()} dialogOpen=${props.api.ui.dialog.open}\n`) } catch { }
-    debugLog("mounted", "dialogOpen", props.api.ui.dialog.open, "directory", props.directory)
     focusInput()
   })
-  createEffect(() => { const m = mode(); debugLog("mode ->", m); focusInput() })
+  createEffect(() => { mode(); focusInput() })
 
   function enterInsertMode() {
     setCommandInput("")
@@ -351,7 +342,6 @@ export function LoopDashboard(props: Props) {
     const name = evt.name || ""
     const seq = (evt as unknown as { sequence?: string }).sequence || ""
     const raw = (evt as unknown as { raw?: string }).raw || ""
-    debugLog("useKeyboard", `name=${name} seq=${JSON.stringify(seq)} raw=${JSON.stringify(raw)} shift=${(evt as unknown as { shift?: boolean }).shift} ctrl=${evt.ctrl} mode=${mode()} dialogOpen=${props.api.ui.dialog.open}`)
     if (!props.api.ui.dialog.open) return
     const active = (() => {
       try {
@@ -363,24 +353,22 @@ export function LoopDashboard(props: Props) {
     if (!active) return
     const isColon = name === ":" || seq === ":" || raw === ":" || seq.includes(":") || raw.includes(":") || name === ";" || name === "colon"
     const isQuestion = name === "?" || seq === "?" || raw === "?" || seq.includes("?") || raw.includes("?")
-    debugLog("isColon", isColon, "isQuestion", isQuestion, "modeBefore", mode())
     // Insert mode: the ONLY keys that act here are Enter (send), Escape and
     // Ctrl+N (back to normal). Everything else must reach the input as text.
     // Enter is handled here — not in the input's onKeyDown — because the
     // focused InputRenderable consumes Enter internally and our prop handler
     // never reliably fires for it (typing worked, sending never did).
     if (mode() === "insert") {
-      if (isEnterKey(evt)) { prevent(evt); debugLog("insert enter -> execute"); void executeCommand(commandInput()); return }
+      if (isEnterKey(evt)) { prevent(evt); void executeCommand(commandInput()); return }
       if (isEscapeKey(evt) || isCtrlN(evt)) {
         prevent(evt)
         returnToNormalMode()
-        debugLog("insert -> normal via esc/ctrl+n")
         return
       }
       return
     }
-    if (isColon) { prevent(evt); enterInsertMode(); debugLog("normal -> insert"); return }
-    if (isQuestion) { prevent(evt); setShowHelp((value) => !value); debugLog("toggle help"); return }
+    if (isColon) { prevent(evt); enterInsertMode(); return }
+    if (isQuestion) { prevent(evt); setShowHelp((value) => !value); return }
     const key = raw || seq || name
     // Ctrl-C on the Commands tab interrupts the selected command (SIGINT
     // delivery, never a kill) — mirrors the fallback panel. Plain `c`
@@ -403,7 +391,6 @@ export function LoopDashboard(props: Props) {
           : `Hiding finished ${tab() === "commands" ? "commands" : "goals"}.`)
         return next
       })
-      debugLog("toggle completed")
       return
     }
     const currentGoals = state()?.goals.filter((goal) => showCompleted() || goal.status !== "complete") || []
@@ -414,14 +401,12 @@ export function LoopDashboard(props: Props) {
     if (name === "tab") {
       prevent(evt)
       setTab((v) => toggleDashboardView(v))
-      debugLog("switch tab ->", tab())
       return
     }
     const directionalView = dashboardViewForKey(key)
     if (directionalView !== undefined) {
       prevent(evt)
       setTab(directionalView)
-      debugLog("select tab ->", tab())
       return
     }
     function dashboardSelection(): DashboardSelection {
@@ -570,7 +555,6 @@ export function LoopDashboard(props: Props) {
 
   /** Commands-tab colon commands: launch/open/interrupt/terminate/kill/restart/remove/write. */
   async function executeCommandTabCommand(verb: string, positional: string[], raw: string) {
-    debugLog("commands-tab command", verb)
     switch (verb) {
       case "model": case "models": case "agent": case "agents":
         setStatusText(`:${verb} is only available on the Goals tab.`)
@@ -623,10 +607,8 @@ export function LoopDashboard(props: Props) {
   }
 
   async function executeCommand(cmd: string) {
-    debugLog("executeCommand raw=", JSON.stringify(cmd))
     const parsed = parseCommand(cmd)
-    debugLog("parsed", parsed)
-    if (!parsed) { setStatusText("Empty command"); debugLog("empty command"); return }
+    if (!parsed) { setStatusText("Empty command"); return }
     // Commands tab: launch/open/interrupt/remove/write on the selected
     // command — goal actions never run here.
     if (tab() === "commands" && !["q", "close"].includes(parsed.command)) {
@@ -1101,14 +1083,10 @@ export function LoopDashboard(props: Props) {
             focusedTextColor={theme().text}
             focusedBackgroundColor={theme().background}
             onInput={(v: string) => {
-              debugLog("onInput", JSON.stringify(v), "mode", mode())
               if (mode() === "insert") setCommandInput(v)
               else if (inputEl?.value) inputEl.value = ""
             }}
             onKeyDown={(evt: ParsedKey) => {
-              const name = evt.name || ""
-              const seq = (evt as unknown as { sequence?: string }).sequence || ""
-              debugLog("input onKeyDown", `name=${name} seq=${JSON.stringify(seq)} mode=${mode()} value=${JSON.stringify(commandInput())}`)
               // Single source of truth for Enter/Escape/Ctrl+N is the global
               // useKeyboard handler above; this prop only stops normal-mode
               // keystrokes from landing in the box as text.

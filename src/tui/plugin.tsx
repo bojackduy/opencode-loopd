@@ -283,15 +283,8 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
         },
       },
       claimantID,
-      onOutcome: (outcome, requestID) => {
-        try {
-          const { appendFileSync } = require("node:fs") as typeof import("node:fs")
-          appendFileSync(
-            "/tmp/loopd-tui.log",
-            `[${new Date().toISOString()}] native-worker request=${requestID} outcome=${JSON.stringify(outcome)}\n`,
-          )
-        } catch {}
-      },
+      // No onOutcome file logging: the TUI thread must never do synchronous
+      // disk I/O per request (it janks rendering and grows /tmp unbounded).
       isKnownParent: (parentSessionID) => {
         const parent = ctx.data.session.get(parentSessionID) as
           | { location?: { directory?: string } }
