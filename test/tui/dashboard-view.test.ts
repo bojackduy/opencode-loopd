@@ -108,6 +108,23 @@ describe("dashboard-view", () => {
     expect(visibleOwnerCommands(undefined, "owner-1")).toEqual([])
   })
 
+  test("open and movement use the same visible commands when finished rows are hidden", () => {
+    const done = { ...cmd("done", "owner-1"), status: "exited" as const }
+    const live = { ...cmd("live", "owner-1"), status: "running" as const }
+    const commands = [done, cmd("foreign", "owner-2"), live]
+    for (const showCompleted of [false, true]) {
+      const visible = visibleOwnerCommands(commands, "owner-1", showCompleted)
+      for (const move of ["first", "down", "last", "up"] as const) {
+        const sel = moveDashboardSelection(initialDashboardSelection("commands"), move, 0, visible.length)
+        expect(resolveDashboardOpen({ goals: [], commands }, sel, "owner-1", "ses-ret", showCompleted)).toEqual({
+          kind: "command",
+          data: { commandID: visible[sel.commandIndex]!.id, ownerSessionID: "owner-1", returnSessionID: "ses-ret" },
+        })
+      }
+    }
+    expect(resolveDashboardOpen({ goals: [], commands: [done] }, initialDashboardSelection("commands"), "owner-1", "ses-ret").kind).toBe("none")
+  })
+
   test("finished commands are hidden until the c toggle reveals them", () => {
     const live = { ...cmd("live", "owner-1"), status: "running" as const }
     const done = { ...cmd("done", "owner-1"), status: "exited" as const, exitCode: 0 }

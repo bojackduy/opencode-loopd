@@ -83,12 +83,14 @@ export interface DashboardLists {
  * `o` dispatches by active selection type: goals open their native worker
  * session (unchanged); commands open the fullscreen terminal route. Goal
  * actions must never apply to a command selection or vice versa.
+ * Command indexes use the same completed visibility as rendering/movement.
  */
 export function resolveDashboardOpen(
   lists: DashboardLists,
   sel: DashboardSelection,
   ownerSessionID: string | undefined,
   returnSessionID: string | undefined,
+  showCompleted = false,
 ): OpenTarget {
   if (sel.view === "goals") {
     const goal = lists.goals[sel.goalIndex]
@@ -96,7 +98,7 @@ export function resolveDashboardOpen(
       { selection: goal ? { kind: "goal", workerSessionID: goal.workerSessionID } : null, ownerSessionID, returnSessionID },
     )
   }
-  const ownerCommands = filterCommandsByOwner(lists.commands, ownerSessionID)
+  const ownerCommands = visibleOwnerCommands(lists.commands, ownerSessionID, showCompleted)
   const cmd = ownerCommands[sel.commandIndex]
   return resolveOpenTarget(
     {

@@ -466,6 +466,7 @@ export function LoopDashboard(props: Props) {
         dashboardSelection(),
         ownerSessionID(),
         currentRouteSessionID(props.api),
+        showCompleted(),
       )
       if (target.kind === "goal") {
         props.api.route.navigate("session", { sessionID: target.workerSessionID })
@@ -1002,7 +1003,7 @@ export function LoopDashboard(props: Props) {
                         {/* Single-line row mirrors the Goals row: icon+bold name,
                             status-colored badge, accent executable, muted args. */}
                         <text wrapMode="none" truncate={true}>
-                          <span style={{ fg: commandStatusColor(cmd.status, theme()), bold: isActive() }}>{isActive() ? `▶ ${commandStatusIcon(cmd.status)} ${cmd.title}` : `  ${commandStatusIcon(cmd.status)} ${cmd.title}`}</span>
+                          <span style={{ fg: commandStatusColor(cmd.status, theme()), bold: isActive() }}>{isActive() ? `▶ ${cmd.title}` : `  ${commandStatusIcon(cmd.status)} ${cmd.title}`}</span>
                           <span style={{ fg: theme().textMuted }}> │ </span>
                           <span style={{ fg: theme().textMuted }}>Cmd </span>
                           <span style={{ fg: commandStatusColor(cmd.status, theme()), bold: true }}>{commandStatusLabel(cmd.status).short}</span>

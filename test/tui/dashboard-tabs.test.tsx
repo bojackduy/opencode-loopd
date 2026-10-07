@@ -93,7 +93,7 @@ async function seedDirWithFinishedCommand(): Promise<string> {
   }
   await mutateState(dir, "seed-finished", async (s) => ({
     ...s,
-    commands: [...(s.commands ?? []), finished as never],
+    commands: [finished as never, ...(s.commands ?? [])],
   }))
   return dir
 }
@@ -138,6 +138,8 @@ describe("LoopDashboard shared Goals/Commands (mounted)", () => {
     await setup.flush()
     await setup.waitFor(() => setup.captureCharFrame().includes("owned-cmd"))
     expect(setup.captureCharFrame()).not.toContain("foreign-cmd")
+    expect(setup.captureCharFrame()).toContain("▶ owned-cmd")
+    expect(setup.captureCharFrame()).not.toContain("▶ ▶ owned-cmd")
     // Finished commands are hidden until `c` reveals them.
     expect(setup.captureCharFrame()).not.toContain("done-cmd")
     setup.mockInput.pressKey("c")
@@ -181,7 +183,7 @@ describe("LoopDashboard shared Goals/Commands (mounted)", () => {
   })
 
   it("o on a command closes the popup and navigates to the terminal route", async () => {
-    const dir = await seedDir()
+    const dir = await seedDirWithFinishedCommand()
     const navigated: Array<{ name: string; params?: unknown }> = []
     const cleared = { count: 0 }
     const setup = await testRender(() => (
@@ -195,6 +197,8 @@ describe("LoopDashboard shared Goals/Commands (mounted)", () => {
     setups.push(setup as never)
     await setup.flush()
     await setup.waitFor(() => setup.captureCharFrame().includes("owned-cmd"))
+    const frame = setup.captureCharFrame()
+    expect(frame).not.toContain("done-cmd")
     setup.mockInput.pressKey("o")
     await setup.waitFor(() => navigated.length === 1)
     expect(navigated[0]).toEqual({
