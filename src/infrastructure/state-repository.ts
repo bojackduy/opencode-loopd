@@ -5,6 +5,7 @@
 import { promises as fs } from "fs"
 import path from "path"
 import os from "os"
+import { createHash } from "crypto"
 
 import type { Goal, GoalID } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
@@ -56,7 +57,7 @@ function eventsFile(directory: string): string {
 
 function lockDir(directory: string): string {
   // Lock files go in /tmp, not inside the project, to avoid snapshot noise
-  const projectHash = Buffer.from(directory).toString("base64url").slice(0, 32)
+  const projectHash = createHash("sha256").update(path.resolve(directory)).digest("hex")
   return path.join(os.tmpdir(), "loopd-locks", projectHash)
 }
 
@@ -75,20 +76,31 @@ interface LockMeta {
 const LOCK_TIMEOUT_MS = 30_000
 const LOCK_STALE_MS = 10_000
 
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error: any) {
+    // EPERM (or any unknown error) is not proof that the owner is dead.
+    return error?.code !== "ESRCH"
+  }
+}
+
 async function acquireLock(directory: string, key: string, operation: string): Promise<void> {
   const dir = lockDir(directory)
   await fs.mkdir(dir, { recursive: true })
 
   const lockPath = lockFile(directory, key)
 
-  for (let attempt = 0; attempt < 10; attempt++) {
+  const deadline = performance.now() + LOCK_TIMEOUT_MS
+  for (let attempt = 0; performance.now() < deadline; attempt++) {
     try {
       // Check for stale lock
       try {
         const raw = await fs.readFile(lockPath, "utf8")
         const meta: LockMeta = JSON.parse(raw)
         const age = Date.now() - Date.parse(meta.acquiredAt)
-        if (age > LOCK_STALE_MS) {
+        if (age > LOCK_STALE_MS && !processIsAlive(meta.pid)) {
           // Stale lock — remove it
           await fs.rm(lockPath, { force: true })
         }
@@ -113,9 +125,11 @@ async function acquireLock(directory: string, key: string, operation: string): P
         throw error
       }
     }
-    await delay(25 * (attempt + 1))
+    // A retry count penalizes healthy concurrent writers: each retry round
+    // may admit only one. Bound elapsed time instead, with capped backoff.
+    await delay(Math.min(25 * (attempt + 1), 250, Math.max(0, deadline - performance.now())))
   }
-  throw new Error(`failed to acquire lock "${key}" for "${operation}" after retries`)
+  throw new Error(`failed to acquire lock "${key}" for "${operation}" after ${LOCK_TIMEOUT_MS}ms`)
 }
 
 async function releaseLock(directory: string, key: string): Promise<void> {
@@ -123,9 +137,8 @@ async function releaseLock(directory: string, key: string): Promise<void> {
   try {
     const raw = await fs.readFile(lockPath, "utf8")
     const meta: LockMeta = JSON.parse(raw)
-    // Only release if we own the lock (same PID) or it's stale
-    const age = Date.now() - Date.parse(meta.acquiredAt)
-    const shouldRelease = meta.pid === process.pid || age > LOCK_STALE_MS
+    // Never release another live process's lock, regardless of its age.
+    const shouldRelease = meta.pid === process.pid
     if (!shouldRelease) return
     // Re-verify before delete to avoid racing with a fresh acquirer
     try {

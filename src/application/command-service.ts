@@ -884,7 +884,7 @@ export function createCommandService(
       c.exitCode = info.exitCode
       if (info.signal && (c.signal === "SIGKILL" || c.signal === "SIGTERM")) {
         c.status = "terminated"
-        c.endReason = "terminate"
+        if (c.endReason !== "until") c.endReason = "terminate"
       } else {
         c.status = "exited"
         c.endReason = "exit"
@@ -1210,6 +1210,11 @@ export function createCommandService(
         const c = (s.commands ?? []).find((x) => x.id === id)
         if (c && c.ownerSessionID === ownerSessionID && c.status === "running") {
           c.signal = "SIGTERM"
+          // Publish the matched-watch reason with termination, not in the
+          // later until overlay: terminal readers must never see "terminate".
+          if (c.endReason !== "timeout" && c.watchState?.state === "until-matched" && c.watchUntilAction === "stop") {
+            c.endReason = "until"
+          }
           c.updatedAt = new Date().toISOString()
         }
         return s
@@ -1254,7 +1259,9 @@ export function createCommandService(
         if (c.status === "running") {
           // No exit event observed (e.g. no live handle): finalize here.
           c.status = status
-          if (c.endReason !== "timeout") c.endReason = status === "terminated" ? "terminate" : "exit"
+          if (c.endReason !== "timeout") {
+            c.endReason = status === "terminated" ? (c.endReason === "until" ? "until" : "terminate") : "exit"
+          }
           if (exitCode !== undefined) c.exitCode = c.exitCode ?? exitCode
           c.signal = c.signal ?? "SIGTERM"
           c.endedAt = new Date().toISOString()

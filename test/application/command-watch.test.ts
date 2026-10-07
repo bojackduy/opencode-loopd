@@ -120,6 +120,22 @@ describe("Command watch (M2 line-level filter/until)", () => {
     expect(types).toContain("command.until-stopped")
   })
 
+  it("persists the until reason before terminate returns, not in a later overlay", async () => {
+    const terminate = svc.terminate.bind(svc)
+    let observed: string | undefined
+    svc.terminate = async (...args) => {
+      const result = await terminate(...args)
+      observed = (await svc.get(args[0], args[1], args[2]))?.endReason
+      return result
+    }
+    const s = await svc.start(dir, {
+      title: "server", command: "sleep", ownerSessionID: "owner-1", watchUntil: "READY",
+    })
+    lastProc().emitOutput("READY\n")
+    await waitFor(() => observed !== undefined)
+    expect(observed).toBe("until")
+  })
+
   it("until-keep notifies once but keeps running; filter stream continues; exit still notifies", async () => {
     const s = await svc.start(dir, {
       title: "keeper",
