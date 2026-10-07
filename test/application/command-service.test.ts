@@ -11,6 +11,15 @@ function tmpDir(): string {
   return path.join(os.tmpdir(), `loopd-cmd-test-${crypto.randomUUID()}`)
 }
 
+async function waitFor(cond: () => Promise<boolean> | boolean, timeoutMs = 6000): Promise<void> {
+  const start = Date.now()
+  for (;;) {
+    if (await cond()) return
+    if (Date.now() - start > timeoutMs) throw new Error("timed out waiting for condition")
+    await new Promise((r) => setTimeout(r, 25))
+  }
+}
+
 describe("CommandService", () => {
   let dir: string
   let host: ReturnType<typeof createFakeCommandHost>
@@ -69,7 +78,7 @@ describe("CommandService", () => {
     const s = await svc.start(dir, { title: "once", command: "true", ownerSessionID: "owner-1" })
     const proc = [...host.procs.values()].at(-1)!
     proc.emitExit({ exitCode: 0 })
-    await new Promise((r) => setTimeout(r, 25))
+    await waitFor(async () => (await svc.get(dir, s.id, "owner-1"))?.status === "exited")
     const after = await svc.get(dir, s.id, "owner-1")
     expect(after!.status).toBe("exited")
     expect(after!.exitCode).toBe(0)
@@ -201,7 +210,7 @@ describe("CommandService owner-exit notification (the missing hop: no goal/await
     const s = await svc.start(dir, { title: "build", command: "false", ownerSessionID: "owner-1" })
     const proc = [...host.procs.values()].at(-1)!
     proc.emitExit({ exitCode: 1 })
-    await new Promise((r) => setTimeout(r, 25))
+    await waitFor(() => calls.length === 1)
     expect(calls).toHaveLength(1)
     expect(calls[0]!.ownerSessionID).toBe("owner-1")
     expect(calls[0]!.message).toContain("build")
@@ -215,7 +224,7 @@ describe("CommandService owner-exit notification (the missing hop: no goal/await
     await svc.start(dir, { title: "quick", command: "true", ownerSessionID: "owner-1" })
     const proc = [...host.procs.values()].at(-1)!
     proc.emitExit({ exitCode: 0 })
-    await new Promise((r) => setTimeout(r, 25))
+    await waitFor(() => calls.length === 1)
     expect(calls).toHaveLength(1)
     expect(calls[0]!.message).toContain("exitCode=0")
   })
@@ -226,7 +235,7 @@ describe("CommandService owner-exit notification (the missing hop: no goal/await
     const proc = [...host.procs.values()].at(-1)!
     proc.emitOutput("\u001b[1;1H\u001b[0J10:24:40 [vite] hmr update\r\n\u001b]0;window title\u0007")
     proc.emitExit({ exitCode: 0 })
-    await new Promise((r) => setTimeout(r, 50))
+    await waitFor(() => calls.length === 1)
     expect(calls).toHaveLength(1)
     expect(calls[0]!.message).toContain("[vite] hmr update")
     expect(calls[0]!.message).not.toMatch(/[\u001b\u0007\r]/)
@@ -242,7 +251,7 @@ describe("CommandService owner-exit notification (the missing hop: no goal/await
     const s = await svc.start(dir, { title: "compile", command: "true", ownerSessionID: "owner-1" })
     const proc = [...host.procs.values()].at(-1)!
     proc.emitExit({ exitCode: 0 })
-    await new Promise((r) => setTimeout(r, 50))
+    await waitFor(() => attempts === 1)
     expect(attempts).toBe(1)
     expect((await svc.get(dir, s.id, "owner-1"))!.ownerNotifiedAt).toBeUndefined()
     const fresh = createCommandService(createFakeCommandHost(), { onOwnerNotify: async () => { attempts++; return true } })
@@ -259,7 +268,7 @@ describe("CommandService owner-exit notification (the missing hop: no goal/await
     await svc.start(dir, { title: "opt-in", command: "true", ownerSessionID: "owner-1", notifyOnExit: true })
     const proc = [...host.procs.values()].at(-1)!
     proc.emitExit({ exitCode: 0 })
-    await new Promise((r) => setTimeout(r, 25))
+    await waitFor(() => calls.length === 1)
     expect(calls).toHaveLength(1)
   })
 
@@ -268,7 +277,7 @@ describe("CommandService owner-exit notification (the missing hop: no goal/await
     await svc.start(dir, { title: "silenced", command: "false", ownerSessionID: "owner-1", notifyOnExit: false })
     const proc = [...host.procs.values()].at(-1)!
     proc.emitExit({ exitCode: 1 })
-    await new Promise((r) => setTimeout(r, 25))
+    await new Promise((r) => setTimeout(r, 150))
     expect(calls).toHaveLength(0)
   })
 
@@ -334,7 +343,7 @@ describe("CommandService force kill + restart (Commands-tab helpers)", () => {
     const s = await svc.start(dir, { title: "once", command: "true", ownerSessionID: "owner-1" })
     const proc = [...host.procs.values()].at(-1)!
     proc.emitExit({ exitCode: 0 })
-    await new Promise((r) => setTimeout(r, 25))
+    await waitFor(async () => (await svc.get(dir, s.id, "owner-1"))?.status === "exited")
     expect((await svc.kill(dir, s.id, "owner-1")).ok).toBe(false)
     expect((await svc.kill(dir, "nope", "owner-1")).ok).toBe(false)
     expect((await svc.kill(dir, s.id, "owner-2")).ok).toBe(false)
@@ -377,7 +386,7 @@ describe("CommandService force kill + restart (Commands-tab helpers)", () => {
     const s = await svc.start(dir, { title: "once", command: "true", ownerSessionID: "owner-1" })
     const proc = [...host.procs.values()].at(-1)!
     proc.emitExit({ exitCode: 0 })
-    await new Promise((r) => setTimeout(r, 25))
+    await waitFor(async () => (await svc.get(dir, s.id, "owner-1"))?.status === "exited")
     const r = await svc.restart(dir, s.id, "owner-1")
     expect(r.ok).toBe(true)
     expect(r.command!.status).toBe("running")
