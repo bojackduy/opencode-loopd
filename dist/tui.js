@@ -1,38 +1,5 @@
 // @bun
-var __create = Object.create;
-var __getProtoOf = Object.getPrototypeOf;
-var __defProp = Object.defineProperty;
-var __getOwnPropNames = Object.getOwnPropertyNames;
-var __hasOwnProp = Object.prototype.hasOwnProperty;
-function __accessProp(key) {
-  return this[key];
-}
-var __toESMCache_node;
-var __toESMCache_esm;
-var __toESM = (mod, isNodeMode, target) => {
-  var canCache = mod != null && typeof mod === "object";
-  if (canCache) {
-    var cache = isNodeMode ? __toESMCache_node ??= new WeakMap : __toESMCache_esm ??= new WeakMap;
-    var cached = cache.get(mod);
-    if (cached)
-      return cached;
-  }
-  target = mod != null ? __create(__getProtoOf(mod)) : {};
-  const to = isNodeMode || !mod || !mod.__esModule || !__hasOwnProp.call(mod, "default") ? __defProp(target, "default", { value: mod, enumerable: true }) : target;
-  if (mod && typeof mod === "object" || typeof mod === "function") {
-    for (let key of __getOwnPropNames(mod))
-      if (!__hasOwnProp.call(to, key))
-        __defProp(to, key, {
-          get: __accessProp.bind(mod, key),
-          enumerable: true
-        });
-  }
-  if (canCache)
-    cache.set(mod, to);
-  return to;
-};
 var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);
-var __require = import.meta.require;
 
 // node_modules/@xterm/headless/lib-headless/xterm-headless.js
 var require_xterm_headless = __commonJS(function(exports) {
@@ -6374,12 +6341,12 @@ function moveDashboardSelection(sel, move, goalCount, commandCount) {
       return { ...sel, commandIndex: max };
   }
 }
-function resolveDashboardOpen(lists, sel, ownerSessionID, returnSessionID) {
+function resolveDashboardOpen(lists, sel, ownerSessionID, returnSessionID, showCompleted = false) {
   if (sel.view === "goals") {
     const goal = lists.goals[sel.goalIndex];
     return resolveOpenTarget({ selection: goal ? { kind: "goal", workerSessionID: goal.workerSessionID } : null, ownerSessionID, returnSessionID });
   }
-  const ownerCommands = filterCommandsByOwner(lists.commands, ownerSessionID);
+  const ownerCommands = visibleOwnerCommands(lists.commands, ownerSessionID, showCompleted);
   const cmd = ownerCommands[sel.commandIndex];
   return resolveOpenTarget({
     selection: cmd ? { kind: "command", commandID: cmd.id } : null,
@@ -6397,16 +6364,6 @@ function visibleOwnerCommands(commands, ownerSessionID, showCompleted = false) {
 
 // src/tui/dashboard.tsx
 import { randomUUID as randomUUID2 } from "crypto";
-var LOG_FILE = "/tmp/loopd-tui.log";
-function debugLog(...args) {
-  try {
-    const {
-      appendFileSync
-    } = __require("fs");
-    appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${args.map((a) => typeof a === "string" ? a : JSON.stringify(a)).join(" ")}
-`);
-  } catch {}
-}
 function prevent(evt) {
   const e = evt;
   e.preventDefault?.();
@@ -6745,19 +6702,10 @@ function LoopDashboard(props) {
       typeof u === "function" ? u() : clearInterval(u);
   });
   onMount(() => {
-    try {
-      const {
-        appendFileSync
-      } = __require("fs");
-      appendFileSync(LOG_FILE, `[${new Date().toISOString()}] dashboard mounted dir=${props.directory} mode=${mode()} dialogOpen=${props.api.ui.dialog.open}
-`);
-    } catch {}
-    debugLog("mounted", "dialogOpen", props.api.ui.dialog.open, "directory", props.directory);
     focusInput();
   });
   createEffect(() => {
-    const m = mode();
-    debugLog("mode ->", m);
+    mode();
     focusInput();
   });
   function enterInsertMode() {
@@ -6778,7 +6726,6 @@ function LoopDashboard(props) {
     const name = evt.name || "";
     const seq = evt.sequence || "";
     const raw = evt.raw || "";
-    debugLog("useKeyboard", `name=${name} seq=${JSON.stringify(seq)} raw=${JSON.stringify(raw)} shift=${evt.shift} ctrl=${evt.ctrl} mode=${mode()} dialogOpen=${props.api.ui.dialog.open}`);
     if (!props.api.ui.dialog.open)
       return;
     const active = (() => {
@@ -6792,18 +6739,15 @@ function LoopDashboard(props) {
       return;
     const isColon = name === ":" || seq === ":" || raw === ":" || seq.includes(":") || raw.includes(":") || name === ";" || name === "colon";
     const isQuestion = name === "?" || seq === "?" || raw === "?" || seq.includes("?") || raw.includes("?");
-    debugLog("isColon", isColon, "isQuestion", isQuestion, "modeBefore", mode());
     if (mode() === "insert") {
       if (isEnterKey(evt)) {
         prevent(evt);
-        debugLog("insert enter -> execute");
         executeCommand(commandInput());
         return;
       }
       if (isEscapeKey(evt) || isCtrlN(evt)) {
         prevent(evt);
         returnToNormalMode();
-        debugLog("insert -> normal via esc/ctrl+n");
         return;
       }
       return;
@@ -6811,13 +6755,11 @@ function LoopDashboard(props) {
     if (isColon) {
       prevent(evt);
       enterInsertMode();
-      debugLog("normal -> insert");
       return;
     }
     if (isQuestion) {
       prevent(evt);
       setShowHelp((value) => !value);
-      debugLog("toggle help");
       return;
     }
     const key = raw || seq || name;
@@ -6840,7 +6782,6 @@ function LoopDashboard(props) {
         setStatusText(next ? `Showing finished ${tab() === "commands" ? "commands" : "goals"}.` : `Hiding finished ${tab() === "commands" ? "commands" : "goals"}.`);
         return next;
       });
-      debugLog("toggle completed");
       return;
     }
     const currentGoals = state()?.goals.filter((goal) => showCompleted() || goal.status !== "complete") || [];
@@ -6848,14 +6789,12 @@ function LoopDashboard(props) {
     if (name === "tab") {
       prevent(evt);
       setTab((v) => toggleDashboardView(v));
-      debugLog("switch tab ->", tab());
       return;
     }
     const directionalView = dashboardViewForKey(key);
     if (directionalView !== undefined) {
       prevent(evt);
       setTab(directionalView);
-      debugLog("select tab ->", tab());
       return;
     }
     function dashboardSelection() {
@@ -6951,7 +6890,7 @@ function LoopDashboard(props) {
       const target = resolveDashboardOpen({
         goals: currentGoals,
         commands: state()?.commands ?? []
-      }, dashboardSelection(), ownerSessionID(), currentRouteSessionID(props.api));
+      }, dashboardSelection(), ownerSessionID(), currentRouteSessionID(props.api), showCompleted());
       if (target.kind === "goal") {
         props.api.route.navigate("session", {
           sessionID: target.workerSessionID
@@ -7046,7 +6985,6 @@ function LoopDashboard(props) {
     }, sel.id);
   }
   async function executeCommandTabCommand(verb, positional, raw) {
-    debugLog("commands-tab command", verb);
     switch (verb) {
       case "model":
       case "models":
@@ -7125,12 +7063,9 @@ function LoopDashboard(props) {
     }
   }
   async function executeCommand(cmd) {
-    debugLog("executeCommand raw=", JSON.stringify(cmd));
     const parsed = parseCommand(cmd);
-    debugLog("parsed", parsed);
     if (!parsed) {
       setStatusText("Empty command");
-      debugLog("empty command");
       return;
     }
     if (tab() === "commands" && !["q", "close"].includes(parsed.command)) {
@@ -8861,7 +8796,7 @@ function LoopDashboard(props) {
                   _$setProp(_el$314, "truncate", true);
                   _$insert(_el$315, (() => {
                     var _c$31 = _$memo(() => !!isActive());
-                    return () => _c$31() ? `\u25B6 ${commandStatusIcon(cmd.status)} ${cmd.title}` : `  ${commandStatusIcon(cmd.status)} ${cmd.title}`;
+                    return () => _c$31() ? `\u25B6 ${cmd.title}` : `  ${commandStatusIcon(cmd.status)} ${cmd.title}`;
                   })());
                   _$insertNode(_el$316, _$createTextNode(` \u2502 `));
                   _$insertNode(_el$318, _$createTextNode(`Cmd `));
@@ -9231,16 +9166,12 @@ function LoopDashboard(props) {
     }, _el$54);
     _$setProp(_el$54, "flexGrow", 1);
     _$setProp(_el$54, "onInput", (v) => {
-      debugLog("onInput", JSON.stringify(v), "mode", mode());
       if (mode() === "insert")
         setCommandInput(v);
       else if (inputEl?.value)
         inputEl.value = "";
     });
     _$setProp(_el$54, "onKeyDown", (evt) => {
-      const name = evt.name || "";
-      const seq = evt.sequence || "";
-      debugLog("input onKeyDown", `name=${name} seq=${JSON.stringify(seq)} mode=${mode()} value=${JSON.stringify(commandInput())}`);
       if (mode() !== "insert") {
         if ((evt.name || "").length === 1)
           prevent(evt);
@@ -9988,7 +9919,6 @@ function createCommandStreamClient(options = {}) {
 }
 
 // src/tui/terminal-screen.ts
-var import_headless = __toESM(require_xterm_headless(), 1);
 var BASE_COLORS = [
   "#000000",
   "#cd0000",
@@ -10027,8 +9957,9 @@ function paletteToHex(index) {
   return toHex(g << 16 | g << 8 | g);
 }
 function createTerminalScreen(cols, rows) {
+  const { Terminal } = require_xterm_headless();
   function makeTerm(nextCols, nextRows) {
-    return new import_headless.Terminal({
+    return new Terminal({
       cols: nextCols,
       rows: nextRows,
       scrollback: 0,
@@ -12678,15 +12609,6 @@ var v2setup = (ctx) => {
         }
       },
       claimantID,
-      onOutcome: (outcome, requestID) => {
-        try {
-          const {
-            appendFileSync
-          } = __require("fs");
-          appendFileSync("/tmp/loopd-tui.log", `[${new Date().toISOString()}] native-worker request=${requestID} outcome=${JSON.stringify(outcome)}
-`);
-        } catch {}
-      },
       isKnownParent: (parentSessionID) => {
         const parent = ctx.data.session.get(parentSessionID);
         if (!parent)

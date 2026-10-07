@@ -129,6 +129,7 @@ var PARENT_NOTIFY_DEDUPE_MS = 60000;
 import { promises as fs } from "fs";
 import path from "path";
 import os from "os";
+import { createHash } from "crypto";
 function emptyState() {
   return { version: CURRENT_VERSION, revision: 0, goals: [], runtimes: [], commandLedger: [], commands: [] };
 }
@@ -142,23 +143,32 @@ function eventsFile(directory) {
   return path.join(loopDir(directory), "events.ndjson");
 }
 function lockDir(directory) {
-  const projectHash = Buffer.from(directory).toString("base64url").slice(0, 32);
+  const projectHash = createHash("sha256").update(path.resolve(directory)).digest("hex");
   return path.join(os.tmpdir(), "loopd-locks", projectHash);
 }
 function lockFile(directory, key) {
   return path.join(lockDir(directory), `${key}.lock`);
 }
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
+}
 async function acquireLock(directory, key, operation) {
   const dir = lockDir(directory);
   await fs.mkdir(dir, { recursive: true });
   const lockPath = lockFile(directory, key);
-  for (let attempt = 0;attempt < 10; attempt++) {
+  const deadline = performance.now() + LOCK_TIMEOUT_MS;
+  for (let attempt = 0;performance.now() < deadline; attempt++) {
     try {
       try {
         const raw = await fs.readFile(lockPath, "utf8");
         const meta = JSON.parse(raw);
         const age = Date.now() - Date.parse(meta.acquiredAt);
-        if (age > LOCK_STALE_MS) {
+        if (age > LOCK_STALE_MS && !processIsAlive(meta.pid)) {
           await fs.rm(lockPath, { force: true });
         }
       } catch {}
@@ -178,17 +188,16 @@ async function acquireLock(directory, key, operation) {
         throw error;
       }
     }
-    await delay(25 * (attempt + 1));
+    await delay(Math.min(25 * (attempt + 1), 250, Math.max(0, deadline - performance.now())));
   }
-  throw new Error(`failed to acquire lock "${key}" for "${operation}" after retries`);
+  throw new Error(`failed to acquire lock "${key}" for "${operation}" after ${LOCK_TIMEOUT_MS}ms`);
 }
 async function releaseLock(directory, key) {
   const lockPath = lockFile(directory, key);
   try {
     const raw = await fs.readFile(lockPath, "utf8");
     const meta = JSON.parse(raw);
-    const age = Date.now() - Date.parse(meta.acquiredAt);
-    const shouldRelease = meta.pid === process.pid || age > LOCK_STALE_MS;
+    const shouldRelease = meta.pid === process.pid;
     if (!shouldRelease)
       return;
     try {
@@ -563,7 +572,7 @@ async function removeCommandLog(directory, commandID) {
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-var CURRENT_VERSION = 9, LOCK_STALE_MS = 1e4;
+var CURRENT_VERSION = 9, LOCK_TIMEOUT_MS = 30000, LOCK_STALE_MS = 1e4;
 var init_state_repository = () => {};
 
 // src/domain/command-await.ts
@@ -6427,7 +6436,8 @@ function createCommandService(host, opts) {
       c.exitCode = info.exitCode;
       if (info.signal && (c.signal === "SIGKILL" || c.signal === "SIGTERM")) {
         c.status = "terminated";
-        c.endReason = "terminate";
+        if (c.endReason !== "until")
+          c.endReason = "terminate";
       } else {
         c.status = "exited";
         c.endReason = "exit";
@@ -6723,6 +6733,9 @@ function createCommandService(host, opts) {
         const c = (s.commands ?? []).find((x) => x.id === id);
         if (c && c.ownerSessionID === ownerSessionID && c.status === "running") {
           c.signal = "SIGTERM";
+          if (c.endReason !== "timeout" && c.watchState?.state === "until-matched" && c.watchUntilAction === "stop") {
+            c.endReason = "until";
+          }
           c.updatedAt = new Date().toISOString();
         }
         return s;
@@ -6761,8 +6774,9 @@ function createCommandService(host, opts) {
           return s;
         if (c.status === "running") {
           c.status = status;
-          if (c.endReason !== "timeout")
-            c.endReason = status === "terminated" ? "terminate" : "exit";
+          if (c.endReason !== "timeout") {
+            c.endReason = status === "terminated" ? c.endReason === "until" ? "until" : "terminate" : "exit";
+          }
           if (exitCode !== undefined)
             c.exitCode = c.exitCode ?? exitCode;
           c.signal = c.signal ?? "SIGTERM";
@@ -8961,7 +8975,7 @@ function commandTools(options) {
   const sizeNote = capabilities.resize ? "applied live to the PTY winsize" : "stored; resize is unsupported by the pipe host";
   return {
     loopd_command_start: tool3({
-      description: "PREFER THIS over the built-in shell/bash tool whenever a command might take a while or never return: installs (npm/pip/brew/cargo...), builds, test suites, downloads, migrations, dev servers, watchers, log tails, REPLs, or anything interactive. The built-in shell BLOCKS your whole turn until the process exits \u2014 a long install freezes you (and can time out); this returns immediately with a command_id and pushes you a message on exit or pattern match, so you stay responsive and can do other work meanwhile. Only use the built-in shell for quick one-shots (ls, git status, a single fast test) that finish in seconds. " + "Start a standalone interactive OS process (arbitrary shell command) in the background \u2014 a dev server, `npm test --watch`, a REPL, a log tail, a build, or a one-off script. This is a raw process, NOT an AI worker: no agent, no checks, no turn loop. For multi-turn autonomous AI work with completion criteria, use loopd_create_goal instead. " + "Returns a command_id for loopd_command_get (read output)/loopd_command_write (send stdin)/loopd_command_interrupt (Ctrl+C)/loopd_command_terminate (kill)/loopd_command_remove (delete). " + "The user can also open it live: /loop or /commands \u2192 Tab/l to the Commands tab \u2192 select it \u2192 `o` opens a fullscreen interactive terminal page (type directly, Ctrl+C interrupts, Ctrl+] detaches without stopping it). " + "Independent from goals: an optional goal_id is display-only metadata and never couples lifecycles \u2014 pausing/clearing a goal never touches the command, and terminating a command never touches the goal. " + "To make a specific goal wake up when this command finishes, call loopd_command_await separately after starting it (linking alone does not wake anything). " + "The OWNER session gets a notification on natural exit (including code 0), missing process, or timeout \u2014 no polling required for completion. Manual terminate stays silent by default. Raw PTY output stays in the log; any short tail included in the notification is sanitized for chat. Set notify_on_exit:false to suppress owner exit notifications.",
+      description: "PREFER THIS over the built-in shell/bash tool whenever a command might take a while or never return: installs (npm/pip/brew/cargo...), builds, test suites, downloads, migrations, dev servers, watchers, log tails, REPLs, or anything interactive. The built-in shell BLOCKS your whole turn until the process exits \u2014 a long install freezes you (and can time out); this returns immediately with a command_id and pushes you a message on exit or pattern match, so you stay responsive and can do other work meanwhile. Only use the built-in shell for quick one-shots (ls, git status, a single fast test) that finish in seconds. " + "Start a standalone interactive OS process (arbitrary shell command) in the background \u2014 a dev server, `npm test --watch`, a REPL, a log tail, a build, or a one-off script. This is a raw process, NOT an AI worker: no agent, no checks, no turn loop. For multi-turn autonomous AI work with completion criteria, use loopd_create_goal instead. " + "Returns a command_id for loopd_command_get (read output)/loopd_command_write (send stdin)/loopd_command_interrupt (Ctrl+C)/loopd_command_terminate (kill)/loopd_command_remove (delete). " + "The user can also open it live: /loop or /commands \u2192 Tab/l to the Commands tab \u2192 select it \u2192 `o` opens a fullscreen interactive terminal page (type directly, Ctrl+C interrupts, Ctrl+] detaches without stopping it). " + "Independent from goals: an optional goal_id is display-only metadata and never couples lifecycles \u2014 pausing/clearing a goal never touches the command, and terminating a command never touches the goal. " + "To make a specific goal wake up when this command finishes, call loopd_command_await separately after starting it (linking alone does not wake anything). " + "The OWNER session gets a notification on natural exit (including code 0), missing process, or timeout \u2014 no polling required for completion. Manual terminate stays silent by default. Raw PTY output stays in the log; any short tail included in the notification is sanitized for chat. Set notify_on_exit:false to suppress owner exit notifications." + " HOW TO WAIT \u2014 declare your wake upfront, then go do other work; you will be pushed. Never poll loopd_command_get in a loop and never sleep-then-read: quick one-shot finishing in seconds \u2192 built-in bash, or start here and read once. " + "Minutes-long or never-exiting where only FINISHING matters \u2192 just start it; the automatic exit/timeout notification is your wake. " + "Never-exiting where a LINE appearing matters (dev-server READY, deploy COMPLETED) \u2192 pass watch_until (+ watch_filter to cut noise); stop (default) ends the command with exactly one message, keep lets it run on. " + "A GOAL worker that must block until that happens \u2192 call loopd_command_await (passing goal_id alone never wakes anything). " + "Polling the WORLD inside the command (a shell loop curling an endpoint until it flips) is fine and costs no turns; polling loopd from YOUR side is the forbidden pattern \u2014 one mid-run peek is fine, a timer loop is not. " + "Emit a printed marker line for EVERY outcome (DONE and FAILED), or a silent failure wakes nobody. " + "Watches longer than ~30min are fragile (in-memory only, die on restart) \u2014 prefer a scheduled goal that checks state and completes.",
       args: {
         title: tool3.schema.string().describe("Short human label for the session."),
         command: tool3.schema.string().describe('Executable to spawn (e.g. "bun", "python3").'),
@@ -9222,7 +9236,7 @@ function commandTools(options) {
 // src/server/plugin.ts
 init_state_repository();
 // package.json
-var version = "1.11.2";
+var version = "1.12.0";
 
 // src/server/plugin.ts
 var PLUGIN_ID = "opencode-loopd.server";
