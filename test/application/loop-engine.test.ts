@@ -12,6 +12,15 @@ function tmpDir(): string {
   return path.join(os.tmpdir(), `loopd-engine-test-${crypto.randomUUID()}`)
 }
 
+async function waitFor(cond: () => boolean | Promise<boolean>, timeoutMs = 6000): Promise<void> {
+  const start = Date.now()
+  for (;;) {
+    if (await cond()) return
+    if (Date.now() - start > timeoutMs) throw new Error("timed out waiting for condition")
+    await new Promise((r) => setTimeout(r, 25))
+  }
+}
+
 describe("Loop Engine", () => {
   let dir: string
   let host: ReturnType<typeof createFakeHost>
@@ -373,7 +382,7 @@ describe("Loop Engine", () => {
       })
 
       // Two-stage idle needs debounce time + maintenance interval
-      await new Promise((resolve) => setTimeout(resolve, 100))
+      await waitFor(() => host.prompts.length > 1)
       expect(host.prompts.length).toBeGreaterThan(1)
     })
 
@@ -397,7 +406,7 @@ describe("Loop Engine", () => {
         ownerSessionID: "owner-1",
       })
 
-      await new Promise((resolve) => setTimeout(resolve, 60))
+      await waitFor(async () => ((await readState(dir)).runtimes[0].unknownStatusCount ?? 0) >= 2)
       const runtime = (await readState(dir)).runtimes[0]
       expect(runtime.unknownStatusCount).toBe(2)
       expect(runtime.workerUnreachableNotifiedAt).toBeTruthy()
@@ -425,12 +434,13 @@ describe("Loop Engine", () => {
         ownerSessionID: "owner-1",
       })
 
-      await new Promise((resolve) => setTimeout(resolve, 60))
+      // Idle maintenance should keep driving the goal forward. Wait for the
+      // condition — a fixed sleep races the 10ms poll on cold CI runners.
+      await waitFor(() => host.prompts.length > 1)
       const runtime = (await readState(dir)).runtimes[0]
       expect(runtime.unknownStatusCount ?? 0).toBe(0)
       expect(runtime.workerUnreachableNotifiedAt).toBeFalsy()
       expect((host.sessions as any).notifications ?? []).toHaveLength(0)
-      // Idle maintenance should keep driving the goal forward.
       expect(host.prompts.length).toBeGreaterThan(1)
     })
 
@@ -458,8 +468,8 @@ describe("Loop Engine", () => {
       expect(toggled.ok).toBe(true)
       expect((await readState(dir)).goals.find((g) => g.id === goal.id)?.interactive).toBeUndefined()
 
-      await new Promise((resolve) => setTimeout(resolve, 120))
       // Auto mode resumes: idle maintenance drives the goal forward again.
+      await waitFor(() => host.prompts.length > 1)
       expect(host.prompts.length).toBeGreaterThan(1)
     })
 
@@ -491,7 +501,7 @@ describe("Loop Engine", () => {
         JSON.stringify(seeded, null, 2),
       )
 
-      await new Promise((resolve) => setTimeout(resolve, 150))
+      await waitFor(async () => (await readState(dir)).goals[0].status === "budget_limited")
       const after = await readState(dir)
       expect(after.goals[0].status).toBe("budget_limited")
       // No continuation prompt after the budget trip — only the initial one
@@ -651,7 +661,7 @@ describe("Loop Engine", () => {
         JSON.stringify(seeded, null, 2),
       )
 
-      await new Promise((resolve) => setTimeout(resolve, 150))
+      await waitFor(async () => (await readEvents(dir, 50)).some((e: any) => e.goalID === goal.id && e.type === "run.stuck"))
       const stuck = (await readEvents(dir, 50)).filter(
         (e: any) => e.goalID === goal.id && e.type === "run.stuck",
       )
@@ -696,7 +706,7 @@ describe("Loop Engine", () => {
       expect(failed).toHaveLength(1)
       expect(failed[0].reason).toBe("assistant-incomplete")
 
-      await new Promise((resolve) => setTimeout(resolve, 200))
+      await waitFor(async () => (await readEvents(dir, 50)).some((e: any) => e.goalID === goal.id && e.type === "run.stuck"))
       const stuck = (await readEvents(dir, 50)).filter(
         (e: any) => e.goalID === goal.id && e.type === "run.stuck",
       )
@@ -776,7 +786,7 @@ describe("Loop Engine", () => {
       })
       host.messages.set(goal.workerSessionID!, transcript)
 
-      await new Promise((resolve) => setTimeout(resolve, 200))
+      await waitFor(async () => (await readState(dir)).goals[0].status === "budget_limited")
 
       const after = await readState(dir)
       expect(after.goals[0].status).toBe("budget_limited")
@@ -816,7 +826,7 @@ describe("Loop Engine", () => {
       })
       host.messages.set(goal.workerSessionID!, transcript)
 
-      await new Promise((resolve) => setTimeout(resolve, 120))
+      await waitFor(async () => (await readState(dir)).goals[0].tokensUsed === 1360)
 
       const after = await readState(dir)
       expect(after.goals[0].tokensUsed).toBe(1360)
@@ -859,7 +869,7 @@ describe("Loop Engine", () => {
         JSON.stringify(seeded, null, 2),
       )
 
-      await new Promise((resolve) => setTimeout(resolve, 200))
+      await waitFor(async () => (await readEvents(dir, 50)).some((e: any) => e.goalID === goal.id && e.type === "run.recovered"))
 
       const recovered = (await readEvents(dir, 50)).filter(
         (e: any) => e.goalID === goal.id && e.type === "run.recovered",
@@ -973,7 +983,7 @@ describe("Loop Engine", () => {
         JSON.stringify(state, null, 2),
       )
 
-      await new Promise((resolve) => setTimeout(resolve, 40))
+      await waitFor(async () => (await readState(dir)).runtimes[0].activeRunID === undefined)
       const repaired = (await readState(dir)).runtimes[0]
       expect(repaired.phase).toBe("idle")
       expect(repaired.activeRunID).toBeUndefined()
@@ -996,7 +1006,10 @@ describe("Loop Engine", () => {
         JSON.stringify(state, null, 2),
       )
 
-      await new Promise((resolve) => setTimeout(resolve, 150))
+      await waitFor(async () => {
+        const s = await readState(dir)
+        return s.goals[0].status === "blocked" && s.runtimes[0].phase === "idle"
+      })
       expect(host.prompts).toHaveLength(1)
       const repaired = await readState(dir)
       expect(repaired.goals[0].status).toBe("blocked")
