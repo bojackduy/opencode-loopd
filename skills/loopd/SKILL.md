@@ -420,6 +420,9 @@ Open the shared dashboard with `/loop` (or `<leader>o`) — focuses the **Goals*
 | `:block <reason> --needed <text>` | Force-block the selected goal | `force_block_goal` |
 | `:abort` | Abort worker session now (status unchanged; A) | `abort_goal_worker` |
 | `:pause` / `:resume` / `:retry` / `:clear` | Quick controls (also p/r/R/x) | `pause_goal` / `resume_goal` / `clear_goal` |
+| `:interactive` | Toggle manual mode (engine never starts turns) | `interactive: true` at creation |
+| `:model <provider/model>` | Switch this goal's model (same worker/session) | `switch_goal_model` |
+| `:models` | Show provider/model inventory + quota status | `loopd_list_models` |
 | `:logs` / `:help` / `:q` | Toggle logs / help / close | — |
 
 > Goal creation (`:goal start`) was removed from the dashboard — create goals via `/goal` in the parent chat so the agent can clarify the objective first.

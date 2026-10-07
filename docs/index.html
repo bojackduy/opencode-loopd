@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>opencode-loopd — Autonomous Background Agents for OpenCode | Codex Loop Engine</title>
-    <meta name="description" content="OpenCode plugin for autonomous background agents with scheduled intervals. Run long tasks as child subagents with engine-driven loop, scheduled requeue, and TUI dashboard — like Claude Code loop & Codex goals for OpenCode." />
-    <meta name="keywords" content="opencode, opencode plugin, opencode tui, background agent, autonomous agent, subagent, loop engine, goal, worker, schedule, interval, codex, claude code, terminal, cli, automation" />
+    <meta name="description" content="OpenCode plugin for autonomous background agents with scheduled intervals, background command sessions, and mid-run model switching. Run long tasks as child subagents with engine-driven loop, scheduled requeue, and TUI dashboard — like Claude Code loop & Codex goals for OpenCode." />
+    <meta name="keywords" content="opencode, opencode plugin, opencode tui, background agent, autonomous agent, subagent, loop engine, goal, worker, schedule, interval, codex, claude code, terminal, cli, automation, model switch, quota fallback, dev server, fullscreen terminal" />
     <meta name="author" content="Duy Trinh" />
     <link rel="canonical" href="https://bojackduy.github.io/opencode-loopd/" />
     <meta name="robots" content="index, follow" />
@@ -191,7 +191,10 @@
          <div class="card feature"><h3><span class="icon">⚡</span> Engine-driven</h3><p>Idle + lease + 30s polling re-prompts the child with <em>accumulated steering</em> (progress + transcript tail + inbox). Not a parent re-prompt machine.</p></div>
          <div class="card feature"><h3><span class="icon">⏱️</span> Scheduled</h3><p><code>scheduleEveryMs</code> auto-requeues the same goal on an interval (1.7) — <code>5s</code> poll, <code>skip-if-running</code>, <code>workspaceWrite</code> gate, inbox <code>Scheduled tick N/M</code>.</p></div>
          <div class="card feature"><h3><span class="icon">👁️</span> Parent ↔ child</h3><p>Owner tools <code>inspect</code>/<code>steer</code>; inbox injects into next turn. Wake-up on <code>complete</code>/<code>block</code> without polling.</p></div>
-         <div class="card feature"><h3><span class="icon">🛡️</span> Safe</h3><p>Per-goal artifact isolation <code>.opencode/loopd/goals/&lt;id&gt;/</code>, <code>maxTurns</code> force-finish → semantic summary → parent.</p></div>
+          <div class="card feature"><h3><span class="icon">🛡️</span> Safe</h3><p>Per-goal artifact isolation <code>.opencode/loopd/goals/&lt;id&gt;/</code>, <code>maxTurns</code> force-finish → semantic summary → parent.</p></div>
+          <div class="card feature"><h3><span class="icon">🖥️</span> Command sessions</h3><p>Installs, builds, dev servers &amp; REPLs as background processes with a fullscreen terminal — owner exit notifications, <code>filter</code>/<code>until</code> watches, timeouts. Never block the turn in <code>bash</code>.</p></div>
+          <div class="card feature"><h3><span class="icon">🧠</span> Switch models mid-run</h3><p>Provider hits quota? <code>switch_goal_model</code> moves the goal to another model on the <em>same</em> worker — or configure ordered <code>fallbackModels</code> for automatic 429 failover.</p></div>
+          <div class="card feature"><h3><span class="icon">✋</span> Manual mode</h3><p><code>interactive: true</code> stops the engine from starting turns — every turn comes from your <code>:send</code>. For workers that wait for input.</p></div>
        </section>
 
       <section style="margin-top:2.2rem">
@@ -260,6 +263,8 @@ loopd_create_goal({
            <details><summary>Where do loop outputs go?</summary><p>Per-goal: <code>.opencode/loopd/goals/&lt;id&gt;/</code> (e.g. <code>progress.md</code>). If your objective names <code>./reports/</code>, that wins.</p></details>
            <details><summary>How to schedule repetitive tasks?</summary><p>Use <code>scheduleEveryMs</code> (1.7) — e.g. <code>scheduleEveryMs: 60000</code> for 1m interval, <code>scheduleMaxRuns: 10</code> for 10 total. The <code>5s</code> schedule worker resurrects <code>complete → active</code> with <code>Scheduled tick N/M</code> inbox; `workspaceWrite:true` defers if another writer is active.</p></details>
            <details><summary>How to report a bug?</summary><p>In the dashboard press <code>Shift+B</code> or <code>:bug</code> — opens <code>github.com/bojackduy/opencode-loopd/issues/new</code> prefilled with environment (version, OS, goal context).</p></details>
+            <details><summary>What if my provider hits quota mid-run?</summary><p>Run <code>loopd_list_models</code> to see what's connected, then <code>switch_goal_model</code> to move the goal to another model — same worker, transcript and progress kept. Or set <code>fallbackModels</code> at creation for automatic ordered failover on 429s. Dashboard: <code>:model</code> / <code>:models</code>.</p></details>
+            <details><summary>Can I run dev servers and long installs without blocking?</summary><p>Yes — use command sessions (<code>loopd_command_start</code>) instead of the blocking shell: installs, builds, dev servers and REPLs run in the background with a fullscreen terminal, owner exit notifications, and <code>until</code> pattern watches that wake you when output appears.</p></details>
         </div>
       </section>
 

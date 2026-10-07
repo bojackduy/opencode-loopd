@@ -21,6 +21,9 @@
 - **Safe by default** — per-goal artifact isolation (`.opencode/loopd/goals/<id>/`), `maxTurns`/`maxFailures`/`maxNoProgress`, force-finish → semantic `complete_goal` summary → parent notification via wake-up injection.
 - **Scheduled intervals** — `scheduleEveryMs`/`scheduleMaxRuns` auto-requeues the same goal every N ms (e.g., `10s` monitor, `1h` report) without manual `/goal` spam — `5s` poll, `skip-if-running`, `workspaceWrite` serialization, inbox `Scheduled tick N/M`.
 - **Modal TUI dashboard** — `<leader>o` or `/loop` opens a focused dialog (no leak to chat prompt). Vim-style navigation, live running indicator, per-status borders.
+- **Command sessions, not blocked shells** — run installs, builds, dev servers, and REPLs as background OS processes with a fullscreen terminal, owner exit notifications, line-level `filter`/`until` watches, and timeouts — instead of freezing the agent turn in `bash`.
+- **Switch models mid-run** — `loopd_list_models` discovers providers/models and quota status; `switch_goal_model` moves a goal to another model on the *same* worker/session when a provider hits quota. Optional ordered `fallbackModels` switch automatically on 429s. Dashboard: `:model`/`:models`.
+- **Manual mode for interactive work** — `interactive: true` (or `:interactive`) stops the engine from starting turns on its own; every turn comes from your `:send`/nudge. For tasks where the worker waits for input.
 
 Keywords: `opencode` `opencode-plugin` `background-agent` `autonomous` `subagent` `loop` `goal` `tui` `codex` `claude-code` `worker`
 
@@ -151,7 +154,9 @@ Dashboard (NORMAL / INSERT `:`) — shared Goals/Commands tabs:
 - `o` — goals: open child session (native OpenCode view) · commands: close
   popup, open fullscreen terminal page (route `opencode.loopd.terminal`)
 - `p/r/R/x` — pause / resume / retry / clear selected goal (Goals tab only)
-- Commands tab: `:new <command> [args...]` launch · `:interrupt` ·
+- `c` — toggle finished on both tabs (completed goals · exited/terminated/missing commands)
+- `:interactive` — toggle manual mode (engine never starts turns) · `:model <provider/model>` — switch goal's model · `:models` — provider/model inventory
+- Commands tab: `X` force-kill · `R` restart · `x` remove finished · `:new <command> [args...]` launch · `:interrupt` ·
   `:terminate` · `:remove` · bare text + Enter writes stdin (owner-scoped)
 - `:` — insert mode → `:send <message>` to steer, `:force` / `:block` to finish manually
 - `?` — toggle help — help stays open while you type
@@ -174,6 +179,9 @@ inspect_background_goal()        — full detail: objective, progress, blocker, 
 read_goal_transcript()           — last N worker messages (what it's doing)
 send_goal_input(goalID, msg)     — steer: "skip appendix PDFs"
 pause_goal(goalID) / resume / clear
+loopd_list_models()              — providers/models, quota status (unknown where hosts can't report it)
+switch_goal_model(goalID, model) — same goal, new model (same worker/session)
+loopd_command_start(...)         — installs/builds/servers as background processes (never block the turn in bash)
 ```
 
 ### 4. Worker tools (child session)
@@ -260,6 +268,8 @@ Goals accept:
 | `checkCwd` | artifact directory | Directory where completion checks run; workspace writes default to project root |
 | `workspaceWrite` | `true` | Marks shared-workspace mutation; only one active workspace writer is allowed. Set `false` explicitly for artifact-only/read-only work |
 | `agent` | `defaultAgent` | Worker agent; goal creation fails if neither is configured nor supplied |
+| `interactive` | `false` | Manual mode: engine never starts turns (`:send`/nudge only). For workers that wait for input |
+| `fallbackModels` | `[]` | Ordered `provider/model` alternatives tried on quota/rate-limit errors only. Empty = no automatic switch |
 | `progressFile` | `<artifactDir>/progress.md` | Transaction state file |
 | `artifactDir` | `goals/<id>/` | Auto — override only if objective names another dir |
 
@@ -292,6 +302,19 @@ loopd_create_goal({
 - **Live proof:** `sched-live-verify` `09cb837c` `10s` `maxRuns 3` → `tick.txt` `3` lines `02:00:56` `02:03:43` `02:05:47` with `runCount 3`.
 
 Without schedule you’d send `/goal` 3× manually; with schedule one creation covers `monitor deploy`, `periodic tests`, `keep going until done`.
+
+## Switch models without losing the worker
+
+When a provider hits quota or rate limits mid-run:
+
+```
+loopd_list_models()                                   — what's connected, quota status (or honestly unknown)
+switch_goal_model(goalID, "other-provider/good-model") — same goal, same worker/session, transcript kept
+```
+
+- Busy workers defer the switch to the next turn (`→ pending … applies next turn`); idle ones switch immediately. On v1 the new model takes effect from the next prompt (no mid-stream session switch API); v2 switches the live session where supported, else reports `unsupported` without touching anything.
+- `fallbackModels: ["b/model", "c/model"]` at creation tries alternatives automatically — quota/429 errors only, each once, never looping. Interactive goals record the fallback but never auto-wake; you steer the next turn.
+- Dashboard: `:model <provider/model>` and `:models` do the same for humans.
 
 ## Dashboard tips
 
