@@ -90,13 +90,15 @@ export function retireWorker(state: StoreState, goal: Goal): void {
 }
 
 export async function beforeWorkspaceTool(directory: string, input: { tool: string; sessionID: string; callID: string }, args: Record<string, unknown>): Promise<void> {
+  // These tools were already unconditionally exempt, including retired
+  // sessions. No shared-state decision or reservation needs a transaction.
+  if (readTools.has(input.tool)) return
   await mutateState(directory, `workspace.before:${input.callID}`, async (state) => {
     const goal = state.goals.find((item) => item.workerSessionID === input.sessionID)
-    if (state.retiredWorkerSessions?.includes(input.sessionID) && !readTools.has(input.tool)) throw new Error("Scope denied: retired worker session; late executions are fenced.")
+    if (state.retiredWorkerSessions?.includes(input.sessionID)) throw new Error("Scope denied: retired worker session; late executions are fenced.")
     const held = heldGoals(state)
     const protectedGoals = held.filter((item) => item.config.write_scope !== undefined || item.config.workspaceWrite === false)
     // Preserve legacy operation when no scoped/read-only contract is present.
-    if (readTools.has(input.tool)) return state
     if (!goal && ownerTools.has(input.tool) && (!protectedGoals.length || state.goals.some((item) => item.ownerSessionID === input.sessionID))) return state
     if (!state.workspaceOperation && !protectedGoals.length && (!goal || goal.config.write_scope === undefined && goal.config.workspaceWrite !== false)) {
       // Preserve unscoped executors, but reserve them BEFORE execution so a

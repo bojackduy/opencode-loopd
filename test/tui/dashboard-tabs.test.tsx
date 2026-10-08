@@ -225,6 +225,39 @@ describe("LoopDashboard shared Goals/Commands (mounted)", () => {
       intervals.mockRestore(); clearIntervals.mockRestore(); timeouts.mockRestore(); clearTimeouts.mockRestore()
     }
   })
+  it("unmount fences a pending initial state read and late agent metadata", async () => {
+    const dir = await seedDir()
+    const raw = await fs.readFile(path.join(dir, ".opencode/loopd/state.json"), "utf8")
+    let resolveState!: (raw: string) => void
+    let resolveAgents!: (value: unknown) => void
+    const stateRead = new Promise<string>((resolve) => { resolveState = resolve })
+    const agents = new Promise<unknown>((resolve) => { resolveAgents = resolve })
+    const readFile = fs.readFile.bind(fs)
+    let reads = 0
+    let agentNames = 0
+    const spy = spyOn(fs, "readFile").mockImplementation(((target: any, ...args: any[]) => {
+      if (String(target) === path.join(dir, ".opencode/loopd/state.json")) { reads++; return stateRead }
+      return (readFile as any)(target, ...args)
+    }) as typeof fs.readFile)
+    try {
+      const handlers = new Map<string, () => void>()
+      const api = fakeApi([], { count: 0 })
+      api.client = { app: { agents: () => agents } }
+      api.event.on = ((name: string, handler: () => void) => { handlers.set(name, handler); return () => handlers.delete(name) }) as never
+      const setup = await testRender(() => <LoopDashboard api={api as never} directory={dir} />)
+      expect(reads).toBe(1)
+      for (let i = 0; i < 100; i++) handlers.get("session.status")!()
+      expect(reads).toBe(1)
+      setup.renderer.destroy()
+      expect(handlers.size).toBe(0)
+      resolveState(raw)
+      resolveAgents([{ get name() { agentNames++; return "late-agent" } }])
+      // Flush the already resolved continuations, not a timing-based sleep.
+      await stateRead; await agents; await Promise.resolve(); await Promise.resolve()
+      expect(reads).toBe(1)
+      expect(agentNames).toBe(0)
+    } finally { spy.mockRestore() }
+  })
   it("renders tabs; Tab switches between Goals and Commands", async () => {
     const dir = await seedDir()
     const navigated: Array<{ name: string; params?: unknown }> = []

@@ -6,6 +6,7 @@ import { promises as fs } from "fs"
 import path from "path"
 import os from "os"
 import { createHash } from "crypto"
+import { readEventTail } from "./event-tail"
 
 import type { Goal, GoalID } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
@@ -414,13 +415,7 @@ export async function readEvents(
   directory: string,
   limit = 50,
 ): Promise<Record<string, unknown>[]> {
-  try {
-    const raw = await fs.readFile(eventsFile(directory), "utf8")
-    const lines = raw.trim().split("\n").filter(Boolean)
-    return lines.slice(-limit).map((l) => JSON.parse(l) as Record<string, unknown>)
-  } catch {
-    return []
-  }
+  return readEventTail(eventsFile(directory), limit)
 }
 
 // ─── Control Mailbox ─────────────────────────────────────────────────────────

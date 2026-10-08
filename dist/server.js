@@ -125,8 +125,59 @@ function removeToolCall(rt, callID) {
 }
 var PARENT_NOTIFY_DEDUPE_MS = 60000;
 
-// src/infrastructure/state-repository.ts
+// src/infrastructure/event-tail.ts
 import { promises as fs } from "fs";
+async function readEventTail(target, limit) {
+  try {
+    if (!Number.isFinite(limit) || limit < 1) {
+      const raw = await fs.readFile(target, "utf8");
+      return raw.trim().split(`
+`).filter(Boolean).slice(-limit).map((line) => JSON.parse(line));
+    }
+    const count = Math.trunc(limit);
+    const file = await fs.open(target, "r");
+    try {
+      let position = (await file.stat()).size;
+      let fragments = [];
+      const lines = [];
+      const finishLine = (first = false) => {
+        const line = Buffer.concat(fragments.reverse()).toString("utf8");
+        fragments = [];
+        if (line && !((first || lines.length === 0) && !line.trim()))
+          lines.push(line);
+      };
+      while (position > 0 && lines.length < count) {
+        const length = Math.min(16 * 1024, position);
+        position -= length;
+        const buffer = Buffer.allocUnsafe(length);
+        const { bytesRead } = await file.read(buffer, 0, length, position);
+        let end = bytesRead;
+        for (let i = bytesRead - 1;i >= 0; i--) {
+          if (buffer[i] !== 10)
+            continue;
+          fragments.push(buffer.subarray(i + 1, end));
+          finishLine();
+          end = i;
+          if (lines.length === count)
+            break;
+        }
+        if (lines.length < count)
+          fragments.push(buffer.subarray(0, end));
+      }
+      if (lines.length < count)
+        finishLine(true);
+      return lines.reverse().map((line) => JSON.parse(line));
+    } finally {
+      await file.close();
+    }
+  } catch {
+    return [];
+  }
+}
+var init_event_tail = () => {};
+
+// src/infrastructure/state-repository.ts
+import { promises as fs2 } from "fs";
 import path from "path";
 import os from "os";
 import { createHash } from "crypto";
@@ -159,21 +210,21 @@ function processIsAlive(pid) {
 }
 async function acquireLock(directory, key, operation) {
   const dir = lockDir(directory);
-  await fs.mkdir(dir, { recursive: true });
+  await fs2.mkdir(dir, { recursive: true });
   const lockPath = lockFile(directory, key);
   const deadline = performance.now() + LOCK_TIMEOUT_MS;
   for (let attempt = 0;performance.now() < deadline; attempt++) {
     try {
       try {
-        const raw = await fs.readFile(lockPath, "utf8");
+        const raw = await fs2.readFile(lockPath, "utf8");
         const meta = JSON.parse(raw);
         const age = Date.now() - Date.parse(meta.acquiredAt);
         if (age > LOCK_STALE_MS && !processIsAlive(meta.pid)) {
-          await fs.rm(lockPath, { force: true });
+          await fs2.rm(lockPath, { force: true });
         }
       } catch {}
       const meta = { pid: process.pid, operation, acquiredAt: new Date().toISOString() };
-      const fd = await fs.open(lockPath, "wx");
+      const fd = await fs2.open(lockPath, "wx");
       try {
         await fd.writeFile(JSON.stringify(meta), "utf8");
       } finally {
@@ -182,7 +233,7 @@ async function acquireLock(directory, key, operation) {
       return;
     } catch (error) {
       if (error?.code === "EEXIST") {} else if (error?.code === "ENOENT") {
-        await fs.mkdir(dir, { recursive: true });
+        await fs2.mkdir(dir, { recursive: true });
         continue;
       } else {
         throw error;
@@ -195,20 +246,20 @@ async function acquireLock(directory, key, operation) {
 async function releaseLock(directory, key) {
   const lockPath = lockFile(directory, key);
   try {
-    const raw = await fs.readFile(lockPath, "utf8");
+    const raw = await fs2.readFile(lockPath, "utf8");
     const meta = JSON.parse(raw);
     const shouldRelease = meta.pid === process.pid;
     if (!shouldRelease)
       return;
     try {
-      const raw2 = await fs.readFile(lockPath, "utf8");
+      const raw2 = await fs2.readFile(lockPath, "utf8");
       const meta2 = JSON.parse(raw2);
       if (meta2.acquiredAt !== meta.acquiredAt || meta2.pid !== meta.pid)
         return;
     } catch {
       return;
     }
-    await fs.rm(lockPath, { force: true });
+    await fs2.rm(lockPath, { force: true });
   } catch {}
 }
 async function readState(directory) {
@@ -216,7 +267,7 @@ async function readState(directory) {
   const attempts = 5;
   for (let attempt = 0;attempt < attempts; attempt++) {
     try {
-      const raw = await fs.readFile(target, "utf8");
+      const raw = await fs2.readFile(target, "utf8");
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object" && Array.isArray(parsed.goals)) {
         return migrate(parsed);
@@ -347,13 +398,13 @@ function migrate(state) {
 }
 async function writeAtomic(target, contents) {
   const dir = path.dirname(target);
-  await fs.mkdir(dir, { recursive: true });
+  await fs2.mkdir(dir, { recursive: true });
   const temp = path.join(dir, `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-  await fs.writeFile(temp, contents, "utf8");
+  await fs2.writeFile(temp, contents, "utf8");
   try {
     for (let attempt = 0;attempt < 5; attempt++) {
       try {
-        await fs.rename(temp, target);
+        await fs2.rename(temp, target);
         return;
       } catch (error) {
         if (error?.code === "EXDEV")
@@ -364,10 +415,10 @@ async function writeAtomic(target, contents) {
           await delay(25 * (attempt + 1));
       }
     }
-    await fs.copyFile(temp, target);
+    await fs2.copyFile(temp, target);
   } finally {
     try {
-      await fs.rm(temp, { force: true });
+      await fs2.rm(temp, { force: true });
     } catch {}
   }
 }
@@ -388,20 +439,13 @@ async function mutateState(directory, description, fn) {
   }
 }
 async function appendEvent(directory, event) {
-  await fs.mkdir(loopDir(directory), { recursive: true });
+  await fs2.mkdir(loopDir(directory), { recursive: true });
   const line = JSON.stringify(event) + `
 `;
-  await fs.appendFile(eventsFile(directory), line, "utf8");
+  await fs2.appendFile(eventsFile(directory), line, "utf8");
 }
 async function readEvents(directory, limit = 50) {
-  try {
-    const raw = await fs.readFile(eventsFile(directory), "utf8");
-    const lines = raw.trim().split(`
-`).filter(Boolean);
-    return lines.slice(-limit).map((l) => JSON.parse(l));
-  } catch {
-    return [];
-  }
+  return readEventTail(eventsFile(directory), limit);
 }
 function controlDir(directory) {
   return path.join(loopDir(directory), "control");
@@ -419,8 +463,8 @@ async function claimControlRequest(directory, requestID) {
   const src = requestFile(directory, requestID);
   const dst = processingFile(directory, requestID);
   try {
-    await fs.mkdir(path.dirname(dst), { recursive: true });
-    await fs.rename(src, dst);
+    await fs2.mkdir(path.dirname(dst), { recursive: true });
+    await fs2.rename(src, dst);
     return true;
   } catch {
     return false;
@@ -428,15 +472,15 @@ async function claimControlRequest(directory, requestID) {
 }
 async function writeControlResponse(directory, response) {
   const dir = path.join(controlDir(directory), "responses");
-  await fs.mkdir(dir, { recursive: true });
+  await fs2.mkdir(dir, { recursive: true });
   await writeAtomic(responseFile(directory, response.requestID), JSON.stringify(response, null, 2));
   try {
-    await fs.rm(processingFile(directory, response.requestID), { force: true });
+    await fs2.rm(processingFile(directory, response.requestID), { force: true });
   } catch {}
 }
 async function readControlResponse(directory, requestID) {
   try {
-    const raw = await fs.readFile(responseFile(directory, requestID), "utf8");
+    const raw = await fs2.readFile(responseFile(directory, requestID), "utf8");
     return JSON.parse(raw);
   } catch {
     return;
@@ -445,13 +489,13 @@ async function readControlResponse(directory, requestID) {
 async function listPendingRequests(directory) {
   const dir = path.join(controlDir(directory), "requests");
   try {
-    const files = await fs.readdir(dir);
+    const files = await fs2.readdir(dir);
     const requests = [];
     for (const file of files) {
       if (!file.endsWith(".json"))
         continue;
       try {
-        const raw = await fs.readFile(path.join(dir, file), "utf8");
+        const raw = await fs2.readFile(path.join(dir, file), "utf8");
         requests.push(JSON.parse(raw));
       } catch {}
     }
@@ -465,7 +509,7 @@ function goalArtifactDir(directory, goalID) {
 }
 async function ensureGoalArtifactDir(directory, goalID) {
   const dir = goalArtifactDir(directory, goalID);
-  await fs.mkdir(dir, { recursive: true });
+  await fs2.mkdir(dir, { recursive: true });
   return dir;
 }
 function inboxFile(directory, goalID) {
@@ -473,21 +517,21 @@ function inboxFile(directory, goalID) {
 }
 async function appendGoalInbox(directory, goalID, from, text) {
   const dir = path.join(loopDir(directory), "inboxes");
-  await fs.mkdir(dir, { recursive: true });
+  await fs2.mkdir(dir, { recursive: true });
   const msg = { from, text, at: new Date().toISOString() };
-  await fs.appendFile(inboxFile(directory, goalID), JSON.stringify(msg) + `
+  await fs2.appendFile(inboxFile(directory, goalID), JSON.stringify(msg) + `
 `, "utf8");
 }
 async function drainGoalInbox(directory, goalID) {
   const file = inboxFile(directory, goalID);
   try {
-    const raw = await fs.readFile(file, "utf8");
+    const raw = await fs2.readFile(file, "utf8");
     const lines = raw.trim().split(`
 `).filter(Boolean);
     if (lines.length === 0)
       return [];
     const messages = lines.map((l) => JSON.parse(l));
-    await fs.rm(file, { force: true });
+    await fs2.rm(file, { force: true });
     return messages.map((m) => `[${m.from}] ${m.text}`);
   } catch {
     return [];
@@ -496,7 +540,7 @@ async function drainGoalInbox(directory, goalID) {
 async function peekGoalInbox(directory, goalID) {
   const file = inboxFile(directory, goalID);
   try {
-    const raw = await fs.readFile(file, "utf8");
+    const raw = await fs2.readFile(file, "utf8");
     const lines = raw.trim().split(`
 `).filter(Boolean);
     if (lines.length === 0)
@@ -512,18 +556,18 @@ function commandLogFile(directory, commandID) {
 }
 async function appendCommandLog(directory, commandID, chunk) {
   const file = commandLogFile(directory, commandID);
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.appendFile(file, chunk, "utf8");
+  await fs2.mkdir(path.dirname(file), { recursive: true });
+  await fs2.appendFile(file, chunk, "utf8");
 }
 async function readCommandLog(directory, commandID, opts) {
   const file = commandLogFile(directory, commandID);
   try {
-    const stat = await fs.stat(file);
+    const stat = await fs2.stat(file);
     const totalBytes = stat.size;
     const requestedStart = Math.max(0, opts?.offsetBytes ?? 0);
     if (requestedStart >= totalBytes)
       return { text: "", totalBytes, startByte: requestedStart };
-    const fh = await fs.open(file, "r");
+    const fh = await fs2.open(file, "r");
     try {
       const want = Math.min(opts?.limitBytes ?? 64 * 1024, totalBytes - requestedStart);
       const buf = Buffer.alloc(want);
@@ -566,14 +610,16 @@ function decodeUtf8Window(buf, windowStart) {
 }
 async function removeCommandLog(directory, commandID) {
   try {
-    await fs.rm(commandLogFile(directory, commandID), { force: true });
+    await fs2.rm(commandLogFile(directory, commandID), { force: true });
   } catch {}
 }
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 var CURRENT_VERSION = 9, LOCK_TIMEOUT_MS = 30000, LOCK_STALE_MS = 1e4;
-var init_state_repository = () => {};
+var init_state_repository = __esm(() => {
+  init_event_tail();
+});
 
 // src/domain/command-await.ts
 function isTerminalCommandStatus(status) {
@@ -1242,16 +1288,16 @@ var init_command_await2 = __esm(() => {
 });
 
 // src/infrastructure/workspace-scope.ts
-import fs2 from "fs/promises";
+import fs3 from "fs/promises";
 import path2 from "path";
 async function resolveExistingParent(target) {
   try {
-    return await fs2.realpath(target);
+    return await fs3.realpath(target);
   } catch (error) {
     if (error?.code !== "ENOENT")
       throw error;
     try {
-      const stat = await fs2.lstat(target);
+      const stat = await fs3.lstat(target);
       if (stat.isSymbolicLink())
         throw new Error(`Dangling symlink in scope: ${target}`);
     } catch (missing) {
@@ -1268,14 +1314,14 @@ async function canonicalScopePath(directory, input) {
   if (typeof input !== "string" || !input.trim() || input.includes("\x00") || /[*?\[\]{}]/.test(input)) {
     throw new Error("write_scope requires exact non-empty file paths, not glob patterns");
   }
-  const root = await fs2.realpath(directory);
+  const root = await fs3.realpath(directory);
   const resolved = await resolveExistingParent(path2.resolve(root, input));
   const relative = path2.relative(root, resolved);
   if (!relative || relative === ".." || relative.startsWith(`..${path2.sep}`) || path2.isAbsolute(relative)) {
     throw new Error(`Scope path is outside the workspace or names its root: ${input}`);
   }
   try {
-    if ((await fs2.stat(resolved)).isDirectory())
+    if ((await fs3.stat(resolved)).isDirectory())
       throw new Error(`Scope must name a file, not a directory: ${input}`);
   } catch (error) {
     if (error?.code !== "ENOENT")
@@ -2948,7 +2994,7 @@ import { randomUUID as randomUUID6 } from "crypto";
 init_state_repository();
 init_command_await2();
 import * as path4 from "path";
-import { promises as fs3 } from "fs";
+import { promises as fs4 } from "fs";
 
 // src/server/host-adapter.ts
 import { randomUUID as randomUUID4 } from "crypto";
@@ -3974,14 +4020,14 @@ function retireWorker(state, goal) {
   state.retiredWorkerSessions = [...new Set([...state.retiredWorkerSessions || [], goal.workerSessionID])];
 }
 async function beforeWorkspaceTool(directory, input, args) {
+  if (readTools.has(input.tool))
+    return;
   await mutateState(directory, `workspace.before:${input.callID}`, async (state) => {
     const goal = state.goals.find((item) => item.workerSessionID === input.sessionID);
-    if (state.retiredWorkerSessions?.includes(input.sessionID) && !readTools.has(input.tool))
+    if (state.retiredWorkerSessions?.includes(input.sessionID))
       throw new Error("Scope denied: retired worker session; late executions are fenced.");
     const held = heldGoals(state);
     const protectedGoals = held.filter((item) => item.config.write_scope !== undefined || item.config.workspaceWrite === false);
-    if (readTools.has(input.tool))
-      return state;
     if (!goal && ownerTools.has(input.tool) && (!protectedGoals.length || state.goals.some((item) => item.ownerSessionID === input.sessionID)))
       return state;
     if (!state.workspaceOperation && !protectedGoals.length && (!goal || goal.config.write_scope === undefined && goal.config.workspaceWrite !== false)) {
@@ -5028,7 +5074,7 @@ function createGoalService(host) {
       const artifactDir = freshGoal.config.artifactDir;
       if (artifactDir) {
         try {
-          const files = await fs3.readdir(artifactDir);
+          const files = await fs4.readdir(artifactDir);
           verification = { artifactSummary: files.length ? `${files.length} file(s): ${files.slice(0, 8).join(", ")}` : "no artifacts yet" };
         } catch {
           verification = { artifactSummary: "no artifacts yet" };
@@ -6058,7 +6104,7 @@ function createCommandHost(opts) {
 
 // src/application/command-service.ts
 import { randomUUID as randomUUID9 } from "crypto";
-import { promises as fs4 } from "fs";
+import { promises as fs5 } from "fs";
 import path5 from "path";
 
 // src/domain/command-session.ts
@@ -6746,14 +6792,14 @@ function createCommandService(host, opts) {
     let retainedBytes = 0;
     let truncated = false;
     const file = path5.join(loopCommandsDir(directory), `${id}.log`);
-    const stat = await fs4.stat(file);
+    const stat = await fs5.stat(file);
     retainedBytes = stat.size;
     if (stat.size > MAX_COMMAND_OUTPUT_BYTES) {
-      const fh = await fs4.open(file, "r");
+      const fh = await fs5.open(file, "r");
       try {
         const buf = Buffer.alloc(MAX_COMMAND_OUTPUT_BYTES);
         await fh.read(buf, 0, buf.length, stat.size - buf.length);
-        await fs4.writeFile(file, buf);
+        await fs5.writeFile(file, buf);
       } finally {
         await fh.close();
       }
@@ -7698,7 +7744,7 @@ function createCommandEventBroker(resolver) {
 
 // src/server/command-stream-server.ts
 import { randomBytes, randomUUID as randomUUID11, timingSafeEqual } from "crypto";
-import { promises as fs5 } from "fs";
+import { promises as fs6 } from "fs";
 import path6 from "path";
 function streamEndpointPath(directory) {
   return path6.join(directory, ".opencode", "loopd", "commands", ".stream-endpoint.json");
@@ -7947,10 +7993,10 @@ function createCommandStreamServer(directory, commandService, broker) {
       generation,
       startedAt
     };
-    await fs5.mkdir(path6.dirname(endpointPath), { recursive: true });
-    await fs5.writeFile(endpointPath, JSON.stringify(endpoint, null, 2) + `
+    await fs6.mkdir(path6.dirname(endpointPath), { recursive: true });
+    await fs6.writeFile(endpointPath, JSON.stringify(endpoint, null, 2) + `
 `, { mode: 384 });
-    await fs5.chmod(endpointPath, 384);
+    await fs6.chmod(endpointPath, 384);
   }
   return {
     get url() {
@@ -7964,7 +8010,7 @@ function createCommandStreamServer(directory, commandService, broker) {
         return;
       started = true;
       try {
-        const previous = await fs5.readFile(endpointPath, "utf8").then((text) => JSON.parse(text), () => {
+        const previous = await fs6.readFile(endpointPath, "utf8").then((text) => JSON.parse(text), () => {
           return;
         });
         if (previous && typeof previous.pid === "number" && isPidAlive(previous.pid) && previous.pid !== process.pid) {
@@ -8034,10 +8080,10 @@ function createCommandStreamServer(directory, commandService, broker) {
       server = undefined;
       serverURL = undefined;
       try {
-        const text = await fs5.readFile(endpointPath, "utf8");
+        const text = await fs6.readFile(endpointPath, "utf8");
         const current = JSON.parse(text);
         if (current?.generation === generation) {
-          await fs5.unlink(endpointPath);
+          await fs6.unlink(endpointPath);
         } else {
           logServerEvent(directory, "command-stream.keep-endpoint", {
             reason: "generation mismatch \u2014 another server owns the file"
@@ -8113,7 +8159,7 @@ var execAsync = promisify(execChild);
 function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
   return {
     loopd_create_goal: tool({
-      description: "Create a new background loop GOAL: an autonomous AI worker that loops turn-by-turn on a multi-step objective until deterministic checks pass or it needs you (contract: objective + checks + agent/model + workspaceWrite). " + "The engine spawns a dedicated worker session that does the work autonomously \u2014 it never runs in this chat. " + "Use this for AI reasoning work spanning multiple turns (implement a feature, fix a failing suite, research and write a report) \u2014 NOT for running a single process you just want to start, watch, and type into. " + "For that (dev servers, `npm test --watch`, REPLs, log tails, one-off scripts, interactive shells with a fullscreen terminal UI), use loopd_command_start instead: it is lighter-weight, has no agent/checks/turn loop, and is a raw OS process, not an AI worker. " + "Call this after clarifying the contract with the user. " + "Worker identity is free-form: agent is any OpenCode agent name (built-in, ~/.config/opencode/agents/*.md, or opencode.jsonc agent.* \u2014 discover with `opencode agent list`), " + 'model is any "providerID/modelID" (discover with `opencode models [provider]`). Omit both by default \u2014 when omitted, both inherit the CALLING session\'s live agent/model (read at creation), then plugin defaultAgent/defaultModel. ' + "Only pass agent/model when the caller explicitly requests a different identity or the task needs it; explicit values freeze identity and break session upgrades. " + "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " + "Workspace-writing goals require checks. Exact disjoint write_scope goals may run concurrently on enforcing hosts; omitted scope retains whole-workspace exclusivity. " + "Monitor with the /loop dashboard's Goals tab (Tab/h to switch there if Commands is focused).",
+      description: "Create a new background loop GOAL: an autonomous AI worker that loops turn-by-turn on a multi-step objective until deterministic checks pass or it needs you (contract: objective + checks + agent/model + workspaceWrite). " + "The engine spawns a dedicated worker session that does the work autonomously \u2014 it never runs in this chat. " + "Use this for AI reasoning work spanning multiple turns (implement a feature, fix a failing suite, research and write a report) \u2014 NOT for running a single process you just want to start, watch, and type into. " + "For that (dev servers, `npm test --watch`, REPLs, log tails, one-off scripts, interactive shells with a fullscreen terminal UI), use loopd_command_start instead: it is lighter-weight, has no agent/checks/turn loop, and is a raw OS process, not an AI worker. " + "Call this after clarifying the contract with the user. " + "Worker identity is free-form: agent is any OpenCode agent name (built-in, ~/.config/opencode/agents/*.md, or opencode.jsonc agent.* \u2014 discover with `opencode agent list`), " + 'model is any "providerID/modelID" (discover with `opencode models [provider]`). Omit both by default \u2014 when omitted, both inherit the CALLING session\'s live agent/model (read at creation), then plugin defaultAgent/defaultModel. ' + "Only pass agent/model when the caller explicitly requests a different identity or the task needs it; explicit values freeze identity and break session upgrades. " + "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " + "Workspace-writing goals require checks. OMIT write_scope entirely for ordinary exclusive coding goals. [] explicitly opts into scoped exploration, not legacy mode. " + (goalService.scopedExecution ? "CURRENT HOST: enforced file scopes supported. Opt in with exact disjoint write_scope files for parallel editing, or [] to explore then claim_goal_scope. Scoped workers use structured edits and run_goal_checks, not arbitrary shell. " : "CURRENT HOST: enforced file scopes UNSUPPORTED. Do not supply write_scope, including []; ordinary exclusive goals still work. Do not tell legacy workers to call claim_goal_scope. If enforced parallelism was explicitly required, explain the limitation rather than silently downgrade. ") + "Monitor with the /loop dashboard's Goals tab (Tab/h to switch there if Commands is focused).",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
@@ -8124,7 +8170,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         checks: tool.schema.array(tool.schema.string()).optional().describe('Shell commands that must pass for completion to be accepted. E.g. ["npm test"].'),
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
         workspaceWrite: tool.schema.boolean().optional().describe("Whether this goal edits the shared project workspace. Defaults to true; explicitly set false for artifact-only/read-only work."),
-        write_scope: tool.schema.array(tool.schema.string()).optional().describe("Exact workspace-relative file paths (new files allowed, no globs). Absent retains whole-workspace exclusivity; [] starts exploration-only. Claim minimal files before editing."),
+        write_scope: tool.schema.array(tool.schema.string()).optional().describe("Opt-in enforced scopes ONLY when the CURRENT HOST description says supported. Omit the key for ordinary exclusive goals; [] requests scoped exploration and is also rejected on unsupported hosts. Exact workspace-relative files, no globs. Never substitute workspaceWrite:false for coding to bypass protection."),
         progressFile: tool.schema.string().optional().describe("Markdown file the worker reads/writes as its transaction state."),
         maxTurns: tool.schema.number().optional().describe("Max turns before auto-block."),
         maxNoProgress: tool.schema.number().optional().describe("Block after N turns without progress."),
@@ -8302,7 +8348,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
       }
     }),
     claim_goal_scope: tool({
-      description: "Atomically add exact files to this worker's write_scope before editing. Start with minimal scope; claim expansion before writing. Conflicts return the owning goal/session and path; initial and expansion failures do not partially acquire files. Coordinate with the owner; never sleep or poll claims. Read-only goals and legacy whole-workspace goals cannot claim.",
+      description: "Only for an existing scoped worker on an enforcing host; NOT required for ordinary legacy goals created without write_scope. Atomically add exact files before editing. Conflicts return owner/path without partial acquisition. Coordinate; never sleep or poll claims. Read-only and legacy goals cannot claim. " + (goalService.scopedExecution ? "CURRENT HOST: scoped claims supported." : "CURRENT HOST: scoped claims UNSUPPORTED; create ordinary exclusive goals with write_scope omitted."),
       args: {
         paths: tool.schema.array(tool.schema.string()).describe("Exact workspace-relative files to add (no globs)."),
         runGeneration: tool.schema.number().describe("Current runGeneration from get_goal; stale workers are denied.")
@@ -8852,7 +8898,7 @@ function describeGoalState(status, phase) {
 }
 
 // src/server/owner-tools.ts
-import { promises as fs6 } from "fs";
+import { promises as fs7 } from "fs";
 function withTimeout2(promise, ms) {
   return Promise.race([
     promise,
@@ -9027,7 +9073,7 @@ function ownerTools2(options) {
             if (!dir)
               return;
             try {
-              const files = await fs6.readdir(dir);
+              const files = await fs7.readdir(dir);
               return files.length ? `${files.length} file(s): ${files.slice(0, 8).join(", ")}` : "no artifacts yet";
             } catch {
               return "no artifacts yet";

@@ -3,7 +3,7 @@
 // Scrollable sections with input always visible at bottom.
 
 /** @jsxImportSource @opentui/solid */
-import { createSignal, For, Show, onCleanup, onMount, createEffect, type JSX } from "solid-js"
+import { batch, createSignal, For, Show, onCleanup, onMount, createEffect, type JSX } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
 import type { TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import type { InputRenderable, ParsedKey, ScrollBoxRenderable, TextRenderable } from "@opentui/core"
@@ -29,6 +29,7 @@ import {
 import { TERMINAL_ROUTE_NAME, currentRouteSessionID, terminalRoutePayload } from "./terminal-route"
 import type { CommandSession } from "../domain/command-session"
 import { randomUUID } from "crypto"
+import { createDashboardRefresh } from "./dashboard-refresh"
 
 function prevent(evt: ParsedKey) {
   const e = evt as ParsedKey & { preventDefault?: () => void; stopPropagation?: () => void }
@@ -308,33 +309,33 @@ export function LoopDashboard(props: Props) {
   const [agentIndex, setAgentIndex] = createSignal<Record<string, AgentMeta>>({})
   let inputEl: InputRenderable | undefined
   let focusTimer: ReturnType<typeof setTimeout> | undefined
+  let disposed = false
   const client = createControlClient(props.directory)
   const popMode = props.api.mode.push("loopd.dashboard")
 
   function focusInput() {
+    if (disposed) return
     if (focusTimer) clearTimeout(focusTimer)
     focusTimer = setTimeout(() => {
+      if (disposed) return
       const current = props.api.renderer.currentFocusedRenderable
       if (current && current !== inputEl) current.blur()
       inputEl?.focus()
     }, 10)
   }
 
-  async function refresh() {
-    try {
-      const s = await client.getState()
-      setState(s)
-      setEvents(await client.getEvents(20))
-    } catch (e) {
-      setStatusText(`Error: ${e instanceof Error ? e.message : String(e)}`)
-    }
-  }
+  const refreshQueue = createDashboardRefresh(client, (s, logs) => {
+    batch(() => { setState(s); setEvents(logs) })
+  }, (e) => {
+    setStatusText(`Error: ${e instanceof Error ? e.message : String(e)}`)
+  })
+  const refresh = refreshQueue.refresh
   refresh()
   async function refreshAgents() {
     try {
       const res = await (props.api.client as any)?.app?.agents?.()
       const list = (res as any)?.data ?? res ?? []
-      if (Array.isArray(list)) setAgentIndex(indexAgents(list))
+      if (!disposed && Array.isArray(list)) setAgentIndex(indexAgents(list))
     } catch { /* agent colors are decorative — dashboard works without them */ }
   }
   refreshAgents()
@@ -347,6 +348,8 @@ export function LoopDashboard(props: Props) {
     setInterval(() => setClock(Date.now()), 500),
   ]
   onCleanup(() => {
+    disposed = true
+    refreshQueue.dispose()
     popMode()
     if (focusTimer) clearTimeout(focusTimer)
     for (const u of unsubs) typeof u === "function" ? u() : clearInterval(u as unknown as number)

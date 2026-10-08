@@ -10,6 +10,9 @@ const result = await Bun.build({
     "@opentui/core",
     "@opentui/solid",
     "solid-js",
+    // Declared runtime dependency; terminal-screen requires it only when a
+    // terminal opens. Keep its large CommonJS factory out of TUI startup.
+    "@xterm/headless",
   ],
   plugins: [solidPlugin],
 })

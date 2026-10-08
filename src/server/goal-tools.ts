@@ -48,7 +48,10 @@ export function goalTools(
         "model is any \"providerID/modelID\" (discover with `opencode models [provider]`). Omit both by default — when omitted, both inherit the CALLING session's live agent/model (read at creation), then plugin defaultAgent/defaultModel. " +
         "Only pass agent/model when the caller explicitly requests a different identity or the task needs it; explicit values freeze identity and break session upgrades. " +
         "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " +
-        "Workspace-writing goals require checks. Exact disjoint write_scope goals may run concurrently on enforcing hosts; omitted scope retains whole-workspace exclusivity. " +
+        "Workspace-writing goals require checks. OMIT write_scope entirely for ordinary exclusive coding goals. [] explicitly opts into scoped exploration, not legacy mode. " +
+        (goalService.scopedExecution
+          ? "CURRENT HOST: enforced file scopes supported. Opt in with exact disjoint write_scope files for parallel editing, or [] to explore then claim_goal_scope. Scoped workers use structured edits and run_goal_checks, not arbitrary shell. "
+          : "CURRENT HOST: enforced file scopes UNSUPPORTED. Do not supply write_scope, including []; ordinary exclusive goals still work. Do not tell legacy workers to call claim_goal_scope. If enforced parallelism was explicitly required, explain the limitation rather than silently downgrade. ") +
         "Monitor with the /loop dashboard's Goals tab (Tab/h to switch there if Commands is focused).",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
@@ -60,7 +63,7 @@ export function goalTools(
         checks: tool.schema.array(tool.schema.string()).optional().describe("Shell commands that must pass for completion to be accepted. E.g. [\"npm test\"]."),
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
         workspaceWrite: tool.schema.boolean().optional().describe("Whether this goal edits the shared project workspace. Defaults to true; explicitly set false for artifact-only/read-only work."),
-        write_scope: tool.schema.array(tool.schema.string()).optional().describe("Exact workspace-relative file paths (new files allowed, no globs). Absent retains whole-workspace exclusivity; [] starts exploration-only. Claim minimal files before editing."),
+        write_scope: tool.schema.array(tool.schema.string()).optional().describe("Opt-in enforced scopes ONLY when the CURRENT HOST description says supported. Omit the key for ordinary exclusive goals; [] requests scoped exploration and is also rejected on unsupported hosts. Exact workspace-relative files, no globs. Never substitute workspaceWrite:false for coding to bypass protection."),
         progressFile: tool.schema.string().optional().describe("Markdown file the worker reads/writes as its transaction state."),
         maxTurns: tool.schema.number().optional().describe("Max turns before auto-block."),
         maxNoProgress: tool.schema.number().optional().describe("Block after N turns without progress."),
@@ -237,7 +240,7 @@ export function goalTools(
     }),
 
     claim_goal_scope: tool({
-      description: "Atomically add exact files to this worker's write_scope before editing. Start with minimal scope; claim expansion before writing. Conflicts return the owning goal/session and path; initial and expansion failures do not partially acquire files. Coordinate with the owner; never sleep or poll claims. Read-only goals and legacy whole-workspace goals cannot claim.",
+      description: "Only for an existing scoped worker on an enforcing host; NOT required for ordinary legacy goals created without write_scope. Atomically add exact files before editing. Conflicts return owner/path without partial acquisition. Coordinate; never sleep or poll claims. Read-only and legacy goals cannot claim. " + (goalService.scopedExecution ? "CURRENT HOST: scoped claims supported." : "CURRENT HOST: scoped claims UNSUPPORTED; create ordinary exclusive goals with write_scope omitted."),
       args: {
         paths: tool.schema.array(tool.schema.string()).describe("Exact workspace-relative files to add (no globs)."),
         runGeneration: tool.schema.number().describe("Current runGeneration from get_goal; stale workers are denied."),
