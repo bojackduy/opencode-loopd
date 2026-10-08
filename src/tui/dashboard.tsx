@@ -3,10 +3,10 @@
 // Scrollable sections with input always visible at bottom.
 
 /** @jsxImportSource @opentui/solid */
-import { createSignal, For, Show, onCleanup, onMount, createEffect } from "solid-js"
+import { createSignal, For, Show, onCleanup, onMount, createEffect, type JSX } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
 import type { TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
-import type { InputRenderable, ParsedKey, ScrollBoxRenderable } from "@opentui/core"
+import type { InputRenderable, ParsedKey, ScrollBoxRenderable, TextRenderable } from "@opentui/core"
 import { readEvents } from "../infrastructure/state-repository"
 import { createControlClient } from "../infrastructure/control-client"
 import type { StoreState } from "../infrastructure/state-repository"
@@ -238,6 +238,45 @@ export function indexAgents(list: Array<{ name: string; color?: string; mode?: s
   return map
 }
 
+/** Both tabs follow selection only after layout (including a tab remount).
+ * Wheel scrolling alone must not pull the viewport back to the selection. */
+function DashboardList(props: { count: number; selectedID?: string; children: JSX.Element }) {
+  let scroll: ScrollBoxRenderable | undefined
+  let followPending = true
+  createEffect(() => {
+    props.count
+    props.selectedID
+    followPending = true
+    scroll?.requestRender()
+  })
+  return (
+    <scrollbox ref={(el) => { scroll = el }} height={Math.min(props.count, 10)}
+      scrollX={false} scrollY={true} stickyScroll={false}
+      renderAfter={() => {
+        if (!followPending || !scroll) return
+        followPending = false
+        if (props.selectedID) scroll.scrollChildIntoView(props.selectedID)
+      }}>
+      {props.children}
+    </scrollbox>
+  )
+}
+
+/** TextRenderable scrolls unwrapped text independently, even with truncate.
+ * Reset that local offset as the wheel bubbles up to the vertical list. */
+function DashboardRow(props: { id: string; backgroundColor?: TuiThemeCurrent["backgroundElement"]; children: JSX.Element }) {
+  let text: TextRenderable | undefined
+  return (
+    <box id={props.id} flexDirection="row" paddingLeft={1} paddingRight={1}
+      height={1} flexShrink={0} overflow="hidden" backgroundColor={props.backgroundColor}
+      onMouseScroll={() => { if (text) { text.scrollX = 0; text.scrollY = 0 } }}>
+      <text ref={(el) => { text = el }} wrapMode="none" truncate={true} minWidth={0} flexShrink={1}>
+        {props.children}
+      </text>
+    </box>
+  )
+}
+
 export function LoopDashboard(props: Props) {
   const theme = () => props.api.theme.current
   const [mode, setMode] = createSignal<Mode>("normal")
@@ -268,7 +307,6 @@ export function LoopDashboard(props: Props) {
   const [clock, setClock] = createSignal(Date.now())
   const [agentIndex, setAgentIndex] = createSignal<Record<string, AgentMeta>>({})
   let inputEl: InputRenderable | undefined
-  let listScrollRef: ScrollBoxRenderable | undefined
   let focusTimer: ReturnType<typeof setTimeout> | undefined
   const client = createControlClient(props.directory)
   const popMode = props.api.mode.push("loopd.dashboard")
@@ -286,11 +324,6 @@ export function LoopDashboard(props: Props) {
     try {
       const s = await client.getState()
       setState(s)
-      const goals = s.goals.filter((g) => showCompleted() || g.status !== "complete")
-      if (goals.length > 0 && selected() >= goals.length) setSelected(goals.length - 1)
-      setSelectedGoal(goals[selected()] || null)
-      const cmds = visibleOwnerCommands(s.commands, ownerSessionID(), showCompleted())
-      if (cmds.length > 0 && cmdSelected() >= cmds.length) setCmdSelected(cmds.length - 1)
       setEvents(await client.getEvents(20))
     } catch (e) {
       setStatusText(`Error: ${e instanceof Error ? e.message : String(e)}`)
@@ -718,10 +751,6 @@ export function LoopDashboard(props: Props) {
   }
 
   const activeGoals = () => state()?.goals.filter((g) => showCompleted() || g.status !== "complete") || []
-  // Rows are pinned to one line each (wrapMode none + truncate), so the list
-  // viewport is exactly `row count` tall, capped at 10. No padding fudge: the
-  // scrollbox sizes its own viewport, and any extra here renders as dead space.
-  const listHeight = () => Math.min(activeGoals().length, 10)
   const runningCount = () => state()?.runtimes.filter((runtime) => runtime.phase === "running").length || 0
   const runningFrame = () => ["|", "/", "-", "\\"][Math.floor(clock() / 500) % 4]
 
@@ -733,23 +762,15 @@ export function LoopDashboard(props: Props) {
     setStatusText(res.status === "opened" ? "Opening bug report in browser…" : `Could not open browser: ${res.reason} — ${url}`)
   }
 
-  createEffect(() => setSelectedGoal(activeGoals()[selected()] || null))
+  createEffect(() => {
+    setSelected(Math.max(0, Math.min(selected(), activeGoals().length - 1)))
+    setCmdSelected(Math.max(0, Math.min(cmdSelected(), ownerCommands().length - 1)))
+    setSelectedGoal(activeGoals()[selected()] || null)
+  })
 
-  // Follow selection: keep the highlighted row visible inside the scrollable
-  // list. scrollChildIntoView is a no-op when the row is already on screen,
-  // so this never fights the user — it only scrolls when j/k/g/G moves the
-  // cursor out of view. Sticky scroll stays off for the same reason.
   function rowIdFor(goalID: string): string {
     return `loopd-goal-${goalID}`
   }
-  createEffect(() => {
-    const goals = activeGoals()
-    const goal = goals[selected()]
-    if (!goal || !listScrollRef) return
-    try {
-      listScrollRef.scrollChildIntoView(rowIdFor(goal.id))
-    } catch { /* decorative — selection still works without scrolling */ }
-  })
 
   return (
     <box flexDirection="column" width="100%" alignItems="center" padding={1}>
@@ -870,7 +891,7 @@ export function LoopDashboard(props: Props) {
               <text><span style={{ fg: theme().textMuted }}>Tip: </span><span style={{ fg: theme().warning }}>:send</span><span style={{ fg: theme().textMuted }}> to steer the worker · </span><span style={{ fg: theme().warning }}>o</span><span style={{ fg: theme().textMuted }}> to open child · </span><span style={{ fg: theme().warning }}>:force</span><span style={{ fg: theme().textMuted }}> to complete manually.</span></text>
             </box>
           }>
-            <scrollbox ref={(el) => { listScrollRef = el }} height={listHeight()}>
+            <DashboardList count={activeGoals().length} selectedID={activeGoals()[selected()] ? rowIdFor(activeGoals()[selected()]!.id) : undefined}>
               <For each={activeGoals()}>
                 {(goal, i) => {
                   const runtime = () => state()?.runtimes.find((r) => r.goalID === goal.id)
@@ -884,11 +905,10 @@ export function LoopDashboard(props: Props) {
                     return phaseColor(runtime()!.phase || "idle", theme())
                   }
                   return (
-                    <box id={rowIdFor(goal.id)} flexDirection="row" paddingLeft={1} paddingRight={1} backgroundColor={isActive() ? theme().backgroundElement : undefined}>
+                    <DashboardRow id={rowIdFor(goal.id)} backgroundColor={isActive() ? theme().backgroundElement : undefined}>
                       {/* Single-line row: wrapMode+truncate pin the height so the
                           list viewport math (1 line per row) stays exact in any
                           dialog width. Full info lives in the detail panel. */}
-                      <text wrapMode="none" truncate={true}>
                         <span style={{ fg: statusColor(goal.status, theme()), bold: isActive() }}>{isActive() ? `▶ ${statusIcon(goal.status)} ${goal.name}` : `  ${statusIcon(goal.status)} ${goal.name}`}</span>
                         <span style={{ fg: theme().textMuted }}> │ </span>
                         <span style={{ fg: theme().textMuted }}>Goal </span>
@@ -909,12 +929,11 @@ export function LoopDashboard(props: Props) {
                         {goal.config.agent && <span style={{ fg: theme().info }}> │ 🤖 {goal.config.agent}</span>}
                         {runtime() && (runtime() as any).retryAfter && <span style={{ fg: theme().accent }}> │ ↻ {countdownLabel((runtime() as any).retryAfter, clock())}</span>}
                         {runtime() && (runtime() as any).nextRunAt && <span style={{ fg: theme().accent }}> │ ⏰ {countdownLabel((runtime() as any).nextRunAt, clock())}</span>}
-                      </text>
-                    </box>
+                    </DashboardRow>
                   )
                 }}
               </For>
-            </scrollbox>
+            </DashboardList>
           </Show>
 
           {/* Goal detail — fixed, bounded, border matches status */}
@@ -994,15 +1013,14 @@ export function LoopDashboard(props: Props) {
                 <text><span style={{ fg: theme().textMuted }}>Tip: </span><span style={{ fg: theme().warning }}>o</span><span style={{ fg: theme().textMuted }}> fullscreen · </span><span style={{ fg: theme().warning }}>X kill · R restart · x remove-done</span><span style={{ fg: theme().textMuted }}> · </span><span style={{ fg: theme().warning }}>:interrupt :terminate :remove</span><span style={{ fg: theme().textMuted }}> manage · text + Enter writes stdin.</span></text>
               </box>
             }>
-              <scrollbox height={Math.min(ownerCommands().length, 10)}>
+              <DashboardList count={ownerCommands().length} selectedID={selectedCommand() ? `loopd-command-${selectedCommand()!.id}` : undefined}>
                 <For each={ownerCommands()}>
                   {(cmd, i) => {
                     const isActive = () => i() === cmdSelected()
                     return (
-                      <box flexDirection="row" paddingLeft={1} paddingRight={1} backgroundColor={isActive() ? theme().backgroundElement : undefined}>
+                      <DashboardRow id={`loopd-command-${cmd.id}`} backgroundColor={isActive() ? theme().backgroundElement : undefined}>
                         {/* Single-line row mirrors the Goals row: icon+bold name,
                             status-colored badge, accent executable, muted args. */}
-                        <text wrapMode="none" truncate={true}>
                           <span style={{ fg: commandStatusColor(cmd.status, theme()), bold: isActive() }}>{isActive() ? `▶ ${cmd.title}` : `  ${commandStatusIcon(cmd.status)} ${cmd.title}`}</span>
                           <span style={{ fg: theme().textMuted }}> │ </span>
                           <span style={{ fg: theme().textMuted }}>Cmd </span>
@@ -1014,12 +1032,11 @@ export function LoopDashboard(props: Props) {
                           {cmd.signal && <span style={{ fg: theme().warning }}> │ {cmd.signal}</span>}
                           <span style={{ fg: theme().textMuted }}> │ {ageLabel(cmd.updatedAt, clock())}</span>
                           {cmd.truncated && <span style={{ fg: theme().warning, bold: true }}> │ ⚠ truncated</span>}
-                        </text>
-                      </box>
+                      </DashboardRow>
                     )
                   }}
                 </For>
-              </scrollbox>
+              </DashboardList>
             </Show>
             <Show when={selectedCommand()}>
               {(cmd) => (

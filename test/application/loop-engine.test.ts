@@ -388,7 +388,20 @@ describe("Loop Engine", () => {
 
     it("bounds unknown status polls and warns the owner once", async () => {
       engine.stop()
-      host = createFakeHost({ sessionStatus: "unknown" })
+      let statusChecks = 0
+      host = createFakeHost({ sessionStatus: async () => {
+        statusChecks++
+        return "unknown"
+      } })
+      let releaseNotification!: () => void
+      const notificationGate = new Promise<void>((resolve) => { releaseNotification = resolve })
+      const notifyOwner = host.notifyOwner.bind(host)
+      let notificationCalls = 0
+      host.notifyOwner = async (...args) => {
+        notificationCalls++
+        await notificationGate
+        await notifyOwner(...args)
+      }
       goalService = createGoalService(host)
       engine = createLoopEngine({
         directory: dir,
@@ -406,11 +419,31 @@ describe("Loop Engine", () => {
         ownerSessionID: "owner-1",
       })
 
-      await waitFor(async () => ((await readState(dir)).runtimes[0].unknownStatusCount ?? 0) >= 2)
-      const runtime = (await readState(dir)).runtimes[0]
-      expect(runtime.unknownStatusCount).toBe(2)
-      expect(runtime.workerUnreachableNotifiedAt).toBeTruthy()
-      expect((host.sessions as any).notifications).toHaveLength(1)
+      try {
+        // The count and marker are persisted before notifyOwner finishes.
+        // Hold delivery so this intermediate state is exercised deterministically.
+        await waitFor(async () => notificationCalls > 0
+          && ((await readState(dir)).runtimes[0].unknownStatusCount ?? 0) >= 2, 1000)
+        expect((host.sessions as any).notifications ?? []).toHaveLength(0)
+        releaseNotification()
+        await waitFor(() => ((host.sessions as any).notifications ?? []).length > 0, 1000)
+        const runtime = (await readState(dir)).runtimes[0]
+        expect(runtime.unknownStatusCount).toBe(2)
+        expect(runtime.workerUnreachableNotifiedAt).toBeTruthy()
+        expect((host.sessions as any).notifications ?? []).toHaveLength(1)
+
+        // Observe later maintenance writes, not just the first notification.
+        await waitFor(async () => statusChecks >= 6
+          && (await readState(dir)).runtimes[0].lastUnknownStatusAt !== runtime.lastUnknownStatusAt, 1000)
+        const laterRuntime = (await readState(dir)).runtimes[0]
+        expect(laterRuntime.unknownStatusCount).toBe(2)
+        expect(laterRuntime.workerUnreachableNotifiedAt).toBe(runtime.workerUnreachableNotifiedAt)
+        expect((host.sessions as any).notifications).toHaveLength(1)
+        // The fake host deduplicates delivery, so also check attempted calls.
+        expect(notificationCalls).toBe(1)
+      } finally {
+        releaseNotification()
+      }
     })
 
     it("treats a sparse-map absent worker as idle without unreachable alert", async () => {
