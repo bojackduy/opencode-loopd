@@ -21,6 +21,7 @@ import { observeProviderLimit, type ProviderLimitObservation } from "../domain/p
 import { createWorkerManager, type WorkerManager, type WorkerSession, type ContinuationContext } from "../server/worker-session"
 import type { LoopEvent } from "../domain/events"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
+import { assertScopeAvailable, retireWorker } from "./workspace-execution"
 
 /**
  * Structured startup failure. start() persists the goal (and worker, when
@@ -43,6 +44,7 @@ export class GoalStartError extends Error {
 }
 
 export interface GoalService {
+  readonly scopedExecution: boolean
   switchIdentity(directory: string, goalID: GoalID, ownerSessionID: string, opts: { model?: string; agent?: string; resume?: boolean }): Promise<{ outcome: "applied" | "deferred" | "unsupported"; model?: string; agent?: string; resumed?: boolean }>
   listAgents(): Promise<AgentCatalog>
   switchAgent(directory: string, goalID: GoalID, ownerSessionID: string, agent: string, opts?: { resume?: boolean }): Promise<{ outcome: "applied" | "deferred" | "unsupported"; agent: string; resumed?: boolean }>
@@ -147,22 +149,8 @@ export function createGoalService(host: LoopHost): GoalService {
   }
 
   function assertWorkspaceWriteAvailable(state: StoreState, goal: Goal, requesterSessionID?: string): void {
-    if (!goal.config.workspaceWrite) return
-    const activeWriter = state.goals.find(
-      (item) => item.id !== goal.id && item.status === "active" && item.config.workspaceWrite,
-    )
-    if (activeWriter) {
-      // The writer lock is workspace-wide but goal listing is owner-scoped,
-      // so the blocker can be invisible to this caller. Say so explicitly
-      // instead of letting the caller conclude the lock is stale.
-      const ownedElsewhere = requesterSessionID !== undefined && activeWriter.ownerSessionID !== requesterSessionID
-      throw new Error(
-        `Workspace-writing goal "${activeWriter.name}" (${activeWriter.id}) is already active` +
-        (ownedElsewhere ? ` (owned by session ${activeWriter.ownerSessionID}, not this session)` : "") +
-        ". Pause, block, complete, or clear it before activating another workspace-writing goal." +
-        (ownedElsewhere ? " Note: list_background_goals shows only this session's goals; clear/pause it from its owning session." : ""),
-      )
-    }
+    if (goal.config.write_scope !== undefined && !host.scopedExecution) throw new Error("Enforced file scopes are unsupported on this host. Use the guarded v2 tool execution surface; v1 retains legacy exclusivity only.")
+    assertScopeAvailable(state, goal)
   }
 
   async function listModels(): Promise<ModelCatalog> {
@@ -219,6 +207,7 @@ export function createGoalService(host: LoopHost): GoalService {
       if (!goal || !ownerSessionID || goal.ownerSessionID !== ownerSessionID) throw new Error("Goal not found or not owned by this session.")
       if (goal.status === "complete") throw new Error("Cannot switch a completed goal.")
       if (opts?.resume && goal.status !== "blocked") throw new Error("resume is only valid for a blocked goal.")
+      if (opts?.resume && goal.config.write_scope !== undefined) throw new Error("Scoped identity-resume is unsupported. Use resume_goal to reacquire and fence the session, then switch identity.")
       if (opts?.resume) assertWorkspaceWriteAvailable(state, goal, ownerSessionID)
       const { agent, catalog } = await validateAgent(value)
       if (catalog.capability !== "supported" || catalog.switching === "unsupported" || !host.switchSessionAgent || !goal.workerSessionID) {
@@ -339,6 +328,7 @@ export function createGoalService(host: LoopHost): GoalService {
       if (opts?.resume && (goal.status !== "blocked" || goal.blocker?.kind !== "provider-limit")) {
         throw new Error("resume is only valid for a provider-limit-blocked goal.")
       }
+      if (opts?.resume && goal.config.write_scope !== undefined) throw new Error("Scoped identity-resume is unsupported. Use resume_goal to reacquire and fence the session, then switch identity.")
       if (opts?.resume) assertWorkspaceWriteAvailable(state, goal, ownerSessionID)
       const { model, catalog } = await validateModel(value)
       if (catalog.capability !== "supported" || catalog.switching === "unsupported" || !host.switchSessionModel || !goal.workerSessionID) {
@@ -392,6 +382,7 @@ export function createGoalService(host: LoopHost): GoalService {
     if (!goal || !ownerSessionID || goal.ownerSessionID !== ownerSessionID) throw new Error("Goal not found or not owned by this session.")
     if (goal.status === "complete") throw new Error("Cannot switch a completed goal.")
     if (opts.resume && goal.status !== "blocked") throw new Error("resume is only valid for a blocked goal.")
+    if (opts.resume && goal.config.write_scope !== undefined) throw new Error("Scoped identity-resume is unsupported. Use resume_goal to reacquire and fence the session, then switch identity.")
     if (opts.resume) assertWorkspaceWriteAvailable(state, goal, ownerSessionID)
     const { model, catalog: models } = await validateModel(opts.model)
     const { agent, catalog: agents } = await validateAgent(opts.agent)
@@ -713,6 +704,7 @@ export function createGoalService(host: LoopHost): GoalService {
     interactive?: boolean
   }, id: GoalID) {
     // Reject malformed/unavailable alternatives before any worker or goal exists.
+    if (input.config?.write_scope !== undefined && !host.scopedExecution) throw new Error("Enforced file scopes are unsupported on this host. Use the guarded v2 tool execution surface; v1 retains legacy exclusivity only.")
     if (input.config?.fallbackModels?.length) {
       if (input.config.fallbackModels.length > 16) throw new Error("At most 16 ordered fallback models are allowed.")
       const catalog = await listModels()
@@ -753,6 +745,14 @@ export function createGoalService(host: LoopHost): GoalService {
         ...input.config,
       },
     })
+    if (goal.config.write_scope !== undefined) {
+      if (!Array.isArray(goal.config.write_scope)) throw new Error("write_scope must be an array of exact file paths")
+      if (!goal.config.workspaceWrite && goal.config.write_scope.length > 0) {
+        throw new Error("Read-only/artifact goals cannot claim shared workspace files.")
+      }
+      const { canonicalWriteScope } = await import("../infrastructure/workspace-scope")
+      goal.config.write_scope = await canonicalWriteScope(directory, goal.config.write_scope)
+    }
     if (typeof input.costBudget === "number") goal.costBudget = input.costBudget
     if (input.interactive === true) goal.interactive = true
     if (parentAgent) goal.parentAgent = parentAgent
@@ -955,6 +955,8 @@ export function createGoalService(host: LoopHost): GoalService {
     const preState = await readState(directory)
     const goal = preState.goals.find((g) => g.id === goalID)
     if (!goal || goal.status !== "active") return
+    if (goal.config.write_scope !== undefined && !host.scopedExecution) return
+    if (goal.scopeClosing || preState.workspaceCalls?.some((call) => call.goalID === goalID) || preState.workspaceOperation) return
 
     const runtime = preState.runtimes.find((r) => r.goalID === goalID)
     if (!runtime) return
@@ -964,6 +966,7 @@ export function createGoalService(host: LoopHost): GoalService {
 
     // Get worker from cache or reconstruct from persisted state
     let session = sessions.get(goalID)
+    if (session && session.workerSessionID !== goal.workerSessionID) { sessions.delete(goalID); session = undefined }
     if (!session && goal.workerSessionID) {
       session = {
         goalID: goal.id,
@@ -972,6 +975,7 @@ export function createGoalService(host: LoopHost): GoalService {
       }
       sessions.set(goalID, session)
     }
+    if (!session && !goal.workerSessionID) session = await ensureWorkerSession(directory, goal)
     if (!session) return
 
     // Check worker idle — unless force is set (nudge/re-prompt)
@@ -1152,10 +1156,23 @@ export function createGoalService(host: LoopHost): GoalService {
 
     if (!canTransition(goal.status, "paused", "user")) return
 
+    // Fence first, abort second, publish the parked status last. Reservations
+    // continue retaining ownership even if abort returns before a tool drains.
+    if (goal.config.write_scope !== undefined) {
+      await mutateState(directory, `goal.pause-closing:${goalID}`, async (s) => {
+        const g = s.goals.find((item) => item.id === goalID)
+        if (g) { g.scopeClosing = true; retireWorker(s, g) }
+        return s
+      })
+      if (goal.workerSessionID) await workers.abortWorker(goal.workerSessionID)
+      sessions.delete(goalID)
+    }
+
     const state = await mutateState(directory, `goal.pause:${goalID}`, async (s) => {
       const g = s.goals.find((item) => item.id === goalID)
       if (!g) return s
       g.status = "paused"
+      g.scopeClosing = false
       g.updatedAt = new Date().toISOString()
 
       const rt = s.runtimes.find((r) => r.goalID === goalID)
@@ -1176,7 +1193,7 @@ export function createGoalService(host: LoopHost): GoalService {
       workerSessionID: goal.workerSessionID,
       startedAt: goal.createdAt,
     } : undefined)
-    if (session) {
+    if (session && goal.config.write_scope === undefined) {
       await workers.abortWorker(session.workerSessionID)
       sessions.delete(goalID)
     }
@@ -1204,6 +1221,11 @@ export function createGoalService(host: LoopHost): GoalService {
       if (!goal) return state
       if (!canTransition(goal.status, "active", "user")) return state
       assertWorkspaceWriteAvailable(state, goal, goal.ownerSessionID)
+      if (goal.config.write_scope !== undefined) {
+        retireWorker(state, goal)
+        goal.workerSessionID = undefined
+        sessions.delete(goalID)
+      }
       goal.status = "active"
       goal.updatedAt = new Date().toISOString()
       resumed = true
@@ -1246,6 +1268,11 @@ export function createGoalService(host: LoopHost): GoalService {
       const goal = state.goals.find((g) => g.id === goalID)
       if (!goal || goal.status !== "blocked") return state
       assertWorkspaceWriteAvailable(state, goal, goal.ownerSessionID)
+      if (goal.config.write_scope !== undefined) {
+        retireWorker(state, goal)
+        goal.workerSessionID = undefined
+        sessions.delete(goalID)
+      }
       goal.status = "active"
       goal.updatedAt = new Date().toISOString()
       retried = true
@@ -1299,6 +1326,12 @@ export function createGoalService(host: LoopHost): GoalService {
     const goal = state.goals.find((g) => g.id === goalID)
     if (!goal) return
 
+    await mutateState(directory, `goal.clear-closing:${goalID}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goalID)
+      if (g) { g.scopeClosing = true; retireWorker(s, g) }
+      return s
+    })
+
     // Abort worker from cache or persisted state (external I/O — not under lock)
     const session = sessions.get(goalID) || (goal.workerSessionID ? {
       goalID: goal.id,
@@ -1311,6 +1344,12 @@ export function createGoalService(host: LoopHost): GoalService {
     }
 
     await mutateState(directory, `goal.clear:${goalID}`, async (s) => {
+      if (s.workspaceCalls?.some((call) => call.goalID === goalID) || s.workspaceOperation?.goalID === goalID) {
+        const g = s.goals.find((item) => item.id === goalID)
+        if (g) { g.status = "paused"; g.scopeClearPending = true }
+        s.commandAwaits = (s.commandAwaits ?? []).filter((a) => a.goalID !== goalID)
+        return s
+      }
       s.goals = s.goals.filter((g) => g.id !== goalID)
       s.runtimes = s.runtimes.filter((r) => r.goalID !== goalID)
       // Clearing cancels outstanding awaits: no orphan wakes after clear.
@@ -1342,6 +1381,21 @@ export function createGoalService(host: LoopHost): GoalService {
     for (const goal of state.goals) {
       if (isTerminal(goal.status)) continue
       if (goal.status === "paused") continue
+      if (goal.config.write_scope !== undefined && !host.scopedExecution) {
+        await mutateState(directory, `reconcile.unsupported-scope:${goal.id}`, async (s) => {
+          const g = s.goals.find((item) => item.id === goal.id)
+          if (g) {
+            g.scopeClosing = true
+            retireWorker(s, g)
+            g.status = "blocked"
+            g.blocker = { reason: "Host lacks audited scoped execution guard.", needed: "Load guarded v2 execution surface; do not resume scoped goals on v1.", at: new Date().toISOString() }
+          }
+          return s
+        })
+        if (goal.workerSessionID) await workers.abortWorker(goal.workerSessionID)
+        sessions.delete(goal.id)
+        continue
+      }
 
       // Active goal without worker ID: create a worker (external I/O — not under lock)
       if (!goal.workerSessionID) {
@@ -1421,6 +1475,11 @@ export function createGoalService(host: LoopHost): GoalService {
     if (goal.status !== "active") {
       return { ok: false, message: `Goal is ${goal.status}; resume or retry it before nudging.` }
     }
+    if (goal.config.write_scope !== undefined) {
+      await pauseUnlocked(directory, goalID)
+      await resumeUnlocked(directory, goalID)
+      return { ok: true, message: `Re-prompted protected worker for "${goal.name}" in a freshly fenced session.` }
+    }
 
     // Clear stale run state so the continuation is not gated on an old lease/run.
     const cleared = await mutateState(directory, `goal.nudge:${goalID}`, async (s) => {
@@ -1454,6 +1513,10 @@ export function createGoalService(host: LoopHost): GoalService {
     await appendGoalInbox(directory, goalID, "user", trimmed)
     if (goal.status !== "active") {
       return { ok: true, message: `Queued for "${goal.name}" (goal is ${goal.status}; delivers on the next active turn).` }
+    }
+    if (goal.config.write_scope !== undefined) {
+      await continueTurnUnlocked(directory, goalID, { bare: true })
+      return { ok: true, message: `Queued for "${goal.name}"; protected workers receive it on the next quiescent turn.` }
     }
 
     // Clear stale run state so the bare turn is not gated on an old lease/run.
@@ -1510,6 +1573,11 @@ export function createGoalService(host: LoopHost): GoalService {
     const preState = await readState(directory)
     const goal = preState.goals.find((g) => g.id === goalID)
     if (!goal) return { ok: false, message: "Goal not found." }
+    if (goal.config.write_scope !== undefined && goal.status === "active") {
+      await pauseUnlocked(directory, goalID)
+      await resumeUnlocked(directory, goalID)
+      return { ok: true, message: `Protected worker for "${goal.name}" aborted and replaced with a fenced session.` }
+    }
     const workerID = sessions.get(goalID)?.workerSessionID || goal.workerSessionID
     if (!workerID) return { ok: false, message: `Goal "${goal.name}" has no worker session to abort.` }
 
@@ -1556,5 +1624,5 @@ export function createGoalService(host: LoopHost): GoalService {
     return withGoalOperation(goalID, () => accountUsageUnlocked(directory, goalID))
   }
 
-  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, observeProviderError, compact }
+  return { scopedExecution: host.scopedExecution === true, start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, observeProviderError, compact }
 }

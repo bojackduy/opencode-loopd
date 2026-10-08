@@ -29,6 +29,42 @@ describe("Goal Tools", () => {
   })
 
   describe("createGoal", () => {
+    it("runs configured checks through the controlled tool and releases its exclusive operation", async () => {
+      const tools = goalTools(dir, goalService, "owner-1")
+      const created = JSON.parse((await tools.loopd_create_goal.execute({ name: "checks", objective: "test", write_scope: [], checks: ["exit 0"] }, { sessionID: "owner-1" })).output)
+      expect(created.ok).toBe(true)
+      const result = JSON.parse((await tools.run_goal_checks.execute({}, { sessionID: created.workerSessionID })).output)
+      expect(result).toMatchObject({ ok: true, passed: true, failures: [] })
+      expect((await readState(dir)).workspaceOperation).toBeUndefined()
+      const parent = JSON.parse((await tools.run_goal_checks.execute({}, { sessionID: "owner-1" })).output)
+      expect(parent.ok).toBe(false)
+    })
+
+    it("persists explicit exploration scope and claims via the actual worker tool", async () => {
+      const tools = goalTools(dir, goalService, "owner-1")
+      const created = JSON.parse((await tools.loopd_create_goal.execute({ name: "scoped", objective: "test", write_scope: [] }, { sessionID: "owner-1" })).output)
+      expect(created.ok).toBe(true)
+      expect(created.write_scope).toEqual([])
+      const state = await readState(dir)
+      const generation = state.runtimes[0]!.runGeneration
+      const claimed = JSON.parse((await tools.claim_goal_scope.execute({ paths: ["src/new.ts"], runGeneration: generation }, { sessionID: created.workerSessionID })).output)
+      expect(claimed).toMatchObject({ ok: true, write_scope: ["src/new.ts"] })
+      const inspected = JSON.parse((await tools.get_goal.execute({}, { sessionID: created.workerSessionID })).output)
+      expect(inspected.config.write_scope).toEqual(["src/new.ts"])
+      const stale = JSON.parse((await tools.claim_goal_scope.execute({ paths: ["other.ts"], runGeneration: generation - 1 }, { sessionID: created.workerSessionID })).output)
+      expect(stale.ok).toBe(false)
+      expect(stale.message).toContain("stale")
+    })
+
+    it("rejects unsafe creation scope and read-only claims before persisting a goal", async () => {
+      const tools = goalTools(dir, goalService, "owner-1")
+      for (const args of [{ write_scope: ["../outside.ts"] }, { workspaceWrite: false, write_scope: ["inside.ts"] }]) {
+        const created = JSON.parse((await tools.loopd_create_goal.execute({ name: "unsafe", objective: "test", ...args }, { sessionID: "owner-1" })).output)
+        expect(created.ok).toBe(false)
+        expect((await readState(dir)).goals).toHaveLength(0)
+      }
+    })
+
     it("creates goal with progress fields", async () => {
       const { goal } = await goalService.start(dir, {
         name: "test",

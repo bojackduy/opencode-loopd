@@ -4,7 +4,7 @@
 
 import { randomUUID } from "crypto"
 import { tool } from "@opencode-ai/plugin/tool"
-import { readState, writeState, mutateState, appendEvent, appendGoalInbox } from "../infrastructure/state-repository"
+import { readState, mutateState, appendEvent, appendGoalInbox } from "../infrastructure/state-repository"
 import type { Goal, GoalID, GoalConfig } from "../domain/goal"
 import { canTransition } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
@@ -22,6 +22,8 @@ import {
   type GoalCreationDefaults,
 } from "../application/goal-policy"
 import { SERVER_LOG_FILE } from "../infrastructure/server-log"
+import { claimGoalScope, GoalScopeConflictError } from "../application/goal-scope"
+import { withWorkspaceOperation } from "../application/workspace-execution"
 
 const execAsync = promisify(execChild)
 
@@ -46,7 +48,7 @@ export function goalTools(
         "model is any \"providerID/modelID\" (discover with `opencode models [provider]`). Omit both by default — when omitted, both inherit the CALLING session's live agent/model (read at creation), then plugin defaultAgent/defaultModel. " +
         "Only pass agent/model when the caller explicitly requests a different identity or the task needs it; explicit values freeze identity and break session upgrades. " +
         "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " +
-        "Workspace-writing goals are serialized (only one active writer) and require checks. " +
+        "Workspace-writing goals require checks. Exact disjoint write_scope goals may run concurrently on enforcing hosts; omitted scope retains whole-workspace exclusivity. " +
         "Monitor with the /loop dashboard's Goals tab (Tab/h to switch there if Commands is focused).",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
@@ -58,6 +60,7 @@ export function goalTools(
         checks: tool.schema.array(tool.schema.string()).optional().describe("Shell commands that must pass for completion to be accepted. E.g. [\"npm test\"]."),
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
         workspaceWrite: tool.schema.boolean().optional().describe("Whether this goal edits the shared project workspace. Defaults to true; explicitly set false for artifact-only/read-only work."),
+        write_scope: tool.schema.array(tool.schema.string()).optional().describe("Exact workspace-relative file paths (new files allowed, no globs). Absent retains whole-workspace exclusivity; [] starts exploration-only. Claim minimal files before editing."),
         progressFile: tool.schema.string().optional().describe("Markdown file the worker reads/writes as its transaction state."),
         maxTurns: tool.schema.number().optional().describe("Max turns before auto-block."),
         maxNoProgress: tool.schema.number().optional().describe("Block after N turns without progress."),
@@ -88,6 +91,7 @@ export function goalTools(
         if (args.checks) config.checks = args.checks
         if (args.checkCwd) config.checkCwd = args.checkCwd
         if (args.workspaceWrite !== undefined) config.workspaceWrite = args.workspaceWrite
+        if (args.write_scope !== undefined) config.write_scope = args.write_scope
         if (args.progressFile) config.progressFile = args.progressFile
         if (args.maxTurns !== undefined) config.maxTurns = args.maxTurns
         if (args.maxNoProgress !== undefined) config.maxNoProgress = args.maxNoProgress
@@ -172,6 +176,8 @@ export function goalTools(
               interactive: goal.interactive === true,
               checks: resolution.config.checks || [],
               workspaceWrite: resolution.config.workspaceWrite,
+              write_scope: goal.config.write_scope,
+              enforcedScopedExecution: goalService.scopedExecution,
               defaultsApplied: resolution.defaultsApplied,
               name: args.name,
               message: `Goal "${args.name}" created and started in the background. Artifacts: ${goal.config.artifactDir}. Monitor with /loop (<leader>o).`,
@@ -225,7 +231,50 @@ export function goalTools(
 
         return {
           title: `Goal: ${goal.name}`,
-          output: formatGoalStructured(goal, runtime),
+          output: formatGoalStructured(goal, runtime, goalService.scopedExecution),
+        }
+      },
+    }),
+
+    claim_goal_scope: tool({
+      description: "Atomically add exact files to this worker's write_scope before editing. Start with minimal scope; claim expansion before writing. Conflicts return the owning goal/session and path; initial and expansion failures do not partially acquire files. Coordinate with the owner; never sleep or poll claims. Read-only goals and legacy whole-workspace goals cannot claim.",
+      args: {
+        paths: tool.schema.array(tool.schema.string()).describe("Exact workspace-relative files to add (no globs)."),
+        runGeneration: tool.schema.number().describe("Current runGeneration from get_goal; stale workers are denied."),
+      },
+      execute: async (args, context) => {
+        if (!goalService.scopedExecution) return { title: "Scope denied", output: JSON.stringify({ ok: false, errorCode: "unsupported_scope_host", message: "Use the guarded v2 execution surface; v1 scoped claims are unsupported." }) }
+        const workerID = context?.sessionID || hostSessionID
+        const goal = findGoalByWorkerSession(await readState(dir), workerID)
+        if (!goal || !workerID) return { title: "Scope denied", output: JSON.stringify({ ok: false, errorCode: "worker_not_found" }) }
+        try {
+          const write_scope = await claimGoalScope(dir, goal.id, workerID, args.runGeneration, args.paths)
+          return { title: "Scope claimed", output: JSON.stringify({ ok: true, goalID: goal.id, write_scope }) }
+        } catch (error) {
+          return {
+            title: "Scope denied",
+            output: JSON.stringify({
+              ok: false,
+              message: error instanceof Error ? error.message : String(error),
+              ...(error instanceof GoalScopeConflictError ? { errorCode: "scope_conflict", kind: error.kind, conflict: error.conflict, retry: "coordinate_then_retry" } : { errorCode: "scope_denied" }),
+            }),
+          }
+        }
+      },
+    }),
+
+    run_goal_checks: tool({
+      description: "Run only this goal's configured trusted checks under the workspace-wide exclusive operation lock. Source edits are denied while checks run; checks cannot start over in-flight writes. No arbitrary command argument. This is coordination, not an OS/filesystem sandbox. Use instead of shell for scoped verification.",
+      args: {},
+      execute: async (_args, context) => {
+        const workerID = context?.sessionID || hostSessionID
+        const goal = findGoalByWorkerSession(await readState(dir), workerID)
+        if (!goal || !workerID || goal.status !== "active") return { title: "Verification denied", output: JSON.stringify({ ok: false, message: "An active exact worker session is required." }) }
+        try {
+          const checks = await withWorkspaceOperation(dir, goal.id, workerID, () => runCompletionChecks(goal.config.checks || [], goal.config.checkCwd || dir))
+          return { title: checks.passed ? "Checks passed" : "Checks failed", output: JSON.stringify({ ok: checks.passed, ...checks }) }
+        } catch (error) {
+          return { title: "Verification denied", output: JSON.stringify({ ok: false, message: error instanceof Error ? error.message : String(error) }) }
         }
       },
     }),
@@ -264,7 +313,7 @@ export function goalTools(
           at: new Date().toISOString(),
         }
 
-        await writeState(dir, state)
+        state.revision = (await persistWorkerMutation(dir, goal, runtime, ["active"])).revision
 
         const event: LoopEvent = {
           version: 1,
@@ -313,7 +362,7 @@ export function goalTools(
         if (goal.config.checks?.length) {
           // Resolve check working directory
           const cwd = goal.config.checkCwd || goal.config.artifactDir || dir
-          const checkResults = await runCompletionChecks(goal.config.checks, cwd)
+          const checkResults = await withWorkspaceOperation(dir, goal.id, goal.workerSessionID!, () => runCompletionChecks(goal.config.checks!, cwd))
           if (!checkResults.passed) {
             const failureDetails = checkResults.failures.map((f) => {
               const stdoutSnippet = f.stdout ? `\nStdout: ${f.stdout.slice(0, 500)}` : ""
@@ -498,7 +547,7 @@ export function goalTools(
           )
         }
 
-        await writeState(dir, state)
+        state.revision = (await persistWorkerMutation(dir, goal, runtime, ["active", "budget_limited"])).revision
 
         const event: LoopEvent = {
           version: 1,
@@ -568,7 +617,7 @@ export function goalTools(
           runtime.updatedAt = new Date().toISOString()
         }
 
-        await writeState(dir, state)
+        state.revision = (await persistWorkerMutation(dir, goal, runtime, ["active", "budget_limited"])).revision
 
         const event: LoopEvent = {
           version: 1,
@@ -647,7 +696,7 @@ function findGoalByWorkerSession(
   )
 }
 
-function formatGoalStructured(goal: Goal, runtime?: GoalRuntimeState): string {
+function formatGoalStructured(goal: Goal, runtime?: GoalRuntimeState, enforcedScopedExecution = false): string {
   const output: Record<string, any> = {
     id: goal.id,
     name: goal.name,
@@ -662,6 +711,11 @@ function formatGoalStructured(goal: Goal, runtime?: GoalRuntimeState): string {
       checks: goal.config.checks,
       checkCwd: goal.config.checkCwd,
       workspaceWrite: goal.config.workspaceWrite,
+      write_scope: goal.config.write_scope,
+      scopeClosing: goal.scopeClosing === true,
+      scopeClearPending: goal.scopeClearPending === true,
+      scopeRetryPolicy: "coordinate_then_retry_no_automatic_queue",
+      enforcedScopedExecution,
       agent: goal.config.agent,
       model: goal.config.model,
       maxTurns: goal.config.maxTurns,
@@ -718,6 +772,27 @@ function formatGoalStructured(goal: Goal, runtime?: GoalRuntimeState): string {
 interface CheckResult {
   passed: boolean
   failures: Array<{ command: string; exitCode: number; stderr: string; stdout: string }>
+}
+
+/** Publish only worker-owned transition fields, never a stale whole-store snapshot. */
+async function persistWorkerMutation(dir: string, goal: Goal, runtime: GoalRuntimeState | undefined, from: Goal["status"][]) {
+  return mutateState(dir, `worker.transition:${goal.id}`, async (state) => {
+    const current = state.goals.find((item) => item.id === goal.id)
+    const rt = state.runtimes.find((item) => item.goalID === goal.id)
+    if (!current || current.workerSessionID !== goal.workerSessionID || !from.includes(current.status) || current.scopeClosing || runtime && rt?.runGeneration !== runtime.runGeneration) {
+      throw new Error("Worker transition denied: stale session/generation or closing goal.")
+    }
+    current.status = goal.status
+    current.updatedAt = goal.updatedAt
+    current.lastProgress = goal.lastProgress
+    current.completionEvidence = goal.completionEvidence
+    current.blocker = goal.blocker
+    if (rt && runtime) {
+      const { activeToolCallIDs, accountedMessageIDs, turnTokensUsed, ...transition } = runtime
+      Object.assign(rt, transition)
+    }
+    return state
+  })
 }
 
 async function runCompletionChecks(checks: string[], cwd?: string): Promise<CheckResult> {

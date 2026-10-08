@@ -244,6 +244,10 @@ export function ownerTools(options: OwnerToolsOptions) {
               checks: goal.config.checks,
               checkCwd: goal.config.checkCwd,
               workspaceWrite: goal.config.workspaceWrite,
+              write_scope: goal.config.write_scope,
+              scopeClosing: goal.scopeClosing === true,
+              scopeClearPending: goal.scopeClearPending === true,
+              scopeRetryPolicy: "coordinate_then_retry_no_automatic_queue",
               agent: goal.config.agent,
               model: goal.config.model,
               fallbackModels: goal.config.fallbackModels ?? [],
@@ -403,7 +407,7 @@ export function ownerTools(options: OwnerToolsOptions) {
 
     pause_goal: tool({
       description:
-        "Pause an active goal: status active → paused, releaseLease, abortWorker, per-goal mutex. Frees the workspaceWrite slot. Use to investigate or to free the single-writer slot.",
+        "Pause an active goal under its operation mutex. Protected writes are fenced before abort; ownership remains held until in-flight tools drain. Use to investigate or release file claims after quiescence.",
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to pause the first active goal."),
       },
@@ -454,7 +458,7 @@ export function ownerTools(options: OwnerToolsOptions) {
 
     resume_goal: tool({
       description:
-        "Resume a paused (→active, reuses existing worker if sessionStatus still idle/busy) or retry a blocked (→active, resets consecutiveFailures/forceFinish). Fails with 'already active' if another workspaceWrite writer is active. Per-goal mutex.",
+        "Resume a paused or retry a blocked goal. Atomically reacquires scope; overlapping ownership/in-flight writes deny activation. Explicit scoped workers rotate sessions to fence late tools; legacy workers retain their session. Per-goal mutex.",
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to resume the first paused/blocked goal."),
       },

@@ -14,7 +14,6 @@ import {
   readControlResponse,
   recoverStaleProcessing,
   readState,
-  writeState,
   mutateState,
   appendEvent,
   type ControlRequest,
@@ -412,7 +411,16 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
           runtime.lastError = undefined
           runtime.updatedAt = new Date().toISOString()
         }
-        await writeState(directory, state)
+        await mutateState(directory, `goal.force-complete:${goal.id}`, async (s) => {
+          const current = s.goals.find((item) => item.id === goal.id)
+          if (!current) return s
+          current.status = "complete"
+          current.updatedAt = goal.updatedAt
+          current.completionEvidence = goal.completionEvidence
+          const rt = s.runtimes.find((item) => item.goalID === goal.id)
+          if (rt) { Object.assign(rt, releaseLease(rt)); rt.activeRunID = undefined; rt.lastError = undefined }
+          return s
+        })
         await appendEvent(directory, {
           version: 1,
           eventID: randomUUID(),
@@ -454,7 +462,16 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
           runtime.lastError = undefined
           runtime.updatedAt = new Date().toISOString()
         }
-        await writeState(directory, state)
+        await mutateState(directory, `goal.force-block:${goal.id}`, async (s) => {
+          const current = s.goals.find((item) => item.id === goal.id)
+          if (!current) return s
+          current.status = "blocked"
+          current.updatedAt = goal.updatedAt
+          current.blocker = goal.blocker
+          const rt = s.runtimes.find((item) => item.goalID === goal.id)
+          if (rt) { Object.assign(rt, releaseLease(rt)); rt.activeRunID = undefined; rt.lastError = undefined }
+          return s
+        })
         await appendEvent(directory, {
           version: 1,
           eventID: randomUUID(),

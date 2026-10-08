@@ -122,6 +122,17 @@ export function createWorkerManager(host: LoopHost): WorkerManager {
 
 function buildContinuationSteering(goal: Goal, runtime: GoalRuntimeState, context?: ContinuationContext): string {
   const parts: string[] = []
+  const scopeInstructions = goal.config.write_scope !== undefined ? [
+    ``, `## FILE OWNERSHIP`,
+    `write_scope: ${JSON.stringify(goal.config.write_scope)} (exact files; [] means exploration-only).`,
+    `Explore with reads/search → claim_goal_scope({ paths, runGeneration from get_goal }) → structured edit/write/apply_patch → run_goal_checks → report progress or complete_goal.`,
+    `Claim only the minimum files needed. Request expansion BEFORE editing new paths; rename requires both endpoints. No globs.`,
+    `Conflicts identify owning goal/session/path. Initial and expansion conflicts fail immediately with no partial claim and no automatic queue. Coordinate with the owner, then retry once; never sleep, poll claims, or repeatedly prompt waiting workers.`,
+    `Arbitrary shell, loopd_command_start/write, custom tools, batch, and subagent writes are denied. Configured checks are trusted commands under a workspace-wide operation lock, not an OS sandbox.`,
+    `Output-location exceptions do not grant extra source files. Only this goal's artifact directory is writable without source claims.`,
+  ] : goal.config.workspaceWrite === false ? [
+    ``, `## READ-ONLY OWNERSHIP`, `Shared source writes and arbitrary shell/custom/subagent tools are denied. Write artifacts only under this goal's artifact directory. Use run_goal_checks for trusted configured verification.`,
+  ] : []
 
   const artifactDir = (goal.config as any).artifactDir as string | undefined
   function outputLocationBlock(): string[] {
@@ -265,5 +276,6 @@ function buildContinuationSteering(goal: Goal, runtime: GoalRuntimeState, contex
     }
   }
 
+  parts.push(...scopeInstructions)
   return parts.join("\n")
 }

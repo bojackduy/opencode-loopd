@@ -31,6 +31,9 @@ export interface Goal {
 
   /** Worker session doing the actual work. Created on start. */
   workerSessionID?: string
+  /** Closing prevents new writes while abort/clear drains reserved executions. */
+  scopeClosing?: boolean
+  scopeClearPending?: boolean
 
   /**
    * How the worker session is topologically attached (v2-native bridge).
@@ -143,8 +146,11 @@ export interface GoalConfig {
   /** Directory where completion checks run. Defaults to the artifact directory. */
   checkCwd?: string
 
-  /** Whether this goal mutates the shared project workspace. Such goals are exclusive. */
+  /** Whether this goal mutates the shared project workspace. Unscoped writers are exclusive. */
   workspaceWrite?: boolean
+
+  /** Exact canonical workspace-relative files. Absent = whole workspace; [] = exploration only. */
+  write_scope?: string[]
 
   /** Max turns before auto-pause. */
   maxTurns?: number

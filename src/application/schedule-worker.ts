@@ -11,6 +11,7 @@ import type { GoalID } from "../domain/goal"
 import { leaseIsValid, releaseLease } from "../domain/runtime"
 import type { GoalService } from "./goal-service"
 import { logServerEvent } from "../infrastructure/server-log"
+import { assertScopeAvailable, retireWorker } from "./workspace-execution"
 
 export interface ScheduleWorkerOptions {
   directory: string
@@ -72,18 +73,6 @@ export function createScheduleWorker(options: ScheduleWorkerOptions): ScheduleWo
       if (!nextAt) continue
       if (Date.now() < Date.parse(nextAt)) continue
 
-      // WorkspaceWrite serialization — skip if another writer active
-      const activeWriter = state.goals.find(
-        (g) => g.id !== goal.id && g.status === "active" && (g.config as any).workspaceWrite,
-      )
-      if (goal.config.workspaceWrite && activeWriter) {
-        await logServerEvent(directory, "schedule.skipped-writer-active", {
-          goalID: goal.id,
-          activeWriter: activeWriter.id,
-        })
-        continue
-      }
-
       // Lease/phase guard — should be idle/complete, but double-check
       if (runtime.phase === "running" || runtime.phase === "queued" || runtime.phase === "compacting") continue
       if (leaseIsValid(runtime as any)) continue
@@ -93,12 +82,19 @@ export function createScheduleWorker(options: ScheduleWorkerOptions): ScheduleWo
         const g = s.goals.find((x) => x.id === goal.id)
         const rt = s.runtimes.find((x) => x.goalID === goal.id)
         if (!g || !rt) return s
+        if (g.config.write_scope !== undefined && !goalService.scopedExecution) return s
         if (g.status !== "complete") return s
         // Re-check max after lock
         const curCount = rt.scheduleRunCount ?? 0
         if (typeof max === "number" && curCount >= max) return s
         const curNext = rt.nextRunAt
         if (!curNext || Date.now() < Date.parse(curNext)) return s
+        // Re-check ownership inside the same persisted activation transaction.
+        try { assertScopeAvailable(s, g) } catch { return s }
+        if (g.config.write_scope !== undefined) {
+          retireWorker(s, g)
+          g.workerSessionID = undefined
+        }
 
         g.status = "active"
         g.updatedAt = new Date().toISOString()

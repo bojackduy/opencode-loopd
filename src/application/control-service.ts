@@ -10,8 +10,7 @@ import { createRuntimeState } from "../domain/runtime"
 import type { LoopCommand, StartGoalCommand } from "../domain/commands"
 import type { LoopEvent } from "../domain/events"
 import {
-  readState,
-  writeState,
+  mutateState,
   appendEvent,
 } from "../infrastructure/state-repository"
 import type { StoreState } from "../infrastructure/state-repository"
@@ -51,8 +50,14 @@ export function createControlService(): ControlService {
     command: LoopCommand,
   ): Promise<ControlResponse> {
     return withLock(directory, async () => {
-      const state = await readState(directory)
-      try {
+      let response!: ControlResponse
+      await mutateState(directory, `legacy-control:${command.command}`, async (state) => {
+        const requested = "args" in command ? (command.args as any)?.config : undefined
+        if (state.goals.some((goal) => goal.config.write_scope !== undefined || goal.config.workspaceWrite === false) || requested?.write_scope !== undefined || requested?.workspaceWrite === false || state.workspaceCalls?.length || state.workspaceOperation) {
+          response = { ok: false, requestID: command.requestID, message: "Legacy control service cannot safely coordinate protected goals. Use the server control worker/GoalService.", errorCode: "unsupported_scope" }
+          return state
+        }
+        response = await (async () => {
         switch (command.command) {
           case "start":
             return await handleStart(directory, state, command)
@@ -82,9 +87,10 @@ export function createControlService(): ControlService {
             }
           }
         }
-      } finally {
-        await writeState(directory, state)
-      }
+        })()
+        return state
+      })
+      return response
     })
   }
 

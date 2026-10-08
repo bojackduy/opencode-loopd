@@ -71,7 +71,7 @@ describe("Interaction parity registry", () => {
     const cmdTools = commandTools({ directory: dir, commandService })
     const toolNames = new Set([...Object.keys(tools), ...Object.keys(cmdTools)])
     // Worker tools live in goalTools, not ownerTools — skip them
-    const workerTools = new Set(["get_goal", "report_goal_progress", "complete_goal", "block_goal"])
+    const workerTools = new Set(["get_goal", "claim_goal_scope", "run_goal_checks", "report_goal_progress", "complete_goal", "block_goal"])
     for (const def of INTERACTIONS) {
       for (const name of def.agentTools) {
         if (workerTools.has(name)) continue

@@ -38,6 +38,7 @@ import type { CommandHost, CommandProcessHandle } from "../server/command-host"
 import { utf8ByteLength, type CommandStreamMessage } from "../domain/command-events"
 import type { CommandEventBroker } from "./command-event-broker"
 import { logServerEvent } from "../infrastructure/server-log"
+import { beforeWorkspaceTool, afterWorkspaceTool } from "./workspace-execution"
 import { clearAwaitsForCommand, fireCommandAwaits, fireUntilAwaits, readBoundedTail, type FiredAwait } from "./command-await"
 import {
   appendCommandLog,
@@ -958,6 +959,9 @@ export function createCommandService(
       type PendingEvent = { type: "output"; chunk: string } | { type: "exit"; info: { exitCode: number; signal?: string } }
       const pending: PendingEvent[] = []
       let ready = false
+      const scopeCallID = `command-start:${id}`
+      await beforeWorkspaceTool(directory, { tool: "loopd_command_start", sessionID: input.ownerSessionID, callID: scopeCallID }, {})
+      try {
       const handle = host.spawn(
         spawnOpts,
         (chunk) => {
@@ -1046,6 +1050,7 @@ export function createCommandService(
       }
       await Promise.all(initialOperations)
       return (await service.get(directory, id, input.ownerSessionID)) ?? session
+      } finally { await afterWorkspaceTool(directory, input.ownerSessionID, scopeCallID) }
     },
 
     async list(directory, ownerSessionID) {
@@ -1128,6 +1133,9 @@ export function createCommandService(
     },
 
     async write(directory, id, ownerSessionID, data) {
+      const scopeCallID = `command-write:${randomUUID()}`
+      await beforeWorkspaceTool(directory, { tool: "loopd_command_write", sessionID: ownerSessionID, callID: scopeCallID }, {})
+      try {
       const session = await service.get(directory, id, ownerSessionID)
       if (!session) return { ok: false, message: "Command not found." }
       if (session.status !== "running") return { ok: false, message: `Command is ${session.status}; only running commands accept input.` }
@@ -1135,6 +1143,7 @@ export function createCommandService(
       const ok = entry ? entry.handle.write(data) : false
       if (!ok) return { ok: false, message: "Process input unavailable (no live handle — host may have restarted; reconcile marks it honestly)." }
       return { ok: true, message: `Sent ${Buffer.byteLength(data)} byte(s) to "${session.title}".` }
+      } finally { await afterWorkspaceTool(directory, ownerSessionID, scopeCallID) }
     },
 
     async resize(directory, id, ownerSessionID, cols, rows) {
@@ -1574,6 +1583,8 @@ export function createCommandService(
           const x = (s.commands ?? []).find((y) => y.id === c.id)
           if (x && x.status === "running") {
             x.status = "missing"
+            s.orphanedCommandProcesses ??= []
+            if (!s.orphanedCommandProcesses.some((process) => process.commandID === x.id)) s.orphanedCommandProcesses.push({ commandID: x.id, pid: x.pid })
             x.endReason = "missing"
             x.lastError = deadlinePassed
               ? `Host restarted or handle lost — no live execution found (timeoutSeconds=${x.timeoutSeconds ?? "?"}s deadline ${x.deadlineAt} already passed; treated as missing, timeout elapsed). Output log retained; remove to clean up.`

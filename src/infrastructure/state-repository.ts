@@ -29,6 +29,24 @@ export interface StoreState {
    * status; cancelled when the goal pauses/clears or the command is removed.
    */
   commandAwaits?: CommandAwait[]
+  /** Durable reservations: never discard on restart without proof of quiescence. */
+  workspaceCalls?: WorkspaceCall[]
+  workspaceOperation?: { id: string; goalID: string; sessionID: string }
+  /** Session tombstones fence late tools after worker rotation/removal. */
+  retiredWorkerSessions?: string[]
+  /** Missing handles are not proof of exit; removing logs must not erase fences. */
+  orphanedCommandProcesses?: Array<{ commandID: string; pid?: number }>
+}
+
+export interface WorkspaceCall {
+  callID: string
+  sessionID: string
+  goalID?: string
+  generation?: number
+  paths: string[]
+  uncontrolled?: boolean
+  /** Reservation timestamp for stuck-call diagnosis. Optional: pre-existing persisted calls lack it. */
+  at?: string
 }
 
 export interface CommandLedgerEntry {

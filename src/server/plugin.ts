@@ -23,6 +23,7 @@ import { addToolCall, removeToolCall } from "../domain/runtime"
 import { readState, mutateState } from "../infrastructure/state-repository"
 import type { GoalToolDefaults } from "./goal-tools"
 import { version as PLUGIN_VERSION } from "../../package.json"
+import { beforeWorkspaceTool, afterWorkspaceTool, guardV2ToolEditor } from "../application/workspace-execution"
 
 const PLUGIN_ID = "opencode-loopd.server"
 
@@ -174,6 +175,8 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
     },
     tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }), ...commandTools({ directory, commandService, capabilities: commandHost.capabilities, goalService }) },
     "tool.execute.before": async (input, _output) => {
+      // Enforcement errors must propagate; tracking's best-effort catch is deliberately separate.
+      await beforeWorkspaceTool(directory, input, _output.args)
       // Track tool call start for worker sessions only
       const activeWorkers = goalService.getActiveWorkers()
       let matchedGoalID: string | undefined
@@ -194,6 +197,7 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
       } catch {}
     },
     "tool.execute.after": async (input, output) => {
+      await afterWorkspaceTool(directory, input.sessionID, input.callID)
       // Lazy start when goal tools are used
       if (input.tool === "loopd_create_goal" || input.tool === "get_goal" || input.tool === "report_goal_progress") {
         ensureStarted()
@@ -321,6 +325,10 @@ const v2 = {
         for (const [id, definition] of Object.entries(hooks.tool ?? {})) {
           editor.add(toV2Tool(id, definition, directory))
         }
+        // Promise SDK hook rejections are defects, not typed Tool.Error failures.
+        // Wrap the supported execution surface too: even a host that logs hook
+        // defects cannot proceed into the original executor after a denial.
+        guardV2ToolEditor(directory, editor)
       }))
       registrations.push(await context.tool.hook("execute.before", async (input) => {
         await hooks["tool.execute.before"]?.({

@@ -103,8 +103,8 @@ describe("Server Plugin V2", () => {
       location: { directory: os.tmpdir() },
       options: {},
       tool: {
-        async transform(callback: (editor: { add(tool: { name: string }): void }) => void) {
-          callback({ add: (tool) => toolIDs.push(tool.name) })
+        async transform(callback: (editor: any) => void) {
+          callback({ add: (tool: { name: string }) => toolIDs.push(tool.name), list: () => [], update: () => {} })
           return registration("transform")
         },
         async hook(name: string) {
@@ -134,6 +134,8 @@ describe("Server Plugin V2", () => {
     expect(toolIDs).toEqual([
       "loopd_create_goal",
       "get_goal",
+      "claim_goal_scope",
+      "run_goal_checks",
       "report_goal_progress",
       "complete_goal",
       "block_goal",

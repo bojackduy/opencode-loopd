@@ -1241,6 +1241,69 @@ var init_command_await2 = __esm(() => {
   init_state_repository();
 });
 
+// src/infrastructure/workspace-scope.ts
+import fs2 from "fs/promises";
+import path2 from "path";
+async function resolveExistingParent(target) {
+  try {
+    return await fs2.realpath(target);
+  } catch (error) {
+    if (error?.code !== "ENOENT")
+      throw error;
+    try {
+      const stat = await fs2.lstat(target);
+      if (stat.isSymbolicLink())
+        throw new Error(`Dangling symlink in scope: ${target}`);
+    } catch (missing) {
+      if (missing?.code !== "ENOENT")
+        throw missing;
+    }
+    const parent = path2.dirname(target);
+    if (parent === target)
+      throw error;
+    return path2.join(await resolveExistingParent(parent), path2.basename(target));
+  }
+}
+async function canonicalScopePath(directory, input) {
+  if (typeof input !== "string" || !input.trim() || input.includes("\x00") || /[*?\[\]{}]/.test(input)) {
+    throw new Error("write_scope requires exact non-empty file paths, not glob patterns");
+  }
+  const root = await fs2.realpath(directory);
+  const resolved = await resolveExistingParent(path2.resolve(root, input));
+  const relative = path2.relative(root, resolved);
+  if (!relative || relative === ".." || relative.startsWith(`..${path2.sep}`) || path2.isAbsolute(relative)) {
+    throw new Error(`Scope path is outside the workspace or names its root: ${input}`);
+  }
+  try {
+    if ((await fs2.stat(resolved)).isDirectory())
+      throw new Error(`Scope must name a file, not a directory: ${input}`);
+  } catch (error) {
+    if (error?.code !== "ENOENT")
+      throw error;
+  }
+  return relative.split(path2.sep).join("/");
+}
+async function canonicalWriteScope(directory, inputs) {
+  return [...new Set(await Promise.all(inputs.map((input) => canonicalScopePath(directory, input))))].sort();
+}
+function findScopeConflict(goals, candidate) {
+  if (candidate.config.workspaceWrite === false || candidate.config.write_scope?.length === 0)
+    return;
+  for (const owner of goals) {
+    if (owner.id === candidate.id || owner.status !== "active" || owner.config.workspaceWrite === false || owner.config.write_scope?.length === 0)
+      continue;
+    const requested = candidate.config.write_scope;
+    const held = owner.config.write_scope;
+    const overlap = requested === undefined || held === undefined ? requested?.[0] ?? held?.[0] ?? "*" : requested.find((file) => held.includes(file));
+    if (overlap !== undefined)
+      return { goalID: owner.id, ownerSessionID: owner.ownerSessionID, name: owner.name, path: overlap };
+  }
+}
+function scopeConflictMessage(conflict) {
+  return `Write scope conflict on "${conflict.path}": goal "${conflict.name}" (${conflict.goalID}), owned by session ${conflict.ownerSessionID}. Coordinate with the owner or release the conflicting scope before retrying; do not poll claims.`;
+}
+var init_workspace_scope = () => {};
+
 // src/server/plugin.ts
 import { tool as v1Tool } from "@opencode-ai/plugin/tool";
 
@@ -1679,7 +1742,21 @@ function createControlWorker(options) {
           runtime.lastError = undefined;
           runtime.updatedAt = new Date().toISOString();
         }
-        await writeState(directory, state);
+        await mutateState(directory, `goal.force-complete:${goal.id}`, async (s) => {
+          const current = s.goals.find((item) => item.id === goal.id);
+          if (!current)
+            return s;
+          current.status = "complete";
+          current.updatedAt = goal.updatedAt;
+          current.completionEvidence = goal.completionEvidence;
+          const rt = s.runtimes.find((item) => item.goalID === goal.id);
+          if (rt) {
+            Object.assign(rt, releaseLease(rt));
+            rt.activeRunID = undefined;
+            rt.lastError = undefined;
+          }
+          return s;
+        });
         await appendEvent(directory, {
           version: 1,
           eventID: randomUUID2(),
@@ -1720,7 +1797,21 @@ function createControlWorker(options) {
           runtime.lastError = undefined;
           runtime.updatedAt = new Date().toISOString();
         }
-        await writeState(directory, state);
+        await mutateState(directory, `goal.force-block:${goal.id}`, async (s) => {
+          const current = s.goals.find((item) => item.id === goal.id);
+          if (!current)
+            return s;
+          current.status = "blocked";
+          current.updatedAt = goal.updatedAt;
+          current.blocker = goal.blocker;
+          const rt = s.runtimes.find((item) => item.goalID === goal.id);
+          if (rt) {
+            Object.assign(rt, releaseLease(rt));
+            rt.activeRunID = undefined;
+            rt.lastError = undefined;
+          }
+          return s;
+        });
         await appendEvent(directory, {
           version: 1,
           eventID: randomUUID2(),
@@ -2853,11 +2944,11 @@ function createLoopEngine(options) {
 }
 
 // src/application/goal-service.ts
-import { randomUUID as randomUUID5 } from "crypto";
+import { randomUUID as randomUUID6 } from "crypto";
 init_state_repository();
 init_command_await2();
-import * as path2 from "path";
-import { promises as fs2 } from "fs";
+import * as path4 from "path";
+import { promises as fs3 } from "fs";
 
 // src/server/host-adapter.ts
 import { randomUUID as randomUUID4 } from "crypto";
@@ -3332,6 +3423,7 @@ function toWorkerCreation(result) {
 function createV2Host(context, statuses, options = {}) {
   const directory = context.location.directory;
   return {
+    scopedExecution: true,
     async listAgents() {
       const switching = typeof context.session.switchAgent === "function" ? "session" : "unsupported";
       if (typeof context.agent?.list !== "function")
@@ -3650,6 +3742,20 @@ function createWorkerManager(host) {
 }
 function buildContinuationSteering(goal, runtime, context) {
   const parts = [];
+  const scopeInstructions = goal.config.write_scope !== undefined ? [
+    ``,
+    `## FILE OWNERSHIP`,
+    `write_scope: ${JSON.stringify(goal.config.write_scope)} (exact files; [] means exploration-only).`,
+    `Explore with reads/search \u2192 claim_goal_scope({ paths, runGeneration from get_goal }) \u2192 structured edit/write/apply_patch \u2192 run_goal_checks \u2192 report progress or complete_goal.`,
+    `Claim only the minimum files needed. Request expansion BEFORE editing new paths; rename requires both endpoints. No globs.`,
+    `Conflicts identify owning goal/session/path. Initial and expansion conflicts fail immediately with no partial claim and no automatic queue. Coordinate with the owner, then retry once; never sleep, poll claims, or repeatedly prompt waiting workers.`,
+    `Arbitrary shell, loopd_command_start/write, custom tools, batch, and subagent writes are denied. Configured checks are trusted commands under a workspace-wide operation lock, not an OS sandbox.`,
+    `Output-location exceptions do not grant extra source files. Only this goal's artifact directory is writable without source claims.`
+  ] : goal.config.workspaceWrite === false ? [
+    ``,
+    `## READ-ONLY OWNERSHIP`,
+    `Shared source writes and arbitrary shell/custom/subagent tools are denied. Write artifacts only under this goal's artifact directory. Use run_goal_checks for trusted configured verification.`
+  ] : [];
   const artifactDir = goal.config.artifactDir;
   function outputLocationBlock() {
     if (!artifactDir)
@@ -3733,8 +3839,253 @@ function buildContinuationSteering(goal, runtime, context) {
       parts.push(`- ${msg}`);
     }
   }
+  parts.push(...scopeInstructions);
   return parts.join(`
 `);
+}
+
+// src/application/workspace-execution.ts
+init_state_repository();
+init_workspace_scope();
+import { randomUUID as randomUUID5 } from "crypto";
+import path3 from "path";
+var readTools = new Set([
+  "read",
+  "glob",
+  "grep",
+  "list",
+  "webfetch",
+  "websearch",
+  "todowrite",
+  "skill",
+  "get_goal",
+  "claim_goal_scope",
+  "report_goal_progress",
+  "complete_goal",
+  "block_goal",
+  "list_background_goals",
+  "inspect_background_goal",
+  "read_goal_transcript",
+  "loopd_command_get",
+  "loopd_command_list",
+  "loopd_command_await",
+  "loopd_command_interrupt",
+  "loopd_command_terminate",
+  "loopd_command_remove",
+  "loopd_list_agents",
+  "loopd_list_models",
+  "run_goal_checks",
+  "codegraph_codegraph_context",
+  "codegraph_codegraph_search",
+  "codegraph_codegraph_node",
+  "codegraph_codegraph_explore",
+  "codegraph_codegraph_files",
+  "codegraph_codegraph_trace",
+  "codegraph_codegraph_callers",
+  "codegraph_codegraph_callees",
+  "codegraph_codegraph_impact",
+  "codegraph_codegraph_status"
+]);
+var ownerTools = new Set(["loopd_create_goal", "switch_goal_identity", "pause_goal", "resume_goal", "clear_goal", "abort_goal_worker", "nudge_goal", "send_goal_input", "force_block_goal", "force_complete_goal"]);
+function structuredWritePaths(tool, args) {
+  if (tool === "write" || tool === "edit") {
+    if (typeof args.filePath !== "string")
+      throw new Error(`Scope denied: ${tool} requires filePath.`);
+    return [args.filePath];
+  }
+  if (tool !== "apply_patch")
+    return;
+  const source = args.patchText ?? args.patch;
+  if (typeof source !== "string" || !source.startsWith(`*** Begin Patch
+`) || !source.trimEnd().endsWith("*** End Patch")) {
+    throw new Error("Scope denied: unsupported apply_patch format.");
+  }
+  const paths = [];
+  let section = false;
+  for (const line of source.split(`
+`)) {
+    const header = /^\*\*\* (?:Add File|Update File|Delete File): (.+)$/.exec(line);
+    if (header) {
+      paths.push(header[1]);
+      section = true;
+      continue;
+    }
+    const move = /^\*\*\* Move to: (.+)$/.exec(line);
+    if (move) {
+      if (!section)
+        throw new Error("Scope denied: rename outside patch section.");
+      paths.push(move[1]);
+      continue;
+    }
+    if (line.startsWith("*** ") && !["*** Begin Patch", "*** End Patch", "*** End of File"].includes(line)) {
+      throw new Error("Scope denied: unknown patch operation.");
+    }
+  }
+  if (!paths.length)
+    throw new Error("Scope denied: patch has no file operations.");
+  return paths;
+}
+function heldGoals(state) {
+  return state.goals.filter((goal) => goal.status === "active" || goal.scopeClosing || state.workspaceCalls?.some((call) => call.goalID === goal.id) || state.workspaceOperation?.goalID === goal.id);
+}
+function mayBeAlive(pid) {
+  if (!pid || pid < 1)
+    return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
+}
+function assertScopeAvailable(state, goal) {
+  if (goal.scopeClosing || state.workspaceCalls?.some((call) => call.goalID === goal.id)) {
+    throw new Error("Goal still has closing/in-flight writes; ownership cannot be reacquired before quiescence.");
+  }
+  if (state.workspaceOperation)
+    throw new Error(`Workspace operation ${state.workspaceOperation.id} is active.`);
+  if (goal.config.write_scope !== undefined || goal.config.workspaceWrite === false) {
+    const orphan = [...state.orphanedCommandProcesses || [], ...(state.commands || []).filter((command) => command.status === "missing").map((command) => ({ commandID: command.id, pid: command.pid }))].find((process2) => mayBeAlive(process2.pid));
+    if (orphan)
+      throw new Error(`Protected activation denied: command ${orphan.commandID} lost its handle and process exit is unproved. Stop/verify the orphan process externally; removing its log does not release this fence.`);
+    if (state.workspaceCalls?.some((call) => call.uncontrolled))
+      throw new Error("Protected goal activation denied: an uncontrolled tool/shell is still executing. Wait for its exit event, do not poll claims.");
+    const running = state.commands?.find((command) => command.status === "running");
+    if (running)
+      throw new Error(`Protected goal activation denied: uncontrolled command ${running.id} is still running. Terminate it before starting scoped/read-only work.`);
+  }
+  const conflict = findScopeConflict(heldGoals(state).map((owner) => ({ ...owner, status: "active" })), goal);
+  if (conflict) {
+    const owner = state.goals.find((item) => item.id === conflict.goalID);
+    if (goal.config.write_scope === undefined && owner?.config.write_scope === undefined) {
+      throw new Error(`Workspace-writing goal "${conflict.name}" (${conflict.goalID}) is already active (owned by session ${conflict.ownerSessionID}). Pause, block, complete, or clear it before activating another workspace-writing goal. Note: list_background_goals shows only this session's goals.`);
+    }
+    throw new Error(scopeConflictMessage(conflict));
+  }
+  if (goal.config.workspaceWrite !== false && goal.config.write_scope?.length !== 0) {
+    const call = state.workspaceCalls?.find((call) => call.goalID !== goal.id && (goal.config.write_scope === undefined || call.paths.some((file) => goal.config.write_scope.includes(file))));
+    if (call)
+      throw new Error(`Scope conflict with in-flight call ${call.callID}, session ${call.sessionID}, path ${call.paths[0]}.`);
+  }
+}
+function retireWorker(state, goal) {
+  if (!goal.workerSessionID)
+    return;
+  state.retiredWorkerSessions = [...new Set([...state.retiredWorkerSessions || [], goal.workerSessionID])];
+}
+async function beforeWorkspaceTool(directory, input, args) {
+  await mutateState(directory, `workspace.before:${input.callID}`, async (state) => {
+    const goal = state.goals.find((item) => item.workerSessionID === input.sessionID);
+    if (state.retiredWorkerSessions?.includes(input.sessionID) && !readTools.has(input.tool))
+      throw new Error("Scope denied: retired worker session; late executions are fenced.");
+    const held = heldGoals(state);
+    const protectedGoals = held.filter((item) => item.config.write_scope !== undefined || item.config.workspaceWrite === false);
+    if (readTools.has(input.tool))
+      return state;
+    if (!goal && ownerTools.has(input.tool) && (!protectedGoals.length || state.goals.some((item) => item.ownerSessionID === input.sessionID)))
+      return state;
+    if (!state.workspaceOperation && !protectedGoals.length && (!goal || goal.config.write_scope === undefined && goal.config.workspaceWrite !== false)) {
+      let paths = [];
+      let uncontrolled = false;
+      try {
+        const writes = structuredWritePaths(input.tool, args);
+        if (writes)
+          paths = await Promise.all(writes.map((file) => canonicalScopePath(directory, file)));
+        else
+          uncontrolled = true;
+      } catch {
+        uncontrolled = true;
+      }
+      state.workspaceCalls ??= [];
+      if (!state.workspaceCalls.some((call) => call.callID === input.callID && call.sessionID === input.sessionID)) {
+        state.workspaceCalls.push({ callID: input.callID, sessionID: input.sessionID, goalID: goal?.id, paths, uncontrolled, at: new Date().toISOString() });
+      }
+      return state;
+    }
+    const writes = structuredWritePaths(input.tool, args);
+    if (!writes)
+      throw new Error(`Scope denied: uncontrolled tool "${input.tool}". Shell, commands, custom tools, batch and subagents are not allowed while protected goals exist. Use structured edits or run_goal_checks.`);
+    if (state.workspaceOperation)
+      throw new Error(`Workspace operation ${state.workspaceOperation.id} is active; source writes are denied until it finishes.`);
+    if (goal && (goal.status !== "active" || goal.scopeClosing))
+      throw new Error(`Scope denied: worker goal is ${goal.scopeClosing ? "closing" : goal.status}.`);
+    if (!goal && !state.goals.some((item) => item.ownerSessionID === input.sessionID)) {
+      throw new Error("Scope denied: unrecognized session/child. Subagent writes are unsupported.");
+    }
+    const paths = await Promise.all(writes.map((file) => canonicalScopePath(directory, file)));
+    const artifact = goal?.config.artifactDir ? path3.relative(directory, goal.config.artifactDir).split(path3.sep).join("/") : undefined;
+    for (const file of paths) {
+      const inArtifact = artifact && file.startsWith(`${artifact}/`);
+      if (goal && !inArtifact && (goal.config.workspaceWrite === false || goal.config.write_scope !== undefined && !goal.config.write_scope.includes(file))) {
+        throw new Error(`Scope denied: "${file}" is outside this goal's write_scope. Claim it before editing.`);
+      }
+      const owner = !inArtifact && held.find((item) => item.id !== goal?.id && item.config.workspaceWrite !== false && (item.config.write_scope === undefined || item.config.write_scope.includes(file)));
+      if (owner)
+        throw new Error(scopeConflictMessage({ goalID: owner.id, ownerSessionID: owner.ownerSessionID, name: owner.name, path: file }));
+      const call = state.workspaceCalls?.find((item) => item.paths.includes(file) && !(item.callID === input.callID && item.sessionID === input.sessionID));
+      if (call)
+        throw new Error(`Scope denied: "${file}" is being written by session ${call.sessionID}, call ${call.callID}.`);
+    }
+    if (!state.workspaceCalls)
+      state.workspaceCalls = [];
+    if (!state.workspaceCalls.some((call) => call.callID === input.callID && call.sessionID === input.sessionID)) {
+      state.workspaceCalls.push({ callID: input.callID, sessionID: input.sessionID, goalID: goal?.id, generation: state.runtimes.find((runtime) => runtime.goalID === goal?.id)?.runGeneration, paths, at: new Date().toISOString() });
+    }
+    return state;
+  });
+}
+async function afterWorkspaceTool(directory, sessionID, callID) {
+  await mutateState(directory, `workspace.after:${callID}`, async (state) => {
+    state.workspaceCalls = state.workspaceCalls?.filter((call) => call.sessionID !== sessionID || call.callID !== callID);
+    state.goals = state.goals.filter((goal) => {
+      if (!goal.scopeClearPending || state.workspaceCalls?.some((call) => call.goalID === goal.id) || state.workspaceOperation?.goalID === goal.id)
+        return true;
+      state.runtimes = state.runtimes.filter((runtime) => runtime.goalID !== goal.id);
+      return false;
+    });
+    return state;
+  });
+}
+function guardV2ToolEditor(directory, editor) {
+  if (typeof editor.list !== "function" || typeof editor.update !== "function")
+    throw new Error("Scoped execution requires the v2 tool editor list/update execution surface.");
+  for (const entry of editor.list()) {
+    editor.update(entry.id, (definition) => {
+      const execute = definition.execute;
+      definition.execute = async (args, context) => {
+        await beforeWorkspaceTool(directory, { tool: entry.name, sessionID: context.sessionID, callID: context.id }, args);
+        try {
+          return await execute(args, context);
+        } finally {
+          await afterWorkspaceTool(directory, context.sessionID, context.id);
+        }
+      };
+    });
+  }
+}
+async function withWorkspaceOperation(directory, goalID, sessionID, run) {
+  const id = randomUUID5();
+  await mutateState(directory, `workspace.operation:${id}`, async (state) => {
+    if (state.workspaceOperation || state.workspaceCalls?.length)
+      throw new Error("Workspace is busy with an operation or in-flight writes; verification denied until quiescent.");
+    state.workspaceOperation = { id, goalID, sessionID };
+    return state;
+  });
+  try {
+    return await run();
+  } finally {
+    await mutateState(directory, `workspace.operation-end:${id}`, async (state) => {
+      if (state.workspaceOperation?.id === id)
+        state.workspaceOperation = undefined;
+      state.goals = state.goals.filter((goal) => {
+        if (!goal.scopeClearPending || state.workspaceCalls?.some((call) => call.goalID === goal.id))
+          return true;
+        state.runtimes = state.runtimes.filter((runtime) => runtime.goalID !== goal.id);
+        return false;
+      });
+      return state;
+    });
+  }
 }
 
 // src/application/goal-service.ts
@@ -3772,13 +4123,9 @@ function createGoalService(host) {
     }
   }
   function assertWorkspaceWriteAvailable(state, goal, requesterSessionID) {
-    if (!goal.config.workspaceWrite)
-      return;
-    const activeWriter = state.goals.find((item) => item.id !== goal.id && item.status === "active" && item.config.workspaceWrite);
-    if (activeWriter) {
-      const ownedElsewhere = requesterSessionID !== undefined && activeWriter.ownerSessionID !== requesterSessionID;
-      throw new Error(`Workspace-writing goal "${activeWriter.name}" (${activeWriter.id}) is already active` + (ownedElsewhere ? ` (owned by session ${activeWriter.ownerSessionID}, not this session)` : "") + ". Pause, block, complete, or clear it before activating another workspace-writing goal." + (ownedElsewhere ? " Note: list_background_goals shows only this session's goals; clear/pause it from its owning session." : ""));
-    }
+    if (goal.config.write_scope !== undefined && !host.scopedExecution)
+      throw new Error("Enforced file scopes are unsupported on this host. Use the guarded v2 tool execution surface; v1 retains legacy exclusivity only.");
+    assertScopeAvailable(state, goal);
   }
   async function listModels() {
     return host.listModels ? host.listModels() : emptyCatalog("host catalog capability absent", "unsupported");
@@ -3838,6 +4185,8 @@ function createGoalService(host) {
       throw new Error("Cannot switch a completed goal.");
     if (opts?.resume && goal.status !== "blocked")
       throw new Error("resume is only valid for a blocked goal.");
+    if (opts?.resume && goal.config.write_scope !== undefined)
+      throw new Error("Scoped identity-resume is unsupported. Use resume_goal to reacquire and fence the session, then switch identity.");
     if (opts?.resume)
       assertWorkspaceWriteAvailable(state, goal, ownerSessionID);
     const { agent, catalog } = await validateAgent(value);
@@ -3969,6 +4318,8 @@ function createGoalService(host) {
     if (opts?.resume && (goal.status !== "blocked" || goal.blocker?.kind !== "provider-limit")) {
       throw new Error("resume is only valid for a provider-limit-blocked goal.");
     }
+    if (opts?.resume && goal.config.write_scope !== undefined)
+      throw new Error("Scoped identity-resume is unsupported. Use resume_goal to reacquire and fence the session, then switch identity.");
     if (opts?.resume)
       assertWorkspaceWriteAvailable(state, goal, ownerSessionID);
     const { model, catalog } = await validateModel(value);
@@ -4027,6 +4378,8 @@ function createGoalService(host) {
       throw new Error("Cannot switch a completed goal.");
     if (opts.resume && goal.status !== "blocked")
       throw new Error("resume is only valid for a blocked goal.");
+    if (opts.resume && goal.config.write_scope !== undefined)
+      throw new Error("Scoped identity-resume is unsupported. Use resume_goal to reacquire and fence the session, then switch identity.");
     if (opts.resume)
       assertWorkspaceWriteAvailable(state, goal, ownerSessionID);
     const { model, catalog: models } = await validateModel(opts.model);
@@ -4277,7 +4630,7 @@ function createGoalService(host) {
     });
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID5(),
+      eventID: randomUUID6(),
       goalID,
       type: "run.failed",
       runID,
@@ -4289,7 +4642,7 @@ function createGoalService(host) {
     if (blocked) {
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID5(),
+        eventID: randomUUID6(),
         goalID,
         type: "goal.blocked",
         reason: `Worker prompt delivery failed: ${detail}`,
@@ -4329,10 +4682,12 @@ function createGoalService(host) {
     return session;
   }
   async function start(directory, input) {
-    const id = randomUUID5();
+    const id = randomUUID6();
     return withGoalOperation(id, () => startUnlocked(directory, input, id));
   }
   async function startUnlocked(directory, input, id) {
+    if (input.config?.write_scope !== undefined && !host.scopedExecution)
+      throw new Error("Enforced file scopes are unsupported on this host. Use the guarded v2 tool execution surface; v1 retains legacy exclusivity only.");
     if (input.config?.fallbackModels?.length) {
       if (input.config.fallbackModels.length > 16)
         throw new Error("At most 16 ordered fallback models are allowed.");
@@ -4370,6 +4725,15 @@ function createGoalService(host) {
         ...input.config
       }
     });
+    if (goal.config.write_scope !== undefined) {
+      if (!Array.isArray(goal.config.write_scope))
+        throw new Error("write_scope must be an array of exact file paths");
+      if (!goal.config.workspaceWrite && goal.config.write_scope.length > 0) {
+        throw new Error("Read-only/artifact goals cannot claim shared workspace files.");
+      }
+      await Promise.resolve().then(() => init_workspace_scope());
+      goal.config.write_scope = await canonicalWriteScope(directory, goal.config.write_scope);
+    }
     if (typeof input.costBudget === "number")
       goal.costBudget = input.costBudget;
     if (input.interactive === true)
@@ -4381,7 +4745,7 @@ function createGoalService(host) {
     const artifactDir = goalArtifactDir(directory, id);
     goal.config.artifactDir = artifactDir;
     if (!goal.config.progressFile)
-      goal.config.progressFile = path2.join(artifactDir, "progress.md");
+      goal.config.progressFile = path4.join(artifactDir, "progress.md");
     await ensureGoalArtifactDir(directory, id);
     const state1 = await mutateState(directory, `goal.create:${id}`, async (state) => {
       assertWorkspaceWriteAvailable(state, goal, goal.ownerSessionID);
@@ -4425,7 +4789,7 @@ function createGoalService(host) {
       });
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID5(),
+        eventID: randomUUID6(),
         goalID: id,
         type: "goal.blocked",
         reason: detail,
@@ -4452,7 +4816,7 @@ function createGoalService(host) {
       const rt = state.runtimes.find((item) => item.goalID === id);
       if (rt) {
         Object.assign(rt, acquireLease(rt, g.config.timeoutMs || 300000));
-        rt.activeRunID = randomUUID5();
+        rt.activeRunID = randomUUID6();
         rt.activePromptMessageID = newPromptMessageID();
         rt.runCount = 1;
         rt.budgetTurnCount = 1;
@@ -4463,7 +4827,7 @@ function createGoalService(host) {
     runtime = state2.runtimes.find((r) => r.goalID === id);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID5(),
+      eventID: randomUUID6(),
       goalID: id,
       type: "goal.created",
       name: input.name,
@@ -4475,7 +4839,7 @@ function createGoalService(host) {
     if (runtime) {
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID5(),
+        eventID: randomUUID6(),
         goalID: id,
         type: "run.started",
         runID: runtime.activeRunID,
@@ -4558,12 +4922,20 @@ function createGoalService(host) {
     const goal = preState.goals.find((g) => g.id === goalID);
     if (!goal || goal.status !== "active")
       return;
+    if (goal.config.write_scope !== undefined && !host.scopedExecution)
+      return;
+    if (goal.scopeClosing || preState.workspaceCalls?.some((call) => call.goalID === goalID) || preState.workspaceOperation)
+      return;
     const runtime = preState.runtimes.find((r) => r.goalID === goalID);
     if (!runtime)
       return;
     if (runtime.phase === "running" && leaseIsValid(runtime))
       return;
     let session = sessions.get(goalID);
+    if (session && session.workerSessionID !== goal.workerSessionID) {
+      sessions.delete(goalID);
+      session = undefined;
+    }
     if (!session && goal.workerSessionID) {
       session = {
         goalID: goal.id,
@@ -4572,6 +4944,8 @@ function createGoalService(host) {
       };
       sessions.set(goalID, session);
     }
+    if (!session && !goal.workerSessionID)
+      session = await ensureWorkerSession(directory, goal);
     if (!session)
       return;
     if (!opts?.force && !await workers.isIdle(session.workerSessionID))
@@ -4595,7 +4969,7 @@ function createGoalService(host) {
         return s;
       const timeoutMs = g.config.timeoutMs || 300000;
       Object.assign(rt, acquireLease(rt, timeoutMs));
-      rt.activeRunID = randomUUID5();
+      rt.activeRunID = randomUUID6();
       rt.activePromptMessageID = newPromptMessageID();
       rt.runCount += 1;
       if (rt.freeRetryPending) {
@@ -4613,7 +4987,7 @@ function createGoalService(host) {
       return;
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID5(),
+      eventID: randomUUID6(),
       goalID,
       type: "run.started",
       runID: freshRuntime.activeRunID,
@@ -4654,7 +5028,7 @@ function createGoalService(host) {
       const artifactDir = freshGoal.config.artifactDir;
       if (artifactDir) {
         try {
-          const files = await fs2.readdir(artifactDir);
+          const files = await fs3.readdir(artifactDir);
           verification = { artifactSummary: files.length ? `${files.length} file(s): ${files.slice(0, 8).join(", ")}` : "no artifacts yet" };
         } catch {
           verification = { artifactSummary: "no artifacts yet" };
@@ -4702,7 +5076,7 @@ function createGoalService(host) {
       return { ok: false, message: "Goal not found." };
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID5(),
+      eventID: randomUUID6(),
       goalID,
       type: "goal.interactive_changed",
       interactive,
@@ -4724,11 +5098,25 @@ function createGoalService(host) {
       return;
     if (!canTransition(goal.status, "paused", "user"))
       return;
+    if (goal.config.write_scope !== undefined) {
+      await mutateState(directory, `goal.pause-closing:${goalID}`, async (s) => {
+        const g = s.goals.find((item) => item.id === goalID);
+        if (g) {
+          g.scopeClosing = true;
+          retireWorker(s, g);
+        }
+        return s;
+      });
+      if (goal.workerSessionID)
+        await workers.abortWorker(goal.workerSessionID);
+      sessions.delete(goalID);
+    }
     const state = await mutateState(directory, `goal.pause:${goalID}`, async (s) => {
       const g = s.goals.find((item) => item.id === goalID);
       if (!g)
         return s;
       g.status = "paused";
+      g.scopeClosing = false;
       g.updatedAt = new Date().toISOString();
       const rt = s.runtimes.find((r) => r.goalID === goalID);
       if (rt) {
@@ -4742,14 +5130,14 @@ function createGoalService(host) {
       workerSessionID: goal.workerSessionID,
       startedAt: goal.createdAt
     } : undefined);
-    if (session) {
+    if (session && goal.config.write_scope === undefined) {
       await workers.abortWorker(session.workerSessionID);
       sessions.delete(goalID);
     }
     await cancelAwaitsForGoal(directory, goalID, "goal paused").catch(() => {});
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID5(),
+      eventID: randomUUID6(),
       goalID,
       type: "goal.status_changed",
       from: "active",
@@ -4767,6 +5155,11 @@ function createGoalService(host) {
       if (!canTransition(goal.status, "active", "user"))
         return state;
       assertWorkspaceWriteAvailable(state, goal, goal.ownerSessionID);
+      if (goal.config.write_scope !== undefined) {
+        retireWorker(state, goal);
+        goal.workerSessionID = undefined;
+        sessions.delete(goalID);
+      }
       goal.status = "active";
       goal.updatedAt = new Date().toISOString();
       resumed = true;
@@ -4788,7 +5181,7 @@ function createGoalService(host) {
     }
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID5(),
+      eventID: randomUUID6(),
       goalID,
       type: "goal.status_changed",
       from: "paused",
@@ -4805,6 +5198,11 @@ function createGoalService(host) {
       if (!goal || goal.status !== "blocked")
         return state;
       assertWorkspaceWriteAvailable(state, goal, goal.ownerSessionID);
+      if (goal.config.write_scope !== undefined) {
+        retireWorker(state, goal);
+        goal.workerSessionID = undefined;
+        sessions.delete(goalID);
+      }
       goal.status = "active";
       goal.updatedAt = new Date().toISOString();
       retried = true;
@@ -4840,7 +5238,7 @@ function createGoalService(host) {
     }
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID5(),
+      eventID: randomUUID6(),
       goalID,
       type: "goal.status_changed",
       from: "blocked",
@@ -4855,6 +5253,14 @@ function createGoalService(host) {
     const goal = state.goals.find((g) => g.id === goalID);
     if (!goal)
       return;
+    await mutateState(directory, `goal.clear-closing:${goalID}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goalID);
+      if (g) {
+        g.scopeClosing = true;
+        retireWorker(s, g);
+      }
+      return s;
+    });
     const session = sessions.get(goalID) || (goal.workerSessionID ? {
       goalID: goal.id,
       workerSessionID: goal.workerSessionID,
@@ -4865,6 +5271,15 @@ function createGoalService(host) {
       sessions.delete(goalID);
     }
     await mutateState(directory, `goal.clear:${goalID}`, async (s) => {
+      if (s.workspaceCalls?.some((call) => call.goalID === goalID) || s.workspaceOperation?.goalID === goalID) {
+        const g = s.goals.find((item) => item.id === goalID);
+        if (g) {
+          g.status = "paused";
+          g.scopeClearPending = true;
+        }
+        s.commandAwaits = (s.commandAwaits ?? []).filter((a) => a.goalID !== goalID);
+        return s;
+      }
       s.goals = s.goals.filter((g) => g.id !== goalID);
       s.runtimes = s.runtimes.filter((r) => r.goalID !== goalID);
       s.commandAwaits = (s.commandAwaits ?? []).filter((a) => a.goalID !== goalID);
@@ -4872,7 +5287,7 @@ function createGoalService(host) {
     });
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID5(),
+      eventID: randomUUID6(),
       goalID,
       type: "goal.cleared",
       timestamp: new Date().toISOString(),
@@ -4892,6 +5307,22 @@ function createGoalService(host) {
         continue;
       if (goal.status === "paused")
         continue;
+      if (goal.config.write_scope !== undefined && !host.scopedExecution) {
+        await mutateState(directory, `reconcile.unsupported-scope:${goal.id}`, async (s) => {
+          const g = s.goals.find((item) => item.id === goal.id);
+          if (g) {
+            g.scopeClosing = true;
+            retireWorker(s, g);
+            g.status = "blocked";
+            g.blocker = { reason: "Host lacks audited scoped execution guard.", needed: "Load guarded v2 execution surface; do not resume scoped goals on v1.", at: new Date().toISOString() };
+          }
+          return s;
+        });
+        if (goal.workerSessionID)
+          await workers.abortWorker(goal.workerSessionID);
+        sessions.delete(goal.id);
+        continue;
+      }
       if (!goal.workerSessionID) {
         let worker;
         try {
@@ -4967,6 +5398,11 @@ function createGoalService(host) {
     if (goal.status !== "active") {
       return { ok: false, message: `Goal is ${goal.status}; resume or retry it before nudging.` };
     }
+    if (goal.config.write_scope !== undefined) {
+      await pauseUnlocked(directory, goalID);
+      await resumeUnlocked(directory, goalID);
+      return { ok: true, message: `Re-prompted protected worker for "${goal.name}" in a freshly fenced session.` };
+    }
     const cleared = await mutateState(directory, `goal.nudge:${goalID}`, async (s) => {
       const rt = s.runtimes.find((r) => r.goalID === goalID);
       if (!rt)
@@ -4997,6 +5433,10 @@ function createGoalService(host) {
     await appendGoalInbox(directory, goalID, "user", trimmed);
     if (goal.status !== "active") {
       return { ok: true, message: `Queued for "${goal.name}" (goal is ${goal.status}; delivers on the next active turn).` };
+    }
+    if (goal.config.write_scope !== undefined) {
+      await continueTurnUnlocked(directory, goalID, { bare: true });
+      return { ok: true, message: `Queued for "${goal.name}"; protected workers receive it on the next quiescent turn.` };
     }
     const cleared = await mutateState(directory, `goal.send:${goalID}`, async (s) => {
       const rt = s.runtimes.find((r) => r.goalID === goalID);
@@ -5043,6 +5483,11 @@ function createGoalService(host) {
     const goal = preState.goals.find((g) => g.id === goalID);
     if (!goal)
       return { ok: false, message: "Goal not found." };
+    if (goal.config.write_scope !== undefined && goal.status === "active") {
+      await pauseUnlocked(directory, goalID);
+      await resumeUnlocked(directory, goalID);
+      return { ok: true, message: `Protected worker for "${goal.name}" aborted and replaced with a fenced session.` };
+    }
     const workerID = sessions.get(goalID)?.workerSessionID || goal.workerSessionID;
     if (!workerID)
       return { ok: false, message: `Goal "${goal.name}" has no worker session to abort.` };
@@ -5079,12 +5524,12 @@ function createGoalService(host) {
   function accountUsage(directory, goalID) {
     return withGoalOperation(goalID, () => accountUsageUnlocked(directory, goalID));
   }
-  return { start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, observeProviderError, compact };
+  return { scopedExecution: host.scopedExecution === true, start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, observeProviderError, compact };
 }
 
 // src/application/schedule-worker.ts
 init_state_repository();
-import { randomUUID as randomUUID6 } from "crypto";
+import { randomUUID as randomUUID7 } from "crypto";
 function createScheduleWorker(options) {
   const { directory, goalService } = options;
   const intervalMs = options.intervalMs ?? 5000;
@@ -5128,14 +5573,6 @@ function createScheduleWorker(options) {
         continue;
       if (Date.now() < Date.parse(nextAt))
         continue;
-      const activeWriter = state.goals.find((g) => g.id !== goal.id && g.status === "active" && g.config.workspaceWrite);
-      if (goal.config.workspaceWrite && activeWriter) {
-        await logServerEvent(directory, "schedule.skipped-writer-active", {
-          goalID: goal.id,
-          activeWriter: activeWriter.id
-        });
-        continue;
-      }
       if (runtime.phase === "running" || runtime.phase === "queued" || runtime.phase === "compacting")
         continue;
       if (leaseIsValid(runtime))
@@ -5145,6 +5582,8 @@ function createScheduleWorker(options) {
         const rt = s.runtimes.find((x) => x.goalID === goal.id);
         if (!g || !rt)
           return s;
+        if (g.config.write_scope !== undefined && !goalService.scopedExecution)
+          return s;
         if (g.status !== "complete")
           return s;
         const curCount = rt.scheduleRunCount ?? 0;
@@ -5153,6 +5592,15 @@ function createScheduleWorker(options) {
         const curNext = rt.nextRunAt;
         if (!curNext || Date.now() < Date.parse(curNext))
           return s;
+        try {
+          assertScopeAvailable(s, g);
+        } catch {
+          return s;
+        }
+        if (g.config.write_scope !== undefined) {
+          retireWorker(s, g);
+          g.workerSessionID = undefined;
+        }
         g.status = "active";
         g.updatedAt = new Date().toISOString();
         g.blocker = undefined;
@@ -5172,7 +5620,7 @@ function createScheduleWorker(options) {
         continue;
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID6(),
+        eventID: randomUUID7(),
         goalID: goal.id,
         type: "schedule.tick",
         scheduleRunCount: count,
@@ -5198,7 +5646,7 @@ function createScheduleWorker(options) {
 }
 
 // src/v2/native-server.ts
-import { randomUUID as randomUUID7 } from "crypto";
+import { randomUUID as randomUUID8 } from "crypto";
 
 // src/v2/native-bridge.ts
 class NativeBridgeError extends Error {
@@ -5340,7 +5788,7 @@ async function setupNativeServer(context) {
     bridge,
     requestWorker: async (input) => {
       const request = {
-        requestID: `req_${randomUUID7()}`,
+        requestID: `req_${randomUUID8()}`,
         goalID: input.goalID ?? "",
         parentSessionID: input.parentSessionID,
         title: input.title,
@@ -5609,9 +6057,9 @@ function createCommandHost(opts) {
 }
 
 // src/application/command-service.ts
-import { randomUUID as randomUUID8 } from "crypto";
-import { promises as fs3 } from "fs";
-import path3 from "path";
+import { randomUUID as randomUUID9 } from "crypto";
+import { promises as fs4 } from "fs";
+import path5 from "path";
 
 // src/domain/command-session.ts
 function normalizeTimeoutSeconds(timeoutSeconds) {
@@ -5899,7 +6347,7 @@ function shellJoin(command, args) {
   return [command, ...args].map(shellQuote).join(" ");
 }
 function loopCommandsDir(directory) {
-  return path3.join(directory, ".opencode", "loopd", "commands");
+  return path5.join(directory, ".opencode", "loopd", "commands");
 }
 function createCommandService(host, opts) {
   const live = new Map;
@@ -5973,7 +6421,7 @@ function createCommandService(host, opts) {
   function watchLedger(directory, commandID, type, extra) {
     return appendEvent(directory, {
       version: 1,
-      eventID: randomUUID8(),
+      eventID: randomUUID9(),
       commandID,
       type,
       timestamp: new Date().toISOString(),
@@ -6297,15 +6745,15 @@ function createCommandService(host, opts) {
     await appendCommandLog(directory, id, chunk);
     let retainedBytes = 0;
     let truncated = false;
-    const file = path3.join(loopCommandsDir(directory), `${id}.log`);
-    const stat = await fs3.stat(file);
+    const file = path5.join(loopCommandsDir(directory), `${id}.log`);
+    const stat = await fs4.stat(file);
     retainedBytes = stat.size;
     if (stat.size > MAX_COMMAND_OUTPUT_BYTES) {
-      const fh = await fs3.open(file, "r");
+      const fh = await fs4.open(file, "r");
       try {
         const buf = Buffer.alloc(MAX_COMMAND_OUTPUT_BYTES);
         await fh.read(buf, 0, buf.length, stat.size - buf.length);
-        await fs3.writeFile(file, buf);
+        await fs4.writeFile(file, buf);
       } finally {
         await fh.close();
       }
@@ -6450,7 +6898,7 @@ function createCommandService(host, opts) {
     }).catch(() => {});
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID8(),
+      eventID: randomUUID9(),
       commandID: id,
       type: "command.exited",
       exitCode: info.exitCode,
@@ -6495,90 +6943,96 @@ function createCommandService(host, opts) {
         watchState = initialWatchState();
       }
       const startedAt = new Date;
-      const id = randomUUID8();
+      const id = randomUUID9();
       const cwd = input.cwd || directory;
       const useShell = input.shell === true;
       const spawnOpts = useShell ? { command: "/bin/sh", args: ["-c", shellJoin(command, input.args ?? [])], cwd, cols: input.cols, rows: input.rows, env: input.env } : { command, args: input.args ?? [], cwd, cols: input.cols, rows: input.rows, env: input.env };
       const pending = [];
       let ready = false;
-      const handle = host.spawn(spawnOpts, (chunk) => {
-        if (!ready)
-          pending.push({ type: "output", chunk });
-        else
-          enqueue(id, () => persistOutput(directory, id, chunk)).catch(() => {});
-      }, (info) => {
-        if (!ready)
-          pending.push({ type: "exit", info });
-        else
-          enqueue(id, () => persistExit(directory, id, info)).catch(() => {});
-      });
-      const session = createCommandSession({
-        id,
-        title,
-        command,
-        args: input.args ?? [],
-        cwd,
-        ownerSessionID: input.ownerSessionID,
-        goalID: input.goalID,
-        notifyOnExit: input.notifyOnExit,
-        notifySuccessfulExit: true,
-        pid: handle.pid,
-        cols: input.cols,
-        rows: input.rows,
-        shell: useShell ? true : undefined,
-        timeoutSeconds,
-        deadlineAt: timeoutSeconds !== undefined ? computeDeadlineAt(startedAt, timeoutSeconds) : undefined,
-        envKeys: input.env ? Object.keys(input.env) : undefined,
-        watchFilter,
-        watchUntil,
-        watchIgnoreCase: input.watchIgnoreCase,
-        watchUntilAction: watcher?.untilAction,
-        watchState
-      });
+      const scopeCallID = `command-start:${id}`;
+      await beforeWorkspaceTool(directory, { tool: "loopd_command_start", sessionID: input.ownerSessionID, callID: scopeCallID }, {});
       try {
-        await mutateState(directory, `cmd.start:${id}`, async (s) => {
-          s.commands = [...s.commands ?? [], session];
-          return s;
+        const handle = host.spawn(spawnOpts, (chunk) => {
+          if (!ready)
+            pending.push({ type: "output", chunk });
+          else
+            enqueue(id, () => persistOutput(directory, id, chunk)).catch(() => {});
+        }, (info) => {
+          if (!ready)
+            pending.push({ type: "exit", info });
+          else
+            enqueue(id, () => persistExit(directory, id, info)).catch(() => {});
         });
-      } catch (error) {
-        handle.terminate();
-        const exited = await Promise.race([
-          handle.exited().then(() => true, () => true),
-          new Promise((resolve) => setTimeout(() => resolve(false), 1000))
-        ]);
-        if (!exited && handle.isAlive())
-          handle.kill();
-        throw error;
+        const session = createCommandSession({
+          id,
+          title,
+          command,
+          args: input.args ?? [],
+          cwd,
+          ownerSessionID: input.ownerSessionID,
+          goalID: input.goalID,
+          notifyOnExit: input.notifyOnExit,
+          notifySuccessfulExit: true,
+          pid: handle.pid,
+          cols: input.cols,
+          rows: input.rows,
+          shell: useShell ? true : undefined,
+          timeoutSeconds,
+          deadlineAt: timeoutSeconds !== undefined ? computeDeadlineAt(startedAt, timeoutSeconds) : undefined,
+          envKeys: input.env ? Object.keys(input.env) : undefined,
+          watchFilter,
+          watchUntil,
+          watchIgnoreCase: input.watchIgnoreCase,
+          watchUntilAction: watcher?.untilAction,
+          watchState
+        });
+        try {
+          await mutateState(directory, `cmd.start:${id}`, async (s) => {
+            s.commands = [...s.commands ?? [], session];
+            return s;
+          });
+        } catch (error) {
+          handle.terminate();
+          const exited = await Promise.race([
+            handle.exited().then(() => true, () => true),
+            new Promise((resolve) => setTimeout(() => resolve(false), 1000))
+          ]);
+          if (!exited && handle.isAlive())
+            handle.kill();
+          throw error;
+        }
+        live.set(id, { handle, buffers: [], bufferedBytes: 0 });
+        if (watcher)
+          watchers.set(id, watcher);
+        if (timeoutSeconds !== undefined)
+          scheduleTimeout(directory, id, input.ownerSessionID, timeoutSeconds);
+        rememberDir(id, directory);
+        await appendEvent(directory, {
+          version: 1,
+          eventID: randomUUID9(),
+          ...input.goalID ? { goalID: input.goalID } : {},
+          commandID: id,
+          type: "command.started",
+          title,
+          timestamp: new Date().toISOString(),
+          revision: 0
+        }).catch(() => {});
+        try {
+          const fresh = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
+          if (fresh)
+            emitBroker(id, { type: "status", command: fresh });
+        } catch {}
+        const initialEvents = pending.splice(0);
+        ready = true;
+        const initialOperations = [];
+        for (const event of initialEvents) {
+          initialOperations.push(event.type === "output" ? enqueue(id, () => persistOutput(directory, id, event.chunk)) : enqueue(id, () => persistExit(directory, id, event.info)));
+        }
+        await Promise.all(initialOperations);
+        return await service.get(directory, id, input.ownerSessionID) ?? session;
+      } finally {
+        await afterWorkspaceTool(directory, input.ownerSessionID, scopeCallID);
       }
-      live.set(id, { handle, buffers: [], bufferedBytes: 0 });
-      if (watcher)
-        watchers.set(id, watcher);
-      if (timeoutSeconds !== undefined)
-        scheduleTimeout(directory, id, input.ownerSessionID, timeoutSeconds);
-      rememberDir(id, directory);
-      await appendEvent(directory, {
-        version: 1,
-        eventID: randomUUID8(),
-        ...input.goalID ? { goalID: input.goalID } : {},
-        commandID: id,
-        type: "command.started",
-        title,
-        timestamp: new Date().toISOString(),
-        revision: 0
-      }).catch(() => {});
-      try {
-        const fresh = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
-        if (fresh)
-          emitBroker(id, { type: "status", command: fresh });
-      } catch {}
-      const initialEvents = pending.splice(0);
-      ready = true;
-      const initialOperations = [];
-      for (const event of initialEvents) {
-        initialOperations.push(event.type === "output" ? enqueue(id, () => persistOutput(directory, id, event.chunk)) : enqueue(id, () => persistExit(directory, id, event.info)));
-      }
-      await Promise.all(initialOperations);
-      return await service.get(directory, id, input.ownerSessionID) ?? session;
     },
     async list(directory, ownerSessionID) {
       const s = await readState(directory);
@@ -6655,16 +7109,22 @@ function createCommandService(host, opts) {
       return { session, text: file.text, totalBytes: session.outputBytes, startByte: file.startByte, live: session.status === "running" };
     },
     async write(directory, id, ownerSessionID, data) {
-      const session = await service.get(directory, id, ownerSessionID);
-      if (!session)
-        return { ok: false, message: "Command not found." };
-      if (session.status !== "running")
-        return { ok: false, message: `Command is ${session.status}; only running commands accept input.` };
-      const entry = live.get(id);
-      const ok = entry ? entry.handle.write(data) : false;
-      if (!ok)
-        return { ok: false, message: "Process input unavailable (no live handle \u2014 host may have restarted; reconcile marks it honestly)." };
-      return { ok: true, message: `Sent ${Buffer.byteLength(data)} byte(s) to "${session.title}".` };
+      const scopeCallID = `command-write:${randomUUID9()}`;
+      await beforeWorkspaceTool(directory, { tool: "loopd_command_write", sessionID: ownerSessionID, callID: scopeCallID }, {});
+      try {
+        const session = await service.get(directory, id, ownerSessionID);
+        if (!session)
+          return { ok: false, message: "Command not found." };
+        if (session.status !== "running")
+          return { ok: false, message: `Command is ${session.status}; only running commands accept input.` };
+        const entry = live.get(id);
+        const ok = entry ? entry.handle.write(data) : false;
+        if (!ok)
+          return { ok: false, message: "Process input unavailable (no live handle \u2014 host may have restarted; reconcile marks it honestly)." };
+        return { ok: true, message: `Sent ${Buffer.byteLength(data)} byte(s) to "${session.title}".` };
+      } finally {
+        await afterWorkspaceTool(directory, ownerSessionID, scopeCallID);
+      }
     },
     async resize(directory, id, ownerSessionID, cols, rows) {
       const session = await service.get(directory, id, ownerSessionID);
@@ -7051,6 +7511,9 @@ function createCommandService(host, opts) {
           const x = (s.commands ?? []).find((y) => y.id === c.id);
           if (x && x.status === "running") {
             x.status = "missing";
+            s.orphanedCommandProcesses ??= [];
+            if (!s.orphanedCommandProcesses.some((process2) => process2.commandID === x.id))
+              s.orphanedCommandProcesses.push({ commandID: x.id, pid: x.pid });
             x.endReason = "missing";
             x.lastError = deadlinePassed ? `Host restarted or handle lost \u2014 no live execution found (timeoutSeconds=${x.timeoutSeconds ?? "?"}s deadline ${x.deadlineAt} already passed; treated as missing, timeout elapsed). Output log retained; remove to clean up.` : "Host restarted or handle lost \u2014 no live execution found. Output log retained; remove to clean up.";
             x.updatedAt = new Date().toISOString();
@@ -7102,7 +7565,7 @@ function createCommandService(host, opts) {
 }
 
 // src/application/command-event-broker.ts
-import { randomUUID as randomUUID9 } from "crypto";
+import { randomUUID as randomUUID10 } from "crypto";
 function safeDeliver(sink, msg) {
   try {
     sink(msg);
@@ -7145,7 +7608,7 @@ function createCommandEventBroker(resolver) {
         throw new Error("ownerSessionID is required.");
       if (typeof sink !== "function")
         throw new Error("sink must be a function.");
-      const sinkID = randomUUID9();
+      const sinkID = randomUUID10();
       const entry = { sinkID, sink, state: "subscribing", buffer: [] };
       entriesFor(commandID).set(sinkID, entry);
       try {
@@ -7234,11 +7697,11 @@ function createCommandEventBroker(resolver) {
 }
 
 // src/server/command-stream-server.ts
-import { randomBytes, randomUUID as randomUUID10, timingSafeEqual } from "crypto";
-import { promises as fs4 } from "fs";
-import path4 from "path";
+import { randomBytes, randomUUID as randomUUID11, timingSafeEqual } from "crypto";
+import { promises as fs5 } from "fs";
+import path6 from "path";
 function streamEndpointPath(directory) {
-  return path4.join(directory, ".opencode", "loopd", "commands", ".stream-endpoint.json");
+  return path6.join(directory, ".opencode", "loopd", "commands", ".stream-endpoint.json");
 }
 function isPidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0)
@@ -7268,7 +7731,7 @@ var MAX_BUFFERED_BYTES = 512 * 1024;
 function createCommandStreamServer(directory, commandService, broker) {
   const endpointPath = streamEndpointPath(directory);
   const token = randomBytes(32).toString("hex");
-  const generation = randomUUID10();
+  const generation = randomUUID11();
   const startedAt = new Date().toISOString();
   let server;
   let serverURL;
@@ -7484,10 +7947,10 @@ function createCommandStreamServer(directory, commandService, broker) {
       generation,
       startedAt
     };
-    await fs4.mkdir(path4.dirname(endpointPath), { recursive: true });
-    await fs4.writeFile(endpointPath, JSON.stringify(endpoint, null, 2) + `
+    await fs5.mkdir(path6.dirname(endpointPath), { recursive: true });
+    await fs5.writeFile(endpointPath, JSON.stringify(endpoint, null, 2) + `
 `, { mode: 384 });
-    await fs4.chmod(endpointPath, 384);
+    await fs5.chmod(endpointPath, 384);
   }
   return {
     get url() {
@@ -7501,7 +7964,7 @@ function createCommandStreamServer(directory, commandService, broker) {
         return;
       started = true;
       try {
-        const previous = await fs4.readFile(endpointPath, "utf8").then((text) => JSON.parse(text), () => {
+        const previous = await fs5.readFile(endpointPath, "utf8").then((text) => JSON.parse(text), () => {
           return;
         });
         if (previous && typeof previous.pid === "number" && isPidAlive(previous.pid) && previous.pid !== process.pid) {
@@ -7571,10 +8034,10 @@ function createCommandStreamServer(directory, commandService, broker) {
       server = undefined;
       serverURL = undefined;
       try {
-        const text = await fs4.readFile(endpointPath, "utf8");
+        const text = await fs5.readFile(endpointPath, "utf8");
         const current = JSON.parse(text);
         if (current?.generation === generation) {
-          await fs4.unlink(endpointPath);
+          await fs5.unlink(endpointPath);
         } else {
           logServerEvent(directory, "command-stream.keep-endpoint", {
             reason: "generation mismatch \u2014 another server owns the file"
@@ -7588,7 +8051,7 @@ function createCommandStreamServer(directory, commandService, broker) {
 
 // src/server/goal-tools.ts
 init_state_repository();
-import { randomUUID as randomUUID11 } from "crypto";
+import { randomUUID as randomUUID12 } from "crypto";
 import { tool } from "@opencode-ai/plugin/tool";
 // src/domain/verification.ts
 var MAX_RECENT_ATTEMPTS = 10;
@@ -7603,11 +8066,54 @@ function appendVerificationAttempt(recent, attempt) {
 // src/server/goal-tools.ts
 import { exec as execChild } from "child_process";
 import { promisify } from "util";
+
+// src/application/goal-scope.ts
+init_state_repository();
+init_workspace_scope();
+class GoalScopeConflictError extends Error {
+  conflict;
+  kind;
+  constructor(conflict, kind) {
+    super(scopeConflictMessage(conflict));
+    this.conflict = conflict;
+    this.kind = kind;
+    this.name = "GoalScopeConflictError";
+  }
+}
+async function claimGoalScope(directory, goalID, workerSessionID, generation, paths) {
+  let claimed = [];
+  await mutateState(directory, `goal.claim-scope:${goalID}`, async (state) => {
+    const goal = state.goals.find((item) => item.id === goalID);
+    const runtime = state.runtimes.find((item) => item.goalID === goalID);
+    if (!goal || goal.workerSessionID !== workerSessionID || runtime?.runGeneration !== generation) {
+      throw new Error("Scope claim denied: stale worker session or run generation. Read get_goal before claiming.");
+    }
+    if (goal.status !== "active")
+      throw new Error(`Scope claim denied: goal is ${goal.status}, not active.`);
+    if (goal.config.workspaceWrite === false)
+      throw new Error("Read-only/artifact goals cannot claim shared workspace files.");
+    if (goal.config.write_scope === undefined)
+      throw new Error("Legacy whole-workspace goals already own the workspace; explicit scopes must be selected at creation.");
+    const additions = await canonicalWriteScope(directory, paths);
+    claimed = [...new Set([...goal.config.write_scope, ...additions])].sort();
+    const candidate = { ...goal, config: { ...goal.config, write_scope: claimed } };
+    const conflict = findScopeConflict(heldGoals(state).map((owner) => ({ ...owner, status: "active" })), candidate);
+    if (conflict)
+      throw new GoalScopeConflictError(conflict, goal.config.write_scope.length === 0 ? "initial" : "expansion");
+    assertScopeAvailable(state, candidate);
+    goal.config.write_scope = claimed;
+    goal.updatedAt = new Date().toISOString();
+    return state;
+  });
+  return claimed;
+}
+
+// src/server/goal-tools.ts
 var execAsync = promisify(execChild);
 function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
   return {
     loopd_create_goal: tool({
-      description: "Create a new background loop GOAL: an autonomous AI worker that loops turn-by-turn on a multi-step objective until deterministic checks pass or it needs you (contract: objective + checks + agent/model + workspaceWrite). " + "The engine spawns a dedicated worker session that does the work autonomously \u2014 it never runs in this chat. " + "Use this for AI reasoning work spanning multiple turns (implement a feature, fix a failing suite, research and write a report) \u2014 NOT for running a single process you just want to start, watch, and type into. " + "For that (dev servers, `npm test --watch`, REPLs, log tails, one-off scripts, interactive shells with a fullscreen terminal UI), use loopd_command_start instead: it is lighter-weight, has no agent/checks/turn loop, and is a raw OS process, not an AI worker. " + "Call this after clarifying the contract with the user. " + "Worker identity is free-form: agent is any OpenCode agent name (built-in, ~/.config/opencode/agents/*.md, or opencode.jsonc agent.* \u2014 discover with `opencode agent list`), " + 'model is any "providerID/modelID" (discover with `opencode models [provider]`). Omit both by default \u2014 when omitted, both inherit the CALLING session\'s live agent/model (read at creation), then plugin defaultAgent/defaultModel. ' + "Only pass agent/model when the caller explicitly requests a different identity or the task needs it; explicit values freeze identity and break session upgrades. " + "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " + "Workspace-writing goals are serialized (only one active writer) and require checks. " + "Monitor with the /loop dashboard's Goals tab (Tab/h to switch there if Commands is focused).",
+      description: "Create a new background loop GOAL: an autonomous AI worker that loops turn-by-turn on a multi-step objective until deterministic checks pass or it needs you (contract: objective + checks + agent/model + workspaceWrite). " + "The engine spawns a dedicated worker session that does the work autonomously \u2014 it never runs in this chat. " + "Use this for AI reasoning work spanning multiple turns (implement a feature, fix a failing suite, research and write a report) \u2014 NOT for running a single process you just want to start, watch, and type into. " + "For that (dev servers, `npm test --watch`, REPLs, log tails, one-off scripts, interactive shells with a fullscreen terminal UI), use loopd_command_start instead: it is lighter-weight, has no agent/checks/turn loop, and is a raw OS process, not an AI worker. " + "Call this after clarifying the contract with the user. " + "Worker identity is free-form: agent is any OpenCode agent name (built-in, ~/.config/opencode/agents/*.md, or opencode.jsonc agent.* \u2014 discover with `opencode agent list`), " + 'model is any "providerID/modelID" (discover with `opencode models [provider]`). Omit both by default \u2014 when omitted, both inherit the CALLING session\'s live agent/model (read at creation), then plugin defaultAgent/defaultModel. ' + "Only pass agent/model when the caller explicitly requests a different identity or the task needs it; explicit values freeze identity and break session upgrades. " + "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " + "Workspace-writing goals require checks. Exact disjoint write_scope goals may run concurrently on enforcing hosts; omitted scope retains whole-workspace exclusivity. " + "Monitor with the /loop dashboard's Goals tab (Tab/h to switch there if Commands is focused).",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
@@ -7618,6 +8124,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         checks: tool.schema.array(tool.schema.string()).optional().describe('Shell commands that must pass for completion to be accepted. E.g. ["npm test"].'),
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
         workspaceWrite: tool.schema.boolean().optional().describe("Whether this goal edits the shared project workspace. Defaults to true; explicitly set false for artifact-only/read-only work."),
+        write_scope: tool.schema.array(tool.schema.string()).optional().describe("Exact workspace-relative file paths (new files allowed, no globs). Absent retains whole-workspace exclusivity; [] starts exploration-only. Claim minimal files before editing."),
         progressFile: tool.schema.string().optional().describe("Markdown file the worker reads/writes as its transaction state."),
         maxTurns: tool.schema.number().optional().describe("Max turns before auto-block."),
         maxNoProgress: tool.schema.number().optional().describe("Block after N turns without progress."),
@@ -7654,6 +8161,8 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
           config.checkCwd = args.checkCwd;
         if (args.workspaceWrite !== undefined)
           config.workspaceWrite = args.workspaceWrite;
+        if (args.write_scope !== undefined)
+          config.write_scope = args.write_scope;
         if (args.progressFile)
           config.progressFile = args.progressFile;
         if (args.maxTurns !== undefined)
@@ -7741,6 +8250,8 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
               interactive: goal.interactive === true,
               checks: resolution.config.checks || [],
               workspaceWrite: resolution.config.workspaceWrite,
+              write_scope: goal.config.write_scope,
+              enforcedScopedExecution: goalService.scopedExecution,
               defaultsApplied: resolution.defaultsApplied,
               name: args.name,
               message: `Goal "${args.name}" created and started in the background. Artifacts: ${goal.config.artifactDir}. Monitor with /loop (<leader>o).`
@@ -7786,8 +8297,52 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         const runtime = state.runtimes.find((r) => r.goalID === goal.id);
         return {
           title: `Goal: ${goal.name}`,
-          output: formatGoalStructured(goal, runtime)
+          output: formatGoalStructured(goal, runtime, goalService.scopedExecution)
         };
+      }
+    }),
+    claim_goal_scope: tool({
+      description: "Atomically add exact files to this worker's write_scope before editing. Start with minimal scope; claim expansion before writing. Conflicts return the owning goal/session and path; initial and expansion failures do not partially acquire files. Coordinate with the owner; never sleep or poll claims. Read-only goals and legacy whole-workspace goals cannot claim.",
+      args: {
+        paths: tool.schema.array(tool.schema.string()).describe("Exact workspace-relative files to add (no globs)."),
+        runGeneration: tool.schema.number().describe("Current runGeneration from get_goal; stale workers are denied.")
+      },
+      execute: async (args, context) => {
+        if (!goalService.scopedExecution)
+          return { title: "Scope denied", output: JSON.stringify({ ok: false, errorCode: "unsupported_scope_host", message: "Use the guarded v2 execution surface; v1 scoped claims are unsupported." }) };
+        const workerID = context?.sessionID || hostSessionID;
+        const goal = findGoalByWorkerSession(await readState(dir), workerID);
+        if (!goal || !workerID)
+          return { title: "Scope denied", output: JSON.stringify({ ok: false, errorCode: "worker_not_found" }) };
+        try {
+          const write_scope = await claimGoalScope(dir, goal.id, workerID, args.runGeneration, args.paths);
+          return { title: "Scope claimed", output: JSON.stringify({ ok: true, goalID: goal.id, write_scope }) };
+        } catch (error) {
+          return {
+            title: "Scope denied",
+            output: JSON.stringify({
+              ok: false,
+              message: error instanceof Error ? error.message : String(error),
+              ...error instanceof GoalScopeConflictError ? { errorCode: "scope_conflict", kind: error.kind, conflict: error.conflict, retry: "coordinate_then_retry" } : { errorCode: "scope_denied" }
+            })
+          };
+        }
+      }
+    }),
+    run_goal_checks: tool({
+      description: "Run only this goal's configured trusted checks under the workspace-wide exclusive operation lock. Source edits are denied while checks run; checks cannot start over in-flight writes. No arbitrary command argument. This is coordination, not an OS/filesystem sandbox. Use instead of shell for scoped verification.",
+      args: {},
+      execute: async (_args, context) => {
+        const workerID = context?.sessionID || hostSessionID;
+        const goal = findGoalByWorkerSession(await readState(dir), workerID);
+        if (!goal || !workerID || goal.status !== "active")
+          return { title: "Verification denied", output: JSON.stringify({ ok: false, message: "An active exact worker session is required." }) };
+        try {
+          const checks = await withWorkspaceOperation(dir, goal.id, workerID, () => runCompletionChecks(goal.config.checks || [], goal.config.checkCwd || dir));
+          return { title: checks.passed ? "Checks passed" : "Checks failed", output: JSON.stringify({ ok: checks.passed, ...checks }) };
+        } catch (error) {
+          return { title: "Verification denied", output: JSON.stringify({ ok: false, message: error instanceof Error ? error.message : String(error) }) };
+        }
       }
     }),
     report_goal_progress: tool({
@@ -7818,10 +8373,10 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
           next: args.next,
           at: new Date().toISOString()
         };
-        await writeState(dir, state);
+        state.revision = (await persistWorkerMutation(dir, goal, runtime, ["active"])).revision;
         const event = {
           version: 1,
-          eventID: randomUUID11(),
+          eventID: randomUUID12(),
           goalID: goal.id,
           type: "goal.progress",
           summary: args.summary,
@@ -7859,7 +8414,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         }
         if (goal.config.checks?.length) {
           const cwd = goal.config.checkCwd || goal.config.artifactDir || dir;
-          const checkResults = await runCompletionChecks(goal.config.checks, cwd);
+          const checkResults = await withWorkspaceOperation(dir, goal.id, goal.workerSessionID, () => runCompletionChecks(goal.config.checks, cwd));
           if (!checkResults.passed) {
             const failureDetails = checkResults.failures.map((f) => {
               const stdoutSnippet = f.stdout ? `
@@ -7886,7 +8441,7 @@ Exit code: ${f.exitCode}${stdoutSnippet}${stderrSnippet}`;
 Working directory: ${cwd}
 
 ${failureDetails}`;
-              attemptID = randomUUID11();
+              attemptID = randomUUID12();
               const verificationAttempt = {
                 id: attemptID,
                 sequence: runtime.evaluatorRejectionCount,
@@ -7931,7 +8486,7 @@ ${failureDetails.slice(0, 500)}`,
             if (attemptID) {
               await appendEvent(dir, {
                 version: 1,
-                eventID: randomUUID11(),
+                eventID: randomUUID12(),
                 goalID: goal.id,
                 type: "goal.completion_rejected",
                 attemptID,
@@ -7949,7 +8504,7 @@ ${failureDetails.slice(0, 500)}`,
             if (blocked && rejectedGoal?.blocker) {
               await appendEvent(dir, {
                 version: 1,
-                eventID: randomUUID11(),
+                eventID: randomUUID12(),
                 goalID: goal.id,
                 type: "goal.blocked",
                 reason: rejectedGoal.blocker.reason,
@@ -8009,7 +8564,7 @@ ${failureDetails.slice(0, 500)}`,
             }
             runtime.updatedAt = new Date().toISOString();
           }
-          const attemptID = randomUUID11();
+          const attemptID = randomUUID12();
           const cwd = goal.config.checkCwd || goal.config.artifactDir || dir;
           const checks = (goal.config.checks || []).map((cmd) => ({
             command: cmd,
@@ -8030,10 +8585,10 @@ ${failureDetails.slice(0, 500)}`,
           runtime.lastVerificationAttempt = verificationAttempt;
           runtime.recentVerificationAttempts = appendVerificationAttempt(runtime.recentVerificationAttempts || [], verificationAttempt);
         }
-        await writeState(dir, state);
+        state.revision = (await persistWorkerMutation(dir, goal, runtime, ["active", "budget_limited"])).revision;
         const event = {
           version: 1,
-          eventID: randomUUID11(),
+          eventID: randomUUID12(),
           goalID: goal.id,
           type: "goal.completed",
           summary: args.summary,
@@ -8090,10 +8645,10 @@ ${failureDetails.slice(0, 500)}`,
           runtime.accountedMessageIDs = [...runtime.accountedMessageIDs ?? [], ...finalUsage.counted].slice(-200);
           runtime.updatedAt = new Date().toISOString();
         }
-        await writeState(dir, state);
+        state.revision = (await persistWorkerMutation(dir, goal, runtime, ["active", "budget_limited"])).revision;
         const event = {
           version: 1,
-          eventID: randomUUID11(),
+          eventID: randomUUID12(),
           goalID: goal.id,
           type: "goal.blocked",
           reason: args.reason,
@@ -8149,7 +8704,7 @@ function findGoalByWorkerSession(state, sessionID) {
     return;
   return state.goals.find((g) => g.workerSessionID === sessionID && (g.status === "active" || g.status === "blocked"));
 }
-function formatGoalStructured(goal, runtime) {
+function formatGoalStructured(goal, runtime, enforcedScopedExecution = false) {
   const output = {
     id: goal.id,
     name: goal.name,
@@ -8164,6 +8719,11 @@ function formatGoalStructured(goal, runtime) {
       checks: goal.config.checks,
       checkCwd: goal.config.checkCwd,
       workspaceWrite: goal.config.workspaceWrite,
+      write_scope: goal.config.write_scope,
+      scopeClosing: goal.scopeClosing === true,
+      scopeClearPending: goal.scopeClearPending === true,
+      scopeRetryPolicy: "coordinate_then_retry_no_automatic_queue",
+      enforcedScopedExecution,
       agent: goal.config.agent,
       model: goal.config.model,
       maxTurns: goal.config.maxTurns,
@@ -8213,6 +8773,25 @@ function formatGoalStructured(goal, runtime) {
     };
   }
   return JSON.stringify(output, null, 2);
+}
+async function persistWorkerMutation(dir, goal, runtime, from) {
+  return mutateState(dir, `worker.transition:${goal.id}`, async (state) => {
+    const current = state.goals.find((item) => item.id === goal.id);
+    const rt = state.runtimes.find((item) => item.goalID === goal.id);
+    if (!current || current.workerSessionID !== goal.workerSessionID || !from.includes(current.status) || current.scopeClosing || runtime && rt?.runGeneration !== runtime.runGeneration) {
+      throw new Error("Worker transition denied: stale session/generation or closing goal.");
+    }
+    current.status = goal.status;
+    current.updatedAt = goal.updatedAt;
+    current.lastProgress = goal.lastProgress;
+    current.completionEvidence = goal.completionEvidence;
+    current.blocker = goal.blocker;
+    if (rt && runtime) {
+      const { activeToolCallIDs, accountedMessageIDs, turnTokensUsed, ...transition } = runtime;
+      Object.assign(rt, transition);
+    }
+    return state;
+  });
 }
 async function runCompletionChecks(checks, cwd) {
   const failures = [];
@@ -8273,14 +8852,14 @@ function describeGoalState(status, phase) {
 }
 
 // src/server/owner-tools.ts
-import { promises as fs5 } from "fs";
+import { promises as fs6 } from "fs";
 function withTimeout2(promise, ms) {
   return Promise.race([
     promise,
     new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms))
   ]);
 }
-function ownerTools(options) {
+function ownerTools2(options) {
   const { directory, host, goalService } = options;
   return {
     loopd_list_models: tool2({
@@ -8448,7 +9027,7 @@ function ownerTools(options) {
             if (!dir)
               return;
             try {
-              const files = await fs5.readdir(dir);
+              const files = await fs6.readdir(dir);
               return files.length ? `${files.length} file(s): ${files.slice(0, 8).join(", ")}` : "no artifacts yet";
             } catch {
               return "no artifacts yet";
@@ -8480,6 +9059,10 @@ function ownerTools(options) {
               checks: goal.config.checks,
               checkCwd: goal.config.checkCwd,
               workspaceWrite: goal.config.workspaceWrite,
+              write_scope: goal.config.write_scope,
+              scopeClosing: goal.scopeClosing === true,
+              scopeClearPending: goal.scopeClearPending === true,
+              scopeRetryPolicy: "coordinate_then_retry_no_automatic_queue",
               agent: goal.config.agent,
               model: goal.config.model,
               fallbackModels: goal.config.fallbackModels ?? [],
@@ -8624,7 +9207,7 @@ function ownerTools(options) {
       }
     }),
     pause_goal: tool2({
-      description: "Pause an active goal: status active \u2192 paused, releaseLease, abortWorker, per-goal mutex. Frees the workspaceWrite slot. Use to investigate or to free the single-writer slot.",
+      description: "Pause an active goal under its operation mutex. Protected writes are fenced before abort; ownership remains held until in-flight tools drain. Use to investigate or release file claims after quiescence.",
       args: {
         goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to pause the first active goal.")
       },
@@ -8668,7 +9251,7 @@ function ownerTools(options) {
       }
     }),
     resume_goal: tool2({
-      description: "Resume a paused (\u2192active, reuses existing worker if sessionStatus still idle/busy) or retry a blocked (\u2192active, resets consecutiveFailures/forceFinish). Fails with 'already active' if another workspaceWrite writer is active. Per-goal mutex.",
+      description: "Resume a paused or retry a blocked goal. Atomically reacquires scope; overlapping ownership/in-flight writes deny activation. Explicit scoped workers rotate sessions to fence late tools; legacy workers retain their session. Per-goal mutex.",
       args: {
         goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to resume the first paused/blocked goal.")
       },
@@ -9236,7 +9819,7 @@ function commandTools(options) {
 // src/server/plugin.ts
 init_state_repository();
 // package.json
-var version = "1.12.0";
+var version = "1.12.3";
 
 // src/server/plugin.ts
 var PLUGIN_ID = "opencode-loopd.server";
@@ -9341,8 +9924,9 @@ function createServerHooks(directory, host, defaults) {
       if (type?.startsWith("session."))
         reconcileInBackground();
     },
-    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }), ...commandTools({ directory, commandService, capabilities: commandHost.capabilities, goalService }) },
+    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools2({ directory, host, goalService }), ...commandTools({ directory, commandService, capabilities: commandHost.capabilities, goalService }) },
     "tool.execute.before": async (input, _output) => {
+      await beforeWorkspaceTool(directory, input, _output.args);
       const activeWorkers = goalService.getActiveWorkers();
       let matchedGoalID;
       for (const [goalID, worker] of activeWorkers) {
@@ -9363,6 +9947,7 @@ function createServerHooks(directory, host, defaults) {
       } catch {}
     },
     "tool.execute.after": async (input, output) => {
+      await afterWorkspaceTool(directory, input.sessionID, input.callID);
       if (input.tool === "loopd_create_goal" || input.tool === "get_goal" || input.tool === "report_goal_progress") {
         ensureStarted();
         reconcileInBackground();
@@ -9474,6 +10059,7 @@ var v2 = {
         for (const [id, definition] of Object.entries(hooks.tool ?? {})) {
           editor.add(toV2Tool(id, definition, directory));
         }
+        guardV2ToolEditor(directory, editor);
       }));
       registrations.push(await context.tool.hook("execute.before", async (input) => {
         await hooks["tool.execute.before"]?.({

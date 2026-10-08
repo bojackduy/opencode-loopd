@@ -29,6 +29,10 @@ Keywords: `opencode` `opencode-plugin` `background-agent` `autonomous` `subagent
 
 ## What it is
 
+Exact-file editing contracts and their execution boundaries are documented in
+[File-scope ownership](docs/file-scope-ownership.md). Use `write_scope: []` to
+explore before claiming files; omitted scope keeps legacy exclusivity.
+
 opencode-loopd is an **OpenCode plugin** (server + TUI) that adds **background goals** to OpenCode. Each goal owns a **worker (child) subagent** that loops autonomously; the **loop engine** drives continuations; the **schedule worker** requeues the same goal on an interval (`scheduleEveryMs`); the **dashboard** and **owner tools** keep the parent in control. Think *Codex goals* or *Claude Code loop*, but native to OpenCode's session model — with scheduled intervals for repetitive dialogues.
 
 ## Install

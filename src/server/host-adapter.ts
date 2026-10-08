@@ -83,6 +83,8 @@ export function isV2PromptMessageID(messageID: string): boolean {
 }
 
 export interface LoopHost {
+  /** True only when an audited execution guard surface is installed. */
+  scopedExecution?: boolean
   listAgents?(): Promise<AgentCatalog>
   switchSessionAgent?(sessionID: string, agent: string): Promise<"applied" | "next-prompt" | "unsupported">
   /** Public catalog only; credentials and quota guesses must never escape. */
@@ -431,6 +433,7 @@ export function createV2Host(
   const directory = context.location.directory
 
   return {
+    scopedExecution: true,
     async listAgents() {
       const switching = typeof context.session.switchAgent === "function" ? "session" : "unsupported"
       if (typeof context.agent?.list !== "function") return emptyAgentCatalog("v2 agent.list", switching)
@@ -715,6 +718,7 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
   const recentNotifies = new Map<string, number>()
 
   return {
+    scopedExecution: true,
     sessions,
     messages,
     prompts,
