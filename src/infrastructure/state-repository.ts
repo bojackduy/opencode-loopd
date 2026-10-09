@@ -512,6 +512,24 @@ export async function readControlResponse(
   }
 }
 
+/**
+ * Acceptance marker for stage-aware client timeouts. Returns the request age
+ * (from the ORIGINAL request file's mtime — rename preserves it) when the
+ * server has claimed the request but not yet responded. Read-only: never
+ * moves or deletes the marker (unlike recoverStaleProcessing).
+ */
+export async function statProcessingRequest(
+  directory: string,
+  requestID: string,
+): Promise<{ requestAgeMs: number } | undefined> {
+  try {
+    const st = await fs.stat(processingFile(directory, requestID))
+    return { requestAgeMs: Math.max(0, Date.now() - st.mtimeMs) }
+  } catch {
+    return undefined
+  }
+}
+
 export async function listPendingRequests(directory: string): Promise<ControlRequest[]> {
   const dir = path.join(controlDir(directory), "requests")
   try {

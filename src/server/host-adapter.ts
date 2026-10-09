@@ -235,7 +235,9 @@ export function createRealHost(client: any, directory: string): LoopHost {
 
     async readSession(sessionID) {
       try {
-        const result = await client.session.get({ path: { id: sessionID } })
+        // Bounded: an unreachable host must resolve unknown (via the catch
+        // below), never hang resume/nudge probes or turn pre-checks.
+        const result = await withTimeout<any>(client.session.get({ path: { id: sessionID } }), 10_000, "OpenCode session.get")
         if (result?.error) return undefined
         const data = result?.data
         if (!data || typeof data !== "object") return undefined
@@ -258,7 +260,11 @@ export function createRealHost(client: any, directory: string): LoopHost {
 
     async sessionStatus(sessionID) {
       try {
-        const result = await client.session.status({})
+        // Bounded: liveness probes sit on the resume/nudge control path. A
+        // timeout resolves "unknown" (fail-closed upstream), never a hang.
+        // NOTE: a missing map entry means idle (OpenCode omits idle sessions);
+        // only request failures / malformed payloads are "unknown".
+        const result = await withTimeout<any>(client.session.status({}), 10_000, "OpenCode session.status")
         if (result?.error) return "unknown"
         const data = result?.data
         if (!data || typeof data !== "object" || Array.isArray(data)) return "unknown"
@@ -279,7 +285,8 @@ export function createRealHost(client: any, directory: string): LoopHost {
 
     async abortSession(sessionID) {
       try {
-        await client.session.abort({ path: { id: sessionID } })
+        // Bounded but still best-effort: abort never gates state transitions.
+        await withTimeout<any>(client.session.abort({ path: { id: sessionID } }), 10_000, "OpenCode session.abort")
       } catch {
         // Best-effort abort
       }
@@ -287,10 +294,12 @@ export function createRealHost(client: any, directory: string): LoopHost {
 
     async readMessages(sessionID, limit = 10) {
       try {
-        const result = await client.session.messages({
+        // Bounded: transcript tails are gathered on every turn; an unreachable
+        // host must yield [] (via the catch below), never stall the turn.
+        const result = await withTimeout<any>(client.session.messages({
           path: { id: sessionID },
           query: { limit },
-        })
+        }), 10_000, "OpenCode session.messages")
         const data = result?.data
         if (!Array.isArray(data)) return []
         return data.map((m: any) => {
@@ -337,7 +346,7 @@ export function createRealHost(client: any, directory: string): LoopHost {
         // not session.compact. Never reuse the old session identity after switch.
         const identity = model ?? (await this.readSession(sessionID))?.model
         if (!identity || typeof client.session.summarize !== "function") return
-        await client.session.summarize({ path: { id: sessionID }, body: identity })
+        await withTimeout<any>(client.session.summarize({ path: { id: sessionID }, body: identity }), 10_000, "OpenCode session.summarize")
       } catch {
         // Best-effort compaction
       }
@@ -355,7 +364,7 @@ export function createRealHost(client: any, directory: string): LoopHost {
       let resolvedAgent = agent?.trim() || undefined
       if (!resolvedAgent) {
         try {
-          const sess = await client.session.get({ path: { id: ownerSessionID } })
+          const sess = await withTimeout<any>(client.session.get({ path: { id: ownerSessionID } }), 10_000, "OpenCode session.get (parent identity)")
           const liveAgent = (sess as any)?.data?.agent
           if (typeof liveAgent === "string" && liveAgent.trim()) resolvedAgent = liveAgent.trim()
         } catch {
@@ -446,7 +455,7 @@ export function createV2Host(
     },
     async switchSessionAgent(sessionID, agent) {
       if (typeof context.session.switchAgent !== "function") return "unsupported"
-      await context.session.switchAgent({ sessionID, agent })
+      await withTimeout(context.session.switchAgent({ sessionID, agent }), 10_000, "OpenCode v2 session.switchAgent")
       return "applied"
     },
     async listModels() {
@@ -467,7 +476,7 @@ export function createV2Host(
     },
     async switchSessionModel(sessionID, model) {
       if (typeof context.session.switchModel !== "function") return "unsupported"
-      await context.session.switchModel({ sessionID, model: { id: model.modelID, providerID: model.providerID } })
+      await withTimeout(context.session.switchModel({ sessionID, model: { id: model.modelID, providerID: model.providerID } }), 10_000, "OpenCode v2 session.switchModel")
       return "applied"
     },
     async createWorker({ parentID, title, agent, model, goalID }) {
@@ -499,7 +508,8 @@ export function createV2Host(
           // Verify native parentage through the supported SessionDomain
           // before trusting the child: a mismatch means the TUI forked the
           // wrong session, and using it would corrupt goal linkage.
-          const child = await context.session.get({ sessionID: childID })
+          // Bounded: verification must not hang startup on a wedged host.
+          const child = await withTimeout(context.session.get({ sessionID: childID }), 10_000, "OpenCode v2 session.get (native parent verify)")
           // Live hosts carry parentage as fork.sessionID (parentID often
           // null) — resolve either shape before trusting the child.
           const actualParent = resolveNativeParentID(child as NativeForkChild)
@@ -514,17 +524,19 @@ export function createV2Host(
           // SessionDomain has NO update method (title rename exists only on
           // the full TUI client) — the TUI-side title already covers it, so
           // re-applying is best-effort and must never fail creation.
-          if (agent) await context.session.switchAgent({ sessionID: childID, agent })
+          // Bounded like the LoopHost switch methods above: post-fork config
+          // must not hang startup on a wedged host.
+          if (agent) await withTimeout(context.session.switchAgent({ sessionID: childID, agent }), 10_000, "OpenCode v2 session.switchAgent (native re-apply)")
           if (model) {
-            await context.session.switchModel({
+            await withTimeout(context.session.switchModel({
               sessionID: childID,
               model: { id: model.modelID, providerID: model.providerID },
-            })
+            }), 10_000, "OpenCode v2 session.switchModel (native re-apply)")
           }
           const rename = (context.session as {
             update?: (input: { sessionID: string; title: string }) => Promise<unknown>
           }).update
-          if (rename) await rename({ sessionID: childID, title })
+          if (rename) await withTimeout(rename({ sessionID: childID, title }), 10_000, "OpenCode v2 session.update (native title)")
           statuses.set(childID, "idle")
           await logServerEvent(directory, "worker.created", {
             parentID,
@@ -544,13 +556,14 @@ export function createV2Host(
       // LIVE PROBE 2026-09-25 (host 0.0.0-beta-19271): session.create
       // rejects explicit undefined for agent ("Expected string | null").
       // Omit unset optionals instead of passing them through.
-      const session = await context.session.create({
+      // Bounded like v1 session.create: startup must fail fast, never hang.
+      const session = await withTimeout(context.session.create({
         title,
         ...(agent !== undefined ? { agent } : {}),
         ...(model !== undefined ? { model: { id: model.modelID, providerID: model.providerID } } : {}),
         location: { directory },
         metadata: { "loopd.parentID": parentID },
-      })
+      }), 10_000, "OpenCode v2 session.create")
       statuses.set(session.id, "idle")
       await logServerEvent(directory, "worker.created", {
         parentID,
@@ -562,12 +575,12 @@ export function createV2Host(
     },
 
     async promptWorker({ sessionID, prompt, messageID, model, agent }) {
-      if (agent) await context.session.switchAgent({ sessionID, agent })
+      if (agent) await withTimeout(context.session.switchAgent({ sessionID, agent }), 10_000, "OpenCode v2 session.switchAgent (prompt)")
       if (model) {
-        await context.session.switchModel({
+        await withTimeout(context.session.switchModel({
           sessionID,
           model: { id: model.modelID, providerID: model.providerID },
-        })
+        }), 10_000, "OpenCode v2 session.switchModel (prompt)")
       }
       // v2 schema-validates the prompt id as SessionMessage.ID ("msg_"
       // prefix). Fail fast with a loopd-scoped message instead of leaking the
@@ -579,11 +592,16 @@ export function createV2Host(
           `Generate IDs with newPromptMessageID() so persisted, delivered, and correlated IDs agree.`,
         )
       }
-      const result = await context.session.prompt({
+      // v2 session.prompt returns the enqueued inbox user message
+      // (SessionInbox.User), NOT the assistant reply: this is prompt
+      // ACCEPTANCE, never LLM completion. A generous bound keeps a wedged
+      // host from stalling resume/nudge forever; a lost race never cancels
+      // the enqueue (late acceptance is verified before any retry re-prompts).
+      const result = await withTimeout(context.session.prompt({
         sessionID,
         id: messageID,
         text: prompt,
-      })
+      }), 30_000, "OpenCode v2 session.prompt (acceptance)")
       statuses.set(sessionID, "busy")
       await logServerEvent(directory, "worker.prompted", { sessionID })
       return { messageID: (result as any)?.id }
@@ -591,7 +609,9 @@ export function createV2Host(
 
     async readSession(sessionID) {
       try {
-        const session = await context.session.get({ sessionID })
+        // Bounded: identity reads sit on turn pre-checks; resolve undefined
+        // (via the catch below), never hang the turn.
+        const session = await withTimeout(context.session.get({ sessionID }), 10_000, "OpenCode v2 session.get")
         const model = session.model
           ? { providerID: session.model.providerID, modelID: session.model.id }
           : undefined
@@ -617,7 +637,9 @@ export function createV2Host(
 
     async readMessages(sessionID, limit = 10) {
       try {
-        const messages = await context.session.context({ sessionID })
+        // Bounded: transcript tails are gathered on every turn; resolve []
+        // (via the catch below), never stall the turn.
+        const messages = await withTimeout(context.session.context({ sessionID }), 10_000, "OpenCode v2 session.context")
         let parentMessageID: string | undefined
         return messages.flatMap((message): SessionMessage[] => {
           if (message.type === "user") {
@@ -662,9 +684,9 @@ export function createV2Host(
       try {
         if (model) {
           if (typeof context.session.switchModel !== "function") return
-          await context.session.switchModel({ sessionID, model: { id: model.modelID, providerID: model.providerID } })
+          await withTimeout(context.session.switchModel({ sessionID, model: { id: model.modelID, providerID: model.providerID } }), 10_000, "OpenCode v2 session.switchModel (compact)")
         }
-        await context.session.command({ sessionID, name: "compact", text: "" })
+        await withTimeout(context.session.command({ sessionID, name: "compact", text: "" }), 10_000, "OpenCode v2 session.command (compact)")
       } catch {
         // Best-effort compaction
       }
@@ -672,7 +694,8 @@ export function createV2Host(
 
     async notifyOwner(ownerSessionID, message) {
       try {
-        await context.session.prompt({ sessionID: ownerSessionID, text: message })
+        // Bounded acceptance like the v1 parent-notify path (10s there).
+        await withTimeout(context.session.prompt({ sessionID: ownerSessionID, text: message }), 10_000, "OpenCode v2 parent notify (acceptance)")
         await logServerEvent(directory, "parent.notified", { ownerSessionID, preview: message.slice(0, 160) })
         return true
       } catch (error) {

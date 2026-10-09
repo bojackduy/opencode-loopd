@@ -63,13 +63,26 @@ afterEach(() => {
 
 function spawnCollector(host: CommandHost, opts: CommandSpawnOptions) {
   let out = ""
-  const handle = host.spawn(
-    opts,
-    (chunk) => {
-      out += chunk
-    },
-    () => {},
-  )
+  // PTY allocation under full-suite load is transiently flaky in constrained
+  // sandboxes (native handle<0). Retry briefly; persistent breakage still
+  // throws and fails the test.
+  let handle: CommandProcessHandle | undefined
+  let lastError: unknown
+  for (let attempt = 0; attempt < 3 && !handle; attempt++) {
+    if (attempt > 0) Bun.sleepSync(200)
+    try {
+      handle = host.spawn(
+        opts,
+        (chunk) => {
+          out += chunk
+        },
+        () => {},
+      )
+    } catch (error) {
+      lastError = error
+    }
+  }
+  if (!handle) throw lastError
   live.push(handle)
   return { handle, text: () => out }
 }

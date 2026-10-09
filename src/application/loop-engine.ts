@@ -18,6 +18,7 @@ import {
 import type { LoopEvent } from "../domain/events"
 import type { GoalService } from "./goal-service"
 import type { LoopHost } from "../server/host-adapter"
+import type { WorkspaceSweepSummary } from "./workspace-execution"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
 
 /** Two-stage idle debounce — require two idle signals 2s apart with no activity in between. */
@@ -879,7 +880,59 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       || (runtime.activeToolCallIDs?.length ?? 0) > 0
   }
 
+  /** Stale scope-ownership sweep — runs on EVERY maintenance pass regardless
+   * of goal status (even with zero known/active workers): a poweroff corpse
+   * (stale scopeClosing + dead workspaceCalls) must heal without any active
+   * goal driving it. Liveness comes from host.sessionStatus. Fail-closed: a
+   * timed-out/unreachable probe ("unknown") KEEPS reservations — timeout is
+   * never proof of death. Only what is provably dead from state alone
+   * (superseded generation, goal gone, age past the force TTL) is reaped
+   * without liveness proof; same-generation + live-or-unknown worker + fresh
+   * activity is always kept. */
+  async function sweepStaleWorkspaceOwnership() {
+    try {
+      const snapshot = await readState(directory)
+      // Cheap pre-check: no reservations/closing flags anywhere means the
+      // sweep could change nothing — skip the state rewrite (mutateState
+      // bumps revision even with no changes).
+      if (
+        !(snapshot.workspaceCalls?.length) &&
+        !snapshot.goals.some((g) => g.scopeClosing || g.scopeClearPending)
+      ) {
+        return
+      }
+      // Fail-closed liveness: every known session counts as live for sweep
+      // purposes. A timed-out/unreachable probe ("unknown") is never proof
+      // of death, and no host reports a confirmed-dead status distinct from
+      // "unknown" — so only state-proven death (superseded generation, goal
+      // gone, age past the force TTL) reaps here. Resume/retry apply their
+      // own bounded tri-state probe and report stage evidence on "unknown".
+      // (No per-session probe: its only consumer was the live/dead bit, and
+      // the dead branch can no longer be proven from a status call.)
+      const { sweepStaleWorkspaceState } = await import("./workspace-execution")
+      let summary: WorkspaceSweepSummary = { reapedCalls: [], resetClosing: [], finalizedClears: [], forceCleared: [] }
+      await mutateState(directory, "maintenance.sweep-stale-workspace", async (s) => {
+        summary = sweepStaleWorkspaceState(s, {
+          isWorkerLive: () => true,
+          now: Date.now(),
+        })
+        return s
+      })
+      if (summary.reapedCalls.length || summary.resetClosing.length || summary.finalizedClears.length || summary.forceCleared.length) {
+        await logServerEvent(directory, "maintenance.sweep-stale-workspace", {
+          reapedCalls: summary.reapedCalls,
+          resetClosing: summary.resetClosing,
+          finalizedClears: summary.finalizedClears,
+          forceCleared: summary.forceCleared,
+        })
+      }
+    } catch {}
+  }
+
   async function maintenance() {
+    // Ownership sweep FIRST — before the fast paths below, so limbo heals
+    // even when there are no known worker sessions or no active goals.
+    await sweepStaleWorkspaceOwnership()
     syncWorkerSessionsFromService()
     // FAST PATH: skip entirely if no known worker sessions
     if (knownWorkerSessions.size === 0) return

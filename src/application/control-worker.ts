@@ -101,32 +101,59 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
 
       processing.add(request.requestID)
       options.onRequest?.(request)
+      // Acceptance marker: the atomic rename above moved requests/<id>.json
+      // to processing/<id>.json. A later client timeout reads that marker
+      // to report "accepted, still running" instead of a bare timeout, and a
+      // late response still lands in responses/<id>.json (ledger idempotency
+      // dedups redelivery by the ORIGINAL requestID).
+      void logServerEvent(directory, "control.request.claimed", {
+        requestID: request.requestID,
+        command: request.command,
+        goalID: request.goalID,
+      }).catch(() => {})
 
+      // Dispatch WITHOUT awaiting: one hung handler (e.g. a resume whose
+      // host probe wedges) must not block unrelated queued controls.
+      // Same-goal order is still serialized by withGoalOperation inside
+      // GoalService; claim atomicity prevents duplicate pickup.
+      void runClaimed(request).finally(() => {
+        processing.delete(request.requestID)
+      })
+    }
+  }
+
+  async function runClaimed(request: ControlRequest) {
+      // Fully non-throwing: this runs detached (fire-and-forget), so even the
+      // error-response write is guarded — a rejection here would be an
+      // unhandled rejection with no interval handler watching it.
       try {
         const response = await handleRequest(request)
         await writeControlResponse(directory, response)
         options.onResponse?.(response)
       } catch (error) {
         const detail = describeError(error)
-        await logServerEvent(directory, "control.request.failed", {
-          requestID: request.requestID,
-          command: request.command,
-          goalID: request.goalID,
-          detail,
-        })
-        const response: ControlResponse = {
-          requestID: request.requestID,
-          ok: false,
-          message: `internal error: ${detail}. Diagnostics: ${SERVER_LOG_FILE}`,
-          errorCode: "internal_error",
-          completedAt: new Date().toISOString(),
+        try {
+          await logServerEvent(directory, "control.request.failed", {
+            requestID: request.requestID,
+            command: request.command,
+            goalID: request.goalID,
+            detail,
+          })
+          const response: ControlResponse = {
+            requestID: request.requestID,
+            ok: false,
+            message: `internal error: ${detail}. Diagnostics: ${SERVER_LOG_FILE}`,
+            errorCode: "internal_error",
+            completedAt: new Date().toISOString(),
+          }
+          await writeControlResponse(directory, response)
+          options.onResponse?.(response)
+        } catch {
+          // Response unwritable (disk failure): the client reports a timeout
+          // with the claimed-stage marker; recoverStaleProcessing re-queues
+          // the request on the next startup. Nothing else can be done here.
         }
-        await writeControlResponse(directory, response)
-        options.onResponse?.(response)
-      } finally {
-        processing.delete(request.requestID)
       }
-    }
   }
 
   async function handleRequest(request: ControlRequest): Promise<ControlResponse> {

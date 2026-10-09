@@ -259,6 +259,9 @@ function controlDir(directory) {
 function requestFile(directory, requestID) {
   return path.join(controlDir(directory), "requests", `${requestID}.json`);
 }
+function processingFile(directory, requestID) {
+  return path.join(controlDir(directory), "processing", `${requestID}.json`);
+}
 function responseFile(directory, requestID) {
   return path.join(controlDir(directory), "responses", `${requestID}.json`);
 }
@@ -271,6 +274,14 @@ async function readControlResponse(directory, requestID) {
   try {
     const raw = await fs2.readFile(responseFile(directory, requestID), "utf8");
     return JSON.parse(raw);
+  } catch {
+    return;
+  }
+}
+async function statProcessingRequest(directory, requestID) {
+  try {
+    const st = await fs2.stat(processingFile(directory, requestID));
+    return { requestAgeMs: Math.max(0, Date.now() - st.mtimeMs) };
   } catch {
     return;
   }
@@ -356,10 +367,22 @@ function createControlClient(directory) {
         return response;
       await delay2(100);
     }
+    const late = await readControlResponse(directory, request.requestID).catch(() => {
+      return;
+    });
+    if (late)
+      return late;
+    let stage = "not yet accepted by the server";
+    try {
+      const claimed = await statProcessingRequest(directory, request.requestID);
+      if (claimed) {
+        stage = `accepted by the server ${(claimed.requestAgeMs / 1000).toFixed(1)}s ago, still processing \u2014 ` + `the operation may complete later (late reply under this requestID); ` + `check the server log before retrying`;
+      }
+    } catch {}
     return {
       requestID: request.requestID,
       ok: false,
-      message: "timeout waiting for response",
+      message: `timeout waiting for response (${stage})`,
       errorCode: "timeout",
       completedAt: new Date().toISOString()
     };

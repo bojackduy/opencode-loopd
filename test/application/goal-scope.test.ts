@@ -151,20 +151,21 @@ describe("persisted scope claims", () => {
     await expect(beforeWorkspaceTool(root, { tool: "write", sessionID: oldWorker, callID: "late" }, { filePath: "a.ts" })).rejects.toThrow("retired")
   })
 
-  it("clear keeps an ownership tombstone across restart until the reserved tool finishes", async () => {
+  it("clear is terminal even with an in-flight write: goal gone, scope reusable, late writes fenced", async () => {
     const root = await fixture([])
     const service = createGoalService(createFakeHost())
     const { goal } = await service.start(root, { name: "first", objective: "test", ownerSessionID: "parent", config: { write_scope: ["a.ts", "b.ts"] } })
     const worker = goal.workerSessionID!
     await beforeWorkspaceTool(root, { tool: "write", sessionID: worker, callID: "write" }, { filePath: "a.ts" })
     await service.clear(root, goal.id)
-    expect((await readState(root)).goals[0]!.scopeClearPending).toBe(true)
-    const restarted = createGoalService(createFakeHost())
-    await expect(restarted.start(root, { name: "overlap", objective: "test", ownerSessionID: "parent", config: { write_scope: ["b.ts"] } })).rejects.toThrow("b.ts")
-    await afterWorkspaceTool(root, worker, "write")
+    // Terminal immediately: no scopeClearPending tombstone, no quiescence gate.
     expect((await readState(root)).goals).toHaveLength(0)
+    expect((await readState(root)).workspaceCalls ?? []).toEqual([])
+    const restarted = createGoalService(createFakeHost())
+    await restarted.start(root, { name: "overlap", objective: "test", ownerSessionID: "parent", config: { write_scope: ["b.ts"] } })
+    // The orphaned after-hook is a harmless no-op; late writes stay fenced.
+    await afterWorkspaceTool(root, worker, "write")
     await expect(beforeWorkspaceTool(root, { tool: "write", sessionID: worker, callID: "late" }, { filePath: "a.ts" })).rejects.toThrow("retired")
-    await restarted.start(root, { name: "new", objective: "test", ownerSessionID: "parent", config: { write_scope: ["b.ts"] } })
   })
 
   it("allows simultaneous disjoint claims and reconstructs them from disk", async () => {

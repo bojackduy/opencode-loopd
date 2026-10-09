@@ -21,7 +21,7 @@ import { observeProviderLimit, type ProviderLimitObservation } from "../domain/p
 import { createWorkerManager, type WorkerManager, type WorkerSession, type ContinuationContext } from "../server/worker-session"
 import type { LoopEvent } from "../domain/events"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
-import { assertScopeAvailable, retireWorker } from "./workspace-execution"
+import { assertScopeAvailable, retireWorker, sweepStaleWorkspaceState, isStaleWorkspaceCall, isSyncStaleWorkspaceCall } from "./workspace-execution"
 
 /**
  * Structured startup failure. start() persists the goal (and worker, when
@@ -584,17 +584,28 @@ export function createGoalService(host: LoopHost): GoalService {
     goalID: GoalID,
     error: unknown,
     blockImmediately = false,
+    expectedRunID?: string,
   ): Promise<void> {
     const detail = describeError(error)
     let runID: string = "unknown"
     let failureCount = 0
     let blocked = false
+    let superseded = false
     let blockerNeeded = "Retry after the OpenCode worker/session API is available."
     const state = await mutateState(directory, `turn.prompt-failed:${goalID}`, async (s) => {
       const goal = s.goals.find((item) => item.id === goalID)
       const rt = s.runtimes.find((item) => item.goalID === goalID)
       if (!goal || !rt) return s
 
+      // Generation fence: only the turn that still owns the lease records the
+      // failure. A superseded turn (a retry/nudge already acquired a newer
+      // run while this dispatch was in flight) must not release the newer
+      // lease or consume its failure budget — that is how a late error killed
+      // a healthy replacement turn.
+      if (expectedRunID !== undefined && rt.activeRunID !== expectedRunID) {
+        superseded = true
+        return s
+      }
       runID = rt.activeRunID || "unknown"
       failureCount = rt.consecutiveFailures + 1
       Object.assign(rt, releaseLease(rt))
@@ -623,6 +634,15 @@ export function createGoalService(host: LoopHost): GoalService {
       return s
     })
 
+    if (superseded) {
+      // The lease already belongs to a newer run: leave it (and its failure
+      // budget) alone. Quota classification is still recorded — a 429 observed
+      // here must inform the CURRENT run's fallback logic too.
+      await logServerEvent(directory, "turn.prompt-failed-superseded", { goalID, expectedRunID }).catch(() => {})
+      await observeProviderErrorUnlocked(directory, goalID, error, "prompt-delivery")
+      return
+    }
+
     await appendEvent(directory, {
       version: 1,
       eventID: randomUUID(),
@@ -647,6 +667,82 @@ export function createGoalService(host: LoopHost): GoalService {
       } satisfies LoopEvent)
     }
     await observeProviderErrorUnlocked(directory, goalID, error, "prompt-delivery")
+  }
+
+  /**
+   * Quota hold for nudge: a provider 429/rate-limit/quota is distinct from a
+   * host timeout — re-prompting the same model burns quota without helping.
+   * Returns an actionable message while the provider's own retry time is still
+   * in the future; undefined otherwise (nudge proceeds). Scoped to the
+   * currently configured model: a switch already applied clears the hold.
+   */
+  function quotaHoldMessage(goal: Goal): string | undefined {
+    const observation = goal.lastProviderLimit
+    const retryMs = observation?.retryAt ? Date.parse(observation.retryAt) : NaN
+    if (!observation || !Number.isFinite(retryMs) || retryMs <= Date.now()) return undefined
+    if (observation.model && observation.model !== goal.config.model) return undefined
+    const kind = observation.kind === "quota" ? "quota exhausted" : "rate-limited"
+    const pending = goal.modelSwitch?.pending?.reason === "quota"
+      ? ` A quota fallback to "${goal.modelSwitch.pending.model}" is prepared and applies on the next idle turn.`
+      : ""
+    return `Model "${goal.config.model ?? "default"}" is provider-${kind} ` +
+      `(observed ${observation.observedAt}; provider says retry after ${observation.retryAt}).` +
+      `${pending} Not re-prompting: nudging a limited model burns quota without helping. ` +
+      `Wait for the retry time, switch model, or use retry_goal afterwards.`
+  }
+
+  /**
+   * Late-acceptance check: did the prompt land in the worker transcript
+   * despite the dispatch error/timeout? A lost acceptance race never cancels
+   * the enqueue, so a retry must verify first — re-prompting an accepted
+   * prompt double-dispatches into the worker session. Best-effort and
+   * bounded; "not found" falls back to recording the failure (current
+   * behavior, safe direction).
+   */
+  async function wasPromptAccepted(
+    directory: string,
+    workerSessionID: string,
+    promptMessageID?: string,
+  ): Promise<boolean> {
+    if (!promptMessageID) return false
+    try {
+      const tail = await withStageTimeout(
+        host.readMessages(workerSessionID, 10),
+        PROMPT_VERIFY_TIMEOUT_MS,
+        `late prompt-acceptance verify for session "${workerSessionID}"`,
+      )
+      const found = tail.some((m) => m.messageID === promptMessageID || m.parentMessageID === promptMessageID)
+      if (found) {
+        await logServerEvent(directory, "worker.prompted-late", { workerSessionID, promptMessageID }).catch(() => {})
+      }
+      return found
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Dispatch a turn prompt; on dispatch error verify late acceptance before
+   * recording a failure. Returns normally when the prompt was accepted (the
+   * lease stays held — the engine observes completion via status/events);
+   * throws only for genuine delivery failures (after a fenced
+   * recordPromptFailure tied to THIS run).
+   */
+  async function dispatchOrRecordFailure(
+    directory: string,
+    goalID: GoalID,
+    dispatch: () => Promise<unknown>,
+    run: { activeRunID?: string; activePromptMessageID?: string },
+    workerSessionID: string,
+    blockImmediately = false,
+  ): Promise<void> {
+    try {
+      await dispatch()
+    } catch (error) {
+      if (await wasPromptAccepted(directory, workerSessionID, run.activePromptMessageID)) return
+      await recordPromptFailure(directory, goalID, error, blockImmediately, run.activeRunID)
+      throw error
+    }
   }
 
   async function ensureWorkerSession(directory: string, goal: Goal): Promise<WorkerSession> {
@@ -872,11 +968,14 @@ export function createGoalService(host: LoopHost): GoalService {
         revision: state2.revision,
       } satisfies LoopEvent)
       try {
-        await workers.continueWorker(worker, goal, runtime)
+        // Verify-before-retry applies here too: a late-accepted startup
+        // prompt means the worker IS running — blocking the goal would strand
+        // a healthy session. blockImmediately still persists genuinely failed
+        // startups as blocked (run-fenced to this startup run).
+        await dispatchOrRecordFailure(directory, id, () => workers.continueWorker(worker, goal, runtime), runtime, worker.workerSessionID, true)
       } catch (error) {
         // recordPromptFailure persists the blocked goal AND releases the run
         // lease, so resume can reuse this same worker session afterwards.
-        await recordPromptFailure(directory, id, error, true)
         throw new GoalStartError(describeError(error), {
           goalID: id,
           workerSessionID: worker.workerSessionID,
@@ -956,7 +1055,11 @@ export function createGoalService(host: LoopHost): GoalService {
     const goal = preState.goals.find((g) => g.id === goalID)
     if (!goal || goal.status !== "active") return
     if (goal.config.write_scope !== undefined && !host.scopedExecution) return
-    if (goal.scopeClosing || preState.workspaceCalls?.some((call) => call.goalID === goalID) || preState.workspaceOperation) return
+    // Provably-dead reservations never stall turns; live ones still do.
+    {
+      const now = Date.now()
+      if (goal.scopeClosing || (preState.workspaceCalls ?? []).some((call) => call.goalID === goalID && !isSyncStaleWorkspaceCall(preState, call, now)) || preState.workspaceOperation) return
+    }
 
     const runtime = preState.runtimes.find((r) => r.goalID === goalID)
     if (!runtime) return
@@ -1036,12 +1139,9 @@ export function createGoalService(host: LoopHost): GoalService {
       const bareWords = await drainGoalInbox(directory, goalID)
       const bareText = bareWords.join("\n").trim()
       if (bareText) {
-        try {
-          await workers.sendBare(session, freshGoal, freshRuntime, bareText)
-        } catch (error) {
-          await recordPromptFailure(directory, goalID, error)
-          throw error
-        }
+        // Verify-before-retry: a late-accepted bare prompt returns normally
+        // (turn dispatched, lease held) instead of failing a healthy turn.
+        await dispatchOrRecordFailure(directory, goalID, () => workers.sendBare(session, freshGoal, freshRuntime, bareText), freshRuntime, session.workerSessionID)
         return
       }
     }
@@ -1109,12 +1209,10 @@ export function createGoalService(host: LoopHost): GoalService {
       verification,
     }
 
-    try {
-      await workers.continueWorker(session, freshGoal, freshRuntime, context)
-    } catch (error) {
-      await recordPromptFailure(directory, goalID, error)
-      throw error
-    }
+    // Send continuation with accumulated context (external I/O — not under lock).
+    // A late-accepted prompt keeps the lease; only genuine delivery failures
+    // throw (after a run-fenced recordPromptFailure).
+    await dispatchOrRecordFailure(directory, goalID, () => workers.continueWorker(session, freshGoal, freshRuntime, context), freshRuntime, session.workerSessionID)
   }
 
   async function setInteractiveUnlocked(directory: string, goalID: GoalID, interactive: boolean) {
@@ -1214,18 +1312,115 @@ export function createGoalService(host: LoopHost): GoalService {
     } satisfies LoopEvent)
   }
 
+  /** Bounded race for control-path stages. Rejects on timeout but NEVER cancels
+   * the underlying work: a lost race leaves the side effect pending/unknown,
+   * which callers must verify (transcript check) rather than blindly retry. */
+  async function withStageTimeout<T>(promise: Promise<T>, ms: number, stage: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${stage} timed out after ${ms}ms`)), ms)
+        }),
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  const PROBE_TIMEOUT_MS = 15_000
+  const PROMPT_VERIFY_TIMEOUT_MS = 12_000
+
+  /**
+   * Bounded tri-state worker liveness probe (outside the state lock).
+   * "dead" ONLY when there is no worker session ID at all. A timed-out or
+   * unreachable probe is "unknown" — never proof of death. Callers fail
+   * CLOSED on "unknown" (keep write protection, report actionable stage
+   * evidence); only "dead" or "live" drive reap/proceed decisions.
+   */
+  async function probeWorkerLiveness(workerSessionID?: string): Promise<"live" | "dead" | "unknown"> {
+    if (!workerSessionID) return "dead"
+    try {
+      const status = await withStageTimeout(
+        host.sessionStatus(workerSessionID),
+        PROBE_TIMEOUT_MS,
+        `worker liveness probe for session "${workerSessionID}"`,
+      )
+      return status === "unknown" ? "unknown" : "live"
+    } catch {
+      return "unknown"
+    }
+  }
+
   async function resumeUnlocked(directory: string, goalID: GoalID) {
+    // Probe liveness BEFORE the transaction so the fence can distinguish a
+    // genuinely running tool (block) from a dead session's corpse (proceed).
+    // An unreachable probe is "unknown": reservations are KEPT (fail-closed)
+    // and resume reports stage evidence instead of reaping or hanging.
+    const preState = await readState(directory)
+    const preGoal = preState.goals.find((g) => g.id === goalID)
+    const workerLiveness = await probeWorkerLiveness(preGoal?.workerSessionID)
     let resumed = false
     const state = await mutateState(directory, `goal.resume:${goalID}`, async (state) => {
       const goal = state.goals.find((g) => g.id === goalID)
       if (!goal) return state
       if (!canTransition(goal.status, "active", "user")) return state
-      assertWorkspaceWriteAvailable(state, goal, goal.ownerSessionID)
+      // Opportunistic sweep first: dead reservations from crashed hooks and
+      // orphaned flags from interrupted two-step transactions are reaped here
+      // (same rules as maintenance), so a poweroff corpse never blocks this.
+      // Fail-closed: only a confirmed-absent worker counts as not-live; an
+      // "unknown" probe keeps every reservation (timeout is not death; the
+      // sync force-TTL rule still reaps calls quiet past 30m without proof).
+      const liveness = { isWorkerLive: (_gid: string, _wsid?: string) => _gid === goalID ? workerLiveness !== "dead" : false, now: Date.now() }
+      sweepStaleWorkspaceState(state, liveness)
+      // Fence-and-proceed: block ONLY on genuinely live same-generation calls
+      // for this goal. Anything older/dead was swept above; scopeClosing is
+      // cleared in THIS transaction (retire + rotate + clear atomically)
+      // instead of demanding quiescence first.
+      const rt = state.runtimes.find((r) => r.goalID === goalID)
+      const liveCalls = (state.workspaceCalls ?? []).filter(
+        (call) => call.goalID === goalID && !isStaleWorkspaceCall(state, call, liveness),
+      )
+      // Generation fence: only same-generation (or unstamped legacy)
+      // reservations of a live worker genuinely block. Superseded ones are
+      // already stale; anything else above is fresh and fail-closed.
+      const blocking = liveCalls.filter(
+        (call) => call.generation === undefined || !rt || call.generation >= rt.runGeneration,
+      )
+      if (blocking.length) {
+        if (workerLiveness === "unknown") {
+          throw new Error(
+            `Worker liveness unknown for session "${goal.workerSessionID}" (probe timed out or unreachable); ` +
+            `keeping ${blocking.length} write reservation(s) — nothing reaped, nothing rotated. ` +
+            `The worker may still be running. Retry resume (a flaky probe recovers on retry); ` +
+            `if the worker is gone its quiet reservations reap automatically past the force TTL.`,
+          )
+        }
+        throw new Error("Goal still has closing/in-flight writes; ownership cannot be reacquired before quiescence.")
+      }
+      // Fence first: retire the old worker, rotate generation/session, clear
+      // closing flags — all atomically, so no crash window can orphan
+      // scopeClosing again. Legacy (unscoped) goals keep their session:
+      // scopeClosing is never set for them, so there is nothing to fence.
+      // (A later throw aborts this whole transaction, so fencing before the
+      // availability check persists nothing on the blocking path.)
       if (goal.config.write_scope !== undefined) {
         retireWorker(state, goal)
         goal.workerSessionID = undefined
         sessions.delete(goalID)
+        if (rt) {
+          rt.runGeneration += 1
+          rt.updatedAt = new Date().toISOString()
+        }
       }
+      goal.scopeClosing = false
+      goal.scopeClearPending = false
+      // Drop any non-blocking leftovers for this goal (dead under the full
+      // liveness check — they belong to the retired session and can never
+      // complete into the new generation).
+      state.workspaceCalls = (state.workspaceCalls ?? []).filter((call) => call.goalID !== goalID)
+      assertWorkspaceWriteAvailable(state, goal, goal.ownerSessionID)
       goal.status = "active"
       goal.updatedAt = new Date().toISOString()
       resumed = true
@@ -1263,16 +1458,48 @@ export function createGoalService(host: LoopHost): GoalService {
   }
 
   async function retryUnlocked(directory: string, goalID: GoalID) {
+    const preState = await readState(directory)
+    const workerLiveness = await probeWorkerLiveness(preState.goals.find((g) => g.id === goalID)?.workerSessionID)
     let retried = false
     const state = await mutateState(directory, `goal.retry:${goalID}`, async (state) => {
       const goal = state.goals.find((g) => g.id === goalID)
       if (!goal || goal.status !== "blocked") return state
-      assertWorkspaceWriteAvailable(state, goal, goal.ownerSessionID)
+      // Fail-closed like resume: an "unknown" probe keeps reservations.
+      const liveness = { isWorkerLive: (_gid: string, _wsid?: string) => _gid === goalID ? workerLiveness !== "dead" : false, now: Date.now() }
+      sweepStaleWorkspaceState(state, liveness)
+      const rt0 = state.runtimes.find((r) => r.goalID === goalID)
+      const blocking = (state.workspaceCalls ?? []).filter(
+        (call) =>
+          call.goalID === goalID &&
+          !isStaleWorkspaceCall(state, call, liveness) &&
+          (call.generation === undefined || !rt0 || call.generation >= rt0.runGeneration),
+      )
+      if (blocking.length) {
+        if (workerLiveness === "unknown") {
+          throw new Error(
+            `Worker liveness unknown for session "${goal.workerSessionID}" (probe timed out or unreachable); ` +
+            `keeping ${blocking.length} write reservation(s) — nothing reaped, nothing rotated. ` +
+            `The worker may still be running. Retry (a flaky probe recovers on retry); ` +
+            `if the worker is gone its quiet reservations reap automatically past the force TTL.`,
+          )
+        }
+        throw new Error("Goal still has closing/in-flight writes; ownership cannot be reacquired before quiescence.")
+      }
+      // Fence first (throw below aborts the transaction, persisting nothing).
       if (goal.config.write_scope !== undefined) {
         retireWorker(state, goal)
         goal.workerSessionID = undefined
         sessions.delete(goalID)
+        const rt = state.runtimes.find((r) => r.goalID === goalID)
+        if (rt) {
+          rt.runGeneration += 1
+          rt.updatedAt = new Date().toISOString()
+        }
       }
+      goal.scopeClosing = false
+      goal.scopeClearPending = false
+      state.workspaceCalls = (state.workspaceCalls ?? []).filter((call) => call.goalID !== goalID)
+      assertWorkspaceWriteAvailable(state, goal, goal.ownerSessionID)
       goal.status = "active"
       goal.updatedAt = new Date().toISOString()
       retried = true
@@ -1322,40 +1549,37 @@ export function createGoalService(host: LoopHost): GoalService {
   }
 
   async function clearUnlocked(directory: string, goalID: GoalID) {
-    const state = await readState(directory)
-    const goal = state.goals.find((g) => g.id === goalID)
-    if (!goal) return
-
-    await mutateState(directory, `goal.clear-closing:${goalID}`, async (s) => {
+    // Terminal by design: clear is NEVER gated on quiescence. The old
+    // two-step (scopeClosing → deferred scopeClearPending tombstone) created
+    // the permanent limbo — a dead reservation deferred deletion forever via
+    // an after-hook that never runs. Now: retire the worker (fences late
+    // tools), drop the goal's reservations, remove goal+runtimes, cancel
+    // awaits, log the event. A genuinely running tool that finishes afterwards
+    // finds its session retired and its reservation gone — fail-closed, and it
+    // cannot resurrect the goal.
+    const pre = await readState(directory)
+    const workerID = sessions.get(goalID)?.workerSessionID || pre.goals.find((g) => g.id === goalID)?.workerSessionID
+    const state = await mutateState(directory, `goal.clear:${goalID}`, async (s) => {
       const g = s.goals.find((item) => item.id === goalID)
-      if (g) { g.scopeClosing = true; retireWorker(s, g) }
-      return s
-    })
-
-    // Abort worker from cache or persisted state (external I/O — not under lock)
-    const session = sessions.get(goalID) || (goal.workerSessionID ? {
-      goalID: goal.id,
-      workerSessionID: goal.workerSessionID,
-      startedAt: goal.createdAt,
-    } : undefined)
-    if (session) {
-      await workers.abortWorker(session.workerSessionID)
-      sessions.delete(goalID)
-    }
-
-    await mutateState(directory, `goal.clear:${goalID}`, async (s) => {
-      if (s.workspaceCalls?.some((call) => call.goalID === goalID) || s.workspaceOperation?.goalID === goalID) {
-        const g = s.goals.find((item) => item.id === goalID)
-        if (g) { g.status = "paused"; g.scopeClearPending = true }
-        s.commandAwaits = (s.commandAwaits ?? []).filter((a) => a.goalID !== goalID)
-        return s
-      }
+      if (g) retireWorker(s, g)
+      s.workspaceCalls = (s.workspaceCalls ?? []).filter((call) => call.goalID !== goalID)
+      if (s.workspaceOperation?.goalID === goalID) s.workspaceOperation = undefined
       s.goals = s.goals.filter((g) => g.id !== goalID)
       s.runtimes = s.runtimes.filter((r) => r.goalID !== goalID)
       // Clearing cancels outstanding awaits: no orphan wakes after clear.
       s.commandAwaits = (s.commandAwaits ?? []).filter((a) => a.goalID !== goalID)
       return s
     })
+    sessions.delete(goalID)
+
+    // Best-effort abort AFTER the terminal state change (never gates it).
+    if (workerID) {
+      try { await workers.abortWorker(workerID) } catch {}
+    }
+
+    // Pausing cancels outstanding command awaits: an exit landing afterwards
+    // fires nothing (no orphan wakes for a cleared goal).
+    await cancelAwaitsForGoal(directory, goalID, "goal cleared").catch(() => {})
 
     await appendEvent(directory, {
       version: 1,
@@ -1365,6 +1589,7 @@ export function createGoalService(host: LoopHost): GoalService {
       timestamp: new Date().toISOString(),
       revision: state.revision,
     } satisfies LoopEvent)
+    await logServerEvent(directory, "goal.cleared-terminal", { goalID }).catch(() => {})
   }
 
   function getWorker(goalID: GoalID): WorkerSession | undefined {
@@ -1376,6 +1601,28 @@ export function createGoalService(host: LoopHost): GoalService {
   }
 
   async function reconcile(directory: string) {
+    // Restart reconstruction: reap provably-dead reservations (no liveness
+    // proof available yet — sync check only: superseded, goal-gone, force-old),
+    // reset orphaned scopeClosing, finalize unreferenced scopeClearPending.
+    // Makes a restart self-healing instead of reconstructing the limbo.
+    try {
+      let summary = { reapedCalls: [], resetClosing: [], finalizedClears: [], forceCleared: [] } as import("./workspace-execution").WorkspaceSweepSummary
+      const pre = await readState(directory)
+      if ((pre.workspaceCalls?.length) || pre.goals.some((g) => g.scopeClosing || g.scopeClearPending)) {
+        await mutateState(directory, "reconcile.sweep-stale-workspace", async (s) => {
+          summary = sweepStaleWorkspaceState(s)
+          return s
+        })
+      }
+      if (summary.reapedCalls.length || summary.resetClosing.length || summary.finalizedClears.length || summary.forceCleared.length) {
+        await logServerEvent(directory, "reconcile.sweep-stale-workspace", {
+          reapedCalls: summary.reapedCalls,
+          resetClosing: summary.resetClosing,
+          finalizedClears: summary.finalizedClears,
+          forceCleared: summary.forceCleared,
+        }).catch(() => {})
+      }
+    } catch {}
     const state = await readState(directory)
 
     for (const goal of state.goals) {
@@ -1475,6 +1722,11 @@ export function createGoalService(host: LoopHost): GoalService {
     if (goal.status !== "active") {
       return { ok: false, message: `Goal is ${goal.status}; resume or retry it before nudging.` }
     }
+    // Quota is not a timeout: never burn a turn re-prompting a model the
+    // provider just limited. ok:false (not an exception) keeps nudge usable —
+    // the operator waits, switches model, or retries after the hold lifts.
+    const quotaHold = quotaHoldMessage(goal)
+    if (quotaHold) return { ok: false, message: quotaHold }
     if (goal.config.write_scope !== undefined) {
       await pauseUnlocked(directory, goalID)
       await resumeUnlocked(directory, goalID)
