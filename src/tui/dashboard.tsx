@@ -814,9 +814,10 @@ export function LoopDashboard(props: Props) {
         {/* Scrollable body — sizes to content; the list caps itself so detail + input stay visible */}
         <box flexDirection="column" flexShrink={1} minHeight={0} overflow="hidden">
           {/* Help panel — single text to avoid flex overlap */}
-          <Show when={showHelp()}>
-            <box flexDirection="column" padding={1} border={true} borderColor="yellow" backgroundColor={theme().background} flexShrink={0} maxHeight={17} overflow="hidden">
-              <text>
+<Show when={showHelp()}>
+              <box flexDirection="column" padding={1} border={true} borderColor="yellow" backgroundColor={theme().background} flexShrink={0} maxHeight={22}>
+                <box flexDirection="column" padding={1} backgroundColor={theme().background} flexShrink={1} minHeight={0} overflow="scroll">
+                  <text>
                 <span style={{ fg: "yellow", bold: true }}>{tab() === "commands" ? "━━━ Commands: ? help  : insert  c toggle done  X kill  R restart  x remove-done  o fullscreen  q close ━━━" : "━━━ Keys: ? toggle help  c toggle done  : insert  Ctrl+N normal  o open  A abort worker  N nudge  q close ━━━"}</span>
                 <For each={(tab() === "commands" ? commandTabHelp() : commandHelp()).split("\n")}>{(line) => {
                   // Modes / Nav — split into label + segments, color keys vs descs
@@ -879,7 +880,9 @@ export function LoopDashboard(props: Props) {
                     </>
                   )
                 }}</For>
-              </text>
+                </text>
+              </box>
+              <text style={{ fg: theme().textMuted }}><span style={{ italic: true }}>▼ scroll for more</span></text>
             </box>
           </Show>
 
@@ -947,7 +950,8 @@ export function LoopDashboard(props: Props) {
               const blk = () => goal().blocker
               return (
                 <box flexDirection="column" border={true} borderColor={borderColorForStatus(goal().status, theme())} padding={1} flexShrink={0} maxHeight={13}>
-                  <text>
+                  <box flexDirection="column" padding={1} backgroundColor={theme().background} flexShrink={1} minHeight={0} overflow="scroll">
+                    <text>
                     <span style={{ fg: statusColor(goal().status, theme()), bold: true }}>{statusIcon(goal().status)} {goal().name}</span>
                     <span style={{ fg: theme().textMuted }}> Goal </span>
                     <span style={{ fg: statusColor(goal().status, theme()) }}>{goalStatusLabel(goal().status).short} — {goalStatusLabel(goal().status).hint}</span>
@@ -1000,8 +1004,10 @@ export function LoopDashboard(props: Props) {
                     {(rt() as any)?.unknownStatusCount > 0 && <><span style={{ fg: theme().error }}>{"\n"}⚠️ unreachable: </span><span style={{ fg: theme().error }}>{String((rt() as any).unknownStatusCount)}/3</span><span style={{ fg: theme().textMuted }}> — nudge to recover</span></>}
                     {(rt() as any)?.retryAfter && <><span style={{ fg: theme().accent }}>{"\n"}↻ retry in: </span><span style={{ fg: theme().accent }}>{countdownLabel((rt() as any).retryAfter, clock())}</span></>}
                     {(rt() as any)?.nextRunAt && <><span style={{ fg: theme().accent }}>{"\n"}⏰ next run: </span><span style={{ fg: theme().accent }}>{countdownLabel((rt() as any).nextRunAt, clock())}</span><span style={{ fg: theme().textMuted }}> ({String((rt() as any).scheduleRunCount || 0)} runs)</span></>}
-                    {rt()?.lastError && <><span style={{ fg: theme().error }}>{"\n"}⚠ </span><span style={{ fg: theme().error, bold: true }}>Error: </span><span style={{ fg: theme().error }}>{rt()!.lastError!.slice(0, 120)}</span></>}
-                  </text>
+{rt()?.lastError && <><span style={{ fg: theme().error }}>{"\n"}⚠ </span><span style={{ fg: theme().error, bold: true }}>Error: </span><span style={{ fg: theme().error }}>{rt()!.lastError!.slice(0, 120)}</span></>}
+                    </text>
+                  </box>
+                  <text style={{ fg: theme().textMuted }}><span style={{ italic: true }}>▼ scroll for more</span></text>
                 </box>
               )
             }}
