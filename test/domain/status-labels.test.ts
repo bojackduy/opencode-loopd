@@ -29,9 +29,9 @@ describe("status labels", () => {
     expect(phaseLabel("unknown").short).toBe("unknown")
   })
 
-  it("describes the owned + acting combo", () => {
+  it("does not claim activity from an owned + running phase alone", () => {
     expect(describeGoalState("active", "running")).toBe(
-      "Loopd owns this; worker is worker acting now.",
+      "Loopd owns this; worker is turn reserved; activity unconfirmed.",
     )
   })
 

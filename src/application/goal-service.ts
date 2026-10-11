@@ -8,7 +8,7 @@ import type { Goal, GoalID } from "../domain/goal"
 import { createGoal, canTransition, isTerminal } from "../domain/goal"
 import type { GoalRuntimeState, RunID } from "../domain/runtime"
 import { createRuntimeState, acquireLease, releaseLease, leaseIsValid, markProgress } from "../domain/runtime"
-import { readState, mutateState, appendEvent, appendGoalInbox, drainGoalInbox, readEvents, goalArtifactDir, ensureGoalArtifactDir } from "../infrastructure/state-repository"
+import { readState, mutateState, appendEvent, appendGoalInbox, deleteGoalInbox, snapshotGoalInbox, acknowledgeGoalInbox, readEvents, goalArtifactDir, ensureGoalArtifactDir } from "../infrastructure/state-repository"
 import * as path from "path"
 import { promises as fs } from "fs"
 import type { StoreState } from "../infrastructure/state-repository"
@@ -21,7 +21,7 @@ import { observeProviderLimit, type ProviderLimitObservation } from "../domain/p
 import { createWorkerManager, type WorkerManager, type WorkerSession, type ContinuationContext } from "../server/worker-session"
 import type { LoopEvent } from "../domain/events"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
-import { assertScopeAvailable, retireWorker, sweepStaleWorkspaceState, isStaleWorkspaceCall, isSyncStaleWorkspaceCall } from "./workspace-execution"
+import { assertScopeAvailable, retireWorker, sweepStaleWorkspaceState, isStaleWorkspaceCall, isSyncStaleWorkspaceCall, reconcileTerminalWorkspaceCalls } from "./workspace-execution"
 
 /**
  * Structured startup failure. start() persists the goal (and worker, when
@@ -41,6 +41,21 @@ export class GoalStartError extends Error {
     this.workerSessionID = info.workerSessionID
     this.failedStage = info.failedStage
   }
+}
+
+/** A control being accepted is not evidence that its worker is acting. */
+export interface GoalActionResult {
+  ok: boolean
+  outcome: "sent" | "queued" | "not_found" | "invalid_state" | "blocked"
+  message: string
+  goalID?: GoalID
+  workerSessionID?: string
+  runGeneration?: number
+  promptMessageID?: string
+}
+
+class GoalDeliveryBlockedError extends Error {
+  constructor(readonly result: GoalActionResult) { super(result.message) }
 }
 
 export interface GoalService {
@@ -67,10 +82,10 @@ export interface GoalService {
   }): Promise<{ goal: Goal; worker: WorkerSession }>
 
   /** Drive one continuation turn for a goal. */
-  continueTurn(directory: string, goalID: GoalID, opts?: { forceFinish?: boolean; force?: boolean }): Promise<void>
+  continueTurn(directory: string, goalID: GoalID, opts?: { forceFinish?: boolean; force?: boolean }): Promise<GoalActionResult>
 
-  /** Force re-prompt a stuck worker even if the session reports non-idle. */
-  nudge(directory: string, goalID: GoalID): Promise<{ ok: boolean; message: string }>
+  /** Request a recovery turn only after confirmed idle and quiescence. */
+  nudge(directory: string, goalID: GoalID): Promise<GoalActionResult>
 
   /**
    * Deliver the owner's words as a bare turn: the drained inbox texts become
@@ -78,7 +93,7 @@ export interface GoalService {
    * turn starts immediately instead of waiting for the next idle boundary.
    * Engine turns are unaffected — they keep building full steering.
    */
-  sendUserMessage(directory: string, goalID: GoalID, text: string): Promise<{ ok: boolean; message: string }>
+  sendUserMessage(directory: string, goalID: GoalID, text: string): Promise<GoalActionResult>
 
   /**
    * Abort the worker session without changing goal status. Manual kill switch
@@ -104,10 +119,10 @@ export interface GoalService {
   pause(directory: string, goalID: GoalID): Promise<void>
 
   /** Resume a paused goal. */
-  resume(directory: string, goalID: GoalID): Promise<void>
+  resume(directory: string, goalID: GoalID): Promise<GoalActionResult>
 
   /** Retry a blocked goal. */
-  retry(directory: string, goalID: GoalID): Promise<void>
+  retry(directory: string, goalID: GoalID): Promise<GoalActionResult>
 
   /** Clear a goal and abort its worker. */
   clear(directory: string, goalID: GoalID): Promise<void>
@@ -732,16 +747,65 @@ export function createGoalService(host: LoopHost): GoalService {
     directory: string,
     goalID: GoalID,
     dispatch: () => Promise<unknown>,
-    run: { activeRunID?: string; activePromptMessageID?: string },
+    run: { activeRunID?: string; activePromptMessageID?: string; runGeneration?: number; forceFinish?: boolean },
     workerSessionID: string,
     blockImmediately = false,
   ): Promise<void> {
+    let blocked: GoalActionResult | undefined
+    await mutateState(directory, `turn.dispatch-intent:${goalID}`, async (s) => {
+      blocked = continuationGuard(s, goalID)
+      const g = s.goals.find((item) => item.id === goalID)
+      const rt = s.runtimes.find((item) => item.goalID === goalID)
+      const ownsRun = rt && g?.workerSessionID === workerSessionID && rt.activeRunID === run.activeRunID && rt.activePromptMessageID === run.activePromptMessageID && (run.runGeneration === undefined || rt.runGeneration === run.runGeneration)
+      if (!ownsRun) blocked ??= rejected(goalID, "blocked", "Run or worker was superseded before dispatch; no prompt was sent.")
+      if (blocked) {
+        if (ownsRun) {
+          Object.assign(rt, releaseLease(rt))
+          rt.activeRunID = undefined
+        }
+      } else if (rt) {
+        rt.activePromptDispatchAt = new Date().toISOString()
+      }
+      return s
+    })
+    if (blocked) {
+      if (blocked.outcome === "not_found") sessions.delete(goalID)
+      throw new GoalDeliveryBlockedError(blocked)
+    }
+    let observed = false
     try {
       await dispatch()
+      observed = await wasPromptAccepted(directory, workerSessionID, run.activePromptMessageID)
     } catch (error) {
-      if (await wasPromptAccepted(directory, workerSessionID, run.activePromptMessageID)) return
-      await recordPromptFailure(directory, goalID, error, blockImmediately, run.activeRunID)
-      throw error
+      const current = await readState(directory)
+      if (!current.goals.some((goal) => goal.id === goalID)) {
+        throw new GoalDeliveryBlockedError(rejected(goalID, "not_found", "Goal cleared while host delivery was pending. Its late result was ignored; list current goals instead of retrying this ID."))
+      }
+      observed = await wasPromptAccepted(directory, workerSessionID, run.activePromptMessageID)
+      if (!observed) {
+        await recordPromptFailure(directory, goalID, error, blockImmediately, run.activeRunID)
+        throw error
+      }
+    }
+    let removed = false
+    let acceptedRun = false
+    const accepted = await mutateState(directory, `turn.dispatch-accepted:${goalID}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goalID)
+      removed = !g
+      const rt = s.runtimes.find((item) => item.goalID === goalID)
+      if (rt && g?.status === "active" && g.workerSessionID === workerSessionID && rt.activeRunID === run.activeRunID && rt.activePromptMessageID === run.activePromptMessageID && (run.runGeneration === undefined || rt.runGeneration === run.runGeneration)) {
+        acceptedRun = true
+        rt.activePromptAcceptedAt = new Date().toISOString()
+        if (run.forceFinish) rt.forceFinishRequested = true
+        if (observed) rt.activePromptObservedAt ??= rt.activePromptAcceptedAt
+      }
+      return s
+    })
+    if (removed) throw new GoalDeliveryBlockedError(rejected(goalID, "not_found", "Goal cleared while host delivery was pending. Its late result was ignored; list current goals instead of retrying this ID."))
+    if (!acceptedRun) throw new GoalDeliveryBlockedError(rejected(goalID, "blocked", "The turn or worker changed while host delivery was pending. Its late result was ignored; inspect the current run before retrying."))
+    const rt = accepted.runtimes.find((item) => item.goalID === goalID)
+    if (rt && rt.activeRunID === run.activeRunID && rt.activePromptAcceptedAt) {
+      await acknowledgeGoalInbox(directory, goalID, rt.activeInboxLines ?? [])
     }
   }
 
@@ -761,18 +825,30 @@ export function createGoalService(host: LoopHost): GoalService {
     }
 
     session = await workers.createWorker(goal)
-    sessions.set(goal.id, session)
+    let linked = false
+    let failure: GoalActionResult | undefined
     await mutateState(directory, `goal.set-worker:${goal.id}`, async (s) => {
       const persisted = s.goals.find((item) => item.id === goal.id)
-      if (persisted) {
+      if (!persisted) failure = rejected(goal.id, "not_found", "Goal cleared during worker creation; the new worker was retired. List your goals instead of retrying this ID.")
+      else if (persisted.ownerSessionID !== goal.ownerSessionID || persisted.workerSessionID !== goal.workerSessionID || persisted.status !== "active") {
+        failure = rejected(goal.id, "blocked", "Goal changed during worker creation; the unused worker was retired. Inspect current state before retrying.")
+      } else {
         persisted.workerSessionID = session!.workerSessionID
+        linked = true
         if (session!.topology) {
           persisted.workerTopology = session!.topology
           persisted.nativeParentID = session!.nativeParentID
         }
       }
+      if (!linked) retireWorker(s, { ...goal, workerSessionID: session!.workerSessionID })
       return s
     })
+    if (!linked) {
+      sessions.delete(goal.id)
+      await workers.abortWorker(session.workerSessionID).catch(() => {})
+      throw new GoalDeliveryBlockedError(failure!)
+    }
+    sessions.set(goal.id, session)
     return session
   }
 
@@ -1049,23 +1125,41 @@ export function createGoalService(host: LoopHost): GoalService {
     return accountTailUsage(directory, goalID, runtime, tail)
   }
 
-  async function continueTurnUnlocked(directory: string, goalID: GoalID, opts?: { forceFinish?: boolean; force?: boolean; bare?: boolean }) {
+  function rejected(goalID: GoalID, outcome: "not_found" | "invalid_state" | "blocked", message: string): GoalActionResult {
+    if (outcome === "not_found") sessions.delete(goalID)
+    return { ok: false, outcome, goalID, message }
+  }
+
+  function continuationGuard(state: StoreState, goalID: GoalID): GoalActionResult | undefined {
+    const goal = state.goals.find((g) => g.id === goalID)
+    if (!goal) return rejected(goalID, "not_found", "Goal not found (it may have been cleared). List your goals instead of retrying this ID.")
+    if (goal.status !== "active") return rejected(goalID, "invalid_state", `Goal is ${goal.status}; resume or retry it before requesting a turn.`)
+    if (goal.config.write_scope !== undefined && !host.scopedExecution) return rejected(goalID, "blocked", "Enforced scopes are unsupported on this host.")
+    if (goal.scopeClosing) return rejected(goalID, "blocked", "Goal is closing; wait for in-flight writes to finish before resuming.")
+    if ((state.workspaceCalls ?? []).some((call) => call.goalID === goalID && !isSyncStaleWorkspaceCall(state, call, Date.now()))) {
+      return rejected(goalID, "blocked", "Goal has in-flight write reservations. Nothing was sent; retry after writes finish.")
+    }
+    if (state.workspaceOperation) return rejected(goalID, "blocked", `Workspace operation ${state.workspaceOperation.id} is in progress. Nothing was sent; retry after it finishes.`)
+    const runtime = state.runtimes.find((r) => r.goalID === goalID)
+    if (!runtime) return rejected(goalID, "blocked", "Goal runtime is missing; no turn was sent.")
+    if (runtime.activeToolCallIDs?.length) return rejected(goalID, "blocked", "Worker has outstanding tool calls. Nothing was sent; wait for terminal tool evidence.")
+  }
+
+  async function continueTurnUnlocked(directory: string, goalID: GoalID, opts?: { forceFinish?: boolean; force?: boolean; bare?: boolean }): Promise<GoalActionResult> {
+    await reconcileTerminalWorkspaceCalls(directory, host)
     // Read state for pre-checks (lease validity, worker idle)
     const preState = await readState(directory)
     const goal = preState.goals.find((g) => g.id === goalID)
-    if (!goal || goal.status !== "active") return
-    if (goal.config.write_scope !== undefined && !host.scopedExecution) return
-    // Provably-dead reservations never stall turns; live ones still do.
-    {
-      const now = Date.now()
-      if (goal.scopeClosing || (preState.workspaceCalls ?? []).some((call) => call.goalID === goalID && !isSyncStaleWorkspaceCall(preState, call, now)) || preState.workspaceOperation) return
-    }
+    const guard = continuationGuard(preState, goalID)
+    if (guard) return guard
+    if (!goal) return rejected(goalID, "not_found", "Goal not found.")
 
     const runtime = preState.runtimes.find((r) => r.goalID === goalID)
-    if (!runtime) return
+    if (!runtime) return rejected(goalID, "blocked", "Goal runtime is missing; no turn was sent.")
+    if (runtime.activePromptAcceptedAt) await acknowledgeGoalInbox(directory, goalID, runtime.activeInboxLines ?? [])
 
     // Check lease
-    if (runtime.phase === "running" && leaseIsValid(runtime)) return
+    if (runtime.phase === "running" && leaseIsValid(runtime)) return rejected(goalID, "blocked", "An existing turn holds the run lease; no additional prompt was sent.")
 
     // Get worker from cache or reconstruct from persisted state
     let session = sessions.get(goalID)
@@ -1079,15 +1173,15 @@ export function createGoalService(host: LoopHost): GoalService {
       sessions.set(goalID, session)
     }
     if (!session && !goal.workerSessionID) session = await ensureWorkerSession(directory, goal)
-    if (!session) return
+    if (!session) return rejected(goalID, "blocked", "Worker session is missing; resume or retry the goal.")
 
     // Check worker idle — unless force is set (nudge/re-prompt)
-    if (!opts?.force && !(await workers.isIdle(session.workerSessionID))) return
+    if (!opts?.force && !(await workers.isIdle(session.workerSessionID))) return rejected(goalID, "blocked", "Worker is busy or its status is unknown; no prompt was sent. Retry after confirmed idle.")
 
     // Never change a running session even when an explicit nudge bypasses idle.
-    // The nudge path interrupts first; require confirmed idle for pending identity.
+    // Require confirmed idle for pending identity; nudge never interrupts a live worker.
     if (goal.pendingIdentity || goal.modelSwitch?.pending || goal.agentSwitch?.pending) {
-      if (await host.sessionStatus(session.workerSessionID) !== "idle") return
+      if (await host.sessionStatus(session.workerSessionID) !== "idle") return rejected(goalID, "blocked", "Pending identity requires an idle worker; no prompt was sent. Wait for idle and retry.")
       await applyPendingIdentity(directory, goal)
       await applyPendingModel(directory, goal)
       await applyPendingAgent(directory, goal)
@@ -1095,7 +1189,10 @@ export function createGoalService(host: LoopHost): GoalService {
 
     // Acquire lease and increment run count atomically
     let acquired = false
+    let acquisitionFailure: GoalActionResult | undefined
     const state = await mutateState(directory, `turn.acquire:${goalID}`, async (s) => {
+      acquisitionFailure = continuationGuard(s, goalID)
+      if (acquisitionFailure) return s
       const g = s.goals.find((item) => item.id === goalID)
       if (!g || g.status !== "active") return s
       const rt = s.runtimes.find((item) => item.goalID === goalID)
@@ -1119,8 +1216,23 @@ export function createGoalService(host: LoopHost): GoalService {
     })
     const freshGoal = state.goals.find((g) => g.id === goalID)
     const freshRuntime = state.runtimes.find((r) => r.goalID === goalID)
-    if (!acquired || !freshGoal || freshGoal.status !== "active" || !freshRuntime?.activeRunID) return
+    if (!acquired || !freshGoal || freshGoal.status !== "active" || !freshRuntime?.activeRunID) return acquisitionFailure ?? rejected(goalID, "blocked", "Run lease acquisition lost to another turn; no prompt was sent.")
 
+    const sent: GoalActionResult = {
+      ok: true, outcome: "sent", goalID, workerSessionID: session.workerSessionID,
+      runGeneration: freshRuntime.runGeneration, promptMessageID: freshRuntime.activePromptMessageID,
+      message: `Prompt submitted for "${freshGoal.name}"; worker activity is not yet confirmed.`,
+    }
+
+    let dispatchAttempted = false
+    try {
+    const inbox = await snapshotGoalInbox(directory, goalID)
+    const inboxMessages = inbox.messages
+    await mutateState(directory, `turn.inbox-snapshot:${goalID}`, async (s) => {
+      const rt = s.runtimes.find((r) => r.goalID === goalID)
+      if (rt && rt.activeRunID === freshRuntime.activeRunID) rt.activeInboxLines = inbox.lines
+      return s
+    })
     await appendEvent(directory, {
       version: 1,
       eventID: randomUUID(),
@@ -1136,18 +1248,17 @@ export function createGoalService(host: LoopHost): GoalService {
     // history, or verification wrapper. Falls through to full steering when
     // the inbox is unexpectedly empty (never open a phantom turn).
     if (opts?.bare) {
-      const bareWords = await drainGoalInbox(directory, goalID)
-      const bareText = bareWords.join("\n").trim()
+      const bareText = inboxMessages.join("\n").trim()
       if (bareText) {
         // Verify-before-retry: a late-accepted bare prompt returns normally
         // (turn dispatched, lease held) instead of failing a healthy turn.
+        dispatchAttempted = true
         await dispatchOrRecordFailure(directory, goalID, () => workers.sendBare(session, freshGoal, freshRuntime, bareText), freshRuntime, session.workerSessionID)
-        return
+        return sent
       }
     }
 
     // Send continuation with accumulated context (external I/O — not under lock)
-    const inboxMessages = await drainGoalInbox(directory, goalID)
 
     // Gather progress history from events
     const allEvents = await readEvents(directory, 200)
@@ -1212,7 +1323,14 @@ export function createGoalService(host: LoopHost): GoalService {
     // Send continuation with accumulated context (external I/O — not under lock).
     // A late-accepted prompt keeps the lease; only genuine delivery failures
     // throw (after a run-fenced recordPromptFailure).
-    await dispatchOrRecordFailure(directory, goalID, () => workers.continueWorker(session, freshGoal, freshRuntime, context), freshRuntime, session.workerSessionID)
+    dispatchAttempted = true
+    await dispatchOrRecordFailure(directory, goalID, () => workers.continueWorker(session, freshGoal, freshRuntime, context), { ...freshRuntime, forceFinish: opts?.forceFinish }, session.workerSessionID)
+    return sent
+    } catch (error) {
+      if (error instanceof GoalDeliveryBlockedError) return error.result
+      if (!dispatchAttempted) await recordPromptFailure(directory, goalID, error, false, freshRuntime.activeRunID)
+      throw error
+    }
   }
 
   async function setInteractiveUnlocked(directory: string, goalID: GoalID, interactive: boolean) {
@@ -1354,10 +1472,8 @@ export function createGoalService(host: LoopHost): GoalService {
   }
 
   async function resumeUnlocked(directory: string, goalID: GoalID) {
-    // Probe liveness BEFORE the transaction so the fence can distinguish a
-    // genuinely running tool (block) from a dead session's corpse (proceed).
-    // An unreachable probe is "unknown": reservations are KEPT (fail-closed)
-    // and resume reports stage evidence instead of reaping or hanging.
+    await reconcileTerminalWorkspaceCalls(directory, host)
+    // Probe outside the transaction for actionable status, never tool-exit proof.
     const preState = await readState(directory)
     const preGoal = preState.goals.find((g) => g.id === goalID)
     const workerLiveness = await probeWorkerLiveness(preGoal?.workerSessionID)
@@ -1366,35 +1482,20 @@ export function createGoalService(host: LoopHost): GoalService {
       const goal = state.goals.find((g) => g.id === goalID)
       if (!goal) return state
       if (!canTransition(goal.status, "active", "user")) return state
-      // Opportunistic sweep first: dead reservations from crashed hooks and
-      // orphaned flags from interrupted two-step transactions are reaped here
-      // (same rules as maintenance), so a poweroff corpse never blocks this.
-      // Fail-closed: only a confirmed-absent worker counts as not-live; an
-      // "unknown" probe keeps every reservation (timeout is not death; the
-      // sync force-TTL rule still reaps calls quiet past 30m without proof).
+      // Heal interrupted goal flags without discarding execution reservations.
       const liveness = { isWorkerLive: (_gid: string, _wsid?: string) => _gid === goalID ? workerLiveness !== "dead" : false, now: Date.now() }
       sweepStaleWorkspaceState(state, liveness)
-      // Fence-and-proceed: block ONLY on genuinely live same-generation calls
-      // for this goal. Anything older/dead was swept above; scopeClosing is
-      // cleared in THIS transaction (retire + rotate + clear atomically)
-      // instead of demanding quiescence first.
       const rt = state.runtimes.find((r) => r.goalID === goalID)
       const liveCalls = (state.workspaceCalls ?? []).filter(
         (call) => call.goalID === goalID && !isStaleWorkspaceCall(state, call, liveness),
       )
-      // Generation fence: only same-generation (or unstamped legacy)
-      // reservations of a live worker genuinely block. Superseded ones are
-      // already stale; anything else above is fresh and fail-closed.
-      const blocking = liveCalls.filter(
-        (call) => call.generation === undefined || !rt || call.generation >= rt.runGeneration,
-      )
+      const blocking = liveCalls
       if (blocking.length) {
         if (workerLiveness === "unknown") {
           throw new Error(
             `Worker liveness unknown for session "${goal.workerSessionID}" (probe timed out or unreachable); ` +
             `keeping ${blocking.length} write reservation(s) — nothing reaped, nothing rotated. ` +
-            `The worker may still be running. Retry resume (a flaky probe recovers on retry); ` +
-            `if the worker is gone its quiet reservations reap automatically past the force TTL.`,
+            `The worker may still be running; wait for actual tool completion/quiescence. Neither age nor a missing session releases execution fences.`,
           )
         }
         throw new Error("Goal still has closing/in-flight writes; ownership cannot be reacquired before quiescence.")
@@ -1416,10 +1517,6 @@ export function createGoalService(host: LoopHost): GoalService {
       }
       goal.scopeClosing = false
       goal.scopeClearPending = false
-      // Drop any non-blocking leftovers for this goal (dead under the full
-      // liveness check — they belong to the retired session and can never
-      // complete into the new generation).
-      state.workspaceCalls = (state.workspaceCalls ?? []).filter((call) => call.goalID !== goalID)
       assertWorkspaceWriteAvailable(state, goal, goal.ownerSessionID)
       goal.status = "active"
       goal.updatedAt = new Date().toISOString()
@@ -1428,12 +1525,14 @@ export function createGoalService(host: LoopHost): GoalService {
     })
 
     const goal = state.goals.find((g) => g.id === goalID)
-    if (!goal || !resumed) return
+    if (!goal) return rejected(goalID, "not_found", "Goal not found (it may have been cleared). List your goals instead of retrying this ID.")
+    if (!resumed) return rejected(goalID, "invalid_state", `Cannot resume a ${goal.status} goal; no turn was sent.`)
 
     // Get or recreate worker (external I/O — not under lock)
     try {
       await ensureWorkerSession(directory, goal)
     } catch (error) {
+      if (error instanceof GoalDeliveryBlockedError) return error.result
       await mutateState(directory, `goal.resume-rollback:${goalID}`, async (s) => {
         const g = s.goals.find((item) => item.id === goalID)
         if (g?.status === "active") g.status = "paused"
@@ -1454,10 +1553,12 @@ export function createGoalService(host: LoopHost): GoalService {
     } satisfies LoopEvent)
 
     // Drive first continuation
-    await continueTurnUnlocked(directory, goalID)
+    const result = await continueTurnUnlocked(directory, goalID)
+    return result.ok ? { ...result, message: `Goal "${goal.name}" resumed; ${result.message}` } : result
   }
 
   async function retryUnlocked(directory: string, goalID: GoalID) {
+    await reconcileTerminalWorkspaceCalls(directory, host)
     const preState = await readState(directory)
     const workerLiveness = await probeWorkerLiveness(preState.goals.find((g) => g.id === goalID)?.workerSessionID)
     let retried = false
@@ -1467,20 +1568,17 @@ export function createGoalService(host: LoopHost): GoalService {
       // Fail-closed like resume: an "unknown" probe keeps reservations.
       const liveness = { isWorkerLive: (_gid: string, _wsid?: string) => _gid === goalID ? workerLiveness !== "dead" : false, now: Date.now() }
       sweepStaleWorkspaceState(state, liveness)
-      const rt0 = state.runtimes.find((r) => r.goalID === goalID)
       const blocking = (state.workspaceCalls ?? []).filter(
         (call) =>
           call.goalID === goalID &&
-          !isStaleWorkspaceCall(state, call, liveness) &&
-          (call.generation === undefined || !rt0 || call.generation >= rt0.runGeneration),
+          !isStaleWorkspaceCall(state, call, liveness),
       )
       if (blocking.length) {
         if (workerLiveness === "unknown") {
           throw new Error(
             `Worker liveness unknown for session "${goal.workerSessionID}" (probe timed out or unreachable); ` +
             `keeping ${blocking.length} write reservation(s) — nothing reaped, nothing rotated. ` +
-            `The worker may still be running. Retry (a flaky probe recovers on retry); ` +
-            `if the worker is gone its quiet reservations reap automatically past the force TTL.`,
+            `The worker may still be running; wait for actual tool completion/quiescence. Neither age nor a missing session releases execution fences.`,
           )
         }
         throw new Error("Goal still has closing/in-flight writes; ownership cannot be reacquired before quiescence.")
@@ -1521,11 +1619,13 @@ export function createGoalService(host: LoopHost): GoalService {
     })
 
     const goal = state.goals.find((g) => g.id === goalID)
-    if (!goal || !retried) return
+    if (!goal) return rejected(goalID, "not_found", "Goal not found (it may have been cleared). List your goals instead of retrying this ID.")
+    if (!retried) return rejected(goalID, "invalid_state", `Cannot retry a ${goal.status} goal; no turn was sent.`)
 
     try {
       await ensureWorkerSession(directory, goal)
     } catch (error) {
+      if (error instanceof GoalDeliveryBlockedError) return error.result
       await mutateState(directory, `goal.retry-rollback:${goalID}`, async (s) => {
         const g = s.goals.find((item) => item.id === goalID)
         if (g?.status === "active") g.status = "blocked"
@@ -1545,29 +1645,25 @@ export function createGoalService(host: LoopHost): GoalService {
       revision: state.revision,
     } satisfies LoopEvent)
 
-    await continueTurnUnlocked(directory, goalID)
+    return continueTurnUnlocked(directory, goalID)
   }
 
   async function clearUnlocked(directory: string, goalID: GoalID) {
     // Terminal by design: clear is NEVER gated on quiescence. The old
-    // two-step (scopeClosing → deferred scopeClearPending tombstone) created
-    // the permanent limbo — a dead reservation deferred deletion forever via
-    // an after-hook that never runs. Now: retire the worker (fences late
-    // tools), drop the goal's reservations, remove goal+runtimes, cancel
-    // awaits, log the event. A genuinely running tool that finishes afterwards
-    // finds its session retired and its reservation gone — fail-closed, and it
-    // cannot resurrect the goal.
+    // two-step scopeClearPending tombstone kept dead goals visible forever.
+    // Retire the worker and remove goal+runtimes immediately, but retain
+    // independent execution fences until their actual after-hook/finally.
+    // Revoking session authority cannot stop an already executing write.
     const pre = await readState(directory)
     const workerID = sessions.get(goalID)?.workerSessionID || pre.goals.find((g) => g.id === goalID)?.workerSessionID
     const state = await mutateState(directory, `goal.clear:${goalID}`, async (s) => {
       const g = s.goals.find((item) => item.id === goalID)
       if (g) retireWorker(s, g)
-      s.workspaceCalls = (s.workspaceCalls ?? []).filter((call) => call.goalID !== goalID)
-      if (s.workspaceOperation?.goalID === goalID) s.workspaceOperation = undefined
       s.goals = s.goals.filter((g) => g.id !== goalID)
       s.runtimes = s.runtimes.filter((r) => r.goalID !== goalID)
       // Clearing cancels outstanding awaits: no orphan wakes after clear.
       s.commandAwaits = (s.commandAwaits ?? []).filter((a) => a.goalID !== goalID)
+      await deleteGoalInbox(directory, goalID)
       return s
     })
     sessions.delete(goalID)
@@ -1601,9 +1697,9 @@ export function createGoalService(host: LoopHost): GoalService {
   }
 
   async function reconcile(directory: string) {
-    // Restart reconstruction: reap provably-dead reservations (no liveness
-    // proof available yet — sync check only: superseded, goal-gone, force-old),
-    // reset orphaned scopeClosing, finalize unreferenced scopeClearPending.
+    await reconcileTerminalWorkspaceCalls(directory, host)
+    // Heal old goal flags after exact terminal proof drained reservations.
+    // Restart, elapsed time and changed generations are not tool-exit proof.
     // Makes a restart self-healing instead of reconstructing the limbo.
     try {
       let summary = { reapedCalls: [], resetClosing: [], finalizedClears: [], forceCleared: [] } as import("./workspace-execution").WorkspaceSweepSummary
@@ -1715,26 +1811,39 @@ export function createGoalService(host: LoopHost): GoalService {
     }
   }
 
-  async function nudgeUnlocked(directory: string, goalID: GoalID): Promise<{ ok: boolean; message: string }> {
+  async function nudgeUnlocked(directory: string, goalID: GoalID): Promise<GoalActionResult> {
+    await reconcileTerminalWorkspaceCalls(directory, host)
     const preState = await readState(directory)
     const goal = preState.goals.find((g) => g.id === goalID)
-    if (!goal) return { ok: false, message: "Goal not found." }
+    if (!goal) return rejected(goalID, "not_found", "Goal not found (it may have been cleared). List your goals instead of retrying this ID.")
     if (goal.status !== "active") {
-      return { ok: false, message: `Goal is ${goal.status}; resume or retry it before nudging.` }
+      return rejected(goalID, "invalid_state", `Goal is ${goal.status}; resume or retry it before nudging.`)
     }
     // Quota is not a timeout: never burn a turn re-prompting a model the
     // provider just limited. ok:false (not an exception) keeps nudge usable —
     // the operator waits, switches model, or retries after the hold lifts.
     const quotaHold = quotaHoldMessage(goal)
-    if (quotaHold) return { ok: false, message: quotaHold }
+    if (quotaHold) return rejected(goalID, "blocked", quotaHold)
+    const guard = continuationGuard(preState, goalID)
+    if (guard) return guard
+    if (goal.workerSessionID) {
+      const status = await host.sessionStatus(goal.workerSessionID)
+      if (status === "busy") return rejected(goalID, "blocked", "Worker is busy; no prompt was sent and its active turn was left intact. Retry after idle.")
+      if (status !== "idle" && (goal.pendingIdentity || goal.modelSwitch?.pending || goal.agentSwitch?.pending)) {
+        return rejected(goalID, "blocked", "Pending identity requires confirmed idle; worker status is unknown. No prompt was sent.")
+      }
+      if (status !== "idle") return rejected(goalID, "blocked", "Worker status is unknown or retrying; an outstanding prompt may already be accepted. Nothing was sent or reset. Retry after confirmed idle.")
+    }
     if (goal.config.write_scope !== undefined) {
       await pauseUnlocked(directory, goalID)
-      await resumeUnlocked(directory, goalID)
-      return { ok: true, message: `Re-prompted protected worker for "${goal.name}" in a freshly fenced session.` }
+      return resumeUnlocked(directory, goalID)
     }
 
     // Clear stale run state so the continuation is not gated on an old lease/run.
+    let resetFailure: GoalActionResult | undefined
     const cleared = await mutateState(directory, `goal.nudge:${goalID}`, async (s) => {
+      resetFailure = continuationGuard(s, goalID)
+      if (resetFailure) return s
       const rt = s.runtimes.find((r) => r.goalID === goalID)
       if (!rt) return s
       rt.phase = "idle"
@@ -1745,34 +1854,45 @@ export function createGoalService(host: LoopHost): GoalService {
       rt.updatedAt = new Date().toISOString()
       return s
     })
+    if (resetFailure) return resetFailure
     const freshGoal = cleared.goals.find((g) => g.id === goalID)
     if (!freshGoal || !freshGoal.workerSessionID) {
-      return { ok: false, message: "Goal has no worker session. Use resume_goal or retry_goal." }
+      return rejected(goalID, "blocked", "Goal has no worker session. Use resume_goal or retry_goal.")
     }
 
-    // Force a continuation even if the session reports non-idle.
-    await continueTurnUnlocked(directory, goalID, { force: true })
-    return { ok: true, message: `Re-prompted worker for "${freshGoal.name}".` }
+    // Idle was confirmed above; force bypasses only the redundant host probe.
+    return continueTurnUnlocked(directory, goalID, { force: true })
   }
 
-  async function sendUnlocked(directory: string, goalID: GoalID, text: string): Promise<{ ok: boolean; message: string }> {
+  async function sendUnlocked(directory: string, goalID: GoalID, text: string): Promise<GoalActionResult> {
     const trimmed = text.trim()
-    if (!trimmed) return { ok: false, message: "Nothing to send." }
+    if (!trimmed) return rejected(goalID, "invalid_state", "Nothing to send.")
+    await reconcileTerminalWorkspaceCalls(directory, host)
     const preState = await readState(directory)
     const goal = preState.goals.find((g) => g.id === goalID)
-    if (!goal) return { ok: false, message: "Goal not found." }
+    if (!goal) return rejected(goalID, "not_found", "Goal not found (it may have been cleared). List your goals instead of retrying this ID.")
 
-    await appendGoalInbox(directory, goalID, "user", trimmed)
+    if (!await appendGoalInbox(directory, goalID, "user", trimmed)) return rejected(goalID, "not_found", "Goal cleared before words could be queued. List current goals instead of retrying this ID.")
     if (goal.status !== "active") {
-      return { ok: true, message: `Queued for "${goal.name}" (goal is ${goal.status}; delivers on the next active turn).` }
+      return { ok: true, outcome: "queued", goalID, message: `Queued for "${goal.name}" (goal is ${goal.status}; delivers on the next active turn).` }
+    }
+    const guard = continuationGuard(preState, goalID)
+    if (guard) return { ok: true, outcome: "queued", goalID, message: `Saved in inbox for "${goal.name}". ${guard.message}` }
+    const status = goal.workerSessionID ? await host.sessionStatus(goal.workerSessionID) : undefined
+    if (!(await readState(directory)).goals.some((item) => item.id === goalID)) return rejected(goalID, "not_found", "Goal cleared during worker status probe; no prompt was sent.")
+    if (goal.workerSessionID && status !== "idle") {
+      return { ok: true, outcome: "queued", goalID, message: `Saved in inbox for "${goal.name}"; worker is busy or unconfirmed. Its active turn was left intact.` }
     }
     if (goal.config.write_scope !== undefined) {
-      await continueTurnUnlocked(directory, goalID, { bare: true })
-      return { ok: true, message: `Queued for "${goal.name}"; protected workers receive it on the next quiescent turn.` }
+      const result = await continueTurnUnlocked(directory, goalID, { bare: true })
+      return result.ok || result.outcome === "not_found" ? result : { ok: true, outcome: "queued", goalID, message: `Saved in inbox for "${goal.name}". ${result.message}` }
     }
 
     // Clear stale run state so the bare turn is not gated on an old lease/run.
+    let resetFailure: GoalActionResult | undefined
     const cleared = await mutateState(directory, `goal.send:${goalID}`, async (s) => {
+      resetFailure = continuationGuard(s, goalID)
+      if (resetFailure) return s
       const rt = s.runtimes.find((r) => r.goalID === goalID)
       if (!rt) return s
       rt.phase = "idle"
@@ -1783,14 +1903,15 @@ export function createGoalService(host: LoopHost): GoalService {
       rt.updatedAt = new Date().toISOString()
       return s
     })
+    if (resetFailure) return resetFailure.outcome === "not_found" ? resetFailure : { ok: true, outcome: "queued", goalID, message: `Words saved in inbox. ${resetFailure.message}` }
     const freshGoal = cleared.goals.find((g) => g.id === goalID)
     if (!freshGoal || !freshGoal.workerSessionID) {
-      return { ok: true, message: `Queued for "${goal.name}" (no worker session yet; delivers on the next turn).` }
+      return { ok: true, outcome: "queued", goalID, message: `Queued for "${goal.name}" (no worker session yet; delivers on the next turn).` }
     }
 
     // Force a bare turn now: the drained words alone, no steering wrapper.
-    await continueTurnUnlocked(directory, goalID, { force: true, bare: true })
-    return { ok: true, message: `Sent to "${freshGoal.name}" as its own turn.` }
+    const result = await continueTurnUnlocked(directory, goalID, { force: true, bare: true })
+    return result.ok || result.outcome === "not_found" ? result : { ok: true, outcome: "queued", goalID, message: `Saved in inbox for "${goal.name}". ${result.message}` }
   }
 
   function sendUserMessage(directory: string, goalID: GoalID, text: string) {

@@ -9,6 +9,8 @@ import { TERMINAL_ROUTE_NAME } from "../../src/tui/terminal-route"
 import { mutateState } from "../../src/infrastructure/state-repository"
 import { createCommandSession } from "../../src/domain/command-session"
 import { ScrollBoxRenderable, TextRenderable } from "@opentui/core"
+import { createRuntimeState, type GoalRuntimeState } from "../../src/domain/runtime"
+import { createGoal } from "../../src/domain/goal"
 
 const THEME = {
   primary: "#fff",
@@ -100,6 +102,43 @@ async function seedDirWithFinishedCommand(): Promise<string> {
 }
 
 describe("LoopDashboard shared Goals/Commands (mounted)", () => {
+  for (const fixture of [
+    { label: "REQUESTED", patch: {}, active: false },
+    { label: "SENDING", patch: { activePromptDispatchAt: new Date().toISOString() }, active: false },
+    { label: "AWAITING", patch: { activePromptAcceptedAt: new Date().toISOString() }, active: false },
+    { label: "PROMPT SEEN", patch: { activePromptObservedAt: new Date().toISOString() }, active: false },
+    { label: "RUNNING", patch: { activePromptObservedAt: new Date().toISOString(), activeAssistantMessageID: "assistant-current" }, active: true },
+    { label: "STALE", patch: { leaseExpiresAt: new Date(Date.now() - 60_000).toISOString(), activeAssistantMessageID: "assistant-old" }, active: false },
+    { label: "UNCONFIRMED", patch: { unknownStatusCount: 1, activeAssistantMessageID: "assistant-current" }, active: false },
+    { label: "QUEUED", patch: { phase: "queued" }, active: false },
+    { label: "FINISHING", patch: { activeAssistantCompletedAt: new Date().toISOString() }, active: false },
+    { label: "PROMPT SEEN", patch: { activePromptObservedAt: new Date().toISOString(), activeAssistantMessageID: "assistant-old", lastWorkerStatus: "idle" }, active: false },
+  ] satisfies Array<{ label: string; patch: Partial<GoalRuntimeState>; active: boolean }>) {
+    it(`worker activity evidence renders ${fixture.label}, not merely its stored running phase`, async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "loopd-dashboard-activity-test-"))
+      const goal = createGoal({ id: "activity-goal" as never, name: "activity-fixture", objective: "fixture", ownerSessionID: "ses-owner", status: "active", config: {} })
+      const runtime: GoalRuntimeState = {
+        ...createRuntimeState(goal.id), phase: "running", activeRunID: "run-current" as never,
+        activePromptMessageID: "msg_current", leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        ...fixture.patch,
+      }
+      await mutateState(dir, "test.activity", async (state) => ({ ...state, goals: [goal], runtimes: [runtime] }))
+      const setup = await testRender(() => <LoopDashboard api={fakeApi([], { count: 0 }) as never} directory={dir} ownerSessionID="ses-owner" />, { width: 160, height: 45 })
+      setups.push(setup as never)
+      try {
+        await setup.waitForFrame((frame) => frame.includes("activity-fixture"))
+        const frame = setup.captureCharFrame()
+        expect(frame).toContain(fixture.label)
+        expect(frame).toContain(`${fixture.active ? 1 : 0} observed active`)
+        if (!fixture.active) expect(frame).not.toContain("worker acting now")
+      } finally {
+        setup.renderer.destroy()
+        setups.pop()
+        await fs.rm(dir, { recursive: true, force: true })
+      }
+    })
+  }
+
   for (const view of ["goals", "commands"] as const) {
     it(`${view}: long lists follow j/k/g/G and wheel scrolls the list, not row text`, async () => {
       const dir = await seedDir()

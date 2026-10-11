@@ -26,7 +26,7 @@ async function emptyRoot(): Promise<string> {
 const HOUR = 60 * 60_000
 const oldAt = (ms: number) => new Date(Date.now() - ms).toISOString()
 
-/** A host whose worker sessions are all dead (poweroff simulation). */
+/** A host whose worker status is unavailable; this is not proof of tool exit. */
 function deadHost() {
   return createFakeHost({ sessionStatus: () => "unknown" })
 }
@@ -41,7 +41,7 @@ async function startScoped(root: string, service: ReturnType<typeof createGoalSe
   return goal
 }
 
-/** Plant the exact poweroff corpse: paused + scopeClosing + dead old calls. */
+/** Plant paused + scopeClosing + old calls with unproved execution lifetime. */
 async function plantCorpse(root: string, goalID: GoalID, worker: string, callAgeMs: number, calls = 2) {
   await mutateState(root, "plant-corpse", async (state) => {
     const g = state.goals.find((item) => item.id === goalID)!
@@ -61,8 +61,8 @@ async function plantCorpse(root: string, goalID: GoalID, worker: string, callAge
   })
 }
 
-describe("scope-ownership limbo (poweroff corpse)", () => {
-  it("stale scopeClosing + dead old calls → resume succeeds, fences the old session, rotates generation", async () => {
+describe("scope-ownership limbo (unknown execution lifetime)", () => {
+  it("unknown old calls block resume; age alone cannot release or rotate authority", async () => {
     const root = await emptyRoot()
     const service = createGoalService(deadHost())
     const goal = await startScoped(root, service)
@@ -70,19 +70,19 @@ describe("scope-ownership limbo (poweroff corpse)", () => {
     const genBefore = (await readState(root)).runtimes.find((r) => r.goalID === goal.id)!.runGeneration
     await plantCorpse(root, goal.id, oldWorker, 2 * HOUR)
 
-    await service.resume(root, goal.id)
+    await expect(service.resume(root, goal.id)).rejects.toThrow("quiescence")
 
     const state = await readState(root)
     const fresh = state.goals.find((g) => g.id === goal.id)!
-    expect(fresh.status).toBe("active")
-    expect(fresh.scopeClosing).toBe(false)
-    expect(state.workspaceCalls ?? []).toEqual([])
-    expect(state.runtimes.find((r) => r.goalID === goal.id)!.runGeneration).toBeGreaterThan(genBefore)
-    expect(fresh.workerSessionID).not.toBe(oldWorker)
-    // Late executions of the dead session stay fenced.
+    expect(fresh.status).toBe("paused")
+    expect(fresh.scopeClosing).toBe(true)
+    expect(state.workspaceCalls).toHaveLength(2)
+    expect(state.runtimes.find((r) => r.goalID === goal.id)!.runGeneration).toBe(genBefore)
+    expect(fresh.workerSessionID).toBe(oldWorker)
+    // No additional execution can enter while the old calls drain.
     await expect(
       beforeWorkspaceTool(root, { tool: "write", sessionID: oldWorker, callID: "late" }, { filePath: "a.ts" }),
-    ).rejects.toThrow("retired")
+    ).rejects.toThrow("closing")
   })
 
   it("the same stuck corpse → clear succeeds terminally", async () => {
@@ -96,7 +96,7 @@ describe("scope-ownership limbo (poweroff corpse)", () => {
 
     const state = await readState(root)
     expect(state.goals).toHaveLength(0)
-    expect(state.workspaceCalls ?? []).toEqual([])
+    expect(state.workspaceCalls).toHaveLength(2)
     expect(state.runtimes).toHaveLength(0)
     await expect(
       beforeWorkspaceTool(root, { tool: "write", sessionID: oldWorker, callID: "late" }, { filePath: "a.ts" }),
@@ -119,7 +119,7 @@ describe("scope-ownership limbo (poweroff corpse)", () => {
     expect((await readState(root)).goals.find((g) => g.id === goal.id)!.status).toBe("active")
   })
 
-  it("retry on a blocked corpse fences and proceeds", async () => {
+  it("retry cannot discard an unproved old execution", async () => {
     const root = await emptyRoot()
     const service = createGoalService(deadHost())
     const goal = await startScoped(root, service)
@@ -139,14 +139,14 @@ describe("scope-ownership limbo (poweroff corpse)", () => {
       return state
     })
 
-    await service.retry(root, goal.id)
+    await expect(service.retry(root, goal.id)).rejects.toThrow("quiescence")
 
     const state = await readState(root)
-    expect(state.goals.find((g) => g.id === goal.id)!.status).toBe("active")
-    expect(state.workspaceCalls ?? []).toEqual([])
+    expect(state.goals.find((g) => g.id === goal.id)!.status).toBe("blocked")
+    expect(state.workspaceCalls).toHaveLength(1)
   })
 
-  it("deferred clear tombstone finalizes via sweep once calls are gone; force after the longer TTL", async () => {
+  it("legacy deferred clear becomes terminal without discarding its execution fence", async () => {
     const root = await emptyRoot()
     const service = createGoalService(deadHost())
     const goal = await startScoped(root, service)
@@ -161,7 +161,7 @@ describe("scope-ownership limbo (poweroff corpse)", () => {
     await service.reconcile(root)
     expect((await readState(root)).goals).toHaveLength(0)
 
-    // Tombstone WITH a fresh reserved call drains naturally — it is kept.
+    // Tombstone WITH a call is deleted too; its independent fence is kept.
     const goal2 = await startScoped(root, service)
     const worker2 = goal2.workerSessionID!
     await beforeWorkspaceTool(root, { tool: "write", sessionID: worker2, callID: "drain" }, { filePath: "a.ts" })
@@ -170,9 +170,10 @@ describe("scope-ownership limbo (poweroff corpse)", () => {
       return state
     })
     await service.reconcile(root)
-    expect((await readState(root)).goals.map((g) => g.id)).toContain(goal2.id)
+    expect((await readState(root)).goals.map((g) => g.id)).not.toContain(goal2.id)
+    expect((await readState(root)).workspaceCalls).toHaveLength(1)
 
-    // Past the longer force TTL the tombstone is force-finalized with the calls.
+    // No TTL may release a possibly executing write after goal deletion.
     await mutateState(root, "age-tombstone", async (state) => {
       state.workspaceCalls = (state.workspaceCalls ?? []).map((call) => ({
         ...call,
@@ -183,10 +184,12 @@ describe("scope-ownership limbo (poweroff corpse)", () => {
     await service.reconcile(root)
     const after = await readState(root)
     expect(after.goals.map((g) => g.id)).not.toContain(goal2.id)
-    expect((after.workspaceCalls ?? []).filter((c) => c.goalID === goal2.id)).toEqual([])
+    expect((after.workspaceCalls ?? []).filter((c) => c.goalID === goal2.id)).toHaveLength(1)
+    await afterWorkspaceTool(root, worker2, "drain")
+    expect((await readState(root)).workspaceCalls).toHaveLength(0)
   })
 
-  it("file locks release after reap: overlapping scope becomes startable", async () => {
+  it("file locks release only after actual completion, not a sweep", async () => {
     const root = await emptyRoot()
     const service = createGoalService(deadHost())
     const goal = await startScoped(root, service, ["b.ts"])
@@ -203,6 +206,11 @@ describe("scope-ownership limbo (poweroff corpse)", () => {
 
     await service.reconcile(root)
 
+    await expect(service.start(root, { name: "overlap", objective: "test", ownerSessionID: "parent", config: { write_scope: ["b.ts"] } })).rejects.toThrow("b.ts")
+    await afterWorkspaceTool(root, oldWorker, "dead-call-0")
+    await afterWorkspaceTool(root, oldWorker, "dead-call-1")
+    await service.reconcile(root)
+
     const created = await service.start(root, {
       name: "overlap",
       objective: "test",
@@ -212,7 +220,7 @@ describe("scope-ownership limbo (poweroff corpse)", () => {
     expect(created.goal.config.write_scope).toEqual(["b.ts"])
   })
 
-  it("owner long-build reservation preserved while fresh, reaped when ancient", async () => {
+  it("owner long-build reservation persists regardless of age until its after-hook", async () => {
     const root = await emptyRoot()
     // No goals: owner shell reserves as an uncontrolled owner-session call.
     await beforeWorkspaceTool(root, { tool: "bash", sessionID: "owner", callID: "build" }, { command: "sleep 3600" })
@@ -225,17 +233,19 @@ describe("scope-ownership limbo (poweroff corpse)", () => {
     expect((await readState(root)).workspaceCalls).toHaveLength(1)
     await expect(withWorkspaceOperation(root, "any" as GoalID, "owner", async () => {})).rejects.toThrow("busy")
 
-    // Ancient owner reservation is reaped; checks proceed.
+    // Ancient owner reservation may still be an OS process; checks stay fenced.
     await mutateState(root, "age-owner-call", async (state) => {
       state.workspaceCalls = (state.workspaceCalls ?? []).map((call) => ({ ...call, at: oldAt(2 * HOUR) }))
       return state
     })
     await createGoalService(deadHost()).reconcile(root)
-    expect((await readState(root)).workspaceCalls ?? []).toEqual([])
+    expect((await readState(root)).workspaceCalls).toHaveLength(1)
+    await expect(withWorkspaceOperation(root, "any" as GoalID, "owner", async () => {})).rejects.toThrow("busy")
+    await afterWorkspaceTool(root, "owner", "build")
     await withWorkspaceOperation(root, "any" as GoalID, "owner", async () => {})
   })
 
-  it("restart reconstruction is safe: reconcile heals the corpse, then resume works", async () => {
+  it("restart reconstruction retains unproved fences rather than inferring process exit", async () => {
     const root = await emptyRoot()
     const first = createGoalService(deadHost())
     const goal = await startScoped(root, first)
@@ -246,14 +256,14 @@ describe("scope-ownership limbo (poweroff corpse)", () => {
     const restarted = createGoalService(deadHost())
     await restarted.reconcile(root)
     const healed = await readState(root)
-    expect(healed.goals.find((g) => g.id === goal.id)!.scopeClosing).toBe(false)
-    expect(healed.workspaceCalls ?? []).toEqual([])
+    expect(healed.goals.find((g) => g.id === goal.id)!.scopeClosing).toBe(true)
+    expect(healed.workspaceCalls).toHaveLength(2)
 
-    await restarted.resume(root, goal.id)
-    expect((await readState(root)).goals.find((g) => g.id === goal.id)!.status).toBe("active")
+    await expect(restarted.resume(root, goal.id)).rejects.toThrow("quiescence")
+    expect((await readState(root)).goals.find((g) => g.id === goal.id)!.status).toBe("paused")
   })
 
-  it("reservations stamp generation whenever a runtime exists; superseded generations reap even when fresh", async () => {
+  it("reservations stamp generation but rotation cannot prove an existing write completed", async () => {
     const root = await emptyRoot()
     const service = createGoalService(createFakeHost())
     const goal = await startScoped(root, service)
@@ -266,7 +276,7 @@ describe("scope-ownership limbo (poweroff corpse)", () => {
     expect(stamped.generation).toBe(gen)
     await afterWorkspaceTool(root, worker, "stamped")
 
-    // A fresh call from a superseded generation is dead on arrival.
+    // Generation change revokes future authority, not an already executing tool.
     await mutateState(root, "bump", async (state) => {
       state.runtimes.find((r) => r.goalID === goal.id)!.runGeneration = gen + 1
       state.workspaceCalls = [{
@@ -280,7 +290,9 @@ describe("scope-ownership limbo (poweroff corpse)", () => {
       return state
     })
     await service.reconcile(root)
-    expect((await readState(root)).workspaceCalls ?? []).toEqual([])
+    expect((await readState(root)).workspaceCalls).toHaveLength(1)
+    await afterWorkspaceTool(root, worker, "superseded")
+    expect((await readState(root)).workspaceCalls).toHaveLength(0)
   })
 
   it("call TTL is conservative: a reservation just under the TTL with a live worker is kept", async () => {

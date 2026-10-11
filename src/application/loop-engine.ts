@@ -6,7 +6,6 @@
 import { randomUUID } from "crypto"
 import { readState, mutateState, appendEvent } from "../infrastructure/state-repository"
 import type { StoreState } from "../infrastructure/state-repository"
-import { isTerminal } from "../domain/goal"
 import type { GoalID } from "../domain/goal"
 import {
   releaseLease,
@@ -19,6 +18,8 @@ import type { LoopEvent } from "../domain/events"
 import type { GoalService } from "./goal-service"
 import type { LoopHost } from "../server/host-adapter"
 import type { WorkspaceSweepSummary } from "./workspace-execution"
+import { releaseTerminalWorkspaceCalls, reconcileTerminalWorkspaceCalls } from "./workspace-execution"
+import { terminalToolExecution } from "../domain/tool-execution"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
 
 /** Two-stage idle debounce — require two idle signals 2s apart with no activity in between. */
@@ -70,6 +71,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
 
   let running = false
   let maintenanceTimer: ReturnType<typeof setInterval> | undefined
+  let maintaining = false
   // In-memory cache of worker session IDs — avoids disk read on every event
   let knownWorkerSessions = new Set<string>()
   let knownWorkerSessionsLoaded = false
@@ -107,7 +109,10 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     loadWorkerSessionsIfneeded().catch(() => {})
     // Maintenance timer — much slower than before (30s vs 5s)
     maintenanceTimer = setInterval(() => {
-      if (running) maintenance().catch(() => {})
+      if (running && !maintaining) {
+        maintaining = true
+        maintenance().catch(() => {}).finally(() => { maintaining = false })
+      }
     }, maintenanceMs)
   }
 
@@ -122,12 +127,18 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     return running
   }
 
-  async function continueGoal(goalID: GoalID): Promise<boolean> {
+  async function continueGoal(goalID: GoalID, opts?: { forceFinish?: boolean }): Promise<boolean> {
     if (inflightContinuations.has(goalID)) return false
     inflightContinuations.add(goalID)
     try {
-      await goalService.continueTurn(directory, goalID)
-      return true
+      const state = await readState(directory)
+      const goal = state.goals.find((g) => g.id === goalID)
+      const rt = state.runtimes.find((r) => r.goalID === goalID)
+      if (!running || !goal || goal.status !== "active" || goal.interactive || !rt) return false
+      const forceFinish = opts?.forceFinish || enforceLimits(goal, rt).stop === "force_finish"
+      const result = await goalService.continueTurn(directory, goalID, { forceFinish })
+      if (!result.ok) await logServerEvent(directory, "engine.continuation-denied", { goalID, outcome: result.outcome, reason: result.message })
+      return result.ok && result.outcome === "sent"
     } finally {
       inflightContinuations.delete(goalID)
     }
@@ -141,6 +152,13 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     // FAST PATH: filter by event type BEFORE any disk I/O
     const type = event.type as string | undefined
     if (!type || !HANDLED_EVENT_TYPES.has(type)) return false
+
+    // v1 may skip tool.execute.after when the executor throws. Handle exact
+    // terminal parts before cleared/owner/retired sessions are filtered out.
+    if (type === "message.part.updated") {
+      const proof = terminalToolExecution(event.properties?.part)
+      if (proof) await releaseTerminalWorkspaceCalls(directory, [proof])
+    }
 
     // FAST PATH: check if this session is one we care about
     const sessionID = eventSessionID(event)
@@ -201,8 +219,9 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
   async function handleMessageActivity(goal: any, event: any): Promise<boolean> {
     let matched = false
     await mutateState(directory, `message-activity:${goal.id}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goal.id)
       const rt = s.runtimes.find((r) => r.goalID === goal.id)
-      if (!rt || rt.phase !== "running" || !rt.activePromptMessageID) return s
+      if (!g || g.status !== "active" || g.workerSessionID !== goal.workerSessionID || !rt || rt.phase !== "running" || !rt.activePromptMessageID) return s
 
       if (event.type === "message.updated") {
         const info = event.properties?.info
@@ -212,6 +231,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
           matched = true
         } else if (info?.role === "assistant" && info.parentID === rt.activePromptMessageID) {
           Object.assign(rt, recordActivity(rt))
+          rt.activePromptObservedAt ??= new Date().toISOString()
           rt.activeAssistantMessageID = info.id
           if (info.time?.completed) {
             rt.activeAssistantCompletedAt = new Date(info.time.completed).toISOString()
@@ -244,8 +264,9 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
   async function handleExecutionSucceeded(goal: any): Promise<boolean> {
     let matched = false
     await mutateState(directory, `execution-succeeded:${goal.id}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goal.id)
       const rt = s.runtimes.find((r) => r.goalID === goal.id)
-      if (!rt || rt.phase !== "running" || !rt.activePromptMessageID) return s
+      if (!g || g.status !== "active" || g.workerSessionID !== goal.workerSessionID || !rt || rt.phase !== "running" || !rt.activePromptMessageID) return s
       Object.assign(rt, recordActivity(rt))
       rt.activeAssistantCompletedAt = new Date().toISOString()
       matched = true
@@ -273,7 +294,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     let afterIdle = await mutateState(directory, `idle:${goalID}`, async (s) => {
       const g = s.goals.find((item) => item.id === goalID)
       if (!g) return s
-      if (isTerminal(g.status) || g.status === "paused") return s
+      if (g.status !== "active" || g.interactive || g.workerSessionID !== goal.workerSessionID) return s
       const rt = s.runtimes.find((r) => r.goalID === goalID)
       if (!rt) return s
       if (rt.phase !== "running") return s
@@ -372,7 +393,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       afterIdle = await mutateState(directory, `idle.confirm:${goalID}`, async (s) => {
         const g = s.goals.find((item) => item.id === goalID)
         const rt = s.runtimes.find((r) => r.goalID === goalID)
-        if (!g || !rt || isTerminal(g.status) || g.status === "paused") return s
+        if (!g || !rt || g.status !== "active" || g.interactive || g.workerSessionID !== goal.workerSessionID) return s
         if (rt.phase !== "running") return s
         if (rt.runGeneration !== candidate.generation) return s
         if (rt.activePromptMessageID !== candidate.promptMessageID) return s
@@ -421,12 +442,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     const limitResult = enforceLimits(freshGoal, freshRuntime)
     if (limitResult.stop === "force_finish") {
       if (!freshRuntime.forceFinishRequested) {
-        await mutateState(directory, `idle.force-finish:${goalID}`, async (s) => {
-          const rt = s.runtimes.find((r) => r.goalID === goalID)
-          if (rt) rt.forceFinishRequested = true
-          return s
-        })
-        await goalService.continueTurn(directory, goalID, { forceFinish: true })
+        await continueGoal(goalID, { forceFinish: true })
         return true
       }
       const blockedKey = goalID
@@ -555,8 +571,9 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     if (statusType === "idle") return handleSessionIdle(state, goal)
 
     await mutateState(directory, `status:${goal.id}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goal.id)
       const rt = s.runtimes.find((r) => r.goalID === goal.id)
-      if (!rt) return s
+      if (!g || g.status !== "active" || g.workerSessionID !== goal.workerSessionID || !rt || rt.runGeneration !== runtime.runGeneration) return s
       if (statusType === "busy" || statusType === "retry") {
         Object.assign(rt, recordActivity(rt))
       }
@@ -580,7 +597,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     const newState = await mutateState(directory, `error:${goal.id}`, async (s) => {
       const g = s.goals.find((item) => item.id === goal.id)
       const rt = s.runtimes.find((r) => r.goalID === goal.id)
-      if (!rt) return s
+      if (!g || g.status !== "active" || g.workerSessionID !== goal.workerSessionID || !rt || rt.runGeneration !== runtime.runGeneration) return s
 
       rt.consecutiveFailures += 1
       rt.lastError = message
@@ -880,17 +897,12 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       || (runtime.activeToolCallIDs?.length ?? 0) > 0
   }
 
-  /** Stale scope-ownership sweep — runs on EVERY maintenance pass regardless
-   * of goal status (even with zero known/active workers): a poweroff corpse
-   * (stale scopeClosing + dead workspaceCalls) must heal without any active
-   * goal driving it. Liveness comes from host.sessionStatus. Fail-closed: a
-   * timed-out/unreachable probe ("unknown") KEEPS reservations — timeout is
-   * never proof of death. Only what is provably dead from state alone
-   * (superseded generation, goal gone, age past the force TTL) is reaped
-   * without liveness proof; same-generation + live-or-unknown worker + fresh
-   * activity is always kept. */
+  /** Recover missed after-hooks from exact terminal transcript evidence,
+   * then heal old goal flags even with zero active workers. No age, status,
+   * absent-goal or generation inference releases an execution reservation. */
   async function sweepStaleWorkspaceOwnership() {
     try {
+      await reconcileTerminalWorkspaceCalls(directory, host)
       const snapshot = await readState(directory)
       // Cheap pre-check: no reservations/closing flags anywhere means the
       // sweep could change nothing — skip the state rewrite (mutateState
@@ -901,14 +913,8 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       ) {
         return
       }
-      // Fail-closed liveness: every known session counts as live for sweep
-      // purposes. A timed-out/unreachable probe ("unknown") is never proof
-      // of death, and no host reports a confirmed-dead status distinct from
-      // "unknown" — so only state-proven death (superseded generation, goal
-      // gone, age past the force TTL) reaps here. Resume/retry apply their
-      // own bounded tri-state probe and report stage evidence on "unknown".
-      // (No per-session probe: its only consumer was the live/dead bit, and
-      // the dead branch can no longer be proven from a status call.)
+      // Status probes cannot establish tool completion; keep closing flags
+      // conservative until exact reservations drain.
       const { sweepStaleWorkspaceState } = await import("./workspace-execution")
       let summary: WorkspaceSweepSummary = { reapedCalls: [], resetClosing: [], finalizedClears: [], forceCleared: [] }
       await mutateState(directory, "maintenance.sweep-stale-workspace", async (s) => {
@@ -997,7 +1003,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
             }
             return s
           })
-          goalService.continueTurn(directory, goal.id).catch(() => {})
+          await continueGoal(goal.id)
         }
       }
 
@@ -1018,24 +1024,6 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
             return s
           })
           await logServerEvent(directory, "maintenance.stale-run-cleared", { goalID: goal.id })
-        }
-
-        // P4: Tool-call deadlock TTL — clear stuck activeToolCallIDs after 30s without activity
-        if ((runtime.activeToolCallIDs?.length ?? 0) > 0 && runtime.lastActivityAt) {
-          const age = Date.now() - Date.parse(runtime.lastActivityAt)
-          if (age > 30000) {
-            await mutateState(directory, `maintenance.toolcall-ttl:${goal.id}`, async (s) => {
-              const rt = s.runtimes.find((r) => r.goalID === goal.id)
-              if (rt && (rt.activeToolCallIDs?.length ?? 0) > 0) {
-                rt.activeToolCallIDs = []
-                rt.idleCandidateAt = undefined
-                rt.idleCandidateGeneration = undefined
-                rt.updatedAt = new Date().toISOString()
-              }
-              return s
-            })
-            await logServerEvent(directory, "maintenance.toolcall-ttl-cleared", { goalID: goal.id, age })
-          }
         }
 
         const status = await host.sessionStatus(goal.workerSessionID)
@@ -1086,13 +1074,8 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
           await logServerEvent(directory, "maintenance.worker-recovered", { goalID: goal.id })
         }
 
-        // Self-heal a running-phase stall. OpenCode reporting the session idle
-        // is authoritative evidence that nothing is streaming there, so after a
-        // long quiet the turn is over and some veto (phantom tool call, late
-        // part trickle, unconfirmable transcript) is holding the lease. Detection
-        // without recovery just moved the manual nudge onto the owner; this does
-        // the same thing the nudge did, fenced on generation so a turn that
-        // started in the meantime is never clobbered.
+        // Recover a quiet idle session only after actual tool/operation fences
+        // have drained. Idle status and elapsed time never prove tool exit.
         if (status === "idle" && runtime.phase === "running") {
           const lastSignal = Math.max(
             runtime.lastActivityAt ? Date.parse(runtime.lastActivityAt) : 0,
@@ -1109,8 +1092,10 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
               const g = s.goals.find((item) => item.id === goal.id)
               const rt = s.runtimes.find((r) => r.goalID === goal.id)
               if (!g || !rt || g.status !== "active") return s
+              if (g.interactive || g.scopeClosing || g.workerSessionID !== goal.workerSessionID) return s
               if (rt.phase !== "running") return s
               if (rt.runGeneration !== generation) return s
+              if (s.workspaceOperation || (s.workspaceCalls ?? []).some((call) => call.goalID === goal.id) || rt.activeToolCallIDs?.length) return s
               clearedToolCalls = rt.activeToolCallIDs?.length ?? 0
               Object.assign(rt, releaseLease(rt))
               rt.activeRunID = undefined

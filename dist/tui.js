@@ -642,7 +642,7 @@ var GOAL_STATUS_META = {
 var PHASE_META = {
   idle: { short: "Idle", hint: "between turns" },
   queued: { short: "Queued", hint: "waiting to start" },
-  running: { short: "Running", hint: "worker acting now" },
+  running: { short: "Reserved", hint: "turn reserved; activity unconfirmed" },
   compacting: { short: "Compacting", hint: "summarizing context" },
   waiting_retry: { short: "Retrying", hint: "backing off" },
   stopping: { short: "Stopping", hint: "abort in flight" }
@@ -653,9 +653,30 @@ function goalStatusLabel(status) {
 function phaseLabel(phase) {
   return PHASE_META[phase] ?? { short: phase, hint: "" };
 }
-function describeGoalState(status, phase) {
+function workerActivityLabel(runtime, now = Date.now()) {
+  if (runtime.phase !== "running")
+    return { ...phaseLabel(runtime.phase), acting: false };
+  const expires = runtime.leaseExpiresAt ? Date.parse(runtime.leaseExpiresAt) : NaN;
+  if (Number.isFinite(expires) && expires <= now)
+    return { short: "Stale", hint: "lease expired; activity unconfirmed (not proof of worker exit)", acting: false };
+  if (!Number.isFinite(expires) || (runtime.unknownStatusCount ?? 0) > 0)
+    return { short: "Unconfirmed", hint: "worker status unavailable; do not assume the prompt failed", acting: false };
+  if (runtime.activeAssistantCompletedAt)
+    return { short: "Finishing", hint: "response completed; waiting for turn reconciliation", acting: false };
+  if (runtime.activePromptObservedAt && runtime.lastWorkerStatus !== "idle" && runtime.lastWorkerStatus !== "retry" && (runtime.activeAssistantMessageID || runtime.activeToolCallIDs?.length)) {
+    return { short: "Running", hint: "correlated assistant or tool activity observed", acting: true };
+  }
+  if (runtime.activePromptObservedAt)
+    return { short: "Prompt seen", hint: "prompt observed; response activity not confirmed", acting: false };
+  if (runtime.activePromptAcceptedAt)
+    return { short: "Awaiting", hint: "host accepted prompt; transcript activity not confirmed", acting: false };
+  if (runtime.activePromptDispatchAt)
+    return { short: "Sending", hint: "dispatch requested; awaiting host acceptance", acting: false };
+  return { short: "Requested", hint: "run reserved; no dispatch evidence yet", acting: false };
+}
+function describeGoalState(status, phase, now = Date.now()) {
   const goal = goalStatusLabel(status);
-  const activity = phase ? phaseLabel(phase) : undefined;
+  const activity = phase ? typeof phase === "string" ? phaseLabel(phase) : workerActivityLabel(phase, now) : undefined;
   const workerClause = activity ? `worker is ${activity.hint || activity.short.toLowerCase()}` : "worker state unknown";
   if (status === "active")
     return `Loopd owns this; ${workerClause}.`;
@@ -2019,7 +2040,7 @@ function LoopDashboard(props) {
     returnToNormalMode();
   }
   const activeGoals = () => state()?.goals.filter((g) => showCompleted() || g.status !== "complete") || [];
-  const runningCount = () => state()?.runtimes.filter((runtime) => runtime.phase === "running").length || 0;
+  const runningCount = () => state()?.runtimes.filter((runtime) => workerActivityLabel(runtime, clock()).acting).length || 0;
   const runningFrame = () => ["|", "/", "-", "\\"][Math.floor(clock() / 500) % 4];
   function handleBugReport() {
     const goal = selectedGoal();
@@ -2040,7 +2061,7 @@ function LoopDashboard(props) {
     return `loopd-goal-${goalID}`;
   }
   return (() => {
-    var _el$4 = _$createElement("box"), _el$5 = _$createElement("box"), _el$6 = _$createElement("box"), _el$7 = _$createElement("text"), _el$8 = _$createElement("span"), _el$0 = _$createElement("span"), _el$10 = _$createElement("span"), _el$11 = _$createTextNode(` `), _el$12 = _$createTextNode(` `), _el$13 = _$createElement("span"), _el$15 = _$createElement("span"), _el$16 = _$createElement("span"), _el$18 = _$createElement("span"), _el$20 = _$createElement("span"), _el$21 = _$createTextNode(` `), _el$22 = _$createTextNode(` acting now`), _el$23 = _$createElement("span"), _el$25 = _$createElement("span"), _el$26 = _$createElement("span"), _el$28 = _$createElement("span"), _el$30 = _$createElement("span"), _el$32 = _$createElement("span"), _el$34 = _$createElement("span"), _el$36 = _$createElement("span"), _el$38 = _$createElement("box"), _el$39 = _$createElement("text"), _el$40 = _$createElement("span"), _el$42 = _$createElement("box"), _el$56 = _$createElement("box"), _el$57 = _$createElement("text"), _el$58 = _$createElement("span"), _el$59 = _$createElement("input");
+    var _el$4 = _$createElement("box"), _el$5 = _$createElement("box"), _el$6 = _$createElement("box"), _el$7 = _$createElement("text"), _el$8 = _$createElement("span"), _el$0 = _$createElement("span"), _el$10 = _$createElement("span"), _el$11 = _$createTextNode(` `), _el$12 = _$createTextNode(` `), _el$13 = _$createElement("span"), _el$15 = _$createElement("span"), _el$16 = _$createElement("span"), _el$18 = _$createElement("span"), _el$20 = _$createElement("span"), _el$21 = _$createTextNode(` `), _el$22 = _$createTextNode(` observed active`), _el$23 = _$createElement("span"), _el$25 = _$createElement("span"), _el$26 = _$createElement("span"), _el$28 = _$createElement("span"), _el$30 = _$createElement("span"), _el$32 = _$createElement("span"), _el$34 = _$createElement("span"), _el$36 = _$createElement("span"), _el$38 = _$createElement("box"), _el$39 = _$createElement("text"), _el$40 = _$createElement("span"), _el$42 = _$createElement("box"), _el$56 = _$createElement("box"), _el$57 = _$createElement("text"), _el$58 = _$createElement("span"), _el$59 = _$createElement("input");
     _$insertNode(_el$4, _el$5);
     _$setProp(_el$4, "flexDirection", "column");
     _$setProp(_el$4, "width", "100%");
@@ -2414,6 +2435,7 @@ function LoopDashboard(props) {
                   },
                   children: (goal, i) => {
                     const runtime = () => state()?.runtimes.find((r) => r.goalID === goal.id);
+                    const activity = () => runtime() ? workerActivityLabel(runtime(), clock()) : undefined;
                     const isActive = () => i() === selected();
                     const maxTurns = goal.config?.maxTurns;
                     const turnColor = () => {
@@ -2478,13 +2500,13 @@ function LoopDashboard(props) {
                           var _el$111 = _$createElement("span"), _el$112 = _$createTextNode(` `);
                           _$insertNode(_el$111, _el$112);
                           _$insert(_el$111, (() => {
-                            var _c$3 = _$memo(() => runtime().phase === "running");
-                            return () => _c$3() ? runningFrame() : phaseIcon(runtime().phase);
+                            var _c$3 = _$memo(() => !!activity()?.acting);
+                            return () => _c$3() ? runningFrame() : _$memo(() => runtime().phase === "running")() ? "\u25F7" : phaseIcon(runtime().phase);
                           })(), _el$112);
-                          _$insert(_el$111, () => phaseLabel(runtime().phase).short.toUpperCase(), null);
+                          _$insert(_el$111, () => activity().short.toUpperCase(), null);
                           _$effect((_$p) => _$setProp(_el$111, "style", {
-                            fg: turnColor(),
-                            bold: runtime().phase === "running"
+                            fg: activity()?.acting ? turnColor() : theme().textMuted,
+                            bold: activity()?.acting
                           }, _$p));
                           return _el$111;
                         })(), (() => {
@@ -2603,6 +2625,7 @@ function LoopDashboard(props) {
           },
           children: (goal) => {
             const rt = () => state()?.runtimes.find((r) => r.goalID === goal().id);
+            const activity = () => rt() ? workerActivityLabel(rt(), clock()) : undefined;
             const lp = () => goal().lastProgress;
             const blk = () => goal().blocker;
             return (() => {
@@ -2650,11 +2673,14 @@ function LoopDashboard(props) {
                   var _el$164 = _$createElement("span"), _el$165 = _$createTextNode(` `), _el$166 = _$createTextNode(` \u2014 `);
                   _$insertNode(_el$164, _el$165);
                   _$insertNode(_el$164, _el$166);
-                  _$insert(_el$164, () => phaseIcon(rt().phase), _el$165);
-                  _$insert(_el$164, () => phaseLabel(rt().phase).short, _el$166);
-                  _$insert(_el$164, () => phaseLabel(rt().phase).hint, null);
+                  _$insert(_el$164, (() => {
+                    var _c$18 = _$memo(() => !!activity()?.acting);
+                    return () => _c$18() ? runningFrame() : _$memo(() => rt().phase === "running")() ? "\u25F7" : phaseIcon(rt().phase);
+                  })(), _el$165);
+                  _$insert(_el$164, () => activity().short, _el$166);
+                  _$insert(_el$164, () => activity().hint, null);
                   _$effect((_$p) => _$setProp(_el$164, "style", {
-                    fg: phaseColor(rt().phase, theme()),
+                    fg: activity()?.acting ? phaseColor(rt().phase, theme()) : theme().textMuted,
                     bold: true
                   }, _$p));
                   return _el$164;
@@ -2671,7 +2697,7 @@ function LoopDashboard(props) {
                   return _el$167;
                 })()];
               })(), _el$149);
-              _$insert(_el$150, () => describeGoalState(goal().status, rt()?.phase));
+              _$insert(_el$150, () => describeGoalState(goal().status, rt(), clock()));
               _$insert(_el$142, (() => {
                 var _c$5 = _$memo(() => !!rt()?.workerAbortedAt);
                 return () => _c$5() && [(() => {
@@ -2972,8 +2998,8 @@ function LoopDashboard(props) {
                 })(), (() => {
                   var _el$237 = _$createElement("span");
                   _$insert(_el$237, (() => {
-                    var _c$18 = _$memo(() => goal().workerTopology === "v2-native-child");
-                    return () => _c$18() ? "native child" : goal().workerTopology === "v2-root-fallback" ? "root fallback" : "v1 child";
+                    var _c$19 = _$memo(() => goal().workerTopology === "v2-native-child");
+                    return () => _c$19() ? "native child" : goal().workerTopology === "v2-root-fallback" ? "root fallback" : "v1 child";
                   })());
                   _$effect((_$p) => _$setProp(_el$237, "style", {
                     fg: theme().text
@@ -3317,15 +3343,15 @@ Write scope: `);
               _$insertNode(_el$299, _el$300);
               _$insertNode(_el$299, _el$301);
               _$insert(_el$299, (() => {
-                var _c$19 = _$memo(() => hiddenFinishedCommands() > 0);
-                return () => _c$19() ? ` \u2014 ${hiddenFinishedCommands()} finished hidden` : "";
+                var _c$20 = _$memo(() => hiddenFinishedCommands() > 0);
+                return () => _c$20() ? ` \u2014 ${hiddenFinishedCommands()} finished hidden` : "";
               })(), _el$301);
               _$insertNode(_el$302, _$createTextNode(`:new &lt;command&gt;`));
               _$insertNode(_el$304, _el$305);
               _$insert(_el$304, () => hiddenFinishedCommands() > 0 ? ", or " : "; ", null);
               _$insert(_el$298, (() => {
-                var _c$20 = _$memo(() => hiddenFinishedCommands() > 0);
-                return () => _c$20() && (() => {
+                var _c$21 = _$memo(() => hiddenFinishedCommands() > 0);
+                return () => _c$21() && (() => {
                   var _el$321 = _$createElement("span"), _el$322 = _$createElement("span"), _el$324 = _$createElement("span");
                   _$insertNode(_el$321, _el$322);
                   _$insertNode(_el$321, _el$324);
@@ -3435,8 +3461,8 @@ Write scope: `);
                         return [(() => {
                           var _el$326 = _$createElement("span");
                           _$insert(_el$326, (() => {
-                            var _c$21 = _$memo(() => !!isActive());
-                            return () => _c$21() ? `\u25B6 ${cmd.title}` : `  ${commandStatusIcon(cmd.status)} ${cmd.title}`;
+                            var _c$22 = _$memo(() => !!isActive());
+                            return () => _c$22() ? `\u25B6 ${cmd.title}` : `  ${commandStatusIcon(cmd.status)} ${cmd.title}`;
                           })());
                           _$effect((_$p) => _$setProp(_el$326, "style", {
                             fg: commandStatusColor(cmd.status, theme()),
@@ -3571,8 +3597,8 @@ Write scope: `);
             _$insertNode(_el$354, _$createTextNode(`\u2B22 Spawn: `));
             _$insert(_el$356, () => cmd().command);
             _$insert(_el$346, (() => {
-              var _c$22 = _$memo(() => cmd().args.length > 0);
-              return () => _c$22() && (() => {
+              var _c$23 = _$memo(() => cmd().args.length > 0);
+              return () => _c$23() && (() => {
                 var _el$375 = _$createElement("span"), _el$376 = _$createTextNode(` `);
                 _$insertNode(_el$375, _el$376);
                 _$insert(_el$375, () => cmd().args.join(" "), null);
@@ -3586,8 +3612,8 @@ Write scope: `);
             _$insertNode(_el$360, _$createTextNode(`Cwd: `));
             _$insert(_el$362, () => cmd().cwd.replace(String(props.directory), "."));
             _$insert(_el$346, (() => {
-              var _c$23 = _$memo(() => !!cmd().goalID);
-              return () => _c$23() && [(() => {
+              var _c$24 = _$memo(() => !!cmd().goalID);
+              return () => _c$24() && [(() => {
                 var _el$377 = _$createElement("span");
                 _$insertNode(_el$377, _$createTextNode(` \u2502 \uD83D\uDD17 linked goal `));
                 _$effect((_$p) => _$setProp(_el$377, "style", {
@@ -3608,8 +3634,8 @@ Write scope: `);
             _$insertNode(_el$368, _el$369);
             _$insert(_el$368, () => cmd().outputBytes, _el$369);
             _$insert(_el$346, (() => {
-              var _c$24 = _$memo(() => !!cmd().truncated);
-              return () => _c$24() && (() => {
+              var _c$25 = _$memo(() => !!cmd().truncated);
+              return () => _c$25() && (() => {
                 var _el$380 = _$createElement("span");
                 _$insertNode(_el$380, _$createTextNode(` \xB7 \u26A0 truncated`));
                 _$effect((_$p) => _$setProp(_el$380, "style", {
@@ -3622,8 +3648,8 @@ Write scope: `);
             _$insertNode(_el$370, _el$371);
             _$insert(_el$370, () => ageLabel(cmd().updatedAt, clock()), null);
             _$insert(_el$346, (() => {
-              var _c$25 = _$memo(() => !!cmd().lastError);
-              return () => _c$25() && [(() => {
+              var _c$26 = _$memo(() => !!cmd().lastError);
+              return () => _c$26() && [(() => {
                 var _el$382 = _$createElement("span"), _el$383 = _$createTextNode(`
 \u26A0 Error: `);
                 _$insertNode(_el$382, _el$383);

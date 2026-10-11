@@ -688,10 +688,13 @@ async function withParentIdentity(
 }
 
 function findGoalByWorkerSession(
-  state: { goals: Goal[]; runtimes: GoalRuntimeState[] },
+  state: { goals: Goal[]; runtimes: GoalRuntimeState[]; retiredWorkerSessions?: string[] },
   sessionID?: string,
 ): Goal | undefined {
   if (!sessionID) return undefined
+  if (state.retiredWorkerSessions?.includes(sessionID)) {
+    throw new Error("Goal cleared or worker retired. This session has no goal authority; stop work and ask the owner to list their current goals. Do not resume a remembered ID.")
+  }
 
   // Match by worker session ID (exact match required)
   return state.goals.find(

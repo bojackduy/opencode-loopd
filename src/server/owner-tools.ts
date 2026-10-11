@@ -381,22 +381,25 @@ export function ownerTools(options: OwnerToolsOptions) {
         const state = await readState(directory)
         const ownerID = context?.sessionID
         const goal = args.goal_id
-          ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID)
+          ? state.goals.find((g) => g.id === args.goal_id)
           : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete")
 
         if (!goal) {
           return {
             title: "No goal found",
-            output: JSON.stringify({ ok: false, message: "No matching active goal for this session." }),
+            output: JSON.stringify({ ok: false, outcome: "not_found", message: args.goal_id ? "Goal not found (it may have been cleared). List your goals instead of retrying this ID." : "No matching active goal for this session." }),
           }
         }
 
+        if (goal.ownerSessionID !== ownerID) {
+          return { title: "Not authorized", output: JSON.stringify({ ok: false, outcome: "unauthorized", message: "This session cannot control that goal." }) }
+        }
         const result = await goalService.sendUserMessage(directory, goal.id, args.message)
 
         return {
-          title: result.ok ? "Message sent" : "Send failed",
+          title: result.ok ? result.outcome === "queued" ? "Message queued" : "Message submitted" : "Send failed",
           output: JSON.stringify({
-            ok: result.ok,
+            ...result,
             goalID: goal.id,
             goalName: goal.name,
             message: result.message,
@@ -466,7 +469,7 @@ export function ownerTools(options: OwnerToolsOptions) {
         const state = await readState(directory)
         const ownerID = context?.sessionID
         const goal = args.goal_id
-          ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID)
+          ? state.goals.find((g) => g.id === args.goal_id)
           : state.goals.find(
               (g) =>
                 g.ownerSessionID === ownerID &&
@@ -478,9 +481,14 @@ export function ownerTools(options: OwnerToolsOptions) {
             title: "No goal found",
             output: JSON.stringify({
               ok: false,
-              message: "No matching paused/blocked goal for this session.",
+              outcome: "not_found",
+              message: args.goal_id ? "Goal not found (it may have been cleared). List your goals instead of retrying this ID." : "No matching paused/blocked goal for this session.",
             }),
           }
+        }
+
+        if (goal.ownerSessionID !== ownerID) {
+          return { title: "Not authorized", output: JSON.stringify({ ok: false, outcome: "unauthorized", message: "This session cannot control that goal." }) }
         }
 
         if (goal.status === "active") {
@@ -491,18 +499,15 @@ export function ownerTools(options: OwnerToolsOptions) {
         }
 
         try {
-          if (goal.status === "paused") {
-            await goalService.resume(directory, goal.id)
-          } else if (goal.status === "blocked") {
-            await goalService.retry(directory, goal.id)
-          }
+          const result = goal.status === "blocked"
+            ? await goalService.retry(directory, goal.id)
+            : await goalService.resume(directory, goal.id)
           return {
-            title: "Goal resumed",
+            title: result.ok ? "Resume submitted" : "Resume not delivered",
             output: JSON.stringify({
-              ok: true,
+              ...result,
               goalID: goal.id,
               goalName: goal.name,
-              message: `Goal "${goal.name}" resumed.`,
             }),
           }
         } catch (error) {
@@ -520,7 +525,7 @@ export function ownerTools(options: OwnerToolsOptions) {
 
     nudge_goal: tool({
       description:
-        "Force re-prompt a stuck active worker (the hardened recovery). Clears stale activeRunID/idleCandidate/generation/lease (phase→idle) and calls continueTurn({force:true}) even if sessionStatus is not idle. Use when unknownStatusCount≥3, lastActivityAt is stale, or maintenance notified 'worker is unreachable'. Per-goal mutex.",
+        "Request a recovery turn for an active goal after confirmed worker idle. Returns the actual delivery outcome or actionable blocker (in-flight writes, workspace operation, busy/unknown worker, pending identity, quota). Never interrupts a live worker or duplicates an unconfirmed prompt. Per-goal mutex.",
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to nudge the first active goal."),
       },
@@ -528,16 +533,19 @@ export function ownerTools(options: OwnerToolsOptions) {
         const state = await readState(directory)
         const ownerID = context?.sessionID
         const goal = args.goal_id
-          ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID)
+          ? state.goals.find((g) => g.id === args.goal_id)
           : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete")
 
         if (!goal) {
           return {
             title: "No goal found",
-            output: JSON.stringify({ ok: false, message: "No matching active goal for this session." }),
+            output: JSON.stringify({ ok: false, outcome: "not_found", message: args.goal_id ? "Goal not found (it may have been cleared). List your goals instead of retrying this ID." : "No matching active goal for this session." }),
           }
         }
 
+        if (goal.ownerSessionID !== ownerID) {
+          return { title: "Not authorized", output: JSON.stringify({ ok: false, outcome: "unauthorized", message: "This session cannot control that goal." }) }
+        }
         try {
           const result = await goalService.nudge(directory, goal.id)
           return {

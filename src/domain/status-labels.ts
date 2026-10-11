@@ -5,7 +5,7 @@
 // TUI dashboard and owner-tool text both read this module.
 
 import type { GoalStatus } from "./goal"
-import type { RuntimePhase } from "./runtime"
+import type { GoalRuntimeState, RuntimePhase } from "./runtime"
 
 export interface StatusLabel {
   short: string
@@ -24,7 +24,7 @@ export const GOAL_STATUS_META: Record<GoalStatus, StatusLabel> = {
 export const PHASE_META: Record<RuntimePhase, StatusLabel> = {
   idle: { short: "Idle", hint: "between turns" },
   queued: { short: "Queued", hint: "waiting to start" },
-  running: { short: "Running", hint: "worker acting now" },
+  running: { short: "Reserved", hint: "turn reserved; activity unconfirmed" },
   compacting: { short: "Compacting", hint: "summarizing context" },
   waiting_retry: { short: "Retrying", hint: "backing off" },
   stopping: { short: "Stopping", hint: "abort in flight" },
@@ -40,10 +40,27 @@ export function phaseLabel(phase: string): StatusLabel {
     ?? { short: phase, hint: "" }
 }
 
+/** Stored running phase means a lease, not proof of worker execution. */
+export function workerActivityLabel(runtime: GoalRuntimeState, now = Date.now()): StatusLabel & { acting: boolean } {
+  if (runtime.phase !== "running") return { ...phaseLabel(runtime.phase), acting: false }
+  const expires = runtime.leaseExpiresAt ? Date.parse(runtime.leaseExpiresAt) : NaN
+  if (Number.isFinite(expires) && expires <= now) return { short: "Stale", hint: "lease expired; activity unconfirmed (not proof of worker exit)", acting: false }
+  if (!Number.isFinite(expires) || (runtime.unknownStatusCount ?? 0) > 0) return { short: "Unconfirmed", hint: "worker status unavailable; do not assume the prompt failed", acting: false }
+  if (runtime.activeAssistantCompletedAt) return { short: "Finishing", hint: "response completed; waiting for turn reconciliation", acting: false }
+  if (runtime.activePromptObservedAt && runtime.lastWorkerStatus !== "idle" && runtime.lastWorkerStatus !== "retry" &&
+      (runtime.activeAssistantMessageID || runtime.activeToolCallIDs?.length)) {
+    return { short: "Running", hint: "correlated assistant or tool activity observed", acting: true }
+  }
+  if (runtime.activePromptObservedAt) return { short: "Prompt seen", hint: "prompt observed; response activity not confirmed", acting: false }
+  if (runtime.activePromptAcceptedAt) return { short: "Awaiting", hint: "host accepted prompt; transcript activity not confirmed", acting: false }
+  if (runtime.activePromptDispatchAt) return { short: "Sending", hint: "dispatch requested; awaiting host acceptance", acting: false }
+  return { short: "Requested", hint: "run reserved; no dispatch evidence yet", acting: false }
+}
+
 /** One plain sentence combining ownership + current activity. */
-export function describeGoalState(status: string, phase?: string): string {
+export function describeGoalState(status: string, phase?: string | GoalRuntimeState, now = Date.now()): string {
   const goal = goalStatusLabel(status)
-  const activity = phase ? phaseLabel(phase) : undefined
+  const activity = phase ? typeof phase === "string" ? phaseLabel(phase) : workerActivityLabel(phase, now) : undefined
   const workerClause = activity
     ? `worker is ${activity.hint || activity.short.toLowerCase()}`
     : "worker state unknown"

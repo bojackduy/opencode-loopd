@@ -10,6 +10,7 @@ import type { NativeForkChild, WorkerTopology } from "../v2/native-rpc"
 import { resolveNativeParentID } from "../v2/native-rpc"
 import { emptyCatalog, normalizeV1Catalog, normalizeV2Catalog, type ModelCatalog } from "./model-catalog"
 import { emptyAgentCatalog, normalizeAgentCatalog, type AgentCatalog } from "./agent-catalog"
+import { terminalToolExecution, type TerminalToolExecution } from "../domain/tool-execution"
 
 export interface ModelRef {
   providerID: string
@@ -83,6 +84,8 @@ export function isV2PromptMessageID(messageID: string): boolean {
 }
 
 export interface LoopHost {
+  /** Optional public transcript capability; terminal call+session+end evidence only. */
+  readToolExecutions?(sessionID: string): Promise<TerminalToolExecution[]>
   /** True only when an audited execution guard surface is installed. */
   scopedExecution?: boolean
   listAgents?(): Promise<AgentCatalog>
@@ -338,6 +341,19 @@ export function createRealHost(client: any, directory: string): LoopHost {
       } catch {
         return []
       }
+    },
+
+    async readToolExecutions(sessionID) {
+      try {
+        // Public v1 messages API, with no tail limit: an old missed after-hook
+        // must not be inferred from age or silently fall outside a recent tail.
+        const result = await withTimeout<any>(client.session.messages({ path: { id: sessionID } }), 10_000, "OpenCode session.messages (tool terminal evidence)")
+        if (!Array.isArray(result?.data)) return []
+        return result.data.flatMap((message: any) => (message.parts ?? []).flatMap((part: any) => {
+          const evidence = terminalToolExecution(part)
+          return evidence?.sessionID === sessionID ? [evidence] : []
+        }))
+      } catch { return [] }
     },
 
     async compactSession(sessionID, model) {

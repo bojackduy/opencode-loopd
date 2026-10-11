@@ -109,6 +109,12 @@ export interface GoalRuntimeState {
   /** SDK messageID of the active prompt sent to the worker. */
   activePromptMessageID?: string
 
+  /** Dispatch intent and host acceptance are not observed worker activity. */
+  activePromptDispatchAt?: string
+  activePromptAcceptedAt?: string
+  /** Inbox snapshot retained until acceptance; also recovers an interrupted acknowledgement. */
+  activeInboxLines?: string[]
+
   /** When the active prompt was observed in the worker transcript/event stream. */
   activePromptObservedAt?: string
 
@@ -183,6 +189,9 @@ export function acquireLease(rt: GoalRuntimeState, timeoutMs: number): GoalRunti
     idleConfirmFailedGeneration: undefined,
     idleStuckNotifiedGeneration: undefined,
     workerAbortedAt: undefined,
+    activePromptDispatchAt: undefined,
+    activePromptAcceptedAt: undefined,
+    activeInboxLines: undefined,
     activePromptObservedAt: undefined,
     activeAssistantMessageID: undefined,
     activeAssistantCompletedAt: undefined,

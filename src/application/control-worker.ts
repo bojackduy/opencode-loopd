@@ -243,24 +243,26 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
       }
 
       case "resume": {
-        await goalSvc.resume(directory, request.goalID as any)
+        const result = await goalSvc.resume(directory, request.goalID as any)
         const state = await readState(directory)
-        const goal = state.goals.find((g) => g.id === request.goalID)
         response = {
           ...base,
-          message: `goal "${goal?.name || request.goalID}" resumed`,
+          ok: result.ok,
+          message: result.message,
+          errorCode: result.ok ? undefined : result.outcome,
           stateRevision: state.revision,
         }
         break
       }
 
       case "retry": {
-        await goalSvc.retry(directory, request.goalID as any)
+        const result = await goalSvc.retry(directory, request.goalID as any)
         const state = await readState(directory)
-        const goal = state.goals.find((g) => g.id === request.goalID)
         response = {
           ...base,
-          message: `goal "${goal?.name || request.goalID}" retried`,
+          ok: result.ok,
+          message: result.message,
+          errorCode: result.ok ? undefined : result.outcome,
           stateRevision: state.revision,
         }
         break
@@ -277,6 +279,7 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
           ...base,
           ok: result.ok,
           message: result.message,
+          errorCode: result.ok ? undefined : result.outcome,
           stateRevision: state.revision,
         }
         break
@@ -391,6 +394,7 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
           ...base,
           ok: sent.ok,
           message: sent.message,
+          errorCode: sent.ok ? undefined : sent.outcome,
           stateRevision: state.revision,
         }
         break

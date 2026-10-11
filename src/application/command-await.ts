@@ -31,9 +31,9 @@ import {
   readState,
 } from "../infrastructure/state-repository"
 
-/** Minimal continuation seam: the caller's GoalService.continueTurn. */
+/** Await wakes use the same confirmed-idle, truthful recovery as owner nudge. */
 export interface AwaitContinuation {
-  continueTurn(directory: string, goalID: GoalID, opts?: { force?: boolean }): Promise<void>
+  nudge(directory: string, goalID: GoalID): Promise<{ ok: boolean; outcome: string; message: string }>
 }
 
 export interface AwaitRequest {
@@ -528,11 +528,10 @@ export async function reconcileCommandAwaits(directory: string): Promise<FiredAw
 }
 
 /**
- * Wake a goal for a fired await through the EXISTING idle-continuation path:
- * clear stale run state (same fields send/nudge reset) then force one
- * steering turn, which drains the evidence from pendingInbox as normal
- * steering context. Non-active goals are never auto-activated — their
- * evidence waits in pendingInbox for the next explicit resume/retry.
+ * Request a fired-await turn through the shared recovery path. It must not
+ * reset a busy/unconfirmed turn or claim a wake when dispatch was blocked.
+ * Evidence stays in the inbox until accepted delivery; non-active goals
+ * require an explicit owner transition.
  */
 export async function wakeGoalForAwait(
   directory: string,
@@ -545,17 +544,6 @@ export async function wakeGoalForAwait(
   if (goal.status !== "active") {
     return { woke: false, message: `Goal is ${goal.status}; evidence waits in pendingInbox.` }
   }
-  await mutateState(directory, `cmd.await-wake:${goalID}`, async (s) => {
-    const rt = s.runtimes.find((r) => r.goalID === (goalID as GoalID))
-    if (!rt) return s
-    rt.phase = "idle"
-    rt.activeRunID = undefined
-    rt.idleCandidateAt = undefined
-    rt.activePromptMessageID = undefined
-    rt.activeToolCallIDs = []
-    rt.updatedAt = new Date().toISOString()
-    return s
-  })
-  await continuation.continueTurn(directory, goalID as GoalID, { force: true })
-  return { woke: true, message: `Woke goal "${goal.name}" for command exit.` }
+  const result = await continuation.nudge(directory, goalID as GoalID)
+  return { woke: result.ok && result.outcome === "sent", message: result.message }
 }

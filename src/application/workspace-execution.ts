@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto"
 import path from "node:path"
 import type { ToolEditor as V2ToolEditor } from "@opencode/plugin/promise/tool"
 import type { Goal } from "../domain/goal"
-import { mutateState, type StoreState } from "../infrastructure/state-repository"
+import { readState, mutateState, type StoreState } from "../infrastructure/state-repository"
+import type { LoopHost } from "../server/host-adapter"
+import type { TerminalToolExecution } from "../domain/tool-execution"
+import { logServerEvent } from "../infrastructure/server-log"
 import { canonicalScopePath, findScopeConflict, scopeConflictMessage } from "../infrastructure/workspace-scope"
 
 const readTools = new Set([
@@ -58,22 +61,8 @@ export function structuredWritePaths(tool: string, args: Record<string, unknown>
 // executions) left them forever; (2) scopeClosing was set in two-step
 // pause/clear/reconcile transactions with no reset path; (3)
 // scopeClearPending deferred deletion completed only in afterWorkspaceTool.
-// The sweeper below reaps what can no longer complete and resets/finalizes
-// the orphaned flags. It runs in maintenance (with worker liveness), in
-// reconcile (sync, restart-safe), and inline in resume/retry/clear.
-//
-// TTL justification (conservative — a healthy reservation lasts seconds, a
-// slow structured edit at most ~1-2 min; the host lock stale window is 10s
-// and the tool-call TTL is 30s):
-// - STALE_WORKSPACE_CALL_TTL_MS (10 min): >5x any healthy reservation.
-//   A call older than this with no live worker backing cannot still complete.
-// - CLEAR_PENDING_FORCE_TTL_MS (30 min): deferred clear gives reserved tools
-//   ample drain; past this the goal is force-finalized with an event log.
-// - OWNER_CALL_TTL_MS (30 min): owner-session (goalID None) reservations such
-//   as long builds must NOT be reaped while plausibly live, so they are only
-//   eligible after a longer window — and never while fresh.
-// NEVER reap a call that could still complete: same-generation + live worker
-// + fresh activity is always kept.
+// Goal tombstones can be removed without erasing independent execution fences.
+// Historical TTL exports are retained for compatibility, never used as exit proof.
 export const STALE_WORKSPACE_CALL_TTL_MS = 10 * 60_000
 export const CLEAR_PENDING_FORCE_TTL_MS = 30 * 60_000
 export const OWNER_CALL_TTL_MS = 30 * 60_000
@@ -91,21 +80,7 @@ export interface WorkspaceSweepSummary {
   forceCleared: string[]
 }
 
-function callAgeMs(call: { at?: string }, now: number): number {
-  if (!call.at) return Number.POSITIVE_INFINITY
-  const age = now - Date.parse(call.at)
-  return Number.isFinite(age) ? age : Number.POSITIVE_INFINITY
-}
-
-function runtimeActivityFresh(state: StoreState, goalID: string | undefined, now: number): boolean {
-  if (!goalID) return false
-  const rt = state.runtimes.find((r) => r.goalID === goalID)
-  if (!rt?.lastActivityAt) return false
-  const age = now - Date.parse(rt.lastActivityAt)
-  return Number.isFinite(age) && age < STALE_WORKSPACE_CALL_TTL_MS
-}
-
-/** Generation-superseded: the goal rotated generation (resume/retry fence), so this reservation belongs to a retired session. */
+/** Generation metadata is an authority fence, never proof that a tool exited. */
 export function isGenerationSuperseded(
   state: StoreState,
   call: { goalID?: string; generation?: number },
@@ -116,51 +91,27 @@ export function isGenerationSuperseded(
 }
 
 /**
- * Sync stale check — usable inside transactions WITHOUT host liveness proof.
- * Deliberately narrow: only what is provably dead from state alone
- * (superseded generation, goal gone, or age past the force TTL).
- * Fresh/ambiguous calls are kept; the async sweeper (with liveness) reaps more.
+ * Compatibility query: no persisted reservation is proved finished by state alone.
  */
 export function isSyncStaleWorkspaceCall(
-  state: StoreState,
-  call: { goalID?: string; generation?: number; at?: string },
-  now = Date.now(),
+  _state: StoreState,
+  _call: { goalID?: string; generation?: number; at?: string },
+  _now = Date.now(),
 ): boolean {
-  if (isGenerationSuperseded(state, call)) return true
-  if (call.goalID && !state.goals.some((g) => g.id === call.goalID)) return true
-  return callAgeMs(call, now) > CLEAR_PENDING_FORCE_TTL_MS
+  // Neither time, goal deletion nor generation rotation proves tool exit.
+  // Only the actual after-hook may remove a reserved execution fence.
+  return false
 }
 
 /**
- * Full liveness-aware stale check. A call is stale when it is sync-stale, or
- * when it is older than the call TTL with no live worker backing it, or (for
- * owner-session reservations with no goal) older than the longer owner TTL.
- * Same-generation + live worker + fresh activity is NEVER stale.
+ * Host idle/unknown concerns a session, not the lifetime of an OS/tool call.
  */
 export function isStaleWorkspaceCall(
   state: StoreState,
   call: { goalID?: string; generation?: number; at?: string; sessionID: string },
   liveness: SweepLiveness = {},
 ): boolean {
-  if (isSyncStaleWorkspaceCall(state, call, liveness.now ?? Date.now())) return true
-  const now = liveness.now ?? Date.now()
-  const age = callAgeMs(call, now)
-  if (!call.goalID) return age > OWNER_CALL_TTL_MS
-  const goal = state.goals.find((g) => g.id === call.goalID)
-  if (!goal) return true
-  if (age <= STALE_WORKSPACE_CALL_TTL_MS) return false
-  const live = liveness.isWorkerLive?.(goal.id, goal.workerSessionID) ?? false
-  if (live && runtimeActivityFresh(state, goal.id, now)) return false
-  if (live) {
-    // Live worker but the reservation AND the runtime are both quiet past the
-    // TTL: the before-hook reservation leaked (missed after-hook). The worker
-    // session itself is unaffected — only the dead reservation is reaped, and
-    // late completions stay fenced via retiredWorkerSessions after rotation.
-    // Still, require the longer force window before reaping under a live
-    // worker, so a slow-but-genuine tool is never cut early.
-    return age > CLEAR_PENDING_FORCE_TTL_MS
-  }
-  return true
+  return isSyncStaleWorkspaceCall(state, call, liveness.now ?? Date.now())
 }
 
 /** Live (non-stale) calls only — what genuinely fences activation and checks. */
@@ -172,10 +123,7 @@ export function liveWorkspaceCalls(
 }
 
 /**
- * Mutates state in place (call inside mutateState): reaps stale calls,
- * resets orphaned scopeClosing (no calls reference the goal, no operation,
- * no live worker), and finalizes scopeClearPending deletions once calls are
- * gone (force after the longer TTL, with the caller logging the event).
+ * Heal old goal tombstones without discarding independent execution fences.
  */
 export function sweepStaleWorkspaceState(
   state: StoreState,
@@ -183,69 +131,20 @@ export function sweepStaleWorkspaceState(
 ): WorkspaceSweepSummary {
   const now = liveness.now ?? Date.now()
   const summary: WorkspaceSweepSummary = { reapedCalls: [], resetClosing: [], finalizedClears: [], forceCleared: [] }
-  const clearPendingGoals = new Set<string>(
-    state.goals.filter((g) => g.scopeClearPending).map((g) => g.id),
-  )
-  const before = state.workspaceCalls ?? []
-  const kept = before.filter((call) => {
-    // Reservations of deferred-clear tombstones drain naturally via their
-    // after-hooks while fresh; the force path below reaps them past the
-    // longer TTL. (Only generation-superseded / goal-gone reservations are
-    // provably dead without any age argument.)
-    if (
-      call.goalID &&
-      clearPendingGoals.has(call.goalID) &&
-      !isGenerationSuperseded(state, call) &&
-      state.goals.some((g) => g.id === call.goalID)
-    ) {
-      return true
-    }
-    if (!isStaleWorkspaceCall(state, call, { ...liveness, now })) return true
-    summary.reapedCalls.push({
-      callID: call.callID,
-      sessionID: call.sessionID,
-      goalID: call.goalID,
-      reason: isGenerationSuperseded(state, call)
-        ? "generation-superseded"
-        : call.goalID && !state.goals.some((g) => g.id === call.goalID)
-          ? "goal-gone"
-          : "age-ttl-no-live-backing",
-    })
-    return false
-  })
-  state.workspaceCalls = kept
-  for (const goal of state.goals) {
+  const kept = state.workspaceCalls ?? []
+  for (const goal of [...state.goals]) {
     const referenced = kept.some((call) => call.goalID === goal.id) || state.workspaceOperation?.goalID === goal.id
     if (goal.scopeClosing && !referenced && !(liveness.isWorkerLive?.(goal.id, goal.workerSessionID) ?? false)) {
       goal.scopeClosing = false
       goal.updatedAt = new Date(now).toISOString()
       summary.resetClosing.push(goal.id)
     }
-    if (goal.scopeClearPending && !referenced) {
+    if (goal.scopeClearPending) {
+      retireWorker(state, goal)
       state.goals = state.goals.filter((g) => g.id !== goal.id)
       state.runtimes = state.runtimes.filter((r) => r.goalID !== goal.id)
       state.commandAwaits = (state.commandAwaits ?? []).filter((a) => a.goalID !== goal.id)
       summary.finalizedClears.push(goal.id)
-    }
-  }
-  // Force path: scopeClearPending stuck WITH referencing calls past the force
-  // TTL — reap those calls and finalize. Recorded as forceCleared so the
-  // caller emits an event log (terminal deletion must stay auditable).
-  for (const goal of [...state.goals]) {
-    if (!goal.scopeClearPending) continue
-    const refs = (state.workspaceCalls ?? []).filter((call) => call.goalID === goal.id)
-    if (!refs.length) continue
-    if (refs.every((call) => callAgeMs(call, now) > CLEAR_PENDING_FORCE_TTL_MS)) {
-      for (const call of refs) {
-        summary.reapedCalls.push({ callID: call.callID, sessionID: call.sessionID, goalID: call.goalID, reason: "clear-pending-force" })
-      }
-      state.workspaceCalls = (state.workspaceCalls ?? []).filter((call) => call.goalID !== goal.id)
-      if (!(state.workspaceCalls ?? []).some((call) => call.goalID === goal.id) && state.workspaceOperation?.goalID !== goal.id) {
-        state.goals = state.goals.filter((g) => g.id !== goal.id)
-        state.runtimes = state.runtimes.filter((r) => r.goalID !== goal.id)
-        state.commandAwaits = (state.commandAwaits ?? []).filter((a) => a.goalID !== goal.id)
-        summary.forceCleared.push(goal.id)
-      }
     }
   }
   return summary
@@ -258,9 +157,8 @@ export function stampCallGeneration(state: StoreState, goalID: string | undefine
 }
 
 export function heldGoals(state: StoreState): Goal[] {
-  // Provably-dead reservations (superseded, goal-less, age past force TTL)
-  // retain no ownership — otherwise file locks survive the reap. Live calls
-  // (fresh or ambiguous) still hold the goal.
+  // Pending calls retain ownership even if the goal is parked. Cleared goals
+  // are absent here, but their independent reservations still fence activation.
   const now = Date.now()
   return state.goals.filter((goal) => goal.status === "active" || goal.scopeClosing || (state.workspaceCalls ?? []).some((call) => call.goalID === goal.id && !isSyncStaleWorkspaceCall(state, call, now)) || state.workspaceOperation?.goalID === goal.id)
 }
@@ -271,9 +169,7 @@ function mayBeAlive(pid?: number): boolean {
 }
 
 export function assertScopeAvailable(state: StoreState, goal: Goal): void {
-  // Stale (provably dead) reservations never fence: only live same-goal calls
-  // and scopeClosing block reacquisition. The async sweeper (with liveness)
-  // reaps more; this sync check covers what state alone proves.
+  // No session/generation/age inference can release an existing tool call.
   const now = Date.now()
   const liveCalls = (state.workspaceCalls ?? []).filter(
     (call) => call.goalID === goal.id && !isSyncStaleWorkspaceCall(state, call, now),
@@ -315,7 +211,7 @@ export async function beforeWorkspaceTool(directory: string, input: { tool: stri
   if (readTools.has(input.tool)) return
   await mutateState(directory, `workspace.before:${input.callID}`, async (state) => {
     const goal = state.goals.find((item) => item.workerSessionID === input.sessionID)
-    if (state.retiredWorkerSessions?.includes(input.sessionID)) throw new Error("Scope denied: retired worker session; late executions are fenced.")
+    if (state.retiredWorkerSessions?.includes(input.sessionID)) throw new Error("Scope denied: retired worker session; goal cleared or worker rotated. Stop work; late executions are fenced.")
     const held = heldGoals(state)
     const protectedGoals = held.filter((item) => item.config.write_scope !== undefined || item.config.workspaceWrite === false)
     // Preserve legacy operation when no scoped/read-only contract is present.
@@ -375,12 +271,71 @@ export async function afterWorkspaceTool(directory: string, sessionID: string, c
     state.goals = state.goals.filter((goal) => {
       const live = (state.workspaceCalls ?? []).some((call) => call.goalID === goal.id && !isSyncStaleWorkspaceCall(state, call, now))
       if (!goal.scopeClearPending || live || state.workspaceOperation?.goalID === goal.id) return true
+      retireWorker(state, goal)
       state.workspaceCalls = (state.workspaceCalls ?? []).filter((call) => !(call.goalID === goal.id && isSyncStaleWorkspaceCall(state, call, now)))
       state.runtimes = state.runtimes.filter((runtime) => runtime.goalID !== goal.id)
       return false
     })
     return state
   })
+}
+
+/** Recover a missed v1 after-hook using exact terminal tool-part evidence. */
+export async function releaseTerminalWorkspaceCalls(directory: string, evidence: TerminalToolExecution[]): Promise<number> {
+  if (!evidence.length) return 0
+  const snapshot = await readState(directory)
+  // Most terminal events have already run their after-hook (or are unrelated).
+  // Do not rewrite the entire store for those events or duplicate replays.
+  const relevant = evidence.some((proof) =>
+    snapshot.workspaceCalls?.some((call) => call.sessionID === proof.sessionID && call.callID === proof.callID) ||
+    snapshot.goals.some((goal) => goal.workerSessionID === proof.sessionID && snapshot.runtimes.some((rt) => rt.goalID === goal.id && rt.activeToolCallIDs?.includes(proof.callID))))
+  if (!relevant) return 0
+  let released = 0
+  await mutateState(directory, "workspace.terminal-evidence", async (state) => {
+    state.workspaceCalls = (state.workspaceCalls ?? []).filter((call) => {
+      const proof = evidence.find((item) => item.sessionID === call.sessionID && item.callID === call.callID &&
+        (item.status === "completed" || item.status === "error") && Number.isFinite(item.endedAt) &&
+        typeof call.at === "string" && Number.isFinite(Date.parse(call.at)) && item.endedAt >= Date.parse(call.at))
+      if (!proof) return true
+      released += 1
+      const goal = state.goals.find((item) => item.id === call.goalID && item.workerSessionID === call.sessionID)
+      const rt = goal && state.runtimes.find((item) => item.goalID === goal.id)
+      if (rt && (call.generation === undefined || rt.runGeneration === call.generation)) {
+        rt.activeToolCallIDs = rt.activeToolCallIDs?.filter((id) => id !== call.callID)
+      }
+      return false
+    })
+    // Exempt/read tools have runtime tracking without a workspace reservation.
+    // Recover their missed after-hooks from exact proof, never elapsed time.
+    for (const goal of state.goals) {
+      const rt = state.runtimes.find((item) => item.goalID === goal.id)
+      const started = rt?.turnStartedAt ? Date.parse(rt.turnStartedAt) : NaN
+      if (!rt?.activeToolCallIDs?.length || !Number.isFinite(started)) continue
+      rt.activeToolCallIDs = rt.activeToolCallIDs.filter((callID) => {
+        if (state.workspaceCalls?.some((call) => call.sessionID === goal.workerSessionID && call.callID === callID)) return true
+        return !evidence.some((item) => item.sessionID === goal.workerSessionID && item.callID === callID &&
+          (item.status === "completed" || item.status === "error") && Number.isFinite(item.endedAt) && item.endedAt >= started)
+      })
+    }
+    return state
+  })
+  if (released) await logServerEvent(directory, "workspace.terminal-evidence-released", { released }).catch(() => {})
+  return released
+}
+
+export async function reconcileTerminalWorkspaceCalls(directory: string, host: LoopHost): Promise<void> {
+  if (!host.readToolExecutions) return
+  const state = await readState(directory)
+  const sessions = [...new Set([
+    ...(state.workspaceCalls ?? []).map((call) => call.sessionID),
+    ...state.goals.filter((goal) => goal.workerSessionID && state.runtimes.some((rt) => rt.goalID === goal.id && rt.activeToolCallIDs?.length)).map((goal) => goal.workerSessionID!),
+  ])]
+  if (!sessions.length) return
+  const proof = await Promise.all(sessions.map(async (sessionID) => {
+    try { return (await host.readToolExecutions!(sessionID)).filter((item) => item.sessionID === sessionID) }
+    catch { return [] }
+  }))
+  await releaseTerminalWorkspaceCalls(directory, proof.flat())
 }
 
 /** Supported v2 execution guard, independent of host handling of hook defects. */
@@ -401,9 +356,7 @@ export function guardV2ToolEditor(directory: string, editor: V2ToolEditor): void
 export async function withWorkspaceOperation<T>(directory: string, goalID: string, sessionID: string, run: () => Promise<T>): Promise<T> {
   const id = randomUUID()
   await mutateState(directory, `workspace.operation:${id}`, async (state) => {
-    // Live in-flight writes still fence checks; provably-dead reservations
-    // (superseded generation, goal gone, age past force TTL) do not — the
-    // sweeper reaps them, and gating checks on corpses was part of the limbo.
+    // Every outstanding reservation fences checks until actual completion.
     const now = Date.now()
     const live = (state.workspaceCalls ?? []).filter((call) => !isSyncStaleWorkspaceCall(state, call, now))
     if (state.workspaceOperation || live.length) throw new Error("Workspace is busy with an operation or in-flight writes; verification denied until quiescent.")
@@ -416,7 +369,8 @@ export async function withWorkspaceOperation<T>(directory: string, goalID: strin
       const now = Date.now()
       state.goals = state.goals.filter((goal) => {
         const live = (state.workspaceCalls ?? []).some((call) => call.goalID === goal.id && !isSyncStaleWorkspaceCall(state, call, now))
-        if (!goal.scopeClearPending || live) return true
+        if (!goal.scopeClearPending || live || state.workspaceOperation?.goalID === goal.id) return true
+        retireWorker(state, goal)
         state.workspaceCalls = (state.workspaceCalls ?? []).filter((call) => !(call.goalID === goal.id && isSyncStaleWorkspaceCall(state, call, now)))
         state.runtimes = state.runtimes.filter((runtime) => runtime.goalID !== goal.id)
         return false

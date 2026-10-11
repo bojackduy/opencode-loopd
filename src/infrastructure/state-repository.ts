@@ -5,7 +5,7 @@
 import { promises as fs } from "fs"
 import path from "path"
 import os from "os"
-import { createHash } from "crypto"
+import { createHash, randomUUID } from "crypto"
 import { readEventTail } from "./event-tail"
 
 import type { Goal, GoalID } from "../domain/goal"
@@ -585,6 +585,7 @@ export async function ensureGoalArtifactDir(directory: string, goalID: string): 
 // ─── Goal Inbox ─────────────────────────────────────────────────────────────
 
 interface GoalInboxMessage {
+  id?: string
   from: "user" | "worker"
   text: string
   at: string
@@ -599,11 +600,50 @@ export async function appendGoalInbox(
   goalID: string,
   from: "user" | "worker",
   text: string,
-): Promise<void> {
-  const dir = path.join(loopDir(directory), "inboxes")
-  await fs.mkdir(dir, { recursive: true })
-  const msg: GoalInboxMessage = { from, text, at: new Date().toISOString() }
-  await fs.appendFile(inboxFile(directory, goalID), JSON.stringify(msg) + "\n", "utf8")
+): Promise<boolean> {
+  let accepted = false
+  await mutateState(directory, `inbox.enqueue:${goalID}`, async (state) => {
+    if (!state.goals.some((goal) => goal.id === goalID)) return state
+    await acquireLock(directory, `inbox-${goalID}`, "inbox.append")
+    try {
+      const dir = path.join(loopDir(directory), "inboxes")
+      await fs.mkdir(dir, { recursive: true })
+      const msg: GoalInboxMessage = { id: randomUUID(), from, text, at: new Date().toISOString() }
+      await fs.appendFile(inboxFile(directory, goalID), JSON.stringify(msg) + "\n", "utf8")
+      accepted = true
+    } finally {
+      await releaseLock(directory, `inbox-${goalID}`)
+    }
+    return state
+  })
+  return accepted
+}
+
+/** Call inside the goal-deletion transaction, with the same state→inbox lock order as enqueue. */
+export async function deleteGoalInbox(directory: string, goalID: string): Promise<void> {
+  await acquireLock(directory, `inbox-${goalID}`, "inbox.delete")
+  try { await fs.rm(inboxFile(directory, goalID), { force: true }) }
+  finally { await releaseLock(directory, `inbox-${goalID}`) }
+}
+
+/** Remove only a delivered snapshot; words appended during dispatch survive. */
+export async function acknowledgeGoalInbox(directory: string, goalID: string, delivered: string[]): Promise<void> {
+  if (!delivered.length) return
+  await acquireLock(directory, `inbox-${goalID}`, "inbox.acknowledge")
+  try {
+    let raw: string
+    try { raw = await fs.readFile(inboxFile(directory, goalID), "utf8") } catch (error: any) {
+      if (error?.code === "ENOENT") return
+      throw error
+    }
+    const lines = raw.trim().split("\n").filter(Boolean)
+    if (!delivered.every((line, index) => lines[index] === line)) return
+    const rest = lines.slice(delivered.length)
+    if (rest.length) await writeAtomic(inboxFile(directory, goalID), rest.join("\n") + "\n")
+    else await fs.rm(inboxFile(directory, goalID), { force: true })
+  } finally {
+    await releaseLock(directory, `inbox-${goalID}`)
+  }
 }
 
 export async function drainGoalInbox(
@@ -624,17 +664,27 @@ export async function drainGoalInbox(
   }
 }
 
+export async function snapshotGoalInbox(directory: string, goalID: string): Promise<{ lines: string[]; messages: string[] }> {
+  await acquireLock(directory, `inbox-${goalID}`, "inbox.snapshot")
+  try {
+    const raw = await fs.readFile(inboxFile(directory, goalID), "utf8")
+    const lines = raw.trim().split("\n").filter(Boolean)
+    const messages = lines.map((line) => JSON.parse(line) as GoalInboxMessage)
+    return { lines, messages: messages.map((m) => `[${m.from}] ${m.text}`) }
+  } catch (error: any) {
+    if (error?.code === "ENOENT") return { lines: [], messages: [] }
+    throw error
+  } finally {
+    await releaseLock(directory, `inbox-${goalID}`)
+  }
+}
+
 export async function peekGoalInbox(
   directory: string,
   goalID: string,
 ): Promise<string[]> {
-  const file = inboxFile(directory, goalID)
   try {
-    const raw = await fs.readFile(file, "utf8")
-    const lines = raw.trim().split("\n").filter(Boolean)
-    if (lines.length === 0) return []
-    const messages = lines.map((l) => JSON.parse(l) as GoalInboxMessage)
-    return messages.map((m) => `[${m.from}] ${m.text}`)
+    return (await snapshotGoalInbox(directory, goalID)).messages
   } catch {
     return []
   }

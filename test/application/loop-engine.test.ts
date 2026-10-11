@@ -868,7 +868,7 @@ describe("Loop Engine", () => {
       expect(after.goals[0].status).toBe("active")
     })
 
-    it("auto-recovers a running-phase stall held by a phantom tool call", async () => {
+    it("auto-recovers a missed tool completion only after exact terminal proof", async () => {
       engine.stop()
       // Worker is genuinely idle; a tool-completion event was missed so a
       // phantom in-flight ID vetoes idle confirmation forever.
@@ -901,6 +901,7 @@ describe("Loop Engine", () => {
         path.join(dir, ".opencode", "loopd", "state.json"),
         JSON.stringify(seeded, null, 2),
       )
+      host.readToolExecutions = async () => [{ sessionID: goal.workerSessionID!, callID: "phantom-call", status: "error", endedAt: Date.now() }]
 
       await waitFor(async () => (await readEvents(dir, 50)).some((e: any) => e.goalID === goal.id && e.type === "run.recovered"))
 
@@ -908,8 +909,7 @@ describe("Loop Engine", () => {
         (e: any) => e.goalID === goal.id && e.type === "run.recovered",
       )
       expect(recovered.length).toBeGreaterThan(0)
-      // The 30s tool-call TTL may clear the phantom ID earlier in the same
-      // sweep; either way the stall must not survive it.
+      // Only supported terminal evidence releases the missed completion.
       expect(recovered[0].clearedToolCalls).toBeGreaterThanOrEqual(0)
       expect((await readState(dir)).runtimes[0].activeToolCallIDs ?? []).toHaveLength(0)
       // Self-healed without owner action: a fresh prompt went out

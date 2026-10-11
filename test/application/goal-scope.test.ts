@@ -151,7 +151,7 @@ describe("persisted scope claims", () => {
     await expect(beforeWorkspaceTool(root, { tool: "write", sessionID: oldWorker, callID: "late" }, { filePath: "a.ts" })).rejects.toThrow("retired")
   })
 
-  it("clear is terminal even with an in-flight write: goal gone, scope reusable, late writes fenced", async () => {
+  it("clear deletes the goal but retains the actual in-flight path fence until completion", async () => {
     const root = await fixture([])
     const service = createGoalService(createFakeHost())
     const { goal } = await service.start(root, { name: "first", objective: "test", ownerSessionID: "parent", config: { write_scope: ["a.ts", "b.ts"] } })
@@ -160,11 +160,14 @@ describe("persisted scope claims", () => {
     await service.clear(root, goal.id)
     // Terminal immediately: no scopeClearPending tombstone, no quiescence gate.
     expect((await readState(root)).goals).toHaveLength(0)
-    expect((await readState(root)).workspaceCalls ?? []).toEqual([])
+    expect((await readState(root)).workspaceCalls).toHaveLength(1)
     const restarted = createGoalService(createFakeHost())
+    await expect(restarted.start(root, { name: "writing-path", objective: "test", ownerSessionID: "parent", config: { write_scope: ["a.ts"] } })).rejects.toThrow("in-flight")
+    // Unused b.ts is disjoint from the actual pending write and may be reused.
     await restarted.start(root, { name: "overlap", objective: "test", ownerSessionID: "parent", config: { write_scope: ["b.ts"] } })
-    // The orphaned after-hook is a harmless no-op; late writes stay fenced.
+    // The actual after-hook releases only its reservation; authority stays revoked.
     await afterWorkspaceTool(root, worker, "write")
+    expect((await readState(root)).workspaceCalls).toHaveLength(0)
     await expect(beforeWorkspaceTool(root, { tool: "write", sessionID: worker, callID: "late" }, { filePath: "a.ts" })).rejects.toThrow("retired")
   })
 
