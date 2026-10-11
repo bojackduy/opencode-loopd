@@ -17,6 +17,23 @@
 
 - Scratch harness (real host + real service): timeout→`terminated/timeout`+notify; until→`terminated/until` with 1 notify and `until-matched` state; pattern read returns ANSI-original lines case-insensitively, rejects `(a+)+`; env value reaches process while state keeps only the name; terminate+remove in one call. 555 tests pass.
 
+## 1.13.1 (2026-10-11) — Truthful Goal Delivery and Safe Recovery
+
+### Fixed
+
+- Nudge, resume, retry, and command-await recovery report actual prompt delivery outcomes instead of success after a blocked or skipped continuation. Busy and unknown workers keep their current turn intact.
+- Failed tools that miss their after-hook release execution reservations only when exact session, call ID, and terminal timestamp evidence proves completion. Automatic maintenance uses the same recovery path; age, idle status, goal deletion, and generation changes never substitute for tool-exit proof.
+- Late prompt responses and worker callbacks cannot overwrite a newer run, acknowledge its inbox, or restore a cleared goal. Explicit cleared IDs return `not_found` rather than falling back to another goal.
+- Inbox messages survive preparation or dispatch failures and concurrent appends. Force-finish requests are recorded only after host acceptance.
+- Dashboard labels distinguish requested, sending, accepted, observed, and stale turns instead of treating a stored running phase as proof of worker activity.
+
+### Verification
+
+- 772 tests pass across 68 files; the 41 recovery regressions also pass ten consecutive repetitions.
+- Typecheck, server/TUI builds, bundle import smoke checks, and whitespace checks pass.
+
+Restart OpenCode after upgrading to load the corrected server and TUI plugins.
+
 ## 1.7.0 (2026-08-25) — Scheduled Intervals
 
 > Interval requeue for repetitive dialogues — one `/goal` covers `monitor deploy` `periodic tests` `keep going` without manual re-prompt. `5s` `createScheduleWorker` resurrects `complete → active` with `Scheduled tick N/M`.
