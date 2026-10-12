@@ -3,6 +3,7 @@
 // Provides locking, validation, migration, and transactional mutations.
 
 import { promises as fs } from "fs"
+import type { FileHandle } from "node:fs/promises"
 import path from "path"
 import os from "os"
 import { createHash, randomUUID } from "crypto"
@@ -90,7 +91,10 @@ interface LockMeta {
   pid: number
   operation: string
   acquiredAt: string
+  token: string
 }
+
+interface LockLease { path: string; handle: FileHandle; token: string }
 
 const LOCK_TIMEOUT_MS = 30_000
 const LOCK_STALE_MS = 10_000
@@ -105,11 +109,12 @@ function processIsAlive(pid: number): boolean {
   }
 }
 
-async function acquireLock(directory: string, key: string, operation: string): Promise<void> {
+async function acquireLock(directory: string, key: string, operation: string): Promise<LockLease> {
   const dir = lockDir(directory)
   await fs.mkdir(dir, { recursive: true })
 
   const lockPath = lockFile(directory, key)
+  let lastOwner: LockMeta | undefined
 
   const deadline = performance.now() + LOCK_TIMEOUT_MS
   for (let attempt = 0; performance.now() < deadline; attempt++) {
@@ -118,6 +123,7 @@ async function acquireLock(directory: string, key: string, operation: string): P
       try {
         const raw = await fs.readFile(lockPath, "utf8")
         const meta: LockMeta = JSON.parse(raw)
+        lastOwner = meta
         const age = Date.now() - Date.parse(meta.acquiredAt)
         if (age > LOCK_STALE_MS && !processIsAlive(meta.pid)) {
           // Stale lock — remove it
@@ -126,14 +132,17 @@ async function acquireLock(directory: string, key: string, operation: string): P
       } catch {}
 
       // Try to create the lock file exclusively — "wx" fails with EEXIST if it exists
-      const meta: LockMeta = { pid: process.pid, operation, acquiredAt: new Date().toISOString() }
-      const fd = await fs.open(lockPath, "wx")
+      const meta: LockMeta = { pid: process.pid, operation, acquiredAt: new Date().toISOString(), token: randomUUID() }
+      const fd = await fs.open(lockPath, "wx+")
       try {
         await fd.writeFile(JSON.stringify(meta), "utf8")
-      } finally {
-        await fd.close()
+        return { path: lockPath, handle: fd, token: meta.token }
+      } catch (error) {
+        // wx created this file, but no valid lease was published. Never leave
+        // an empty/partial lock behind when metadata writing fails.
+        try { await fs.rm(lockPath, { force: true }) } finally { await fd.close() }
+        throw error
       }
-      return // Lock acquired
     } catch (error: any) {
       if (error?.code === "EEXIST") {
         // Lock held by another process — retry
@@ -148,28 +157,24 @@ async function acquireLock(directory: string, key: string, operation: string): P
     // may admit only one. Bound elapsed time instead, with capped backoff.
     await delay(Math.min(25 * (attempt + 1), 250, Math.max(0, deadline - performance.now())))
   }
-  throw new Error(`failed to acquire lock "${key}" for "${operation}" after ${LOCK_TIMEOUT_MS}ms`)
+  const owner = lastOwner ? ` Last observed owner: PID ${lastOwner.pid}, operation "${lastOwner.operation}", acquired ${lastOwner.acquiredAt}.` : " Owner metadata unavailable."
+  throw new Error(`failed to acquire lock "${key}" for "${operation}" after ${LOCK_TIMEOUT_MS}ms. This is the loopd plugin's lock, not OpenCode core.${owner}`)
 }
 
-async function releaseLock(directory: string, key: string): Promise<void> {
-  const lockPath = lockFile(directory, key)
+async function releaseLock(lease: LockLease): Promise<void> {
   try {
-    const raw = await fs.readFile(lockPath, "utf8")
-    const meta: LockMeta = JSON.parse(raw)
-    // Never release another live process's lock, regardless of its age.
-    const shouldRelease = meta.pid === process.pid
-    if (!shouldRelease) return
-    // Re-verify before delete to avoid racing with a fresh acquirer
-    try {
-      const raw2 = await fs.readFile(lockPath, "utf8")
-      const meta2: LockMeta = JSON.parse(raw2)
-      if (meta2.acquiredAt !== meta.acquiredAt || meta2.pid !== meta.pid) return
-    } catch {
-      return
-    }
-    await fs.rm(lockPath, { force: true })
-  } catch {
-    // Lock file doesn't exist or is unreadable — nothing to release
+    // Keep the acquisition descriptor: cleanup must not need another open
+    // when the system file table is exhausted. Token + inode fence replacement.
+    const held = await lease.handle.stat()
+    const buffer = Buffer.alloc(held.size)
+    const { bytesRead } = await lease.handle.read(buffer, 0, buffer.length, 0)
+    const meta: LockMeta = JSON.parse(buffer.subarray(0, bytesRead).toString("utf8"))
+    if (meta.pid !== process.pid || meta.token !== lease.token) return
+    const current = await fs.stat(lease.path).catch((error) => { if (error?.code === "ENOENT") return undefined; throw error })
+    if (!current || current.dev !== held.dev || current.ino !== held.ino) return
+    await fs.rm(lease.path, { force: true })
+  } finally {
+    await lease.handle.close()
   }
 }
 
@@ -193,11 +198,11 @@ export async function readState(directory: string): Promise<StoreState> {
         error?.code === "EPERM" ||
         error?.code === "EACCES" ||
         error?.code === "EBUSY"
-      if (!transient || attempt === attempts - 1) break
+      if (!transient || attempt === attempts - 1) throw error
       await delay(25 * (attempt + 1))
     }
   }
-  return emptyState()
+  throw new Error("State could not be read.")
 }
 
 // ─── Migration ───────────────────────────────────────────────────────────────
@@ -389,14 +394,14 @@ export async function mutateState(
   description: string,
   fn: (state: StoreState) => Promise<StoreState>,
 ): Promise<StoreState> {
-  await acquireLock(directory, "state", description)
+  const lease = await acquireLock(directory, "state", description)
   try {
     const state = await readState(directory)
     const next = await fn(state)
     await writeState(directory, next)
     return next
   } finally {
-    await releaseLock(directory, "state")
+    await releaseLock(lease)
   }
 }
 
@@ -604,7 +609,7 @@ export async function appendGoalInbox(
   let accepted = false
   await mutateState(directory, `inbox.enqueue:${goalID}`, async (state) => {
     if (!state.goals.some((goal) => goal.id === goalID)) return state
-    await acquireLock(directory, `inbox-${goalID}`, "inbox.append")
+    const lease = await acquireLock(directory, `inbox-${goalID}`, "inbox.append")
     try {
       const dir = path.join(loopDir(directory), "inboxes")
       await fs.mkdir(dir, { recursive: true })
@@ -612,7 +617,7 @@ export async function appendGoalInbox(
       await fs.appendFile(inboxFile(directory, goalID), JSON.stringify(msg) + "\n", "utf8")
       accepted = true
     } finally {
-      await releaseLock(directory, `inbox-${goalID}`)
+      await releaseLock(lease)
     }
     return state
   })
@@ -621,15 +626,15 @@ export async function appendGoalInbox(
 
 /** Call inside the goal-deletion transaction, with the same state→inbox lock order as enqueue. */
 export async function deleteGoalInbox(directory: string, goalID: string): Promise<void> {
-  await acquireLock(directory, `inbox-${goalID}`, "inbox.delete")
+  const lease = await acquireLock(directory, `inbox-${goalID}`, "inbox.delete")
   try { await fs.rm(inboxFile(directory, goalID), { force: true }) }
-  finally { await releaseLock(directory, `inbox-${goalID}`) }
+  finally { await releaseLock(lease) }
 }
 
 /** Remove only a delivered snapshot; words appended during dispatch survive. */
 export async function acknowledgeGoalInbox(directory: string, goalID: string, delivered: string[]): Promise<void> {
   if (!delivered.length) return
-  await acquireLock(directory, `inbox-${goalID}`, "inbox.acknowledge")
+  const lease = await acquireLock(directory, `inbox-${goalID}`, "inbox.acknowledge")
   try {
     let raw: string
     try { raw = await fs.readFile(inboxFile(directory, goalID), "utf8") } catch (error: any) {
@@ -642,7 +647,7 @@ export async function acknowledgeGoalInbox(directory: string, goalID: string, de
     if (rest.length) await writeAtomic(inboxFile(directory, goalID), rest.join("\n") + "\n")
     else await fs.rm(inboxFile(directory, goalID), { force: true })
   } finally {
-    await releaseLock(directory, `inbox-${goalID}`)
+    await releaseLock(lease)
   }
 }
 
@@ -665,7 +670,7 @@ export async function drainGoalInbox(
 }
 
 export async function snapshotGoalInbox(directory: string, goalID: string): Promise<{ lines: string[]; messages: string[] }> {
-  await acquireLock(directory, `inbox-${goalID}`, "inbox.snapshot")
+  const lease = await acquireLock(directory, `inbox-${goalID}`, "inbox.snapshot")
   try {
     const raw = await fs.readFile(inboxFile(directory, goalID), "utf8")
     const lines = raw.trim().split("\n").filter(Boolean)
@@ -675,7 +680,7 @@ export async function snapshotGoalInbox(directory: string, goalID: string): Prom
     if (error?.code === "ENOENT") return { lines: [], messages: [] }
     throw error
   } finally {
-    await releaseLock(directory, `inbox-${goalID}`)
+    await releaseLock(lease)
   }
 }
 

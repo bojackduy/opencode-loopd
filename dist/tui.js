@@ -106,11 +106,11 @@ async function readState(directory) {
         return emptyState();
       const transient = error instanceof SyntaxError || error?.code === "EPERM" || error?.code === "EACCES" || error?.code === "EBUSY";
       if (!transient || attempt === attempts - 1)
-        break;
+        throw error;
       await delay(25 * (attempt + 1));
     }
   }
-  return emptyState();
+  throw new Error("State could not be read.");
 }
 function migrate(state) {
   if (state.version === CURRENT_VERSION)
@@ -359,33 +359,66 @@ function createControlClient(directory) {
       args: command.args,
       requestedAt: new Date().toISOString()
     };
-    await writeControlRequest(directory, request);
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const response = await readControlResponse(directory, request.requestID);
-      if (response)
-        return response;
-      await delay2(100);
+    let submitted = false;
+    let expired = false;
+    let timeoutReply;
+    const deadline = performance.now() + timeoutMs;
+    function timedOut() {
+      return timeoutReply ??= (async () => {
+        let probeTimer;
+        let claimed;
+        try {
+          claimed = await Promise.race([
+            statProcessingRequest(directory, request.requestID),
+            new Promise((resolve) => {
+              probeTimer = setTimeout(() => resolve(undefined), 100);
+            })
+          ]);
+        } catch {} finally {
+          if (probeTimer)
+            clearTimeout(probeTimer);
+        }
+        const stage = claimed ? `accepted by the server ${(claimed.requestAgeMs / 1000).toFixed(1)}s ago, still processing` : submitted ? "request submitted; server acceptance or response could not be confirmed" : "request submission is still pending";
+        return {
+          requestID: request.requestID,
+          ok: false,
+          errorCode: "timeout",
+          message: `timeout waiting for response (${stage}; the operation may complete later under this requestID \u2014 check the server log before retrying)`,
+          completedAt: new Date().toISOString()
+        };
+      })();
     }
-    const late = await readControlResponse(directory, request.requestID).catch(() => {
-      return;
-    });
-    if (late)
-      return late;
-    let stage = "not yet accepted by the server";
-    try {
-      const claimed = await statProcessingRequest(directory, request.requestID);
-      if (claimed) {
-        stage = `accepted by the server ${(claimed.requestAgeMs / 1000).toFixed(1)}s ago, still processing \u2014 ` + `the operation may complete later (late reply under this requestID); ` + `check the server log before retrying`;
+    async function exchange() {
+      await writeControlRequest(directory, request);
+      submitted = true;
+      while (!expired && performance.now() < deadline) {
+        const response = await readControlResponse(directory, request.requestID);
+        if (response)
+          return response;
+        if (!expired)
+          await delay2(Math.min(100, Math.max(0, deadline - performance.now())));
       }
-    } catch {}
-    return {
-      requestID: request.requestID,
-      ok: false,
-      message: `timeout waiting for response (${stage})`,
-      errorCode: "timeout",
-      completedAt: new Date().toISOString()
-    };
+      if (!expired) {
+        const late = await readControlResponse(directory, request.requestID);
+        if (late)
+          return late;
+      }
+      return timedOut();
+    }
+    let timer;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        expired = true;
+        timedOut().then(resolve);
+      }, timeoutMs);
+    });
+    try {
+      return await Promise.race([exchange(), timeout]);
+    } finally {
+      expired = true;
+      if (timer)
+        clearTimeout(timer);
+    }
   }
   async function getState() {
     return readState(directory);

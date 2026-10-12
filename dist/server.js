@@ -215,25 +215,32 @@ async function acquireLock(directory, key, operation) {
   const dir = lockDir(directory);
   await fs2.mkdir(dir, { recursive: true });
   const lockPath = lockFile(directory, key);
+  let lastOwner;
   const deadline = performance.now() + LOCK_TIMEOUT_MS;
   for (let attempt = 0;performance.now() < deadline; attempt++) {
     try {
       try {
         const raw = await fs2.readFile(lockPath, "utf8");
         const meta = JSON.parse(raw);
+        lastOwner = meta;
         const age = Date.now() - Date.parse(meta.acquiredAt);
         if (age > LOCK_STALE_MS && !processIsAlive(meta.pid)) {
           await fs2.rm(lockPath, { force: true });
         }
       } catch {}
-      const meta = { pid: process.pid, operation, acquiredAt: new Date().toISOString() };
-      const fd = await fs2.open(lockPath, "wx");
+      const meta = { pid: process.pid, operation, acquiredAt: new Date().toISOString(), token: randomUUID() };
+      const fd = await fs2.open(lockPath, "wx+");
       try {
         await fd.writeFile(JSON.stringify(meta), "utf8");
-      } finally {
-        await fd.close();
+        return { path: lockPath, handle: fd, token: meta.token };
+      } catch (error) {
+        try {
+          await fs2.rm(lockPath, { force: true });
+        } finally {
+          await fd.close();
+        }
+        throw error;
       }
-      return;
     } catch (error) {
       if (error?.code === "EEXIST") {} else if (error?.code === "ENOENT") {
         await fs2.mkdir(dir, { recursive: true });
@@ -244,26 +251,28 @@ async function acquireLock(directory, key, operation) {
     }
     await delay(Math.min(25 * (attempt + 1), 250, Math.max(0, deadline - performance.now())));
   }
-  throw new Error(`failed to acquire lock "${key}" for "${operation}" after ${LOCK_TIMEOUT_MS}ms`);
+  const owner = lastOwner ? ` Last observed owner: PID ${lastOwner.pid}, operation "${lastOwner.operation}", acquired ${lastOwner.acquiredAt}.` : " Owner metadata unavailable.";
+  throw new Error(`failed to acquire lock "${key}" for "${operation}" after ${LOCK_TIMEOUT_MS}ms. This is the loopd plugin's lock, not OpenCode core.${owner}`);
 }
-async function releaseLock(directory, key) {
-  const lockPath = lockFile(directory, key);
+async function releaseLock(lease) {
   try {
-    const raw = await fs2.readFile(lockPath, "utf8");
-    const meta = JSON.parse(raw);
-    const shouldRelease = meta.pid === process.pid;
-    if (!shouldRelease)
+    const held = await lease.handle.stat();
+    const buffer = Buffer.alloc(held.size);
+    const { bytesRead } = await lease.handle.read(buffer, 0, buffer.length, 0);
+    const meta = JSON.parse(buffer.subarray(0, bytesRead).toString("utf8"));
+    if (meta.pid !== process.pid || meta.token !== lease.token)
       return;
-    try {
-      const raw2 = await fs2.readFile(lockPath, "utf8");
-      const meta2 = JSON.parse(raw2);
-      if (meta2.acquiredAt !== meta.acquiredAt || meta2.pid !== meta.pid)
+    const current = await fs2.stat(lease.path).catch((error) => {
+      if (error?.code === "ENOENT")
         return;
-    } catch {
+      throw error;
+    });
+    if (!current || current.dev !== held.dev || current.ino !== held.ino)
       return;
-    }
-    await fs2.rm(lockPath, { force: true });
-  } catch {}
+    await fs2.rm(lease.path, { force: true });
+  } finally {
+    await lease.handle.close();
+  }
 }
 async function readState(directory) {
   const target = stateFile(directory);
@@ -281,11 +290,11 @@ async function readState(directory) {
         return emptyState();
       const transient = error instanceof SyntaxError || error?.code === "EPERM" || error?.code === "EACCES" || error?.code === "EBUSY";
       if (!transient || attempt === attempts - 1)
-        break;
+        throw error;
       await delay(25 * (attempt + 1));
     }
   }
-  return emptyState();
+  throw new Error("State could not be read.");
 }
 function migrate(state) {
   if (state.version === CURRENT_VERSION)
@@ -431,14 +440,14 @@ async function writeState(directory, state) {
   await writeAtomic(stateFile(directory), payload);
 }
 async function mutateState(directory, description, fn) {
-  await acquireLock(directory, "state", description);
+  const lease = await acquireLock(directory, "state", description);
   try {
     const state = await readState(directory);
     const next = await fn(state);
     await writeState(directory, next);
     return next;
   } finally {
-    await releaseLock(directory, "state");
+    await releaseLock(lease);
   }
 }
 async function appendEvent(directory, event) {
@@ -523,7 +532,7 @@ async function appendGoalInbox(directory, goalID, from, text) {
   await mutateState(directory, `inbox.enqueue:${goalID}`, async (state) => {
     if (!state.goals.some((goal) => goal.id === goalID))
       return state;
-    await acquireLock(directory, `inbox-${goalID}`, "inbox.append");
+    const lease = await acquireLock(directory, `inbox-${goalID}`, "inbox.append");
     try {
       const dir = path.join(loopDir(directory), "inboxes");
       await fs2.mkdir(dir, { recursive: true });
@@ -532,24 +541,24 @@ async function appendGoalInbox(directory, goalID, from, text) {
 `, "utf8");
       accepted = true;
     } finally {
-      await releaseLock(directory, `inbox-${goalID}`);
+      await releaseLock(lease);
     }
     return state;
   });
   return accepted;
 }
 async function deleteGoalInbox(directory, goalID) {
-  await acquireLock(directory, `inbox-${goalID}`, "inbox.delete");
+  const lease = await acquireLock(directory, `inbox-${goalID}`, "inbox.delete");
   try {
     await fs2.rm(inboxFile(directory, goalID), { force: true });
   } finally {
-    await releaseLock(directory, `inbox-${goalID}`);
+    await releaseLock(lease);
   }
 }
 async function acknowledgeGoalInbox(directory, goalID, delivered) {
   if (!delivered.length)
     return;
-  await acquireLock(directory, `inbox-${goalID}`, "inbox.acknowledge");
+  const lease = await acquireLock(directory, `inbox-${goalID}`, "inbox.acknowledge");
   try {
     let raw;
     try {
@@ -571,11 +580,11 @@ async function acknowledgeGoalInbox(directory, goalID, delivered) {
     else
       await fs2.rm(inboxFile(directory, goalID), { force: true });
   } finally {
-    await releaseLock(directory, `inbox-${goalID}`);
+    await releaseLock(lease);
   }
 }
 async function snapshotGoalInbox(directory, goalID) {
-  await acquireLock(directory, `inbox-${goalID}`, "inbox.snapshot");
+  const lease = await acquireLock(directory, `inbox-${goalID}`, "inbox.snapshot");
   try {
     const raw = await fs2.readFile(inboxFile(directory, goalID), "utf8");
     const lines = raw.trim().split(`
@@ -587,7 +596,7 @@ async function snapshotGoalInbox(directory, goalID) {
       return { lines: [], messages: [] };
     throw error;
   } finally {
-    await releaseLock(directory, `inbox-${goalID}`);
+    await releaseLock(lease);
   }
 }
 async function peekGoalInbox(directory, goalID) {
@@ -1423,6 +1432,9 @@ var init_workspace_scope = () => {};
 // src/application/workspace-execution.ts
 import { randomUUID as randomUUID4 } from "crypto";
 import path3 from "path";
+function isWorkspaceToolExempt(tool) {
+  return readTools.has(tool);
+}
 function structuredWritePaths(tool, args) {
   if (tool === "write" || tool === "edit") {
     if (typeof args.filePath !== "string")
@@ -1607,7 +1619,12 @@ async function beforeWorkspaceTool(directory, input, args) {
     return state;
   });
 }
-async function afterWorkspaceTool(directory, sessionID, callID) {
+async function afterWorkspaceTool(directory, sessionID, callID, tool) {
+  if (tool && isWorkspaceToolExempt(tool))
+    return;
+  const snapshot = await readState(directory);
+  if (!snapshot.workspaceCalls?.some((call) => call.sessionID === sessionID && call.callID === callID))
+    return;
   await mutateState(directory, `workspace.after:${callID}`, async (state) => {
     state.workspaceCalls = state.workspaceCalls?.filter((call) => call.sessionID !== sessionID || call.callID !== callID);
     const now = Date.now();
@@ -1703,7 +1720,7 @@ function guardV2ToolEditor(directory, editor, lifecycle) {
           if (lifecycle)
             await lifecycle.after(input, values, result);
           else
-            await afterWorkspaceTool(directory, input.sessionID, input.callID);
+            await afterWorkspaceTool(directory, input.sessionID, input.callID, input.tool);
         }
       };
     });
@@ -10553,6 +10570,8 @@ function createServerHooks(directory, host, defaults) {
     tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools2({ directory, host, goalService }), ...commandTools({ directory, commandService, capabilities: commandHost.capabilities, goalService }) },
     "tool.execute.before": async (input, _output) => {
       await beforeWorkspaceTool(directory, input, _output.args);
+      if (isWorkspaceToolExempt(input.tool))
+        return;
       const activeWorkers = goalService.getActiveWorkers();
       let matchedGoalID;
       for (const [goalID, worker] of activeWorkers) {
@@ -10573,7 +10592,7 @@ function createServerHooks(directory, host, defaults) {
       } catch {}
     },
     "tool.execute.after": async (input, output) => {
-      await afterWorkspaceTool(directory, input.sessionID, input.callID);
+      await afterWorkspaceTool(directory, input.sessionID, input.callID, input.tool);
       if (input.tool === "loopd_create_goal" || input.tool === "get_goal" || input.tool === "report_goal_progress") {
         ensureStarted();
         reconcileInBackground();
@@ -10581,7 +10600,7 @@ function createServerHooks(directory, host, defaults) {
       const activeWorkers = goalService.getActiveWorkers();
       let matchedGoalID;
       for (const [goalID, worker] of activeWorkers) {
-        if (worker.workerSessionID === input.sessionID) {
+        if (!isWorkspaceToolExempt(input.tool) && worker.workerSessionID === input.sessionID) {
           matchedGoalID = goalID;
           break;
         }

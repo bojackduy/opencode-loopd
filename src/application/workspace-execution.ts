@@ -22,6 +22,9 @@ const readTools = new Set([
 ])
 const ownerTools = new Set(["loopd_create_goal", "switch_goal_identity", "pause_goal", "resume_goal", "clear_goal", "abort_goal_worker", "nudge_goal", "send_goal_input", "force_block_goal", "force_complete_goal"])
 
+/** These calls never acquire a workspace reservation; tracking must not gate them. */
+export function isWorkspaceToolExempt(tool: string): boolean { return readTools.has(tool) }
+
 /** Only known structured formats are trusted; shell/custom/batch cannot be inferred safe. */
 export function structuredWritePaths(tool: string, args: Record<string, unknown>): string[] | undefined {
   if (tool === "write" || tool === "edit") {
@@ -264,7 +267,10 @@ export async function beforeWorkspaceTool(directory: string, input: { tool: stri
   })
 }
 
-export async function afterWorkspaceTool(directory: string, sessionID: string, callID: string): Promise<void> {
+export async function afterWorkspaceTool(directory: string, sessionID: string, callID: string, tool?: string): Promise<void> {
+  if (tool && isWorkspaceToolExempt(tool)) return
+  const snapshot = await readState(directory)
+  if (!snapshot.workspaceCalls?.some((call) => call.sessionID === sessionID && call.callID === callID)) return
   await mutateState(directory, `workspace.after:${callID}`, async (state) => {
     state.workspaceCalls = state.workspaceCalls?.filter((call) => call.sessionID !== sessionID || call.callID !== callID)
     const now = Date.now()
@@ -364,7 +370,7 @@ export function guardV2ToolEditor(directory: string, editor: V2ToolEditor, lifec
         try { result = await execute(args, context); return result as Awaited<ReturnType<typeof execute>> }
         finally {
           if (lifecycle) await lifecycle.after(input, values, result)
-          else await afterWorkspaceTool(directory, input.sessionID, input.callID)
+          else await afterWorkspaceTool(directory, input.sessionID, input.callID, input.tool)
         }
       }
     })

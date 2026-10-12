@@ -23,7 +23,7 @@ import { addToolCall, removeToolCall } from "../domain/runtime"
 import { readState, mutateState } from "../infrastructure/state-repository"
 import type { GoalToolDefaults } from "./goal-tools"
 import { version as PLUGIN_VERSION } from "../../package.json"
-import { beforeWorkspaceTool, afterWorkspaceTool, guardV2ToolEditor } from "../application/workspace-execution"
+import { beforeWorkspaceTool, afterWorkspaceTool, guardV2ToolEditor, isWorkspaceToolExempt } from "../application/workspace-execution"
 
 const PLUGIN_ID = "opencode-loopd.server"
 
@@ -177,6 +177,7 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
     "tool.execute.before": async (input, _output) => {
       // Enforcement errors must propagate; tracking's best-effort catch is deliberately separate.
       await beforeWorkspaceTool(directory, input, _output.args)
+      if (isWorkspaceToolExempt(input.tool)) return
       // Track tool call start for worker sessions only
       const activeWorkers = goalService.getActiveWorkers()
       let matchedGoalID: string | undefined
@@ -197,7 +198,7 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
       } catch {}
     },
     "tool.execute.after": async (input, output) => {
-      await afterWorkspaceTool(directory, input.sessionID, input.callID)
+      await afterWorkspaceTool(directory, input.sessionID, input.callID, input.tool)
       // Lazy start when goal tools are used
       if (input.tool === "loopd_create_goal" || input.tool === "get_goal" || input.tool === "report_goal_progress") {
         ensureStarted()
@@ -208,7 +209,7 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
       const activeWorkers = goalService.getActiveWorkers()
       let matchedGoalID: string | undefined
       for (const [goalID, worker] of activeWorkers) {
-        if (worker.workerSessionID === input.sessionID) {
+        if (!isWorkspaceToolExempt(input.tool) && worker.workerSessionID === input.sessionID) {
           matchedGoalID = goalID
           break
         }

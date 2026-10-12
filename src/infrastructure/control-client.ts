@@ -55,47 +55,58 @@ export function createControlClient(directory: string): ControlClient {
       requestedAt: new Date().toISOString(),
     }
 
-    await writeControlRequest(directory, request)
+    let submitted = false
+    let expired = false
+    let timeoutReply: Promise<ControlResponse> | undefined
+    const deadline = performance.now() + timeoutMs
 
-    // Poll for response
-    const deadline = Date.now() + timeoutMs
-    while (Date.now() < deadline) {
-      const response = await readControlResponse(directory, request.requestID)
-      if (response) return response
-      await delay(100)
+    function timedOut(): Promise<ControlResponse> {
+      return timeoutReply ??= (async () => {
+        // Diagnostics must not turn a bounded request into another hung I/O.
+        let probeTimer: ReturnType<typeof setTimeout> | undefined
+        let claimed: { requestAgeMs: number } | undefined
+        try {
+          claimed = await Promise.race([
+            statProcessingRequest(directory, request.requestID),
+            new Promise<undefined>((resolve) => { probeTimer = setTimeout(() => resolve(undefined), 100) }),
+          ])
+        } catch {} finally { if (probeTimer) clearTimeout(probeTimer) }
+        const stage = claimed
+          ? `accepted by the server ${(claimed.requestAgeMs / 1000).toFixed(1)}s ago, still processing`
+          : submitted ? "request submitted; server acceptance or response could not be confirmed"
+          : "request submission is still pending"
+        return {
+          requestID: request.requestID, ok: false, errorCode: "timeout",
+          message: `timeout waiting for response (${stage}; the operation may complete later under this requestID — check the server log before retrying)`,
+          completedAt: new Date().toISOString(),
+        }
+      })()
     }
 
-    // Final re-read: a response may have landed inside the last poll window.
-    // A late server reply still lands in responses/<requestID>.json afterwards,
-    // but this call already timed out — the retry uses a NEW requestID, so a
-    // late reply never double-applies to the retry (ledger dedups by the
-    // ORIGINAL requestID only).
-    const late = await readControlResponse(directory, request.requestID).catch(() => undefined)
-    if (late) return late
-
-    // Stage-aware timeout: distinguish "server never picked it up" (server
-    // down or poll wedged) from "accepted and still running" (slow/blocked
-    // handler — the operation may complete later; do not blindly retry
-    // non-idempotent commands, check the server log first).
-    let stage = "not yet accepted by the server"
-    try {
-      const claimed = await statProcessingRequest(directory, request.requestID)
-      if (claimed) {
-        stage = `accepted by the server ${(claimed.requestAgeMs / 1000).toFixed(1)}s ago, still processing — ` +
-          `the operation may complete later (late reply under this requestID); ` +
-          `check the server log before retrying`
+    async function exchange(): Promise<ControlResponse> {
+      await writeControlRequest(directory, request)
+      submitted = true
+      while (!expired && performance.now() < deadline) {
+        const response = await readControlResponse(directory, request.requestID)
+        if (response) return response
+        if (!expired) await delay(Math.min(100, Math.max(0, deadline - performance.now())))
       }
-    } catch {
-      // Stage probe is best-effort; the timeout below is still accurate.
+      if (!expired) {
+        const late = await readControlResponse(directory, request.requestID)
+        if (late) return late
+      }
+      return timedOut()
     }
 
-    return {
-      requestID: request.requestID,
-      ok: false,
-      message: `timeout waiting for response (${stage})`,
-      errorCode: "timeout",
-      completedAt: new Date().toISOString(),
-    }
+    // Bound the WHOLE exchange, including submission, response reads, and the
+    // final read. A filesystem promise need not settle for the UI to finish.
+    // Timeout is not cancellation: an already-started write may land later.
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<ControlResponse>((resolve) => {
+      timer = setTimeout(() => { expired = true; void timedOut().then(resolve) }, timeoutMs)
+    })
+    try { return await Promise.race([exchange(), timeout]) }
+    finally { expired = true; if (timer) clearTimeout(timer) }
   }
 
   async function getState(): Promise<StoreState> {
