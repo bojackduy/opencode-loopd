@@ -1646,7 +1646,7 @@ async function releaseTerminalWorkspaceCalls(directory, evidence) {
     });
     for (const goal of state.goals) {
       const rt = state.runtimes.find((item) => item.goalID === goal.id);
-      const started = rt?.turnStartedAt ? Date.parse(rt.turnStartedAt) : NaN;
+      const started = rt?.turnStartedAt || rt?.lastRunAt ? Date.parse(rt.turnStartedAt ?? rt.lastRunAt) : NaN;
       if (!rt?.activeToolCallIDs?.length || !Number.isFinite(started))
         continue;
       rt.activeToolCallIDs = rt.activeToolCallIDs.filter((callID) => {
@@ -1680,22 +1680,35 @@ async function reconcileTerminalWorkspaceCalls(directory, host) {
   }));
   await releaseTerminalWorkspaceCalls(directory, proof.flat());
 }
-function guardV2ToolEditor(directory, editor) {
+function guardV2ToolEditor(directory, editor, lifecycle) {
   if (typeof editor.list !== "function" || typeof editor.update !== "function")
     throw new Error("Scoped execution requires the v2 tool editor list/update execution surface.");
+  const guarded = new Set;
   for (const entry of editor.list()) {
+    guarded.add(entry.id);
     editor.update(entry.id, (definition) => {
       const execute = definition.execute;
       definition.execute = async (args, context) => {
-        await beforeWorkspaceTool(directory, { tool: entry.name, sessionID: context.sessionID, callID: context.id }, args);
+        const input = { tool: entry.id, sessionID: context.sessionID, callID: `${context.id}:${randomUUID4()}` };
+        const values = args;
+        if (lifecycle)
+          await lifecycle.before(input, values);
+        else
+          await beforeWorkspaceTool(directory, input, values);
+        let result;
         try {
-          return await execute(args, context);
+          result = await execute(args, context);
+          return result;
         } finally {
-          await afterWorkspaceTool(directory, context.sessionID, context.id);
+          if (lifecycle)
+            await lifecycle.after(input, values, result);
+          else
+            await afterWorkspaceTool(directory, input.sessionID, input.callID);
         }
       };
     });
   }
+  return guarded;
 }
 async function withWorkspaceOperation(directory, goalID, sessionID, run) {
   const id = randomUUID4();
@@ -2602,9 +2615,7 @@ function createLoopEngine(options) {
           Object.assign(rt, recordActivity(rt));
           rt.activePromptObservedAt ??= new Date().toISOString();
           rt.activeAssistantMessageID = info.id;
-          if (info.time?.completed) {
-            rt.activeAssistantCompletedAt = new Date(info.time.completed).toISOString();
-          }
+          rt.activeAssistantCompletedAt = info.time?.completed && info.finish !== "tool-calls" ? new Date(info.time.completed).toISOString() : undefined;
           matched = true;
         }
       } else {
@@ -2692,7 +2703,7 @@ function createLoopEngine(options) {
       const stagedRt = afterIdle.runtimes.find((r) => r.goalID === goalID);
       const eventAnchored = stagedRt?.runGeneration === candidate.generation && Boolean(stagedRt?.activeAssistantCompletedAt);
       const transcript = await inspectPromptTurn(goal.workerSessionID, candidate.promptMessageID);
-      const failureReason = !transcript.latestUserPrompt && !eventAnchored ? "prompt-outside-window" : !eventAnchored && !candidate.assistantCompleted && !transcript.assistantCompleted ? "assistant-incomplete" : undefined;
+      const failureReason = transcript.assistantInProgress ? "assistant-incomplete" : !transcript.latestUserPrompt && !eventAnchored ? "prompt-outside-window" : !eventAnchored && !candidate.assistantCompleted && !transcript.assistantCompleted ? "assistant-incomplete" : undefined;
       if (failureReason) {
         let newlyStamped = false;
         await mutateState(directory, `idle.confirm-stamp:${goalID}`, async (s) => {
@@ -2855,7 +2866,7 @@ function createLoopEngine(options) {
     return true;
   }
   async function inspectPromptTurn(workerSessionID, promptMessageID) {
-    const noMatch = { latestUserPrompt: false, assistantCompleted: false };
+    const noMatch = { latestUserPrompt: false, assistantCompleted: false, assistantInProgress: false };
     if (!workerSessionID)
       return noMatch;
     let messages;
@@ -2869,9 +2880,14 @@ function createLoopEngine(options) {
       return noMatch;
     const allTimestamped = users.every((message) => message.timestamp && Number.isFinite(Date.parse(message.timestamp)));
     const ordered = allTimestamped ? [...users].sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp)) : users;
+    const assistants = messages.filter((message) => message.role === "assistant" && message.parentMessageID === promptMessageID);
+    const orderedAssistants = assistants.every((message) => Number.isFinite(Date.parse(message.createdAt ?? message.timestamp ?? ""))) ? [...assistants].sort((a, b) => Date.parse(a.createdAt ?? a.timestamp) - Date.parse(b.createdAt ?? b.timestamp)) : assistants;
+    const latestAssistant = orderedAssistants.at(-1);
+    const assistantCompleted = Boolean(latestAssistant?.completedAt) && latestAssistant?.finish !== "tool-calls";
     return {
       latestUserPrompt: ordered.at(-1)?.messageID === promptMessageID,
-      assistantCompleted: messages.some((message) => message.role === "assistant" && message.parentMessageID === promptMessageID && Boolean(message.completedAt))
+      assistantCompleted,
+      assistantInProgress: Boolean(latestAssistant) && !assistantCompleted
     };
   }
   async function handleSessionStatus(state, goal, event) {
@@ -3852,6 +3868,8 @@ function createRealHost(client, directory) {
             messageID: m.info?.id || m.id,
             parentMessageID: m.info?.parentID,
             completedAt: completedMs ? new Date(completedMs).toISOString() : undefined,
+            finish: typeof m.info?.finish === "string" ? m.info.finish : undefined,
+            createdAt: typeof createdMs === "number" ? new Date(createdMs).toISOString() : undefined,
             tokens: tokens && typeof tokens.input === "number" ? {
               input: tokens.input || 0,
               output: tokens.output || 0,
@@ -3872,10 +3890,14 @@ function createRealHost(client, directory) {
         const result = await withTimeout(client.session.messages({ path: { id: sessionID } }), 1e4, "OpenCode session.messages (tool terminal evidence)");
         if (!Array.isArray(result?.data))
           return [];
-        return result.data.flatMap((message) => (message.parts ?? []).flatMap((part) => {
-          const evidence = terminalToolExecution(part);
-          return evidence?.sessionID === sessionID ? [evidence] : [];
-        }));
+        return result.data.flatMap((message) => {
+          if (message.info?.sessionID !== undefined && message.info.sessionID !== sessionID)
+            return [];
+          return (message.parts ?? []).flatMap((part) => {
+            const evidence = terminalToolExecution(part?.sessionID === undefined && message.info?.sessionID === sessionID ? { ...part, sessionID } : part);
+            return evidence?.sessionID === sessionID ? [evidence] : [];
+          });
+        });
       } catch {
         return [];
       }
@@ -4111,6 +4133,7 @@ function createV2Host(context, statuses, options = {}) {
             messageID: message.id,
             parentMessageID,
             completedAt: completed ? new Date(completed).toISOString() : undefined,
+            createdAt: new Date(created).toISOString(),
             tokens: message.tokens ? {
               input: message.tokens.input,
               output: message.tokens.output,
@@ -9184,6 +9207,16 @@ ${failureDetails.slice(0, 500)}`,
         if (!goal) {
           return { title: "No goal", output: "No active goal to block." };
         }
+        if (goal.status === "blocked") {
+          return { title: "Goal already blocked", output: JSON.stringify({
+            goalID: goal.id,
+            goalName: goal.name,
+            status: "blocked",
+            alreadyBlocked: true,
+            reason: goal.blocker?.reason,
+            needed: goal.blocker?.needed
+          }) };
+        }
         if (!canTransition(goal.status, "blocked", "model")) {
           return { title: "Invalid transition", output: `Cannot block goal in ${goal.status} state.` };
         }
@@ -10569,6 +10602,8 @@ function createServerHooks(directory, host, defaults) {
           if (!raw)
             return;
           const parsed = JSON.parse(raw);
+          if (parsed.alreadyBlocked === true)
+            return;
           if (parsed.status !== "complete" && parsed.status !== "blocked")
             return;
           const goalID = parsed.goalID;
@@ -10635,6 +10670,7 @@ var v2 = {
     const eventController = new AbortController;
     let eventTask = Promise.resolve();
     let disposed = false;
+    let guardedToolIDs = new Set;
     const cleanup = async () => {
       if (disposed)
         return;
@@ -10652,9 +10688,23 @@ var v2 = {
         for (const [id, definition] of Object.entries(hooks.tool ?? {})) {
           editor.add(toV2Tool(id, definition, directory));
         }
-        guardV2ToolEditor(directory, editor);
+        guardedToolIDs = guardV2ToolEditor(directory, editor, {
+          before: async (input, args) => {
+            await hooks["tool.execute.before"]?.(input, { args });
+          },
+          after: async (input, args, result) => {
+            const output = result;
+            await hooks["tool.execute.after"]?.({ ...input, args }, {
+              title: "",
+              output: typeof output?.content === "string" ? output.content : JSON.stringify(output?.content ?? ""),
+              metadata: output?.metadata ?? {}
+            });
+          }
+        });
       }));
       registrations.push(await context.tool.hook("execute.before", async (input) => {
+        if (input.tool === "execute" || guardedToolIDs.has(input.tool))
+          return;
         await hooks["tool.execute.before"]?.({
           tool: input.tool,
           sessionID: input.sessionID,
@@ -10662,6 +10712,8 @@ var v2 = {
         }, { args: input.input });
       }));
       registrations.push(await context.tool.hook("execute.after", async (input) => {
+        if (input.tool === "execute" || guardedToolIDs.has(input.tool))
+          return;
         const output = input.status === "completed" ? input.result : { content: JSON.stringify(input.error) };
         await hooks["tool.execute.after"]?.({
           tool: input.tool,

@@ -592,6 +592,12 @@ export function goalTools(
           return { title: "No goal", output: "No active goal to block." }
         }
 
+        if (goal.status === "blocked") {
+          return { title: "Goal already blocked", output: JSON.stringify({
+            goalID: goal.id, goalName: goal.name, status: "blocked", alreadyBlocked: true,
+            reason: goal.blocker?.reason, needed: goal.blocker?.needed,
+          }) }
+        }
         if (!canTransition(goal.status, "blocked", "model")) {
           return { title: "Invalid transition", output: `Cannot block goal in ${goal.status} state.` }
         }

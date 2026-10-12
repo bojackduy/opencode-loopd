@@ -233,9 +233,8 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
           Object.assign(rt, recordActivity(rt))
           rt.activePromptObservedAt ??= new Date().toISOString()
           rt.activeAssistantMessageID = info.id
-          if (info.time?.completed) {
-            rt.activeAssistantCompletedAt = new Date(info.time.completed).toISOString()
-          }
+          rt.activeAssistantCompletedAt = info.time?.completed && info.finish !== "tool-calls"
+            ? new Date(info.time.completed).toISOString() : undefined
           matched = true
         }
       } else {
@@ -355,7 +354,8 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
         && Boolean(stagedRt?.activeAssistantCompletedAt)
       const transcript = await inspectPromptTurn(goal.workerSessionID, candidate.promptMessageID)
       const failureReason: "prompt-outside-window" | "assistant-incomplete" | undefined =
-        !transcript.latestUserPrompt && !eventAnchored
+        transcript.assistantInProgress ? "assistant-incomplete"
+        : !transcript.latestUserPrompt && !eventAnchored
           ? "prompt-outside-window"
           : (!eventAnchored && !candidate.assistantCompleted && !transcript.assistantCompleted)
             ? "assistant-incomplete"
@@ -528,8 +528,8 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
   async function inspectPromptTurn(
     workerSessionID: string | undefined,
     promptMessageID: string,
-  ): Promise<{ latestUserPrompt: boolean; assistantCompleted: boolean }> {
-    const noMatch = { latestUserPrompt: false, assistantCompleted: false }
+  ): Promise<{ latestUserPrompt: boolean; assistantCompleted: boolean; assistantInProgress: boolean }> {
+    const noMatch = { latestUserPrompt: false, assistantCompleted: false, assistantInProgress: false }
     if (!workerSessionID) return noMatch
     let messages
     try {
@@ -548,13 +548,16 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     const ordered = allTimestamped
       ? [...users].sort((a, b) => Date.parse(a.timestamp!) - Date.parse(b.timestamp!))
       : users
+    const assistants = messages.filter((message) => message.role === "assistant" && message.parentMessageID === promptMessageID)
+    const orderedAssistants = assistants.every((message) => Number.isFinite(Date.parse(message.createdAt ?? message.timestamp ?? "")))
+      ? [...assistants].sort((a, b) => Date.parse(a.createdAt ?? a.timestamp!) - Date.parse(b.createdAt ?? b.timestamp!))
+      : assistants
+    const latestAssistant = orderedAssistants.at(-1)
+    const assistantCompleted = Boolean(latestAssistant?.completedAt) && latestAssistant?.finish !== "tool-calls"
     return {
       latestUserPrompt: ordered.at(-1)?.messageID === promptMessageID,
-      assistantCompleted: messages.some(
-        (message) => message.role === "assistant"
-          && message.parentMessageID === promptMessageID
-          && Boolean(message.completedAt),
-      ),
+      assistantCompleted,
+      assistantInProgress: Boolean(latestAssistant) && !assistantCompleted,
     }
   }
 

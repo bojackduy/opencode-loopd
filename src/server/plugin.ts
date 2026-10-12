@@ -229,6 +229,7 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
           const raw = (output as any)?.output as string | undefined
           if (!raw) return
           const parsed = JSON.parse(raw) as any
+          if (parsed.alreadyBlocked === true) return
           if (parsed.status !== "complete" && parsed.status !== "blocked") return
           const goalID = parsed.goalID as string | undefined
           if (!goalID) return
@@ -307,6 +308,7 @@ const v2 = {
     const eventController = new AbortController()
     let eventTask = Promise.resolve()
     let disposed = false
+    let guardedToolIDs = new Set<string>()
 
     const cleanup = async () => {
       if (disposed) return
@@ -328,9 +330,23 @@ const v2 = {
         // Promise SDK hook rejections are defects, not typed Tool.Error failures.
         // Wrap the supported execution surface too: even a host that logs hook
         // defects cannot proceed into the original executor after a denial.
-        guardV2ToolEditor(directory, editor)
+        guardedToolIDs = guardV2ToolEditor(directory, editor, {
+          before: async (input, args) => { await hooks["tool.execute.before"]?.(input, { args }) },
+          after: async (input, args, result) => {
+            const output = result as { content?: unknown; metadata?: Record<string, unknown> } | undefined
+            await hooks["tool.execute.after"]?.({ ...input, args }, {
+              title: "", output: typeof output?.content === "string" ? output.content : JSON.stringify(output?.content ?? ""),
+              metadata: output?.metadata ?? {},
+            })
+          },
+        })
       }))
       registrations.push(await context.tool.hook("execute.before", async (input) => {
+        // In audited v2, reserved built-in execute is a confined orchestrator
+        // synthesized outside the registry. Nested executors above carry the
+        // actual guards and unique tracking IDs; reserving the wrapper locks
+        // out its own goal creation. Unwrapped/custom tools stay fail-closed.
+        if (input.tool === "execute" || guardedToolIDs.has(input.tool)) return
         await hooks["tool.execute.before"]?.({
           tool: input.tool,
           sessionID: input.sessionID,
@@ -338,6 +354,7 @@ const v2 = {
         }, { args: input.input })
       }))
       registrations.push(await context.tool.hook("execute.after", async (input) => {
+        if (input.tool === "execute" || guardedToolIDs.has(input.tool)) return
         const output = input.status === "completed" ? input.result : { content: JSON.stringify(input.error) }
         await hooks["tool.execute.after"]?.({
           tool: input.tool,

@@ -4,7 +4,7 @@ import path from "path"
 import os from "os"
 import { createGoalService } from "../../src/application/goal-service"
 import { createFakeHost } from "../../src/server/host-adapter"
-import { readState } from "../../src/infrastructure/state-repository"
+import { readState, readEvents } from "../../src/infrastructure/state-repository"
 import type { GoalID } from "../../src/domain/goal"
 import { goalTools } from "../../src/server/goal-tools"
 
@@ -29,6 +29,21 @@ describe("Goal Tools", () => {
   })
 
   describe("createGoal", () => {
+    it("acknowledges a repeated block without changing its blocker or emitting another transition", async () => {
+      const { goal } = await goalService.start(dir, { name: "blocked", objective: "test", ownerSessionID: "owner-1" })
+      const tools = goalTools(dir, goalService)
+      const context = { sessionID: goal.workerSessionID }
+      await tools.block_goal.execute({ reason: "reference unavailable", needed: "approved export" }, context)
+      const first = (await readState(dir)).goals[0]
+      const repeated = JSON.parse((await tools.block_goal.execute({ reason: "replacement", needed: "replacement" }, context)).output)
+      expect(repeated).toMatchObject({ status: "blocked", alreadyBlocked: true, reason: "reference unavailable", needed: "approved export" })
+      const state = await readState(dir)
+      expect(state.goals[0].blocker).toEqual(first.blocker)
+      expect(state.runtimes[0].phase).toBe("idle")
+      expect((await readEvents(dir, 100)).filter((event) => event.type === "goal.blocked")).toHaveLength(1)
+      expect(host.promptCalls).toHaveLength(1)
+    })
+
     it("runs configured checks through the controlled tool and releases its exclusive operation", async () => {
       const tools = goalTools(dir, goalService, "owner-1")
       const created = JSON.parse((await tools.loopd_create_goal.execute({ name: "checks", objective: "test", write_scope: [], checks: ["exit 0"] }, { sessionID: "owner-1" })).output)

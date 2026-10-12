@@ -309,7 +309,11 @@ export async function releaseTerminalWorkspaceCalls(directory: string, evidence:
     // Recover their missed after-hooks from exact proof, never elapsed time.
     for (const goal of state.goals) {
       const rt = state.runtimes.find((item) => item.goalID === goal.id)
-      const started = rt?.turnStartedAt ? Date.parse(rt.turnStartedAt) : NaN
+      // releaseLease removes turnStartedAt, but lastRunAt still identifies the
+      // same generation's start. Missed read/error hooks can be tracked while
+      // idle; retain the exact session/call and not-before-run proof checks.
+      const started = rt?.turnStartedAt || rt?.lastRunAt
+        ? Date.parse(rt.turnStartedAt ?? rt.lastRunAt!) : NaN
       if (!rt?.activeToolCallIDs?.length || !Number.isFinite(started)) continue
       rt.activeToolCallIDs = rt.activeToolCallIDs.filter((callID) => {
         if (state.workspaceCalls?.some((call) => call.sessionID === goal.workerSessionID && call.callID === callID)) return true
@@ -339,17 +343,33 @@ export async function reconcileTerminalWorkspaceCalls(directory: string, host: L
 }
 
 /** Supported v2 execution guard, independent of host handling of hook defects. */
-export function guardV2ToolEditor(directory: string, editor: V2ToolEditor): void {
+export function guardV2ToolEditor(directory: string, editor: V2ToolEditor, lifecycle?: {
+  before(input: { tool: string; sessionID: string; callID: string }, args: Record<string, unknown>): Promise<void>
+  after(input: { tool: string; sessionID: string; callID: string }, args: Record<string, unknown>, result: unknown): Promise<void>
+}): Set<string> {
   if (typeof editor.list !== "function" || typeof editor.update !== "function") throw new Error("Scoped execution requires the v2 tool editor list/update execution surface.")
+  const guarded = new Set<string>()
   for (const entry of editor.list()) {
+    guarded.add(entry.id)
     editor.update(entry.id, (definition) => {
       const execute = definition.execute
       definition.execute = async (args, context) => {
-        await beforeWorkspaceTool(directory, { tool: entry.name, sessionID: context.sessionID, callID: context.id }, args as Record<string, unknown>)
-        try { return await execute(args, context) } finally { await afterWorkspaceTool(directory, context.sessionID, context.id) }
+        // CodeMode reuses its host call ID for parallel nested calls. Reserve
+        // each actual invocation independently; never change the host context.
+        const input = { tool: entry.id, sessionID: context.sessionID, callID: `${context.id}:${randomUUID()}` }
+        const values = args as Record<string, unknown>
+        if (lifecycle) await lifecycle.before(input, values)
+        else await beforeWorkspaceTool(directory, input, values)
+        let result: unknown
+        try { result = await execute(args, context); return result as Awaited<ReturnType<typeof execute>> }
+        finally {
+          if (lifecycle) await lifecycle.after(input, values, result)
+          else await afterWorkspaceTool(directory, input.sessionID, input.callID)
+        }
       }
     })
   }
+  return guarded
 }
 
 /** Trusted configured checks only. This is coordination, not a filesystem/OS sandbox. */

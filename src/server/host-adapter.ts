@@ -24,6 +24,9 @@ export interface SessionMessage {
   messageID?: string
   parentMessageID?: string
   completedAt?: string
+  /** A completed tool-call message is a step boundary, not a finished turn. */
+  finish?: string
+  createdAt?: string
   /** Token usage for completed assistant messages (absent for user messages). */
   tokens?: {
     input: number
@@ -323,6 +326,8 @@ export function createRealHost(client: any, directory: string): LoopHost {
             completedAt: completedMs
               ? new Date(completedMs).toISOString()
               : undefined,
+            finish: typeof m.info?.finish === "string" ? m.info.finish : undefined,
+            createdAt: typeof createdMs === "number" ? new Date(createdMs).toISOString() : undefined,
             tokens: tokens && typeof tokens.input === "number"
               ? {
                 input: tokens.input || 0,
@@ -349,10 +354,18 @@ export function createRealHost(client: any, directory: string): LoopHost {
         // must not be inferred from age or silently fall outside a recent tail.
         const result = await withTimeout<any>(client.session.messages({ path: { id: sessionID } }), 10_000, "OpenCode session.messages (tool terminal evidence)")
         if (!Array.isArray(result?.data)) return []
-        return result.data.flatMap((message: any) => (message.parts ?? []).flatMap((part: any) => {
-          const evidence = terminalToolExecution(part)
-          return evidence?.sessionID === sessionID ? [evidence] : []
-        }))
+        return result.data.flatMap((message: any) => {
+          // Public transcript parts may omit their enclosing session identity.
+          // Only inherit an exact matching message identity, never a foreign
+          // message or an explicitly conflicting part identity.
+          if (message.info?.sessionID !== undefined && message.info.sessionID !== sessionID) return []
+          return (message.parts ?? []).flatMap((part: any) => {
+            const evidence = terminalToolExecution(part?.sessionID === undefined && message.info?.sessionID === sessionID
+              ? { ...part, sessionID }
+              : part)
+            return evidence?.sessionID === sessionID ? [evidence] : []
+          })
+        })
       } catch { return [] }
     },
 
@@ -680,6 +693,7 @@ export function createV2Host(
             messageID: message.id,
             parentMessageID,
             completedAt: completed ? new Date(completed).toISOString() : undefined,
+            createdAt: new Date(created).toISOString(),
             tokens: message.tokens ? {
               input: message.tokens.input,
               output: message.tokens.output,

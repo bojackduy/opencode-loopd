@@ -546,6 +546,104 @@ describe("truthful goal delivery regressions", () => {
     expect((await readEvents(dir, 100)).filter((event) => event.type === "run.started")).toHaveLength(2)
   })
 
+  it("maintenance recovers a terminal read error in an idle runtime from session-bound message metadata", async () => {
+    const { goal } = await start()
+    const at = Date.now() - 600_000
+    await mutateState(dir, "test.idle-missed-read", async (state) => {
+      const rt = state.runtimes[0]
+      rt.phase = "idle"
+      rt.turnStartedAt = undefined
+      rt.lastRunAt = new Date(at).toISOString()
+      rt.activeToolCallIDs = ["failed-glob", "foreign-read", "older-read"]
+      return state
+    })
+    let allowForeign = false
+    const real = createRealHost({ session: { messages: async () => ({ data: [
+      { info: { sessionID: goal.workerSessionID }, parts: [
+        { type: "tool", callID: "failed-glob", state: { status: "error", time: { end: at + 1 } } },
+        { type: "tool", callID: "older-read", state: { status: "completed", time: { end: at - 1 } } },
+        { type: "tool", sessionID: "other-session", callID: "foreign-read", state: { status: "completed", time: { end: at + 1 } } },
+        ...(allowForeign ? ["foreign-read", "older-read"].map((callID) => ({ type: "tool", callID, state: { status: "completed", time: { end: at + 2 } } })) : []),
+      ] },
+      { info: { sessionID: "other-session" }, parts: [
+        { type: "tool", callID: "foreign-read", state: { status: "completed", time: { end: at + 1 } } },
+      ] },
+    ] }) } }, dir)
+    host.readToolExecutions = real.readToolExecutions
+    await service.reconcile(dir)
+    expect((await readState(dir)).runtimes[0].activeToolCallIDs).toEqual(["foreign-read", "older-read"])
+    expect(host.promptCalls).toHaveLength(1)
+    allowForeign = true
+    const prompt = host.promptWorker.bind(host)
+    host.promptWorker = async (input) => {
+      const result = await prompt(input)
+      host.sessionStatus = async () => "busy"
+      return result
+    }
+    const engine = createLoopEngine({ directory: dir, host, goalService: service, pollIntervalMs: 20, confirmIdleMs: 0 })
+    engines.push(engine)
+    engine.start()
+    await waitFor(async () => host.promptCalls.length === 2 && (await readState(dir)).runtimes[0].activePromptAcceptedAt !== undefined)
+    engine.stop()
+    expect((await readState(dir)).runtimes[0].activeToolCallIDs).toEqual([])
+    expect(host.promptCalls).toHaveLength(2)
+  })
+
+  it("a completed tool-call step cannot authorize idle continuation while another assistant step is running", async () => {
+    const { goal } = await start()
+    const promptID = (await readState(dir)).runtimes[0].activePromptMessageID!
+    const at = Date.now()
+    const real = createRealHost({ session: { messages: async () => ({ data: [
+      { info: { id: promptID, role: "user", time: { created: at - 1 } }, parts: [] },
+      { info: { id: "step-done", role: "assistant", parentID: promptID, finish: "tool-calls", time: { created: at, completed: at + 1 } }, parts: [] },
+      { info: { id: "step-running", role: "assistant", parentID: promptID, time: { created: at + 2 } }, parts: [] },
+    ] }) } }, dir)
+    host.readMessages = real.readMessages
+    const engine = createLoopEngine({ directory: dir, host, goalService: service, pollIntervalMs: 60_000, confirmIdleMs: 0 })
+    engines.push(engine)
+    engine.start()
+    await engine.handleEvent({ type: "message.updated", properties: { info: { sessionID: goal.workerSessionID, id: "step-done", role: "assistant", parentID: promptID,
+      finish: "tool-calls", time: { completed: at + 1 } } } })
+    expect((await readState(dir)).runtimes[0].activeAssistantCompletedAt).toBeUndefined()
+    await engine.handleEvent({ type: "session.idle", properties: { sessionID: goal.workerSessionID } })
+    await engine.handleEvent({ type: "session.idle", properties: { sessionID: goal.workerSessionID } })
+    expect(host.promptCalls).toHaveLength(1)
+  })
+
+  it("a new assistant step invalidates an older completed-message anchor", async () => {
+    const { goal } = await start()
+    const promptID = (await readState(dir)).runtimes[0].activePromptMessageID!
+    const engine = createLoopEngine({ directory: dir, host, goalService: service, pollIntervalMs: 60_000 })
+    engines.push(engine)
+    engine.start()
+    const info = { sessionID: goal.workerSessionID, role: "assistant", parentID: promptID }
+    await engine.handleEvent({ type: "message.updated", properties: { info: { ...info, id: "older-finished", finish: "stop", time: { completed: Date.now() } } } })
+    expect((await readState(dir)).runtimes[0].activeAssistantCompletedAt).toBeDefined()
+    await engine.handleEvent({ type: "message.updated", properties: { info: { ...info, id: "newer-running", time: { created: Date.now() } } } })
+    expect((await readState(dir)).runtimes[0].activeAssistantCompletedAt).toBeUndefined()
+  })
+
+  it("an unfinished newer transcript step vetoes a delayed older completion event", async () => {
+    const { goal } = await start()
+    const promptID = (await readState(dir)).runtimes[0].activePromptMessageID!
+    const at = Date.now() - 100
+    const real = createRealHost({ session: { messages: async () => ({ data: [
+      { info: { id: promptID, role: "user", time: { created: at - 1 } }, parts: [] },
+      { info: { id: "older-finished", role: "assistant", parentID: promptID, finish: "stop", time: { created: at, completed: at + 50 } }, parts: [] },
+      { info: { id: "newer-running", role: "assistant", parentID: promptID, time: { created: at + 1 } }, parts: [] },
+    ] }) } }, dir)
+    host.readMessages = real.readMessages
+    const engine = createLoopEngine({ directory: dir, host, goalService: service, pollIntervalMs: 60_000, confirmIdleMs: 0 })
+    engines.push(engine)
+    engine.start()
+    await engine.handleEvent({ type: "message.updated", properties: { info: { sessionID: goal.workerSessionID, id: "older-finished", role: "assistant", parentID: promptID,
+      finish: "stop", time: { completed: at + 50 } } } })
+    await engine.handleEvent({ type: "session.idle", properties: { sessionID: goal.workerSessionID } })
+    await engine.handleEvent({ type: "session.idle", properties: { sessionID: goal.workerSessionID } })
+    expect(host.promptCalls).toHaveLength(1)
+    expect((await readState(dir)).runtimes[0].activeRunID).toBeDefined()
+  })
+
   for (const status of ["idle", "unknown"] as const) {
     it(`maintenance retains live tool correlation and writes when host status is ${status}`, async () => {
       const { goal } = await start()
