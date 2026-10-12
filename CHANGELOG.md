@@ -17,6 +17,26 @@
 
 - Scratch harness (real host + real service): timeout→`terminated/timeout`+notify; until→`terminated/until` with 1 notify and `until-matched` state; pattern read returns ANSI-original lines case-insensitively, rejects `(a+)+`; env value reaches process while state keeps only the name; terminate+remove in one call. 555 tests pass.
 
+## 1.13.2 (2026-10-12) — Diagnostic Isolation and Lock Recovery
+
+### Fixed
+
+- Read/exempt tools no longer wait on workspace bookkeeping in either hook or worker tracking. After-hooks without an execution reservation avoid unnecessary state mutations; write and scope guards remain enforced.
+- State and inbox locks retain their acquisition descriptor for cleanup under file-table exhaustion, validate token and inode ownership, and remove incomplete acquisition metadata on failure. Lock errors identify loopd and the last observed owner PID and operation.
+- State read errors fail closed instead of allowing a mutation to overwrite saved goals with an empty store.
+- Dashboard control timeouts bound request submission, response reads, and timeout diagnostics. A timeout reports uncertain/late delivery rather than implying cancellation.
+- v2 CodeMode orchestration no longer blocks itself on the outer execute reservation. Nested executors retain independent guards and reservations even when the host reuses a call ID.
+- Automatic terminal-tool cleanup handles missing part identity only with matching message-envelope identity, and retained idle runtime IDs only with exact terminal evidence.
+- Idle continuation distinguishes completed tool-call steps from finished turns, and newer unfinished assistant steps invalidate older completion anchors.
+- Repeated block acknowledgements preserve the original blocker and do not duplicate accounting, events, or parent notifications.
+
+### Verification
+
+- 794 tests pass across 70 files; the ten control-I/O and diagnostic-isolation regressions also pass ten repetitions.
+- Typecheck, server/TUI builds, and whitespace checks pass.
+
+Fully stop the old OpenCode instance before restarting to load the updated plugins. This release does not steal or delete locks held by a live process.
+
 ## 1.13.1 (2026-10-11) — Truthful Goal Delivery and Safe Recovery
 
 ### Fixed
