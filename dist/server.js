@@ -10461,7 +10461,7 @@ function commandTools(options) {
 init_server_log();
 init_state_repository();
 // package.json
-var version = "1.13.2";
+var version = "1.13.3";
 
 // src/server/plugin.ts
 init_workspace_execution();

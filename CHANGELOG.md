@@ -17,6 +17,21 @@
 
 - Scratch harness (real host + real service): timeout→`terminated/timeout`+notify; until→`terminated/until` with 1 notify and `until-matched` state; pattern read returns ANSI-original lines case-insensitively, rejects `(a+)+`; env value reaches process while state keeps only the name; terminate+remove in one call. 555 tests pass.
 
+## 1.13.3 (2026-10-13) — Tracked Worker Notifications
+
+### Fixed
+
+- Background notifications addressed to goal workers now use the existing tracked send path instead of injecting uncorrelated messages that change assistant ancestry and cause false unconfirmed/stale diagnostics.
+- Busy workers and workers with live execution reservations queue notifications for a later tracked turn. Idle workers receive a registered prompt; paused workers remain paused and retired workers are not revived.
+- Ordinary parent-session notifications retain their existing delivery and agent identity.
+
+### Verification
+
+- 801 tests pass across 71 files, including an end-to-end command watch/exit regression that drains queued notifications once after the original turn completes.
+- All seven notification regressions pass ten repetitions; typecheck and server/TUI builds pass.
+
+Provider retry/transport stalls and expired-lease dashboard labels are not changed by this release.
+
 ## 1.13.2 (2026-10-12) — Diagnostic Isolation and Lock Recovery
 
 ### Fixed
