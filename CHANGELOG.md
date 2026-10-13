@@ -17,6 +17,25 @@
 
 - Scratch harness (real host + real service): timeout→`terminated/timeout`+notify; until→`terminated/until` with 1 notify and `until-matched` state; pattern read returns ANSI-original lines case-insensitively, rejects `(a+)+`; env value reaches process while state keeps only the name; terminate+remove in one call. 555 tests pass.
 
+## 1.14.0 (2026-10-13) — V2-First Goal Supervision
+
+### Added
+
+- Native v2 execution supervision through the host coordinator, durable terminal outcomes, and delivered inbox receipts. Loopd retains goal verification, budgets, scheduling, and workspace coordination.
+- Active-turn steering and notifications use OpenCode's native queued delivery; loopd stores correlation receipts rather than duplicate message contents.
+- Missed native completion events reconcile after restart. Native interruptions pause goals, while terminal failures enter bounded goal retry policy.
+
+### Changed
+
+- Supported v2 hosts bypass transcript idle-confirmation heuristics, expired-lease recovery, and duplicate runtime tool-call tracking. V1 and older v2 surfaces retain a compatibility path.
+- Native dashboard activity follows host execution status independently of the scheduling lease.
+- Documented the audited v2 contracts and compatibility boundaries in `docs/v2-supervisor.md`.
+
+### Verification
+
+- 819 tests pass across 73 files; 18 native supervision and adapter regressions pass ten repetitions.
+- Typecheck, server/TUI builds, bundle imports, and diff checks pass. Live-host migration has not yet been exercised.
+
 ## 1.13.3 (2026-10-13) — Tracked Worker Notifications
 
 ### Fixed
