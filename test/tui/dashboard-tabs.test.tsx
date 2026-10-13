@@ -11,6 +11,7 @@ import { createCommandSession } from "../../src/domain/command-session"
 import { ScrollBoxRenderable, TextRenderable } from "@opentui/core"
 import { createRuntimeState, type GoalRuntimeState } from "../../src/domain/runtime"
 import { createGoal } from "../../src/domain/goal"
+import plugin from "../../src/tui/plugin"
 
 const THEME = {
   primary: "#fff",
@@ -102,6 +103,47 @@ async function seedDirWithFinishedCommand(): Promise<string> {
 }
 
 describe("LoopDashboard shared Goals/Commands (mounted)", () => {
+  for (const fixture of [
+    { index: 0, name: "goals", expected: "goal-one", resumed: false },
+    { index: 1, name: "commands", expected: "owned-cmd", resumed: false },
+    { index: 0, name: "resumed session goals", expected: "goal-one", resumed: true },
+    { index: 1, name: "resumed session commands", expected: "owned-cmd", resumed: true },
+  ]) {
+    it(`v1 opens the current project's ${fixture.name} instead of its startup directory`, async () => {
+      const startup = await fs.mkdtemp(path.join(os.tmpdir(), "loopd-dashboard-startup-"))
+      const current = await seedDir()
+      let dialog: (() => any) | undefined
+      let layer: any
+      const api = {
+        ...fakeApi([], { count: 0 }),
+        state: { path: { directory: startup }, session: { get: (_id: string): { directory: string } | undefined => undefined } },
+        keymap: { registerLayer: (value: any) => { layer = value } },
+        lifecycle: { onDispose: () => {} },
+      }
+      api.ui.dialog.replace = ((render: () => any) => { dialog = render }) as any
+      try {
+        await plugin.tui(api as any)
+        if (fixture.resumed) api.state.session.get = () => ({ directory: current })
+        else api.state.path.directory = current
+        layer.commands[fixture.index].run()
+        const setup = await testRender(() => dialog!(), { width: 120, height: 40 })
+        setups.push(setup)
+        const deadline = Date.now() + 2000
+        let frame = ""
+        do {
+          await setup.renderOnce()
+          frame = setup.captureCharFrame()
+          if (frame.includes(fixture.expected)) break
+          await Bun.sleep(10)
+        } while (Date.now() < deadline)
+        expect(frame).toContain(fixture.expected)
+      } finally {
+        while (setups.length) setups.pop()!.renderer.destroy()
+        await fs.rm(startup, { recursive: true, force: true })
+        await fs.rm(current, { recursive: true, force: true })
+      }
+    })
+  }
   for (const fixture of [
     { label: "REQUESTED", patch: {}, active: false },
     { label: "SENDING", patch: { activePromptDispatchAt: new Date().toISOString() }, active: false },

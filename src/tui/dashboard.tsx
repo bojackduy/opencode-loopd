@@ -894,6 +894,7 @@ export function LoopDashboard(props: Props) {
           <Show when={activeGoals().length > 0} fallback={
             <box flexDirection="column" gap={1} padding={1}>
               <text><span style={{ fg: theme().textMuted }}>No active goals.</span><span style={{ fg: theme().accent }}> /goal</span><span style={{ fg: theme().textMuted }}> in parent chat to create one.</span></text>
+              <text style={{ fg: theme().textMuted }}>Store: {props.directory}/.opencode/loopd</text>
               <text><span style={{ fg: theme().textMuted }}>Tip: </span><span style={{ fg: theme().warning }}>:send</span><span style={{ fg: theme().textMuted }}> to steer the worker · </span><span style={{ fg: theme().warning }}>o</span><span style={{ fg: theme().textMuted }}> to open child · </span><span style={{ fg: theme().warning }}>:force</span><span style={{ fg: theme().textMuted }}> to complete manually.</span></text>
             </box>
           }>

@@ -35,7 +35,10 @@ export function navigateToTerminalV1(
 }
 
 const tui: TuiPlugin = async (api) => {
-  const directory = api.state.path.directory
+  // A resumed session can belong to another project even before the global
+  // path projection updates. Resolve its store at navigation time.
+  const directoryFor = (sessionID = currentRouteSessionID(api)) =>
+    (sessionID ? api.state.session?.get(sessionID)?.directory : undefined) || api.state.path.directory
 
   // Full-screen terminal route (custom OpenCode page — not a dialog, panel,
   // or chat session). Hosts that truly lack route support get the CommandPanel
@@ -46,7 +49,7 @@ const tui: TuiPlugin = async (api) => {
     unregisterTerminalRoute = api.route.register([
       {
         name: TERMINAL_ROUTE_NAME,
-        render: ({ params }) => <TerminalView api={api} directory={directory} data={params} />,
+        render: ({ params }) => <TerminalView api={api} directory={directoryFor((params as any)?.ownerSessionID)} data={params} />,
       },
     ])
     terminalRouteAvailable = true
@@ -55,6 +58,7 @@ const tui: TuiPlugin = async (api) => {
   }
 
   const openTerminal = (commandID: string, ownerSessionID: string, returnSessionID: string) => {
+    const directory = directoryFor(ownerSessionID)
     if (terminalRouteAvailable && navigateToTerminalV1(api, commandID, ownerSessionID, returnSessionID)) return
     // Compatibility fallback: clipped monitor dialog (route-less hosts only).
     const previousFocus = api.renderer.currentFocusedRenderable
@@ -71,6 +75,7 @@ const tui: TuiPlugin = async (api) => {
   }
 
   const open = () => {
+    const directory = directoryFor()
     const previousFocus = api.renderer.currentFocusedRenderable
     api.ui.dialog.replace(() => <LoopDashboard api={api} directory={directory} />)
     api.ui.dialog.setSize("xlarge")
@@ -78,6 +83,7 @@ const tui: TuiPlugin = async (api) => {
   }
 
   const openCommands = () => {
+    const directory = directoryFor()
     // Same shared dashboard as /loop, focused on Commands — never the
     // separate clipped terminal monitor.
     const previousFocus = api.renderer.currentFocusedRenderable
