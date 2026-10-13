@@ -178,7 +178,7 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
     "tool.execute.before": async (input, _output) => {
       // Enforcement errors must propagate; tracking's best-effort catch is deliberately separate.
       await beforeWorkspaceTool(directory, input, _output.args)
-      if (isWorkspaceToolExempt(input.tool)) return
+      if (host.readExecution || isWorkspaceToolExempt(input.tool)) return
       // Track tool call start for worker sessions only
       const activeWorkers = goalService.getActiveWorkers()
       let matchedGoalID: string | undefined
@@ -210,7 +210,7 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
       const activeWorkers = goalService.getActiveWorkers()
       let matchedGoalID: string | undefined
       for (const [goalID, worker] of activeWorkers) {
-        if (!isWorkspaceToolExempt(input.tool) && worker.workerSessionID === input.sessionID) {
+        if (!host.readExecution && !isWorkspaceToolExempt(input.tool) && worker.workerSessionID === input.sessionID) {
           matchedGoalID = goalID
           break
         }
@@ -292,7 +292,7 @@ const v2 = {
     const directory = context.location.directory
     // Same staleness marker as the v1 path above: proves the running v2 host
     // actually loaded this build (rebuild alone never reloads a live process).
-    void logServerEvent(directory, "plugin.loaded", { pluginID: PLUGIN_ID, host: "v2", version: PLUGIN_VERSION })
+    void logServerEvent(directory, "plugin.loaded", { pluginID: PLUGIN_ID, host: "v2", version: PLUGIN_VERSION, execution: typeof context.session.wait === "function" ? "native" : "legacy-compatibility" })
     const statuses = new Map<string, SessionStatusType>()
     // Native-child bridge (v2 only): registers loopd.native RPC + emits
     // workerCreateRequested for attached TUIs. Undefined when the host has
@@ -427,6 +427,7 @@ async function consumeV2Events(
       if (event.type === "session.status") statuses.set(sessionID, data.status?.type ?? "unknown")
       else if (event.type === "session.idle") statuses.set(sessionID, "idle")
       else if (event.type === "session.execution.started") statuses.set(sessionID, "busy")
+      else if (event.type === "session.execution.succeeded" || event.type === "session.execution.failed" || event.type === "session.execution.interrupted") statuses.set(sessionID, "idle")
     }
     await hooks.event?.({ event: normalizeV2Event(event) as any })
   }
@@ -437,7 +438,7 @@ async function consumeV2Events(
 export function normalizeV2Event(event: any) {
   const properties = event?.data && typeof event.data === "object" ? event.data : {}
   if (event?.type === "session.compaction.ended") return { type: "session.compacted", properties }
-  if (event?.type === "session.execution.failed") return { type: "session.error", properties }
+  if (event?.type === "session.execution.failed") return { type: "session.execution.failed", properties }
   if (event?.type === "session.execution.succeeded") return { type: "session.execution.succeeded", properties }
   if (event?.type === "session.inbox.delivered") {
     // Delivery confirmation carries the prompt's message ID (inboxID).

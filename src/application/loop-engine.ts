@@ -31,6 +31,9 @@ const HANDLED_EVENT_TYPES = new Set([
   "session.error",
   "session.compacted",
   "session.execution.succeeded",
+  "session.execution.started",
+  "session.execution.failed",
+  "session.execution.interrupted",
   "message.updated",
   "message.part.updated",
 ])
@@ -186,6 +189,15 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     // for an explicit owner transition.
     if (goal.status !== "active") return false
 
+    if (host.readExecution) {
+      // Native lifecycle signals trigger projection reconciliation, never
+      // transcript/lease inference. Events have no execution ID in v2.
+      if (type.startsWith("session.execution.") || type === "session.idle" || type === "session.status") {
+        return await reconcileNativeExecution(goal, event.properties?.error)
+      }
+      if (type === "message.updated" || type === "message.part.updated") return false
+    }
+
     // Interactive (manual) goals: the engine never starts turns. Idle events
     // from a worker waiting for input must not force a continuation — every
     // turn comes from :send/nudge/resume/retry. Other events are bookkeeping.
@@ -197,6 +209,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       case "session.status":
         return await handleSessionStatus(state, goal, event)
       case "session.error":
+      case "session.execution.failed":
         return await handleSessionError(state, goal, event)
       case "session.compacted":
         return await handleSessionCompacted(state, goal)
@@ -432,7 +445,11 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       return true
     }
 
-    // Re-read fresh state for limit enforcement
+    return await afterCompletedTurn(goalID, goal)
+  }
+
+  async function afterCompletedTurn(goalID: GoalID, goal: any): Promise<boolean> {
+    // Goal policy is independent of the host's execution lifecycle.
     const freshState = await readState(directory)
     const freshGoal = freshState.goals.find((g) => g.id === goalID)
     if (!freshGoal || freshGoal.status !== "active") return false
@@ -525,6 +542,60 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     return true
   }
 
+  async function reconcileNativeExecution(goal: any, nativeError?: unknown): Promise<boolean> {
+    const before = await readState(directory)
+    const runtime = before.runtimes.find((rt) => rt.goalID === goal.id)
+    if (!runtime || !goal.workerSessionID || !host.readExecution) return false
+    const observed = await host.readExecution(goal.workerSessionID)
+    let completedRunID: string | undefined
+    const after = await mutateState(directory, `native.execution:${goal.id}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goal.id)
+      const rt = s.runtimes.find((item) => item.goalID === goal.id)
+      if (!g || g.status !== "active" || g.scopeClosing || g.workerSessionID !== goal.workerSessionID || !rt || rt.runGeneration !== runtime.runGeneration || rt.activePromptMessageID !== runtime.activePromptMessageID) return s
+      rt.executionSource = "native"
+      rt.nativeExecutionStatus = observed?.status ?? "unknown"
+      if (observed?.status === "busy" || observed?.status === "retry") {
+        rt.lastWorkerStatus = observed.status
+        return s
+      }
+      const started = Date.parse(rt.turnStartedAt ?? "")
+      const ended = Date.parse(observed?.idleAt ?? "")
+      const inboxIDs = rt.nativeInboxMessageIDs ?? []
+      const ownsLatest = observed?.latestUserMessageID === rt.activePromptMessageID || inboxIDs.includes(observed?.latestUserMessageID ?? "")
+      if (rt.phase !== "running" || !rt.activeRunID || !rt.activePromptMessageID ||
+          observed?.status !== "idle" || !observed.outcome || !Number.isFinite(started) || !Number.isFinite(ended) || ended < started ||
+          !ownsLatest || (observed.outcome !== "interrupted" && inboxIDs.some((id) => !observed.deliveredMessageIDs?.includes(id))) ||
+          s.workspaceOperation || s.workspaceCalls?.some((call) => call.goalID === goal.id)) return s
+      completedRunID = rt.activeRunID
+      if (observed.outcome === "failed") return s
+      Object.assign(rt, releaseLease(rt))
+      rt.activeRunID = undefined
+      rt.lastWorkerStatus = "idle"
+      rt.nativeExecutionStatus = "idle"
+      rt.nativeInboxMessageIDs = undefined
+      if (observed.outcome === "interrupted") {
+        g.status = "paused"
+        g.updatedAt = new Date().toISOString()
+      }
+      return s
+    })
+    if (!completedRunID) return false
+    // An interrupted/failed execution is not successful work. Reuse the
+    // existing error policy, but only after the host proves the terminal turn.
+    if (observed?.outcome === "interrupted") {
+      // Native interruption is an explicit stop, not a failed attempt to
+      // immediately restart. Shutdown outcomes also wait for owner resume.
+      await appendEvent(directory, { version: 1, eventID: randomUUID(), goalID: goal.id, type: "goal.status_changed", from: "active", to: "paused", timestamp: new Date().toISOString(), revision: after.revision } satisfies LoopEvent)
+      return true
+    }
+    if (observed?.outcome === "failed") {
+      return await handleSessionError(after, goal, { properties: { expectedRunID: completedRunID, runID: completedRunID, error: nativeError ?? { message: "OpenCode execution failed (reconciled native outcome)" } } })
+    }
+    await appendEvent(directory, { version: 1, eventID: randomUUID(), goalID: goal.id, type: "run.completed", runID: completedRunID, timestamp: new Date().toISOString(), revision: after.revision } satisfies LoopEvent)
+    if (goal.interactive) return true
+    return await afterCompletedTurn(goal.id, goal)
+  }
+
   async function inspectPromptTurn(
     workerSessionID: string | undefined,
     promptMessageID: string,
@@ -597,10 +668,13 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     const message = describeError(error) || "unknown error"
 
     let shouldNotify = false
+    let errorRecorded = false
     const newState = await mutateState(directory, `error:${goal.id}`, async (s) => {
       const g = s.goals.find((item) => item.id === goal.id)
       const rt = s.runtimes.find((r) => r.goalID === goal.id)
       if (!g || g.status !== "active" || g.workerSessionID !== goal.workerSessionID || !rt || rt.runGeneration !== runtime.runGeneration) return s
+      if (event.properties?.expectedRunID && (rt.activeRunID !== event.properties.expectedRunID || rt.phase !== "running")) return s
+      errorRecorded = true
 
       rt.consecutiveFailures += 1
       rt.lastError = message
@@ -611,6 +685,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       if (rt.phase === "running") {
         Object.assign(rt, releaseLease(rt))
       }
+      if (event.properties?.expectedRunID) { rt.activeRunID = undefined; rt.nativeInboxMessageIDs = undefined }
 
       if (rt.consecutiveFailures >= (goal.config?.maxFailures || 5)) {
         if (g) {
@@ -635,12 +710,13 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       return s
     })
 
+    if (!errorRecorded) return false
     await appendEvent(directory, {
       version: 1,
       eventID: randomUUID(),
       goalID: goal.id,
       type: "run.failed",
-      runID: runtime.activeRunID || "unknown",
+      runID: event.properties?.runID || runtime.activeRunID || "unknown",
       error: message,
       consecutiveFailures: runtime.consecutiveFailures + 1,
       timestamp: new Date().toISOString(),
@@ -1010,8 +1086,15 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
         }
       }
 
-      // Some OpenCode transports miss the idle event. Poll active workers so a
-      // completed turn is continued on the maintenance cadence, not lease expiry.
+      // Native maintenance reconciles missed durable events, not idle guesses.
+      if (host.readExecution) {
+        if (runtime.phase === "running") await reconcileNativeExecution(goal)
+        else if (!manual && runtime.phase === "idle" && goal.workerSessionID && (await host.readExecution(goal.workerSessionID))?.status === "idle") await continueGoal(goal.id)
+        continue
+      }
+
+      // Legacy transports reconstruct turn completion from transcript evidence
+      // on the maintenance cadence, not lease expiry.
       // Also poll idle-phase goals that missed the idle event entirely.
       // Manual goals skip the lease/state churn below (unknown-status and
       // stuck notifications further down still run — they notify, never turn).

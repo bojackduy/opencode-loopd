@@ -43,6 +43,13 @@ export function phaseLabel(phase: string): StatusLabel {
 /** Stored running phase means a lease, not proof of worker execution. */
 export function workerActivityLabel(runtime: GoalRuntimeState, now = Date.now()): StatusLabel & { acting: boolean } {
   if (runtime.phase !== "running") return { ...phaseLabel(runtime.phase), acting: false }
+  if (runtime.executionSource === "native") {
+    const status = runtime.nativeExecutionStatus
+    if (status === "busy") return { short: "Running", hint: "OpenCode execution is active", acting: true }
+    if (status === "retry") return { short: "Retrying", hint: "OpenCode is retrying execution", acting: false }
+    if (status === "idle") return { short: "Finishing", hint: "OpenCode is idle; reconciling goal outcome", acting: false }
+    return { short: "Unconfirmed", hint: "native execution state unavailable", acting: false }
+  }
   const expires = runtime.leaseExpiresAt ? Date.parse(runtime.leaseExpiresAt) : NaN
   if (Number.isFinite(expires) && expires <= now) return { short: "Stale", hint: "lease expired; activity unconfirmed (not proof of worker exit)", acting: false }
   if (!Number.isFinite(expires) || (runtime.unknownStatusCount ?? 0) > 0) return { short: "Unconfirmed", hint: "worker status unavailable; do not assume the prompt failed", acting: false }

@@ -50,6 +50,11 @@ export interface GoalRuntimeState {
 
   /** Last observed worker status from SDK. */
   lastWorkerStatus?: "idle" | "busy" | "retry"
+  /** Native host observation, separate from the scheduling lease. */
+  executionSource?: "native"
+  nativeExecutionStatus?: "idle" | "busy" | "retry" | "unknown"
+  /** Receipt IDs only; v2 owns the queued message contents and delivery. */
+  nativeInboxMessageIDs?: string[]
 
   /** Consecutive maintenance polls where worker status was unavailable. */
   unknownStatusCount?: number
@@ -192,6 +197,7 @@ export function acquireLease(rt: GoalRuntimeState, timeoutMs: number): GoalRunti
     activePromptDispatchAt: undefined,
     activePromptAcceptedAt: undefined,
     activeInboxLines: undefined,
+    nativeInboxMessageIDs: undefined,
     activePromptObservedAt: undefined,
     activeAssistantMessageID: undefined,
     activeAssistantCompletedAt: undefined,

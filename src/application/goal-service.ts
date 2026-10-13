@@ -1007,6 +1007,7 @@ export function createGoalService(host: LoopHost): GoalService {
       const rt = state.runtimes.find((item) => item.goalID === id)
       if (rt) {
         Object.assign(rt, acquireLease(rt, g.config.timeoutMs || 300_000))
+        if (host.readExecution) { rt.executionSource = "native"; rt.nativeExecutionStatus = "unknown" }
         rt.activeRunID = randomUUID() as RunID
         // "msg_" spelling: valid on v1 ("msg" prefix) and required on v2
         // (SessionMessage.ID schema). Persisted verbatim for correlation.
@@ -1200,6 +1201,7 @@ export function createGoalService(host: LoopHost): GoalService {
       if (rt.phase === "running" && leaseIsValid(rt)) return s
       const timeoutMs = g.config.timeoutMs || 300_000
       Object.assign(rt, acquireLease(rt, timeoutMs))
+      if (host.readExecution) { rt.executionSource = "native"; rt.nativeExecutionStatus = "unknown" }
       rt.activeRunID = randomUUID() as RunID
       // "msg_" spelling: valid on v1 ("msg" prefix) and required on v2
       // (SessionMessage.ID schema). Persisted verbatim for correlation.
@@ -1526,6 +1528,7 @@ export function createGoalService(host: LoopHost): GoalService {
 
     const goal = state.goals.find((g) => g.id === goalID)
     if (!goal) return rejected(goalID, "not_found", "Goal not found (it may have been cleared). List your goals instead of retrying this ID.")
+
     if (!resumed) return rejected(goalID, "invalid_state", `Cannot resume a ${goal.status} goal; no turn was sent.`)
 
     // Get or recreate worker (external I/O — not under lock)
@@ -1794,7 +1797,7 @@ export function createGoalService(host: LoopHost): GoalService {
 
       // Active goal with expired lease and idle worker: release and resume
       const preRt = state.runtimes.find((r) => r.goalID === goal.id)
-      if (preRt?.phase === "running" && !leaseIsValid(preRt)) {
+      if (!host.readExecution && preRt?.phase === "running" && !leaseIsValid(preRt)) {
         const session = sessions.get(goal.id)
         if (session && await workers.isIdle(session.workerSessionID)) {
           await mutateState(directory, `reconcile.release-lease:${goal.id}`, async (s) => {
@@ -1871,6 +1874,36 @@ export function createGoalService(host: LoopHost): GoalService {
     const preState = await readState(directory)
     const goal = preState.goals.find((g) => g.id === goalID)
     if (!goal) return rejected(goalID, "not_found", "Goal not found (it may have been cleared). List your goals instead of retrying this ID.")
+
+    const active = preState.runtimes.find((rt) => rt.goalID === goalID)
+    if (host.readExecution && host.enqueueWorkerMessage && goal.status === "active" && !goal.scopeClosing && goal.workerSessionID && active?.phase === "running" && active.activePromptAcceptedAt) {
+      // Persist receipt intent; v2 owns queue contents and actual delivery.
+      const messageID = newPromptMessageID()
+      let reserved = false
+      await mutateState(directory, `native.inbox:${goalID}`, async (s) => {
+        const g = s.goals.find((item) => item.id === goalID)
+        const rt = s.runtimes.find((item) => item.goalID === goalID)
+        if (g?.status !== "active" || g.scopeClosing || g.workerSessionID !== goal.workerSessionID || !rt || rt.phase !== "running" || rt.runGeneration !== active.runGeneration || rt.activeRunID !== active.activeRunID) return s
+        rt.nativeInboxMessageIDs = [...(rt.nativeInboxMessageIDs ?? []), messageID]
+        reserved = true
+        return s
+      })
+      if (reserved) {
+        try {
+          await host.enqueueWorkerMessage(goal.workerSessionID, messageID, trimmed)
+          const current = await readState(directory)
+          if (!current.goals.some((g) => g.id === goalID && g.workerSessionID === goal.workerSessionID)) return rejected(goalID, "not_found", "Goal cleared during native enqueue; late acceptance grants no authority.")
+          const currentGoal = current.goals.find((g) => g.id === goalID)
+          const currentRun = current.runtimes.find((rt) => rt.goalID === goalID)
+          if (currentGoal?.status !== "active" || currentRun?.runGeneration !== active.runGeneration || currentRun.activeRunID !== active.activeRunID) return rejected(goalID, "blocked", "Goal or turn changed during native enqueue; late acceptance grants no authority.")
+          return { ok: true, outcome: "queued", goalID, promptMessageID: messageID, message: `Queued in the OpenCode inbox for "${goal.name}".` }
+        } catch {
+          // A timeout is ambiguous acceptance, never cancellation or permission
+          // to retry blindly. Keep the receipt until host delivery is observed.
+          return rejected(goalID, "blocked", `Native inbox acceptance is unconfirmed for ${messageID}; inspect the session before resending.`)
+        }
+      }
+    }
 
     if (!await appendGoalInbox(directory, goalID, "user", trimmed)) return rejected(goalID, "not_found", "Goal cleared before words could be queued. List current goals instead of retrying this ID.")
     if (goal.status !== "active") {

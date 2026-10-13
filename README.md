@@ -1,6 +1,6 @@
 # opencode-loopd
 
-**Codex-inspired background goal engine for OpenCode — autonomous subagents, engine-driven loop, and modal TUI dashboard. Like Claude Code's loop, for OpenCode.**
+**Durable goal supervision for OpenCode — verified objectives, bounded retries, scheduling, and a goal dashboard. OpenCode runs the sessions; loopd supervises the goals.**
 
 > Run long-running tasks as **autonomous child sessions** (subagents) while the main chat stays interactive. Create a goal with `/goal`, watch it loop in the background, and monitor everything from a keyboard-driven TUI — without blocking the parent conversation.
 
@@ -16,7 +16,7 @@
 ## Why opencode-loopd
 
 - **Background agents, not blocked chats** — an OpenCode plugin that spawns a dedicated **worker (child) session** per goal. The parent stays free to keep chatting.
-- **Codex-style engine-driven loop** — idle detection → continuation steering with accumulated context (progress history, transcript tail, inbox). No prompt spam in the parent.
+- **Goal-driven continuation** — native v2 execution outcomes advance goal policy with accumulated context. Transcript-based idle recovery remains a legacy compatibility path.
 - **Parent ↔ child visibility** — `list/inspect/read_transcript/send_input` give the parent full observability. Bidirectional inbox lets you steer mid-run.
 - **Safe by default** — per-goal artifact isolation (`.opencode/loopd/goals/<id>/`), `maxTurns`/`maxFailures`/`maxNoProgress`, force-finish → semantic `complete_goal` summary → parent notification via wake-up injection.
 - **Scheduled intervals** — `scheduleEveryMs`/`scheduleMaxRuns` auto-requeues the same goal every N ms (e.g., `10s` monitor, `1h` report) without manual `/goal` spam — `5s` poll, `skip-if-running`, `workspaceWrite` serialization, inbox `Scheduled tick N/M`.
@@ -28,6 +28,11 @@
 Keywords: `opencode` `opencode-plugin` `background-agent` `autonomous` `subagent` `loop` `goal` `tui` `codex` `claude-code` `worker`
 
 ## What it is
+
+On supported v2 hosts, OpenCode owns execution, queued message delivery and
+session lifecycle. Loopd owns objectives, acceptance checks, budgets,
+scheduling and cross-goal coordination. See [v2-first supervision](docs/v2-supervisor.md)
+for the audited contracts, restart reconciliation and legacy boundaries.
 
 Exact-file editing contracts and their execution boundaries are documented in
 [File-scope ownership](docs/file-scope-ownership.md). Use `write_scope: []` to

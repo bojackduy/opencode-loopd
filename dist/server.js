@@ -50,6 +50,7 @@ function acquireLease(rt, timeoutMs) {
     activePromptDispatchAt: undefined,
     activePromptAcceptedAt: undefined,
     activeInboxLines: undefined,
+    nativeInboxMessageIDs: undefined,
     activePromptObservedAt: undefined,
     activeAssistantMessageID: undefined,
     activeAssistantCompletedAt: undefined,
@@ -2482,6 +2483,9 @@ var HANDLED_EVENT_TYPES = new Set([
   "session.error",
   "session.compacted",
   "session.execution.succeeded",
+  "session.execution.started",
+  "session.execution.failed",
+  "session.execution.interrupted",
   "message.updated",
   "message.part.updated"
 ]);
@@ -2592,6 +2596,13 @@ function createLoopEngine(options) {
       knownWorkerSessions.add(goal.workerSessionID);
     if (goal.status !== "active")
       return false;
+    if (host.readExecution) {
+      if (type.startsWith("session.execution.") || type === "session.idle" || type === "session.status") {
+        return await reconcileNativeExecution(goal, event.properties?.error);
+      }
+      if (type === "message.updated" || type === "message.part.updated")
+        return false;
+    }
     if (goal.interactive === true && type === "session.idle")
       return false;
     switch (type) {
@@ -2600,6 +2611,7 @@ function createLoopEngine(options) {
       case "session.status":
         return await handleSessionStatus(state, goal, event);
       case "session.error":
+      case "session.execution.failed":
         return await handleSessionError(state, goal, event);
       case "session.compacted":
         return await handleSessionCompacted(state, goal);
@@ -2792,6 +2804,9 @@ function createLoopEngine(options) {
     } else {
       return true;
     }
+    return await afterCompletedTurn(goalID, goal);
+  }
+  async function afterCompletedTurn(goalID, goal) {
     const freshState = await readState(directory);
     const freshGoal = freshState.goals.find((g) => g.id === goalID);
     if (!freshGoal || freshGoal.status !== "active")
@@ -2882,6 +2897,58 @@ function createLoopEngine(options) {
     await continueGoal(goalID);
     return true;
   }
+  async function reconcileNativeExecution(goal, nativeError) {
+    const before = await readState(directory);
+    const runtime = before.runtimes.find((rt) => rt.goalID === goal.id);
+    if (!runtime || !goal.workerSessionID || !host.readExecution)
+      return false;
+    const observed = await host.readExecution(goal.workerSessionID);
+    let completedRunID;
+    const after = await mutateState(directory, `native.execution:${goal.id}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goal.id);
+      const rt = s.runtimes.find((item) => item.goalID === goal.id);
+      if (!g || g.status !== "active" || g.scopeClosing || g.workerSessionID !== goal.workerSessionID || !rt || rt.runGeneration !== runtime.runGeneration || rt.activePromptMessageID !== runtime.activePromptMessageID)
+        return s;
+      rt.executionSource = "native";
+      rt.nativeExecutionStatus = observed?.status ?? "unknown";
+      if (observed?.status === "busy" || observed?.status === "retry") {
+        rt.lastWorkerStatus = observed.status;
+        return s;
+      }
+      const started = Date.parse(rt.turnStartedAt ?? "");
+      const ended = Date.parse(observed?.idleAt ?? "");
+      const inboxIDs = rt.nativeInboxMessageIDs ?? [];
+      const ownsLatest = observed?.latestUserMessageID === rt.activePromptMessageID || inboxIDs.includes(observed?.latestUserMessageID ?? "");
+      if (rt.phase !== "running" || !rt.activeRunID || !rt.activePromptMessageID || observed?.status !== "idle" || !observed.outcome || !Number.isFinite(started) || !Number.isFinite(ended) || ended < started || !ownsLatest || observed.outcome !== "interrupted" && inboxIDs.some((id) => !observed.deliveredMessageIDs?.includes(id)) || s.workspaceOperation || s.workspaceCalls?.some((call) => call.goalID === goal.id))
+        return s;
+      completedRunID = rt.activeRunID;
+      if (observed.outcome === "failed")
+        return s;
+      Object.assign(rt, releaseLease(rt));
+      rt.activeRunID = undefined;
+      rt.lastWorkerStatus = "idle";
+      rt.nativeExecutionStatus = "idle";
+      rt.nativeInboxMessageIDs = undefined;
+      if (observed.outcome === "interrupted") {
+        g.status = "paused";
+        g.updatedAt = new Date().toISOString();
+      }
+      return s;
+    });
+    if (!completedRunID)
+      return false;
+    if (observed?.outcome === "interrupted") {
+      await appendEvent(directory, { version: 1, eventID: randomUUID5(), goalID: goal.id, type: "goal.status_changed", from: "active", to: "paused", timestamp: new Date().toISOString(), revision: after.revision });
+      return true;
+    }
+    if (observed?.outcome === "failed") {
+      return await handleSessionError(after, goal, { properties: { expectedRunID: completedRunID, runID: completedRunID, error: nativeError ?? { message: "OpenCode execution failed (reconciled native outcome)" } } });
+    }
+    await appendEvent(directory, { version: 1, eventID: randomUUID5(), goalID: goal.id, type: "run.completed", runID: completedRunID, timestamp: new Date().toISOString(), revision: after.revision });
+    if (goal.interactive)
+      return true;
+    return await afterCompletedTurn(goal.id, goal);
+  }
   async function inspectPromptTurn(workerSessionID, promptMessageID) {
     const noMatch = { latestUserPrompt: false, assistantCompleted: false, assistantInProgress: false };
     if (!workerSessionID)
@@ -2938,17 +3005,25 @@ function createLoopEngine(options) {
     const error = event.properties?.error;
     const message = describeError(error) || "unknown error";
     let shouldNotify = false;
+    let errorRecorded = false;
     const newState = await mutateState(directory, `error:${goal.id}`, async (s) => {
       const g = s.goals.find((item) => item.id === goal.id);
       const rt = s.runtimes.find((r) => r.goalID === goal.id);
       if (!g || g.status !== "active" || g.workerSessionID !== goal.workerSessionID || !rt || rt.runGeneration !== runtime.runGeneration)
         return s;
+      if (event.properties?.expectedRunID && (rt.activeRunID !== event.properties.expectedRunID || rt.phase !== "running"))
+        return s;
+      errorRecorded = true;
       rt.consecutiveFailures += 1;
       rt.lastError = message;
       rt.updatedAt = new Date().toISOString();
       rt.idleCandidateAt = undefined;
       if (rt.phase === "running") {
         Object.assign(rt, releaseLease(rt));
+      }
+      if (event.properties?.expectedRunID) {
+        rt.activeRunID = undefined;
+        rt.nativeInboxMessageIDs = undefined;
       }
       if (rt.consecutiveFailures >= (goal.config?.maxFailures || 5)) {
         if (g) {
@@ -2971,12 +3046,14 @@ function createLoopEngine(options) {
       }
       return s;
     });
+    if (!errorRecorded)
+      return false;
     await appendEvent(directory, {
       version: 1,
       eventID: randomUUID5(),
       goalID: goal.id,
       type: "run.failed",
-      runID: runtime.activeRunID || "unknown",
+      runID: event.properties?.runID || runtime.activeRunID || "unknown",
       error: message,
       consecutiveFailures: runtime.consecutiveFailures + 1,
       timestamp: new Date().toISOString(),
@@ -3247,6 +3324,13 @@ function createLoopEngine(options) {
           });
           await continueGoal(goal.id);
         }
+      }
+      if (host.readExecution) {
+        if (runtime.phase === "running")
+          await reconcileNativeExecution(goal);
+        else if (!manual && runtime.phase === "idle" && goal.workerSessionID && (await host.readExecution(goal.workerSessionID))?.status === "idle")
+          await continueGoal(goal.id);
+        continue;
       }
       if (!manual && (runtime.phase === "running" || runtime.phase === "idle") && goal.workerSessionID) {
         if (runtime.phase === "idle" && runtime.activeRunID) {
@@ -3969,8 +4053,31 @@ function toWorkerCreation(result) {
 }
 function createV2Host(context, statuses, options = {}) {
   const directory = context.location.directory;
+  async function readExecution(sessionID) {
+    try {
+      await withTimeout(context.session.wait({ sessionID }, { signal: AbortSignal.timeout(500) }), 750, "OpenCode v2 idle observation");
+      const messages = await withTimeout(context.session.context({ sessionID }), 1e4, "OpenCode v2 delivered inbox projection");
+      await withTimeout(context.session.wait({ sessionID }, { signal: AbortSignal.timeout(500) }), 750, "OpenCode v2 idle recheck");
+      const session = await withTimeout(context.session.get({ sessionID }), 1e4, "OpenCode v2 execution projection");
+      const idle = session.time?.idle;
+      return {
+        status: "idle",
+        outcome: session.outcome,
+        idleAt: idle ? new Date(idle).toISOString() : undefined,
+        latestUserMessageID: messages.filter((message) => message.type === "user").at(-1)?.id,
+        deliveredMessageIDs: messages.filter((message) => message.type === "user").map((message) => message.id)
+      };
+    } catch {
+      return { status: statuses.get(sessionID) === "retry" ? "retry" : statuses.get(sessionID) === "busy" ? "busy" : "unknown" };
+    }
+  }
   return {
     scopedExecution: true,
+    readExecution: typeof context.session.wait === "function" ? readExecution : undefined,
+    enqueueWorkerMessage: typeof context.session.wait === "function" ? async (sessionID, messageID, text) => {
+      await withTimeout(context.session.prompt({ sessionID, id: messageID, text, delivery: "queue" }), 30000, "OpenCode v2 queue notification");
+      statuses.set(sessionID, "busy");
+    } : undefined,
     async listAgents() {
       const switching = typeof context.session.switchAgent === "function" ? "session" : "unsupported";
       if (typeof context.agent?.list !== "function")
@@ -4116,7 +4223,7 @@ function createV2Host(context, statuses, options = {}) {
       }
     },
     async sessionStatus(sessionID) {
-      return statuses.get(sessionID) ?? "unknown";
+      return typeof context.session.wait === "function" ? (await readExecution(sessionID))?.status ?? "unknown" : statuses.get(sessionID) ?? "unknown";
     },
     async abortSession(sessionID) {
       try {
@@ -5244,6 +5351,10 @@ function createGoalService(host) {
       const rt = state.runtimes.find((item) => item.goalID === id);
       if (rt) {
         Object.assign(rt, acquireLease(rt, g.config.timeoutMs || 300000));
+        if (host.readExecution) {
+          rt.executionSource = "native";
+          rt.nativeExecutionStatus = "unknown";
+        }
         rt.activeRunID = randomUUID7();
         rt.activePromptMessageID = newPromptMessageID();
         rt.runCount = 1;
@@ -5428,6 +5539,10 @@ function createGoalService(host) {
         return s;
       const timeoutMs = g.config.timeoutMs || 300000;
       Object.assign(rt, acquireLease(rt, timeoutMs));
+      if (host.readExecution) {
+        rt.executionSource = "native";
+        rt.nativeExecutionStatus = "unknown";
+      }
       rt.activeRunID = randomUUID7();
       rt.activePromptMessageID = newPromptMessageID();
       rt.runCount += 1;
@@ -5928,7 +6043,7 @@ function createGoalService(host) {
         });
       }
       const preRt = state.runtimes.find((r) => r.goalID === goal.id);
-      if (preRt?.phase === "running" && !leaseIsValid(preRt)) {
+      if (!host.readExecution && preRt?.phase === "running" && !leaseIsValid(preRt)) {
         const session = sessions.get(goal.id);
         if (session && await workers.isIdle(session.workerSessionID)) {
           await mutateState(directory, `reconcile.release-lease:${goal.id}`, async (s) => {
@@ -6007,6 +6122,35 @@ function createGoalService(host) {
     const goal = preState.goals.find((g) => g.id === goalID);
     if (!goal)
       return rejected(goalID, "not_found", "Goal not found (it may have been cleared). List your goals instead of retrying this ID.");
+    const active = preState.runtimes.find((rt) => rt.goalID === goalID);
+    if (host.readExecution && host.enqueueWorkerMessage && goal.status === "active" && !goal.scopeClosing && goal.workerSessionID && active?.phase === "running" && active.activePromptAcceptedAt) {
+      const messageID = newPromptMessageID();
+      let reserved = false;
+      await mutateState(directory, `native.inbox:${goalID}`, async (s) => {
+        const g = s.goals.find((item) => item.id === goalID);
+        const rt = s.runtimes.find((item) => item.goalID === goalID);
+        if (g?.status !== "active" || g.scopeClosing || g.workerSessionID !== goal.workerSessionID || !rt || rt.phase !== "running" || rt.runGeneration !== active.runGeneration || rt.activeRunID !== active.activeRunID)
+          return s;
+        rt.nativeInboxMessageIDs = [...rt.nativeInboxMessageIDs ?? [], messageID];
+        reserved = true;
+        return s;
+      });
+      if (reserved) {
+        try {
+          await host.enqueueWorkerMessage(goal.workerSessionID, messageID, trimmed);
+          const current = await readState(directory);
+          if (!current.goals.some((g) => g.id === goalID && g.workerSessionID === goal.workerSessionID))
+            return rejected(goalID, "not_found", "Goal cleared during native enqueue; late acceptance grants no authority.");
+          const currentGoal = current.goals.find((g) => g.id === goalID);
+          const currentRun = current.runtimes.find((rt) => rt.goalID === goalID);
+          if (currentGoal?.status !== "active" || currentRun?.runGeneration !== active.runGeneration || currentRun.activeRunID !== active.activeRunID)
+            return rejected(goalID, "blocked", "Goal or turn changed during native enqueue; late acceptance grants no authority.");
+          return { ok: true, outcome: "queued", goalID, promptMessageID: messageID, message: `Queued in the OpenCode inbox for "${goal.name}".` };
+        } catch {
+          return rejected(goalID, "blocked", `Native inbox acceptance is unconfirmed for ${messageID}; inspect the session before resending.`);
+        }
+      }
+    }
     if (!await appendGoalInbox(directory, goalID, "user", trimmed))
       return rejected(goalID, "not_found", "Goal cleared before words could be queued. List current goals instead of retrying this ID.");
     if (goal.status !== "active") {
@@ -9458,6 +9602,16 @@ function phaseLabel(phase) {
 function workerActivityLabel(runtime, now = Date.now()) {
   if (runtime.phase !== "running")
     return { ...phaseLabel(runtime.phase), acting: false };
+  if (runtime.executionSource === "native") {
+    const status = runtime.nativeExecutionStatus;
+    if (status === "busy")
+      return { short: "Running", hint: "OpenCode execution is active", acting: true };
+    if (status === "retry")
+      return { short: "Retrying", hint: "OpenCode is retrying execution", acting: false };
+    if (status === "idle")
+      return { short: "Finishing", hint: "OpenCode is idle; reconciling goal outcome", acting: false };
+    return { short: "Unconfirmed", hint: "native execution state unavailable", acting: false };
+  }
   const expires = runtime.leaseExpiresAt ? Date.parse(runtime.leaseExpiresAt) : NaN;
   if (Number.isFinite(expires) && expires <= now)
     return { short: "Stale", hint: "lease expired; activity unconfirmed (not proof of worker exit)", acting: false };
@@ -10590,7 +10744,7 @@ function createServerHooks(directory, host, defaults) {
     tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools2({ directory, host, goalService }), ...commandTools({ directory, commandService, capabilities: commandHost.capabilities, goalService }) },
     "tool.execute.before": async (input, _output) => {
       await beforeWorkspaceTool(directory, input, _output.args);
-      if (isWorkspaceToolExempt(input.tool))
+      if (host.readExecution || isWorkspaceToolExempt(input.tool))
         return;
       const activeWorkers = goalService.getActiveWorkers();
       let matchedGoalID;
@@ -10620,7 +10774,7 @@ function createServerHooks(directory, host, defaults) {
       const activeWorkers = goalService.getActiveWorkers();
       let matchedGoalID;
       for (const [goalID, worker] of activeWorkers) {
-        if (!isWorkspaceToolExempt(input.tool) && worker.workerSessionID === input.sessionID) {
+        if (!host.readExecution && !isWorkspaceToolExempt(input.tool) && worker.workerSessionID === input.sessionID) {
           matchedGoalID = goalID;
           break;
         }
@@ -10693,7 +10847,7 @@ var v2 = {
   id: PLUGIN_ID,
   async setup(context) {
     const directory = context.location.directory;
-    logServerEvent(directory, "plugin.loaded", { pluginID: PLUGIN_ID, host: "v2", version });
+    logServerEvent(directory, "plugin.loaded", { pluginID: PLUGIN_ID, host: "v2", version, execution: typeof context.session.wait === "function" ? "native" : "legacy-compatibility" });
     const statuses = new Map;
     const native = await setupNativeServer(context);
     if (native) {
@@ -10817,6 +10971,8 @@ async function consumeV2Events(context, signal, statuses, hooks) {
         statuses.set(sessionID, "idle");
       else if (event.type === "session.execution.started")
         statuses.set(sessionID, "busy");
+      else if (event.type === "session.execution.succeeded" || event.type === "session.execution.failed" || event.type === "session.execution.interrupted")
+        statuses.set(sessionID, "idle");
     }
     await hooks.event?.({ event: normalizeV2Event(event) });
   }
@@ -10826,7 +10982,7 @@ function normalizeV2Event(event) {
   if (event?.type === "session.compaction.ended")
     return { type: "session.compacted", properties };
   if (event?.type === "session.execution.failed")
-    return { type: "session.error", properties };
+    return { type: "session.execution.failed", properties };
   if (event?.type === "session.execution.succeeded")
     return { type: "session.execution.succeeded", properties };
   if (event?.type === "session.inbox.delivered") {

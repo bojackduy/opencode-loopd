@@ -87,6 +87,9 @@ export function isV2PromptMessageID(messageID: string): boolean {
 }
 
 export interface LoopHost {
+  /** v2 durable session projection; absent on legacy transports. */
+  readExecution?(sessionID: string): Promise<NativeExecutionSnapshot | undefined>
+  enqueueWorkerMessage?(sessionID: string, messageID: string, text: string): Promise<void>
   /** Optional public transcript capability; terminal call+session+end evidence only. */
   readToolExecutions?(sessionID: string): Promise<TerminalToolExecution[]>
   /** True only when an audited execution guard surface is installed. */
@@ -122,6 +125,14 @@ export interface LoopHost {
   compactSession(sessionID: string, model?: ModelRef): Promise<void>
   /** True when the host accepted the prompt; false on a delivery error. */
   notifyOwner(ownerSessionID: string, message: string, agent?: string): Promise<boolean | void>
+}
+
+export interface NativeExecutionSnapshot {
+  status: SessionStatusType
+  outcome?: "succeeded" | "failed" | "interrupted"
+  idleAt?: string
+  latestUserMessageID?: string
+  deliveredMessageIDs?: string[]
 }
 
 const recentParentNotifies = new Map<string, number>()
@@ -470,8 +481,37 @@ export function createV2Host(
 ): LoopHost {
   const directory = context.location.directory
 
+  async function readExecution(sessionID: string): Promise<NativeExecutionSnapshot | undefined> {
+    try {
+      // wait observes the native coordinator, including queued inputs. A
+      // bounded, cancelled observation is not an interrupt of the session.
+      await withTimeout(context.session.wait({ sessionID }, { signal: AbortSignal.timeout(500) }), 750, "OpenCode v2 idle observation")
+      const messages = await withTimeout(context.session.context({ sessionID }), 10_000, "OpenCode v2 delivered inbox projection")
+      // A queue may arrive while context is read. Observe idle again before
+      // reading its terminal outcome; never use the previous outcome while
+      // native queued work is executing.
+      await withTimeout(context.session.wait({ sessionID }, { signal: AbortSignal.timeout(500) }), 750, "OpenCode v2 idle recheck")
+      const session = await withTimeout(context.session.get({ sessionID }), 10_000, "OpenCode v2 execution projection")
+      const idle = session.time?.idle
+      return {
+        status: "idle",
+        outcome: session.outcome,
+        idleAt: idle ? new Date(idle).toISOString() : undefined,
+        latestUserMessageID: messages.filter((message) => message.type === "user").at(-1)?.id,
+        deliveredMessageIDs: messages.filter((message) => message.type === "user").map((message) => message.id),
+      }
+    } catch {
+      return { status: statuses.get(sessionID) === "retry" ? "retry" : statuses.get(sessionID) === "busy" ? "busy" : "unknown" }
+    }
+  }
+
   return {
     scopedExecution: true,
+    readExecution: typeof context.session.wait === "function" ? readExecution : undefined,
+    enqueueWorkerMessage: typeof context.session.wait === "function" ? async (sessionID, messageID, text) => {
+      await withTimeout(context.session.prompt({ sessionID, id: messageID, text, delivery: "queue" }), 30_000, "OpenCode v2 queue notification")
+      statuses.set(sessionID, "busy")
+    } : undefined,
     async listAgents() {
       const switching = typeof context.session.switchAgent === "function" ? "session" : "unsupported"
       if (typeof context.agent?.list !== "function") return emptyAgentCatalog("v2 agent.list", switching)
@@ -652,7 +692,7 @@ export function createV2Host(
     },
 
     async sessionStatus(sessionID) {
-      return statuses.get(sessionID) ?? "unknown"
+      return typeof context.session.wait === "function" ? (await readExecution(sessionID))?.status ?? "unknown" : statuses.get(sessionID) ?? "unknown"
     },
 
     async abortSession(sessionID) {
