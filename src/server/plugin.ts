@@ -24,6 +24,7 @@ import { readState, mutateState } from "../infrastructure/state-repository"
 import type { GoalToolDefaults } from "./goal-tools"
 import { version as PLUGIN_VERSION } from "../../package.json"
 import { beforeWorkspaceTool, afterWorkspaceTool, guardV2ToolEditor, isWorkspaceToolExempt } from "../application/workspace-execution"
+import { deliverOwnerNotification } from "../application/owner-notification"
 
 const PLUGIN_ID = "opencode-loopd.server"
 
@@ -39,6 +40,8 @@ const server: Plugin = async ({ client, directory }, pluginOptions) => {
 
 function createServerHooks(directory: string, host: LoopHost, defaults: GoalToolDefaults): Hooks {
   const goalService = createGoalService(host)
+  const notificationHost = { notifyOwner: host.notifyOwner.bind(host) }
+  host.notifyOwner = (sessionID, message, agent) => deliverOwnerNotification(directory, notificationHost, goalService, sessionID, message, agent)
   // Command sessions are standalone (no goal coupling): their own host
   // (real PTY via bun-pty with automatic pipe fallback — see command-host.ts
   // + capability matrix) and their own service. Never share the AI worker
@@ -67,10 +70,8 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
         )
       }
     },
-    // The missing hop: a command with no goal/await linkage still reaches
-    // its owner session here (a real prompt-injected message, same channel
-    // as goal complete/blocked notifications) instead of dying silently at
-    // the dashboard-only status update.
+    // Owner delivery needs no goal linkage. Worker owners use tracked sends
+    // so busy turns are not interrupted by uncorrelated notification prompts.
     onOwnerNotify: async (dir, ownerSessionID, message) => {
       try {
         return (await host.notifyOwner(ownerSessionID, message)) !== false
@@ -82,8 +83,8 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
         return false
       }
     },
-    // M2 watch pushes: coalesced filter/until notices on the same owner
-    // channel (never the goal inbox — watch is owner-scoped, not goal-scoped).
+    // Watches still target the command owner; a worker owner queues safely
+    // into its own inbox instead of changing a live turn's ancestry.
     onWatchNotify: async (dir, ownerSessionID, message) => {
       await host.notifyOwner(ownerSessionID, message).catch((error) =>
         logServerEvent(dir, "command.watch-notify-failed", {

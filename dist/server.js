@@ -10465,6 +10465,24 @@ var version = "1.13.2";
 
 // src/server/plugin.ts
 init_workspace_execution();
+
+// src/application/owner-notification.ts
+init_state_repository();
+init_server_log();
+async function deliverOwnerNotification(directory, host, goals, sessionID, message, agent) {
+  const state = await readState(directory);
+  if (state.retiredWorkerSessions?.includes(sessionID))
+    return false;
+  const goal = state.goals.find((item) => item.workerSessionID === sessionID);
+  if (goal) {
+    const result = await goals.sendUserMessage(directory, goal.id, message);
+    await logServerEvent(directory, "worker.notification", { goalID: goal.id, workerSessionID: sessionID, outcome: result.outcome });
+    return result.ok;
+  }
+  return await host.notifyOwner(sessionID, message, agent) !== false;
+}
+
+// src/server/plugin.ts
 var PLUGIN_ID = "opencode-loopd.server";
 var server = async ({ client, directory }, pluginOptions) => {
   const defaults = parsePluginDefaults(pluginOptions);
@@ -10474,6 +10492,8 @@ var server = async ({ client, directory }, pluginOptions) => {
 };
 function createServerHooks(directory, host, defaults) {
   const goalService = createGoalService(host);
+  const notificationHost = { notifyOwner: host.notifyOwner.bind(host) };
+  host.notifyOwner = (sessionID, message, agent) => deliverOwnerNotification(directory, notificationHost, goalService, sessionID, message, agent);
   const commandBroker = createCommandEventBroker();
   const commandHost = createCommandHost();
   const commandService = createCommandService(commandHost, {
