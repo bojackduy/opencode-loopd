@@ -103,6 +103,62 @@ async function seedDirWithFinishedCommand(): Promise<string> {
 }
 
 describe("LoopDashboard shared Goals/Commands (mounted)", () => {
+  for (const view of ["goals", "commands", "panel", "terminal", "home"] as const) {
+    it(`v2 opens ${view} from the current session project instead of the setup location`, async () => {
+      const startup = await fs.mkdtemp(path.join(os.tmpdir(), "loopd-v2-startup-"))
+      const current = await seedDir()
+      let render: (() => any) | undefined
+      let layer: any
+      let terminalRoute: any
+      const slots: any[] = []
+      let session: { location: { directory: string } } | undefined
+      let defaultDirectory = startup
+      const ctx = {
+        location: { directory: startup },
+        theme: {}, renderer: { currentFocusedRenderable: undefined }, client: {},
+        data: {
+          location: { default: () => ({ directory: defaultDirectory }) },
+          session: { get: (id: string) => id === "ses-owner" ? session : { location: { directory: startup } } }, on: () => () => {},
+        },
+        keymap: { mode: { push: () => () => {} }, layer: (get: () => any) => { layer = get() } },
+        ui: {
+          router: {
+            current: () => view === "home" ? { type: "home" } : ({ type: "session", sessionID: view === "panel" || view === "terminal" ? "ses-other" : "ses-owner" }),
+            register: (route: any) => { terminalRoute = route; return () => {} }, navigate: () => {},
+          },
+          slot: (slot: any) => { slots.push(slot); return () => {} },
+          panel: { open: () => false, close: () => {} },
+          dialog: { show: (component: () => any) => { render = component }, clear: () => {}, set: () => {} },
+        },
+      }
+      const cleanup = plugin.setup(ctx as any)
+      try {
+        // Session metadata becomes available after plugin setup. Default and
+        // plugin locations intentionally stay on the original project.
+        session = { location: { directory: current } }
+        if (view === "home") defaultDirectory = current
+        slots.find((slot) => slot.append === "app").render()
+        if (view === "panel") render = () => slots.find((slot) => slot.append === "session.panel").render({ name: "opencode.loopd.commands", sessionID: "ses-owner", focused: true })
+        else if (view === "terminal") render = () => terminalRoute.render({ data: { commandID: "cmd-owned", ownerSessionID: "ses-owner", returnSessionID: "ses-owner" } })
+        else layer.commands[view === "goals" || view === "home" ? 0 : 1].run()
+        const setup = await testRender(() => render!(), { width: 120, height: 40 })
+        setups.push(setup)
+        const expected = view === "goals" || view === "home" ? "goal-one" : "owned-cmd"
+        const deadline = Date.now() + 2000
+        do {
+          await setup.renderOnce()
+          if (setup.captureCharFrame().includes(expected)) break
+          await Bun.sleep(10)
+        } while (Date.now() < deadline)
+        expect(setup.captureCharFrame()).toContain(expected)
+      } finally {
+        while (setups.length) setups.pop()!.renderer.destroy()
+        if (typeof cleanup === "function") cleanup()
+        await fs.rm(startup, { recursive: true, force: true })
+        await fs.rm(current, { recursive: true, force: true })
+      }
+    })
+  }
   for (const fixture of [
     { index: 0, name: "goals", expected: "goal-one", resumed: false },
     { index: 1, name: "commands", expected: "owned-cmd", resumed: false },

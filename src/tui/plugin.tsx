@@ -256,6 +256,13 @@ const REFRESH_EVENTS = [
 
 const v2setup: TuiV2.Definition["setup"] = (ctx) => {
   const directory = ctx.location?.directory ?? ctx.data.location.default().directory
+  const directoryFor = (sessionID?: string) => {
+    const route = ctx.ui.router.current()
+    const id = sessionID ?? (route.type === "session" ? route.sessionID : undefined)
+    return (id ? ctx.data.session.get(id)?.location?.directory : undefined)
+      || ctx.data.location.default().directory
+      || directory
+  }
 
   // Native-worker bridge (v2 only): subscribe to the server's
   // workerCreateRequested events and fork real children via the full client.
@@ -371,7 +378,7 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
   try {
     unregisterTerminalRoute = ctx.ui.router.register({
       name: TERMINAL_ROUTE_NAME,
-      render: ({ data }) => <TerminalView api={facade} directory={directory} data={data} />,
+      render: ({ data }) => <TerminalView api={facade} directory={directoryFor(data?.ownerSessionID)} data={data} />,
     })
     terminalRouteAvailable = true
   } catch {
@@ -391,6 +398,7 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
   }
 
   const open = () => {
+    const directory = directoryFor()
     const previousFocus = (ctx.renderer as unknown as { currentFocusedRenderable?: { blur(): void } })
       .currentFocusedRenderable
     dialogOpen = true
@@ -402,6 +410,7 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
   }
 
   const openCommands = () => {
+    const directory = directoryFor()
     // Same shared dashboard as /loop, focused on Commands.
     const previousFocus = (ctx.renderer as unknown as { currentFocusedRenderable?: { blur(): void } })
       .currentFocusedRenderable
@@ -438,7 +447,7 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
     render: (input) => input.name === commandsPanel
       ? <LoopDashboard
           api={facade}
-          directory={directory}
+          directory={directoryFor(input.sessionID)}
           initialView="commands"
           ownerSessionID={input.sessionID}
           onOpenCommand={(payload) => {

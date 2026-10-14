@@ -7292,6 +7292,11 @@ function navigateToTerminalV2(router, commandID, ownerSessionID, returnSessionID
 }
 var v2setup = (ctx) => {
   const directory = ctx.location?.directory ?? ctx.data.location.default().directory;
+  const directoryFor = (sessionID) => {
+    const route = ctx.ui.router.current();
+    const id = sessionID ?? (route.type === "session" ? route.sessionID : undefined);
+    return (id ? ctx.data.session.get(id)?.location?.directory : undefined) || ctx.data.location.default().directory || directory;
+  };
   const claimantID = `tui-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
   let unsubscribeNative;
   try {
@@ -7411,7 +7416,9 @@ var v2setup = (ctx) => {
         data
       }) => _$createComponent4(TerminalView, {
         api: facade,
-        directory,
+        get directory() {
+          return directoryFor(data?.ownerSessionID);
+        },
         data
       })
     });
@@ -7432,6 +7439,7 @@ var v2setup = (ctx) => {
     return ok;
   };
   const open = () => {
+    const directory = directoryFor();
     const previousFocus = ctx.renderer.currentFocusedRenderable;
     dialogOpen = true;
     ctx.ui.dialog.show(() => _$createComponent4(LoopDashboard, {
@@ -7446,6 +7454,7 @@ var v2setup = (ctx) => {
     previousFocus?.blur();
   };
   const openCommands = () => {
+    const directory = directoryFor();
     const previousFocus = ctx.renderer.currentFocusedRenderable;
     dialogOpen = true;
     ctx.ui.dialog.show(() => _$createComponent4(LoopDashboard, {
@@ -7471,7 +7480,9 @@ var v2setup = (ctx) => {
     append: "session.panel",
     render: (input) => input.name === commandsPanel ? _$createComponent4(LoopDashboard, {
       api: facade,
-      directory,
+      get directory() {
+        return directoryFor(input.sessionID);
+      },
       initialView: "commands",
       get ownerSessionID() {
         return input.sessionID;
