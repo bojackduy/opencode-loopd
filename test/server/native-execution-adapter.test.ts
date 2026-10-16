@@ -27,7 +27,7 @@ it("does not turn a failed idle observation into proof from an old succeeded pro
   context.session.wait = async () => { throw new Error("busy or unreachable") }
   expect(await host.readExecution!("worker")).toEqual({ status: "unknown" })
   statuses.set("worker", "busy")
-  expect(await host.readExecution!("worker")).toEqual({ status: "busy" })
+  expect(await host.readExecution!("worker")).toEqual({ status: "unknown" })
 })
 
 it("vetoes new native work arriving during projection reads", async () => {
@@ -38,7 +38,14 @@ it("vetoes new native work arriving during projection reads", async () => {
 })
 
 it("requests native queue delivery explicitly without switching identity or creating another session", async () => {
-  const { host, prompts } = fixture()
+  const { host, prompts, statuses } = fixture()
   await host.enqueueWorkerMessage!("worker", "msg_receipt", "command done")
   expect(prompts).toEqual([{ sessionID: "worker", id: "msg_receipt", text: "command done", delivery: "queue" }])
+  expect(statuses.has("worker")).toBe(false)
+})
+
+it("prompt acceptance does not manufacture a cached busy execution", async () => {
+  const { host, statuses } = fixture()
+  await host.promptWorker({ sessionID: "worker", prompt: "continue", messageID: "msg_receipt" })
+  expect(statuses.has("worker")).toBe(false)
 })

@@ -750,7 +750,7 @@ export function createGoalService(host: LoopHost): GoalService {
     run: { activeRunID?: string; activePromptMessageID?: string; runGeneration?: number; forceFinish?: boolean },
     workerSessionID: string,
     blockImmediately = false,
-  ): Promise<void> {
+  ): Promise<boolean> {
     let blocked: GoalActionResult | undefined
     await mutateState(directory, `turn.dispatch-intent:${goalID}`, async (s) => {
       blocked = continuationGuard(s, goalID)
@@ -807,6 +807,7 @@ export function createGoalService(host: LoopHost): GoalService {
     if (rt && rt.activeRunID === run.activeRunID && rt.activePromptAcceptedAt) {
       await acknowledgeGoalInbox(directory, goalID, rt.activeInboxLines ?? [])
     }
+    return observed
   }
 
   async function ensureWorkerSession(directory: string, goal: Goal): Promise<WorkerSession> {
@@ -1255,7 +1256,11 @@ export function createGoalService(host: LoopHost): GoalService {
         // Verify-before-retry: a late-accepted bare prompt returns normally
         // (turn dispatched, lease held) instead of failing a healthy turn.
         dispatchAttempted = true
-        await dispatchOrRecordFailure(directory, goalID, () => workers.sendBare(session, freshGoal, freshRuntime, bareText), freshRuntime, session.workerSessionID)
+        const observed = await dispatchOrRecordFailure(directory, goalID, () => workers.sendBare(session, freshGoal, freshRuntime, bareText), freshRuntime, session.workerSessionID)
+        if (host.readExecution && !observed) return {
+          ...sent, outcome: "queued",
+          message: `OpenCode accepted prompt ${freshRuntime.activePromptMessageID} into its inbox; delivery and execution are not confirmed. Do not resend while this receipt is pending.`,
+        }
         return sent
       }
     }
@@ -1326,7 +1331,11 @@ export function createGoalService(host: LoopHost): GoalService {
     // A late-accepted prompt keeps the lease; only genuine delivery failures
     // throw (after a run-fenced recordPromptFailure).
     dispatchAttempted = true
-    await dispatchOrRecordFailure(directory, goalID, () => workers.continueWorker(session, freshGoal, freshRuntime, context), { ...freshRuntime, forceFinish: opts?.forceFinish }, session.workerSessionID)
+    const observed = await dispatchOrRecordFailure(directory, goalID, () => workers.continueWorker(session, freshGoal, freshRuntime, context), { ...freshRuntime, forceFinish: opts?.forceFinish }, session.workerSessionID)
+    if (host.readExecution && !observed) return {
+      ...sent, outcome: "queued",
+      message: `OpenCode accepted prompt ${freshRuntime.activePromptMessageID} into its inbox for "${freshGoal.name}"; delivery and execution are not confirmed. No duplicate prompt will be sent while this receipt is pending.`,
+    }
     return sent
     } catch (error) {
       if (error instanceof GoalDeliveryBlockedError) return error.result
@@ -1829,6 +1838,17 @@ export function createGoalService(host: LoopHost): GoalService {
     if (quotaHold) return rejected(goalID, "blocked", quotaHold)
     const guard = continuationGuard(preState, goalID)
     if (guard) return guard
+    const currentRun = preState.runtimes.find((rt) => rt.goalID === goalID)
+    if (host.readExecution && goal.workerSessionID && currentRun?.phase === "running" && currentRun.activePromptAcceptedAt) {
+      const projection = await host.readExecution(goal.workerSessionID)
+      const prompt = currentRun.activePromptMessageID
+      if (prompt && !projection?.deliveredMessageIDs?.includes(prompt) && projection?.latestUserMessageID !== prompt) {
+        return rejected(goalID, "blocked", `OpenCode already accepted prompt ${prompt}, but delivery is unconfirmed. No duplicate nudge was sent; inspect the native inbox/session.`)
+      }
+      if (currentRun.nativeInboxMessageIDs?.some((id) => !projection?.deliveredMessageIDs?.includes(id))) {
+        return rejected(goalID, "blocked", "Native inbox messages are still awaiting delivery. No duplicate nudge was sent.")
+      }
+    }
     if (goal.workerSessionID) {
       const status = await host.sessionStatus(goal.workerSessionID)
       if (status === "busy") return rejected(goalID, "blocked", "Worker is busy; no prompt was sent and its active turn was left intact. Retry after idle.")

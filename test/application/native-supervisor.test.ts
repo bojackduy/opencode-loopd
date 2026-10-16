@@ -162,3 +162,32 @@ it("uses native queued receipts rather than copying busy notification contents i
   expect(host.promptCalls).toHaveLength(2)
   expect((await readState(dir)).runtimes[0].nativeInboxMessageIDs).toBeUndefined()
 })
+
+it("reports accepted but invisible nudge as queued, and never duplicates its pending receipt", async () => {
+  const goal = await start()
+  const original = (await readState(dir)).runtimes[0].activePromptMessageID!
+  snapshot = { status: "idle", latestUserMessageID: original, deliveredMessageIDs: [original] }
+  host.sessionStatus = async () => "idle"
+  // The host accepts the new inbox item but has not delivered it to context.
+  host.readMessages = async () => []
+  const result = await goals.nudge(dir, goal.id)
+  expect(result).toMatchObject({ ok: true, outcome: "queued" })
+  expect(result.message).toContain("delivery and execution are not confirmed")
+  const pending = (await readState(dir)).runtimes[0]
+  expect(pending.activePromptAcceptedAt).toBeDefined()
+  expect(pending.activePromptObservedAt).toBeUndefined()
+  expect(await goals.nudge(dir, goal.id)).toMatchObject({ ok: false, outcome: "blocked" })
+  expect(host.promptCalls).toHaveLength(2)
+  expect((await readState(dir)).runtimes[0].activePromptMessageID).toBe(pending.activePromptMessageID)
+})
+
+it("retains pending native notification receipts rather than dropping them on nudge", async () => {
+  const goal = await start()
+  const original = (await readState(dir)).runtimes[0].activePromptMessageID!
+  await mutateState(dir, "queued-notification", async (s) => { s.runtimes[0].nativeInboxMessageIDs = ["msg_pending"]; return s })
+  snapshot = { status: "idle", latestUserMessageID: original, deliveredMessageIDs: [original] }
+  host.sessionStatus = async () => "idle"
+  expect(await goals.nudge(dir, goal.id)).toMatchObject({ ok: false, outcome: "blocked" })
+  expect(host.promptCalls).toHaveLength(1)
+  expect((await readState(dir)).runtimes[0].nativeInboxMessageIDs).toEqual(["msg_pending"])
+})

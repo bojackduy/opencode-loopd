@@ -20,6 +20,7 @@ import type { LoopHost } from "../server/host-adapter"
 import type { WorkspaceSweepSummary } from "./workspace-execution"
 import { releaseTerminalWorkspaceCalls, reconcileTerminalWorkspaceCalls } from "./workspace-execution"
 import { terminalToolExecution } from "../domain/tool-execution"
+import { isOutputlessTurn } from "../domain/message-turn"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
 
 /** Two-stage idle debounce — require two idle signals 2s apart with no activity in between. */
@@ -231,7 +232,8 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
 
   async function handleMessageActivity(goal: any, event: any): Promise<boolean> {
     let matched = false
-    await mutateState(directory, `message-activity:${goal.id}`, async (s) => {
+    let outputless: string | undefined
+    const after = await mutateState(directory, `message-activity:${goal.id}`, async (s) => {
       const g = s.goals.find((item) => item.id === goal.id)
       const rt = s.runtimes.find((r) => r.goalID === goal.id)
       if (!g || g.status !== "active" || g.workerSessionID !== goal.workerSessionID || !rt || rt.phase !== "running" || !rt.activePromptMessageID) return s
@@ -246,6 +248,14 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
           Object.assign(rt, recordActivity(rt))
           rt.activePromptObservedAt ??= new Date().toISOString()
           rt.activeAssistantMessageID = info.id
+          // A turn the host closed without output is a FAILURE, not a completion.
+          // Stamping it as an anchor made a quota-closed turn look like delivered
+          // work, stranding the goal in phase=running with nothing to show. Route
+          // it through the bounded failure path so it is visible and retryable.
+          if (isOutputlessTurn(info)) {
+            outputless = info.id
+            return s
+          }
           rt.activeAssistantCompletedAt = info.time?.completed && info.finish !== "tool-calls"
             ? new Date(info.time.completed).toISOString() : undefined
           matched = true
@@ -263,6 +273,20 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       }
       return s
     })
+    if (outputless) {
+      const runID = after.runtimes.find((r) => r.goalID === goal.id)?.activeRunID
+      return await handleSessionError(after, goal, {
+        type: "session.error",
+        properties: {
+          // The turn is closed, so fence this record to that run.
+          expectedRunID: runID,
+          runID,
+          error: {
+            message: `OpenCode closed this turn with no output (no finish reason, no parts, no error). The host accepted prompt ${outputless} and produced nothing — commonly a quota-limited model. No prompt failed at the transport layer; inspect the worker session and provider, then retry.`,
+          },
+        },
+      })
+    }
     return matched
   }
 
@@ -366,6 +390,25 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       const eventAnchored = stagedRt?.runGeneration === candidate.generation
         && Boolean(stagedRt?.activeAssistantCompletedAt)
       const transcript = await inspectPromptTurn(goal.workerSessionID, candidate.promptMessageID)
+      // Missed the live event but the transcript proves the host closed the turn
+      // without output. That is a failure, not a completion: record it here so a
+      // lost event cannot wedge the goal in phase=running again.
+      if (!eventAnchored && transcript.outputless &&
+          stagedRt?.runGeneration === candidate.generation &&
+          stagedRt.phase === "running" &&
+          stagedRt.activePromptMessageID === candidate.promptMessageID &&
+          stagedRt.activeRunID) {
+        return await handleSessionError(afterIdle, goal, {
+          type: "session.error",
+          properties: {
+            expectedRunID: stagedRt.activeRunID,
+            runID: stagedRt.activeRunID,
+            error: {
+              message: `OpenCode closed this turn with no output (no finish reason, no parts, no error). The host accepted the prompt and produced nothing — commonly a quota-limited model. Recovered from the transcript because the live turn event was missed.`,
+            },
+          },
+        })
+      }
       const failureReason: "prompt-outside-window" | "assistant-incomplete" | undefined =
         transcript.assistantInProgress ? "assistant-incomplete"
         : !transcript.latestUserPrompt && !eventAnchored
@@ -599,8 +642,8 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
   async function inspectPromptTurn(
     workerSessionID: string | undefined,
     promptMessageID: string,
-  ): Promise<{ latestUserPrompt: boolean; assistantCompleted: boolean; assistantInProgress: boolean }> {
-    const noMatch = { latestUserPrompt: false, assistantCompleted: false, assistantInProgress: false }
+  ): Promise<{ latestUserPrompt: boolean; assistantCompleted: boolean; assistantInProgress: boolean; outputless: boolean }> {
+    const noMatch = { latestUserPrompt: false, assistantCompleted: false, assistantInProgress: false, outputless: false }
     if (!workerSessionID) return noMatch
     let messages
     try {
@@ -624,11 +667,16 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       ? [...assistants].sort((a, b) => Date.parse(a.createdAt ?? a.timestamp!) - Date.parse(b.createdAt ?? b.timestamp!))
       : assistants
     const latestAssistant = orderedAssistants.at(-1)
-    const assistantCompleted = Boolean(latestAssistant?.completedAt) && latestAssistant?.finish !== "tool-calls"
+    const outputless = isOutputlessTurn(latestAssistant)
+    // An outputless close is neither a completion nor work in progress. Reporting
+    // it as completed would confirm a turn that produced nothing; reporting it as
+    // in-progress would defer forever.
+    const assistantCompleted = Boolean(latestAssistant?.completedAt) && latestAssistant?.finish !== "tool-calls" && !outputless
     return {
       latestUserPrompt: ordered.at(-1)?.messageID === promptMessageID,
       assistantCompleted,
-      assistantInProgress: Boolean(latestAssistant) && !assistantCompleted,
+      assistantInProgress: Boolean(latestAssistant) && !assistantCompleted && !outputless,
+      outputless,
     }
   }
 

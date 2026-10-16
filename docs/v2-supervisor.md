@@ -26,9 +26,18 @@ goal's bounded retry policy; a live provider retry is not a terminal failure.
 Interrupted execution parks the goal as paused, requiring owner resume.
 Interactive goals record terminal execution without automatic continuation.
 
+A turn the host closes with no output is a failure, not a completion. On the
+legacy path an assistant message stamped completed with no `finish` is routed
+through the bounded failure policy, and `inspectPromptTurn` no longer reports
+it as completed or as work in progress — neither of which is true. The
+completion anchor is therefore never stamped for a turn that produced nothing,
+and the goal stays visible as `Retrying` instead of `Unconfirmed`.
+
 Native running status is independent of the scheduling lease. Lease expiry
 does not label a host-observed active execution as stale or permit a new turn.
 Native tools retain workspace guards without duplicate runtime tool-call tracking.
+An enqueue receipt is not a busy-execution observation. Failed native status
+reads return unknown rather than recycling an acceptance-time busy flag.
 
 ## Message ownership
 
@@ -38,6 +47,9 @@ Receipts are reserved before enqueue and reconciled after restart. Ambiguous
 acceptance retains the fence and returns an unconfirmed result; it never
 authorizes a blind retry. Paused goals retain words in the goal inbox until an
 explicit owner transition. Retired workers are not notification targets.
+Nudge and continuation report `queued` when acceptance is acknowledged but the
+prompt is absent from delivered context. Nudge retains that receipt (and queued
+notification receipts) rather than clearing it and submitting duplicate work.
 
 ## Restart and compatibility
 

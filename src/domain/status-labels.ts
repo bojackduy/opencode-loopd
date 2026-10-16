@@ -52,9 +52,10 @@ export function workerActivityLabel(runtime: GoalRuntimeState, now = Date.now())
   }
   const expires = runtime.leaseExpiresAt ? Date.parse(runtime.leaseExpiresAt) : NaN
   if (Number.isFinite(expires) && expires <= now) return { short: "Stale", hint: "lease expired; activity unconfirmed (not proof of worker exit)", acting: false }
+  if (runtime.lastWorkerStatus === "retry") return { short: "Retrying", hint: "provider is retrying; the prompt may already be accepted", acting: false }
   if (!Number.isFinite(expires) || (runtime.unknownStatusCount ?? 0) > 0) return { short: "Unconfirmed", hint: "worker status unavailable; do not assume the prompt failed", acting: false }
   if (runtime.activeAssistantCompletedAt) return { short: "Finishing", hint: "response completed; waiting for turn reconciliation", acting: false }
-  if (runtime.activePromptObservedAt && runtime.lastWorkerStatus !== "idle" && runtime.lastWorkerStatus !== "retry" &&
+  if (runtime.activePromptObservedAt && runtime.lastWorkerStatus !== "idle" &&
       (runtime.activeAssistantMessageID || runtime.activeToolCallIDs?.length)) {
     return { short: "Running", hint: "correlated assistant or tool activity observed", acting: true }
   }

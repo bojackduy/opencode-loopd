@@ -2474,6 +2474,17 @@ function terminalToolExecution(part) {
   return { sessionID: part.sessionID, callID: part.callID, status: part.state.status, endedAt: part.state.time.end };
 }
 
+// src/domain/message-turn.ts
+function isOutputlessTurn(message) {
+  if (!message || !(message.time?.completed || message.completedAt))
+    return false;
+  if (message.finish || message.error)
+    return false;
+  if (message.content?.trim() || message.parts?.length)
+    return false;
+  return true;
+}
+
 // src/application/loop-engine.ts
 init_server_log();
 var CONFIRM_IDLE_DURATION_MS = 2000;
@@ -2629,7 +2640,8 @@ function createLoopEngine(options) {
   }
   async function handleMessageActivity(goal, event) {
     let matched = false;
-    await mutateState(directory, `message-activity:${goal.id}`, async (s) => {
+    let outputless;
+    const after = await mutateState(directory, `message-activity:${goal.id}`, async (s) => {
       const g = s.goals.find((item) => item.id === goal.id);
       const rt = s.runtimes.find((r) => r.goalID === goal.id);
       if (!g || g.status !== "active" || g.workerSessionID !== goal.workerSessionID || !rt || rt.phase !== "running" || !rt.activePromptMessageID)
@@ -2644,6 +2656,10 @@ function createLoopEngine(options) {
           Object.assign(rt, recordActivity(rt));
           rt.activePromptObservedAt ??= new Date().toISOString();
           rt.activeAssistantMessageID = info.id;
+          if (isOutputlessTurn(info)) {
+            outputless = info.id;
+            return s;
+          }
           rt.activeAssistantCompletedAt = info.time?.completed && info.finish !== "tool-calls" ? new Date(info.time.completed).toISOString() : undefined;
           matched = true;
         }
@@ -2658,6 +2674,19 @@ function createLoopEngine(options) {
       }
       return s;
     });
+    if (outputless) {
+      const runID = after.runtimes.find((r) => r.goalID === goal.id)?.activeRunID;
+      return await handleSessionError(after, goal, {
+        type: "session.error",
+        properties: {
+          expectedRunID: runID,
+          runID,
+          error: {
+            message: `OpenCode closed this turn with no output (no finish reason, no parts, no error). The host accepted prompt ${outputless} and produced nothing \u2014 commonly a quota-limited model. No prompt failed at the transport layer; inspect the worker session and provider, then retry.`
+          }
+        }
+      });
+    }
     return matched;
   }
   async function handleExecutionSucceeded(goal) {
@@ -2732,6 +2761,18 @@ function createLoopEngine(options) {
       const stagedRt = afterIdle.runtimes.find((r) => r.goalID === goalID);
       const eventAnchored = stagedRt?.runGeneration === candidate.generation && Boolean(stagedRt?.activeAssistantCompletedAt);
       const transcript = await inspectPromptTurn(goal.workerSessionID, candidate.promptMessageID);
+      if (!eventAnchored && transcript.outputless && stagedRt?.runGeneration === candidate.generation && stagedRt.phase === "running" && stagedRt.activePromptMessageID === candidate.promptMessageID && stagedRt.activeRunID) {
+        return await handleSessionError(afterIdle, goal, {
+          type: "session.error",
+          properties: {
+            expectedRunID: stagedRt.activeRunID,
+            runID: stagedRt.activeRunID,
+            error: {
+              message: `OpenCode closed this turn with no output (no finish reason, no parts, no error). The host accepted the prompt and produced nothing \u2014 commonly a quota-limited model. Recovered from the transcript because the live turn event was missed.`
+            }
+          }
+        });
+      }
       const failureReason = transcript.assistantInProgress ? "assistant-incomplete" : !transcript.latestUserPrompt && !eventAnchored ? "prompt-outside-window" : !eventAnchored && !candidate.assistantCompleted && !transcript.assistantCompleted ? "assistant-incomplete" : undefined;
       if (failureReason) {
         let newlyStamped = false;
@@ -2950,7 +2991,7 @@ function createLoopEngine(options) {
     return await afterCompletedTurn(goal.id, goal);
   }
   async function inspectPromptTurn(workerSessionID, promptMessageID) {
-    const noMatch = { latestUserPrompt: false, assistantCompleted: false, assistantInProgress: false };
+    const noMatch = { latestUserPrompt: false, assistantCompleted: false, assistantInProgress: false, outputless: false };
     if (!workerSessionID)
       return noMatch;
     let messages;
@@ -2967,11 +3008,13 @@ function createLoopEngine(options) {
     const assistants = messages.filter((message) => message.role === "assistant" && message.parentMessageID === promptMessageID);
     const orderedAssistants = assistants.every((message) => Number.isFinite(Date.parse(message.createdAt ?? message.timestamp ?? ""))) ? [...assistants].sort((a, b) => Date.parse(a.createdAt ?? a.timestamp) - Date.parse(b.createdAt ?? b.timestamp)) : assistants;
     const latestAssistant = orderedAssistants.at(-1);
-    const assistantCompleted = Boolean(latestAssistant?.completedAt) && latestAssistant?.finish !== "tool-calls";
+    const outputless = isOutputlessTurn(latestAssistant);
+    const assistantCompleted = Boolean(latestAssistant?.completedAt) && latestAssistant?.finish !== "tool-calls" && !outputless;
     return {
       latestUserPrompt: ordered.at(-1)?.messageID === promptMessageID,
       assistantCompleted,
-      assistantInProgress: Boolean(latestAssistant) && !assistantCompleted
+      assistantInProgress: Boolean(latestAssistant) && !assistantCompleted && !outputless,
+      outputless
     };
   }
   async function handleSessionStatus(state, goal, event) {
@@ -4068,7 +4111,7 @@ function createV2Host(context, statuses, options = {}) {
         deliveredMessageIDs: messages.filter((message) => message.type === "user").map((message) => message.id)
       };
     } catch {
-      return { status: statuses.get(sessionID) === "retry" ? "retry" : statuses.get(sessionID) === "busy" ? "busy" : "unknown" };
+      return { status: "unknown" };
     }
   }
   return {
@@ -4076,7 +4119,6 @@ function createV2Host(context, statuses, options = {}) {
     readExecution: typeof context.session.wait === "function" ? readExecution : undefined,
     enqueueWorkerMessage: typeof context.session.wait === "function" ? async (sessionID, messageID, text) => {
       await withTimeout(context.session.prompt({ sessionID, id: messageID, text, delivery: "queue" }), 30000, "OpenCode v2 queue notification");
-      statuses.set(sessionID, "busy");
     } : undefined,
     async listAgents() {
       const switching = typeof context.session.switchAgent === "function" ? "session" : "unsupported";
@@ -4207,7 +4249,6 @@ function createV2Host(context, statuses, options = {}) {
         id: messageID,
         text: prompt
       }), 30000, "OpenCode v2 session.prompt (acceptance)");
-      statuses.set(sessionID, "busy");
       await logServerEvent(directory, "worker.prompted", { sessionID });
       return { messageID: result?.id };
     },
@@ -5173,6 +5214,7 @@ function createGoalService(host) {
     if (rt && rt.activeRunID === run.activeRunID && rt.activePromptAcceptedAt) {
       await acknowledgeGoalInbox(directory, goalID, rt.activeInboxLines ?? []);
     }
+    return observed;
   }
   async function ensureWorkerSession(directory, goal) {
     let session = sessions.get(goal.id);
@@ -5593,7 +5635,13 @@ function createGoalService(host) {
 `).trim();
         if (bareText) {
           dispatchAttempted = true;
-          await dispatchOrRecordFailure(directory, goalID, () => workers.sendBare(session, freshGoal, freshRuntime, bareText), freshRuntime, session.workerSessionID);
+          const observed = await dispatchOrRecordFailure(directory, goalID, () => workers.sendBare(session, freshGoal, freshRuntime, bareText), freshRuntime, session.workerSessionID);
+          if (host.readExecution && !observed)
+            return {
+              ...sent,
+              outcome: "queued",
+              message: `OpenCode accepted prompt ${freshRuntime.activePromptMessageID} into its inbox; delivery and execution are not confirmed. Do not resend while this receipt is pending.`
+            };
           return sent;
         }
       }
@@ -5640,7 +5688,13 @@ function createGoalService(host) {
         verification
       };
       dispatchAttempted = true;
-      await dispatchOrRecordFailure(directory, goalID, () => workers.continueWorker(session, freshGoal, freshRuntime, context), { ...freshRuntime, forceFinish: opts?.forceFinish }, session.workerSessionID);
+      const observed = await dispatchOrRecordFailure(directory, goalID, () => workers.continueWorker(session, freshGoal, freshRuntime, context), { ...freshRuntime, forceFinish: opts?.forceFinish }, session.workerSessionID);
+      if (host.readExecution && !observed)
+        return {
+          ...sent,
+          outcome: "queued",
+          message: `OpenCode accepted prompt ${freshRuntime.activePromptMessageID} into its inbox for "${freshGoal.name}"; delivery and execution are not confirmed. No duplicate prompt will be sent while this receipt is pending.`
+        };
       return sent;
     } catch (error) {
       if (error instanceof GoalDeliveryBlockedError)
@@ -6075,6 +6129,17 @@ function createGoalService(host) {
     const guard = continuationGuard(preState, goalID);
     if (guard)
       return guard;
+    const currentRun = preState.runtimes.find((rt) => rt.goalID === goalID);
+    if (host.readExecution && goal.workerSessionID && currentRun?.phase === "running" && currentRun.activePromptAcceptedAt) {
+      const projection = await host.readExecution(goal.workerSessionID);
+      const prompt = currentRun.activePromptMessageID;
+      if (prompt && !projection?.deliveredMessageIDs?.includes(prompt) && projection?.latestUserMessageID !== prompt) {
+        return rejected(goalID, "blocked", `OpenCode already accepted prompt ${prompt}, but delivery is unconfirmed. No duplicate nudge was sent; inspect the native inbox/session.`);
+      }
+      if (currentRun.nativeInboxMessageIDs?.some((id) => !projection?.deliveredMessageIDs?.includes(id))) {
+        return rejected(goalID, "blocked", "Native inbox messages are still awaiting delivery. No duplicate nudge was sent.");
+      }
+    }
     if (goal.workerSessionID) {
       const status = await host.sessionStatus(goal.workerSessionID);
       if (status === "busy")
@@ -9615,11 +9680,13 @@ function workerActivityLabel(runtime, now = Date.now()) {
   const expires = runtime.leaseExpiresAt ? Date.parse(runtime.leaseExpiresAt) : NaN;
   if (Number.isFinite(expires) && expires <= now)
     return { short: "Stale", hint: "lease expired; activity unconfirmed (not proof of worker exit)", acting: false };
+  if (runtime.lastWorkerStatus === "retry")
+    return { short: "Retrying", hint: "provider is retrying; the prompt may already be accepted", acting: false };
   if (!Number.isFinite(expires) || (runtime.unknownStatusCount ?? 0) > 0)
     return { short: "Unconfirmed", hint: "worker status unavailable; do not assume the prompt failed", acting: false };
   if (runtime.activeAssistantCompletedAt)
     return { short: "Finishing", hint: "response completed; waiting for turn reconciliation", acting: false };
-  if (runtime.activePromptObservedAt && runtime.lastWorkerStatus !== "idle" && runtime.lastWorkerStatus !== "retry" && (runtime.activeAssistantMessageID || runtime.activeToolCallIDs?.length)) {
+  if (runtime.activePromptObservedAt && runtime.lastWorkerStatus !== "idle" && (runtime.activeAssistantMessageID || runtime.activeToolCallIDs?.length)) {
     return { short: "Running", hint: "correlated assistant or tool activity observed", acting: true };
   }
   if (runtime.activePromptObservedAt)
@@ -10615,7 +10682,7 @@ function commandTools(options) {
 init_server_log();
 init_state_repository();
 // package.json
-var version = "1.14.0";
+var version = "1.14.1";
 
 // src/server/plugin.ts
 init_workspace_execution();

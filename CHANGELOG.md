@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.14.2 (2026-10-16) — Turn Recovery and Native Delivery Receipts
+
+### Fixed
+
+- Legacy goal workers now treat a host-closed assistant turn with no finish reason or output as a failed attempt rather than successful completion. Failures enter the existing bounded retry and blocking policy, clear the active run fence, and notify the owner when blocked.
+- Legacy idle reconciliation recognizes outputless closes in normalized transcripts when a live event was missed, while fencing recovery to the current run. In-flight and genuinely completed turns remain unaffected; native execution supervision retains host authority.
+- The dashboard labels a provider retry as `Retrying` instead of `Unconfirmed`.
+- Native v2 nudge and steering distinguish accepted inbox items from observed delivery. Undelivered receipts survive repeated nudges without duplicate prompts, and failed execution observations no longer recycle cached acceptance-time `busy` status.
+
+### Verification
+
+- Added outputless-turn regression coverage for live events, missed events, stale turns, native execution boundaries, retry exhaustion, and status labels.
+- The fix is exercised by automated tests; a real quota-exhausted provider session has not been used to verify recovery end to end.
+
 ## Unreleased — Command sessions replace opencode-pty + sentinel
 
 > `loopd_command_*` now covers everything `opencode-pty` (`pty_spawn/write/read/list/kill`) and `opencode-sentinel` (`sentinel_monitor/stop/list`) do — remove both plugins from config. Live-smoked on the real PTY backend (timeout, until-stop, pattern read, env, terminate+remove).

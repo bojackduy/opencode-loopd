@@ -501,7 +501,7 @@ export function createV2Host(
         deliveredMessageIDs: messages.filter((message) => message.type === "user").map((message) => message.id),
       }
     } catch {
-      return { status: statuses.get(sessionID) === "retry" ? "retry" : statuses.get(sessionID) === "busy" ? "busy" : "unknown" }
+      return { status: "unknown" }
     }
   }
 
@@ -510,7 +510,6 @@ export function createV2Host(
     readExecution: typeof context.session.wait === "function" ? readExecution : undefined,
     enqueueWorkerMessage: typeof context.session.wait === "function" ? async (sessionID, messageID, text) => {
       await withTimeout(context.session.prompt({ sessionID, id: messageID, text, delivery: "queue" }), 30_000, "OpenCode v2 queue notification")
-      statuses.set(sessionID, "busy")
     } : undefined,
     async listAgents() {
       const switching = typeof context.session.switchAgent === "function" ? "session" : "unsupported"
@@ -671,7 +670,6 @@ export function createV2Host(
         id: messageID,
         text: prompt,
       }), 30_000, "OpenCode v2 session.prompt (acceptance)")
-      statuses.set(sessionID, "busy")
       await logServerEvent(directory, "worker.prompted", { sessionID })
       return { messageID: (result as any)?.id }
     },
