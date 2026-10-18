@@ -51,6 +51,30 @@ jobs:
       - name: Typecheck & test
         run: bun run prepack
 
+      - name: Lifecycle smoke (real OpenCode v2 host)
+        env:
+          LOOPD_SMOKE_HOST_VERSION: "2.0.32"
+          LOOPD_SMOKE_ARTIFACTS_DIR: ${{ github.workspace }}/smoke-artifacts
+        run: |
+          set -euo pipefail
+          # The host ships platform binaries as npm optional deps. Install the
+          # exact version under test into a throwaway prefix, never the repo.
+          host_dir="$RUNNER_TEMP/opencode-host"
+          mkdir -p "$host_dir"
+          npm install --prefix "$host_dir" --no-fund --no-audit "@opencode/cli@$LOOPD_SMOKE_HOST_VERSION"
+          OPENCODE_V2_BIN="$host_dir/node_modules/.bin/opencode"
+          "$OPENCODE_V2_BIN" --version
+          OPENCODE_V2_BIN="$OPENCODE_V2_BIN" bun run smoke:v2-lifecycle
+
+      - name: Upload smoke artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lifecycle-smoke
+          path: smoke-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Publish to npm
         run: npm publish --access public
 

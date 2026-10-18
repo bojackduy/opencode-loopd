@@ -116,6 +116,16 @@ describe("real plugin scope enforcement", () => {
 
   it("validates rename destinations, deletes, aliases and new file paths", async () => {
     const { directory, before, after } = await fixture()
+    await before("write", { path: "owned.ts", content: "native v2" }, "worker", "native-write")
+    expect((await readState(directory)).workspaceCalls).toMatchObject([{ callID: "native-write", paths: ["owned.ts"] }])
+    await after("native-write")
+    await expect(before("write", { path: "other.ts", content: "denied" })).rejects.toThrow("other.ts")
+    await expect(before("write", { filePath: "owned.ts", path: "other.ts" })).rejects.toThrow("conflicting")
+    await before("patch", { patchText: "*** Begin Patch\n*** Update File: owned.ts\n-before\n+after\n*** End Patch" }, "worker", "v2-patch")
+    expect((await readState(directory)).workspaceCalls).toMatchObject([{ callID: "v2-patch", paths: ["owned.ts"] }])
+    await after("v2-patch")
+    await expect(before("patch", { patchText: "*** Begin Patch\n*** Add File: other.ts\n+x\n*** End Patch" })).rejects.toThrow("other.ts")
+    await expect(before("patch", { patchText: "unstructured shell text" })).rejects.toThrow("unsupported")
     await fs.symlink("owned.ts", path.join(directory, "alias.ts"))
     await before("write", { filePath: "alias.ts" }, "worker", "alias")
     await after("alias")

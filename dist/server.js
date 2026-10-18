@@ -1438,11 +1438,14 @@ function isWorkspaceToolExempt(tool) {
 }
 function structuredWritePaths(tool, args) {
   if (tool === "write" || tool === "edit") {
-    if (typeof args.filePath !== "string")
-      throw new Error(`Scope denied: ${tool} requires filePath.`);
-    return [args.filePath];
+    if (args.filePath !== undefined && args.path !== undefined && args.filePath !== args.path)
+      throw new Error(`Scope denied: ${tool} has conflicting path fields.`);
+    const file = args.filePath ?? args.path;
+    if (typeof file !== "string")
+      throw new Error(`Scope denied: ${tool} requires filePath (v1) or path (v2).`);
+    return [file];
   }
-  if (tool !== "apply_patch")
+  if (tool !== "apply_patch" && tool !== "patch")
     return;
   const source = args.patchText ?? args.patch;
   if (typeof source !== "string" || !source.startsWith(`*** Begin Patch

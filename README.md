@@ -38,6 +38,12 @@ Exact-file editing contracts and their execution boundaries are documented in
 [File-scope ownership](docs/file-scope-ownership.md). Use `write_scope: []` to
 explore before claiming files; omitted scope keeps legacy exclusivity.
 
+Every promise loopd makes about a running goal — checked completion, one owner
+notification, queued steering, durable pause, final clear — is listed in the
+[Lifecycle contract](docs/lifecycle-contract.md) and asserted against a real
+`opencode serve` process before each release. That gate is what
+`bun run smoke:v2-lifecycle` runs; it is not a mocked unit test.
+
 opencode-loopd is an **OpenCode plugin** (server + TUI) that adds **background goals** to OpenCode. Each goal owns a **worker (child) subagent** that loops autonomously; the **loop engine** drives continuations; the **schedule worker** requeues the same goal on an interval (`scheduleEveryMs`); the **dashboard** and **owner tools** keep the parent in control. Think *Codex goals* or *Claude Code loop*, but native to OpenCode's session model — with scheduled intervals for repetitive dialogues.
 
 ## Install
@@ -330,6 +336,19 @@ switch_goal_identity({goal_id, model:"other-provider/good-model"}) — same goal
 - Press `:` then type bare text → sent as `send_goal_input` to the selected goal.
 - Bare `:force my summary --evidence "glob ok"` bypasses verification when the child is stuck.
 - `o` jumps to the native OpenCode child session — full transcript, diffs, tool calls.
+
+## Verify a change
+
+```bash
+bun run typecheck && bun test          # unit + integration
+bun run build:server && bun run smoke:v2-lifecycle   # real OpenCode v2 host
+```
+
+`smoke:v2-lifecycle` boots a throwaway `opencode serve` with private
+`XDG_*`/database state and a local fixture model, then asserts the lifecycle
+guarantees end to end. CI runs it before `npm publish`, and uploads its private
+artifacts on failure. See [Lifecycle contract](docs/lifecycle-contract.md) for
+what it covers and what it deliberately does not.
 
 ## Related / SEO
 

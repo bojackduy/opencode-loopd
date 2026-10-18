@@ -28,10 +28,14 @@ export function isWorkspaceToolExempt(tool: string): boolean { return readTools.
 /** Only known structured formats are trusted; shell/custom/batch cannot be inferred safe. */
 export function structuredWritePaths(tool: string, args: Record<string, unknown>): string[] | undefined {
   if (tool === "write" || tool === "edit") {
-    if (typeof args.filePath !== "string") throw new Error(`Scope denied: ${tool} requires filePath.`)
-    return [args.filePath]
+    if (args.filePath !== undefined && args.path !== undefined && args.filePath !== args.path) throw new Error(`Scope denied: ${tool} has conflicting path fields.`)
+    const file = args.filePath ?? args.path
+    if (typeof file !== "string") throw new Error(`Scope denied: ${tool} requires filePath (v1) or path (v2).`)
+    return [file]
   }
-  if (tool !== "apply_patch") return undefined
+  // v1/Codex calls this apply_patch; native v2 calls it patch with the same
+  // structured patchText grammar. Both must pass identical path extraction.
+  if (tool !== "apply_patch" && tool !== "patch") return undefined
   const source = args.patchText ?? args.patch
   if (typeof source !== "string" || !source.startsWith("*** Begin Patch\n") || !source.trimEnd().endsWith("*** End Patch")) {
     throw new Error("Scope denied: unsupported apply_patch format.")
