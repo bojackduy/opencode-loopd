@@ -14,12 +14,13 @@
 - Added outputless-turn regression coverage for live events, missed events, stale turns, native execution boundaries, retry exhaustion, and status labels.
 - The fix is exercised by automated tests; a real quota-exhausted provider session has not been used to verify recovery end to end.
 
-## Unreleased — Command sessions replace opencode-pty + sentinel
+## 1.14.3 (2026-10-18) — Command Sessions Replace opencode-pty + sentinel
 
 > `loopd_command_*` now covers everything `opencode-pty` (`pty_spawn/write/read/list/kill`) and `opencode-sentinel` (`sentinel_monitor/stop/list`) do — remove both plugins from config. Live-smoked on the real PTY backend (timeout, until-stop, pattern read, env, terminate+remove).
 
 ### Fixed
 
+- **V2 dashboard `o` opens the command terminal** — the mounted dashboard had no terminal opener and its key/event path returned early whenever the dialog was not open, so selecting a command in the Commands tab (or the session panel entrypoint) did nothing. The dashboard now receives the terminal opener and no longer suppresses command events; covered by mounted v2 tests for the command list, panel entrypoint, and the registered route, including `Ctrl+]` detaching without terminating the command.
 - **v2 native `write` rejected inside a valid scope claim** — `structuredWritePaths` only read `args.filePath`, but the v2 native write tool sends `path`. A scoped worker holding a valid claim was denied with `Scope denied: write requires filePath`, so `write_scope` goals could not write their own files on v2. Both field names are now accepted, conflicting `filePath`/`path` values are rejected, and the regression is covered by unit tests plus the real-host smoke gate.
 
 ### Added
