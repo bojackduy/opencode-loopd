@@ -1412,8 +1412,6 @@ function LoopDashboard(props) {
     const name = evt.name || "";
     const seq = evt.sequence || "";
     const raw = evt.raw || "";
-    if (!props.api.ui.dialog.open)
-      return;
     const active = (() => {
       try {
         return props.isActive?.() ?? props.api.ui.dialog.open;
@@ -7156,7 +7154,8 @@ var tui = async (api) => {
     const previousFocus = api.renderer.currentFocusedRenderable;
     api.ui.dialog.replace(() => _$createComponent4(LoopDashboard, {
       api,
-      directory
+      directory,
+      onOpenCommand: (payload) => openTerminal(payload.commandID, payload.ownerSessionID, payload.returnSessionID)
     }));
     api.ui.dialog.setSize("xlarge");
     previousFocus?.blur();
@@ -7446,7 +7445,10 @@ var v2setup = (ctx) => {
     dialogOpen = true;
     ctx.ui.dialog.show(() => _$createComponent4(LoopDashboard, {
       api: facade,
-      directory
+      directory,
+      onOpenCommand: (payload) => {
+        openTerminal(payload.commandID, payload.ownerSessionID, payload.returnSessionID);
+      }
     }), () => {
       dialogOpen = false;
     });

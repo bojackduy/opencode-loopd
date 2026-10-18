@@ -12,6 +12,8 @@ import { ScrollBoxRenderable, TextRenderable } from "@opentui/core"
 import { createRuntimeState, type GoalRuntimeState } from "../../src/domain/runtime"
 import { createGoal } from "../../src/domain/goal"
 import plugin from "../../src/tui/plugin"
+import { TERMINAL_INPUT_MODE } from "../../src/tui/terminal-view"
+import { readState } from "../../src/infrastructure/state-repository"
 
 const THEME = {
   primary: "#fff",
@@ -103,6 +105,105 @@ async function seedDirWithFinishedCommand(): Promise<string> {
 }
 
 describe("LoopDashboard shared Goals/Commands (mounted)", () => {
+  for (const entry of ["loop", "commands", "panel"] as const) {
+    it(`v2 ${entry} opens the registered terminal from the Commands selection and detaches without termination`, async () => {
+      const dir = await seedDir()
+      let dialog: (() => any) | undefined
+      let layer: any
+      let page: any
+      const slots: any[] = []
+      const destinations: any[] = []
+      const modes: string[] = []
+      let panelClosed = 0
+      let dialogCleared = 0
+      const panel = { name: "opencode.loopd.commands", sessionID: "ses-owner", focused: false }
+      let current: any = { type: "session", sessionID: "ses-owner" }
+      const ctx = {
+        location: { directory: dir }, theme: {}, renderer: {}, client: {},
+        data: {
+          location: { default: () => ({ directory: dir }) },
+          session: { get: () => ({ location: { directory: dir } }) },
+          on: () => () => {},
+        },
+        keymap: {
+          layer: (get: () => any) => { layer = get() },
+          mode: { push: (mode: string) => { modes.push(mode); return () => { modes.splice(modes.indexOf(mode), 1) } } },
+        },
+        ui: {
+          router: {
+            current: () => current,
+            register: (route: any) => { page = route; return () => {} },
+            navigate: (destination: any) => {
+              if (destination.type === "plugin") expect(destination.name).toBe(page.name)
+              destinations.push(destination)
+              current = destination
+            },
+          },
+          slot: (slot: any) => { slots.push(slot); return () => {} },
+          panel: { open: () => false, close: () => { panelClosed++ } },
+          dialog: {
+            show: (render: () => any) => { dialog = render }, set: () => {},
+            clear: () => { dialogCleared++ },
+          },
+        },
+      }
+      const cleanup = plugin.setup(ctx as any)
+      try {
+        slots.find((slot) => slot.append === "app").render()
+        if (entry === "panel") {
+          dialog = () => slots.find((slot) => slot.append === "session.panel").render(panel)
+        } else layer.commands[entry === "loop" ? 0 : 1].run()
+        const dashboard = await testRender(() => dialog!(), { width: 120, height: 40 })
+        setups.push(dashboard)
+        await dashboard.flush()
+        await dashboard.waitForFrame((frame) => frame.includes(entry === "loop" ? "goal-one" : "owned-cmd"))
+        if (entry === "loop") {
+          dashboard.mockInput.pressKey("l")
+          await dashboard.waitFor(() => dashboard.captureCharFrame().includes("owned-cmd"))
+        }
+        expect(dashboard.captureCharFrame()).not.toContain("foreign-cmd")
+        // The dashboard focuses its input after mount; flush runs that timer
+        // before dispatching a key, including the session.panel entrypoint.
+        await dashboard.flush()
+        if (entry === "panel") {
+          dashboard.mockInput.pressKey("o")
+          await dashboard.flush()
+          expect(destinations).toEqual([])
+          panel.focused = true
+        }
+        dashboard.mockInput.pressKey("o")
+        await dashboard.waitFor(() => dialogCleared > 0)
+        expect(destinations).toEqual([{
+          type: "plugin", name: TERMINAL_ROUTE_NAME,
+          data: { commandID: "cmd-owned", ownerSessionID: "ses-owner", returnSessionID: "ses-owner" },
+        }])
+        expect(panelClosed).toBe(1)
+        expect(dialogCleared).toBe(1)
+        dashboard.renderer.destroy()
+        setups.pop()
+
+        // Mount the actual registered V2 page, not a V1 route mock or a
+        // substitute TerminalView. Its real session driver loads the command.
+        const terminal = await testRender(() => page.render({ data: current.data }), { width: 120, height: 40 })
+        setups.push(terminal)
+        await terminal.flush()
+        await terminal.waitFor(() => terminal.captureCharFrame().includes("owned-cmd"), { maxPasses: 2000 })
+        expect(modes).toContain(TERMINAL_INPUT_MODE)
+        await terminal.mockInput.pressKey("]", { ctrl: true })
+        await terminal.flush()
+        expect(destinations.at(-1)).toEqual({ type: "session", sessionID: "ses-owner" })
+        terminal.renderer.destroy()
+        setups.pop()
+        expect(modes).not.toContain(TERMINAL_INPUT_MODE)
+        expect((await readState(dir)).commands?.find((command) => command.id === "cmd-owned")?.status).toBe("running")
+      } finally {
+        while (setups.length) setups.pop()!.renderer.destroy()
+        if (typeof cleanup === "function") cleanup()
+        await fs.rm(dir, { recursive: true, force: true })
+      }
+    })
+  }
+
   for (const view of ["goals", "commands", "panel", "terminal", "home"] as const) {
     it(`v2 opens ${view} from the current session project instead of the setup location`, async () => {
       const startup = await fs.mkdtemp(path.join(os.tmpdir(), "loopd-v2-startup-"))

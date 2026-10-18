@@ -378,7 +378,6 @@ export function LoopDashboard(props: Props) {
     const name = evt.name || ""
     const seq = (evt as unknown as { sequence?: string }).sequence || ""
     const raw = (evt as unknown as { raw?: string }).raw || ""
-    if (!props.api.ui.dialog.open) return
     const active = (() => {
       try {
         return props.isActive?.() ?? props.api.ui.dialog.open

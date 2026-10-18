@@ -77,7 +77,13 @@ const tui: TuiPlugin = async (api) => {
   const open = () => {
     const directory = directoryFor()
     const previousFocus = api.renderer.currentFocusedRenderable
-    api.ui.dialog.replace(() => <LoopDashboard api={api} directory={directory} />)
+    api.ui.dialog.replace(() => (
+      <LoopDashboard
+        api={api}
+        directory={directory}
+        onOpenCommand={(payload) => openTerminal(payload.commandID, payload.ownerSessionID, payload.returnSessionID)}
+      />
+    ))
     api.ui.dialog.setSize("xlarge")
     previousFocus?.blur()
   }
@@ -402,7 +408,15 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
     const previousFocus = (ctx.renderer as unknown as { currentFocusedRenderable?: { blur(): void } })
       .currentFocusedRenderable
     dialogOpen = true
-    ctx.ui.dialog.show(() => <LoopDashboard api={facade} directory={directory} />, () => {
+    ctx.ui.dialog.show(() => (
+      <LoopDashboard
+        api={facade}
+        directory={directory}
+        onOpenCommand={(payload) => {
+          openTerminal(payload.commandID, payload.ownerSessionID, payload.returnSessionID)
+        }}
+      />
+    ), () => {
       dialogOpen = false
     })
     ctx.ui.dialog.set({ size: "xlarge" })
