@@ -92,6 +92,14 @@ export interface LoopHost {
   enqueueWorkerMessage?(sessionID: string, messageID: string, text: string): Promise<void>
   /** Optional public transcript capability; terminal call+session+end evidence only. */
   readToolExecutions?(sessionID: string): Promise<TerminalToolExecution[]>
+  /**
+   * Definitive existence probe for an execution owner. `true` resolved,
+   * `false` positively absent, `undefined` unproven (capability missing,
+   * timeout, or an error that does not prove absence). Only `false` may
+   * release a stale reservation: a timeout or a missing capability must
+   * never be mistaken for a dead session.
+   */
+  sessionKnown?(sessionID: string): Promise<boolean | undefined>
   /** True only when an audited execution guard surface is installed. */
   scopedExecution?: boolean
   listAgents?(): Promise<AgentCatalog>
@@ -297,6 +305,22 @@ export function createRealHost(client: any, directory: string): LoopHost {
         return "unknown"
       } catch {
         return "unknown"
+      }
+    },
+
+    async sessionKnown(sessionID) {
+      try {
+        const result = await withTimeout<any>(client.session.get({ path: { id: sessionID } }), 10_000, "OpenCode session.get (existence)")
+        if (result?.error) {
+          const status = result.error?.statusCode ?? result.error?.status ?? result.error?.data?.statusCode
+          if (status === 404) return false
+          // A message that says "not found" is absence; anything else (auth,
+          // network, 5xx) stays unproven so nothing is released on a blip.
+          return /not.?found|does not exist|unknown session/i.test(describeError(result.error)) ? false : undefined
+        }
+        return result?.data ? true : undefined
+      } catch {
+        return undefined
       }
     },
 
@@ -693,6 +717,17 @@ export function createV2Host(
       return typeof context.session.wait === "function" ? (await readExecution(sessionID))?.status ?? "unknown" : statuses.get(sessionID) ?? "unknown"
     },
 
+    async sessionKnown(sessionID) {
+      // v2's session projection throws for both "absent" and "unreachable", so
+      // a throw stays unproven rather than being read as a dead session.
+      try {
+        const session = await withTimeout(context.session.get({ sessionID }), 10_000, "OpenCode v2 session.get (existence)")
+        return session ? true : undefined
+      } catch (error: any) {
+        return /not.?found|does not exist|unknown session/i.test(String(error?.message ?? error)) ? false : undefined
+      }
+    },
+
     async abortSession(sessionID) {
       try {
         await context.session.interrupt({ sessionID })
@@ -794,6 +829,8 @@ export interface FakeHostOptions {
   workerDelay?: number
   sessionStatus?: SessionStatusType | ((sessionID: string) => SessionStatusType | Promise<SessionStatusType>)
   autoCompletePrompts?: boolean
+  /** Override the existence probe; return undefined to model an unprovable probe. */
+  sessionKnown?: (sessionID: string) => boolean | undefined | Promise<boolean | undefined>
 }
 
 export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
@@ -804,6 +841,11 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
 } {
   const sessions = new Map<string, string[]>()
   const messages = new Map<string, SessionMessage[]>()
+  // Existence is deliberately separate from `sessions`: real hosts interrupt
+  // rather than delete, so an aborted session is still resolvable while it is
+  // no longer a live worker. Only IDs this host instance never created are
+  // absent, which models a restart against a wiped store.
+  const everCreated = new Set<string>()
   const prompts: string[] = []
   const promptCalls: Array<{ sessionID: string; agent?: string; model?: ModelRef }> = []
   const recentNotifies = new Map<string, number>()
@@ -818,6 +860,7 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
       const id = `worker-${crypto.randomUUID().slice(0, 8)}`
       sessions.set(id, [])
       messages.set(id, [])
+      everCreated.add(id)
       if (agent) (sessions as any).agents = { ...((sessions as any).agents || {}), [id]: agent }
       return id
     },
@@ -874,6 +917,13 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
       if (options.sessionStatus) return options.sessionStatus
       if (sessions.has(sessionID)) return "idle"
       return "idle"
+    },
+    async sessionKnown(sessionID) {
+      // Fake host: IDs this instance never created are provably absent, which
+      // models a restart against a wiped store. Tests that need "unproven" set
+      // FakeHostOptions.sessionKnown explicitly.
+      if (options.sessionKnown) return options.sessionKnown(sessionID)
+      return everCreated.has(sessionID)
     },
     async abortSession(sessionID) {
       sessions.delete(sessionID)

@@ -4,10 +4,10 @@
 
 | Contract | Shared-source ownership |
 | --- | --- |
-| `workspaceWrite: true`, scope omitted | Legacy whole-workspace exclusivity |
+| `workspaceWrite: true`, scope omitted | Infer `write_scope` from file names in the objective; falls back to legacy whole-workspace exclusivity when the objective names no files |
 | `write_scope: []` | Exploration only; no source writes until claimed |
 | `write_scope: ["src/a.ts"]` | Exact files; disjoint owners may run concurrently |
-| `workspaceWrite: false` | Read-only source; own goal artifacts only |
+| `workspaceWrite: false` | Read-only source; own goal artifacts only. Never contends: no reservation is recorded, so it is not blocked by, and does not block, any writer |
 
 Paths can name new files. They are canonical workspace-relative files, not
 globs or directories. Existing symlinks and new-file parents are resolved;

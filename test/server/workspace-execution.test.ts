@@ -8,6 +8,7 @@ import { createRuntimeState } from "../../src/domain/runtime"
 import { mutateState, readState } from "../../src/infrastructure/state-repository"
 import { withWorkspaceOperation } from "../../src/application/workspace-execution"
 import { guardV2ToolEditor } from "../../src/application/workspace-execution"
+import { releaseTerminalWorkspaceCalls } from "../../src/application/workspace-execution"
 import { fromPromise } from "@opencode/plugin/promise/adapter"
 // The SDK has its own Effect RC; use that exact runtime, not a hoisted RC.
 const { Effect }: typeof import("effect") = await import(import.meta.resolve("effect", import.meta.resolve("@opencode/plugin/promise/adapter")))
@@ -226,5 +227,61 @@ describe("installed host veto/error-path semantics", () => {
     // rejected promise, and the finally releases the reservation.
     await expect(definitions.get("edit").execute({ filePath: "owned.ts" }, { sessionID: "worker", id: "v2-throw" })).rejects.toThrow("original exploded")
     expect((await readState(directory)).workspaceCalls ?? []).toEqual([])
+  })
+})
+
+describe("recovering a missed guarded-v2 after-hook", () => {
+  // The guarded editor reserves under `${context.id}:${uuid}` while host evidence
+  // only ever names `context.id`. Comparing them for equality could never
+  // succeed, so a missed v2 after-hook left a fence no evidence could clear and
+  // every later check in that project was denied forever.
+  const directories: string[] = []
+  afterEach(async () => {
+    for (const directory of directories.splice(0)) await fs.rm(directory, { recursive: true, force: true })
+  })
+
+  async function reserved() {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "loopd-fence-recovery-"))
+    directories.push(directory)
+    const at = new Date(Date.now() - 60_000).toISOString()
+    await mutateState(directory, "seed", async (state) => {
+      state.goals.push(createGoal({ id: "one" as GoalID, name: "one", objective: "test", status: "active", ownerSessionID: "parent", workerSessionID: "worker", config: { workspaceWrite: true } }))
+      const runtime = createRuntimeState("one" as GoalID)
+      runtime.runGeneration = 2
+      state.runtimes.push(runtime)
+      state.workspaceCalls = [{ callID: "call_outer:5f1e", sessionID: "worker", goalID: "one" as GoalID, generation: 2, paths: [], uncontrolled: true, at }]
+      return state
+    })
+    return { directory, at }
+  }
+
+  it("releases the nested reservation of a proven-terminal outer call", async () => {
+    const { directory, at } = await reserved()
+    const released = await releaseTerminalWorkspaceCalls(directory, [
+      { sessionID: "worker", callID: "call_outer", status: "completed", endedAt: Date.parse(at) + 1_000 },
+    ])
+    expect(released).toBe(1)
+    expect((await readState(directory)).workspaceCalls ?? []).toEqual([])
+    // The fence is genuinely gone rather than merely hidden: verification,
+    // which refuses while any reservation is live, now proceeds.
+    expect(await withWorkspaceOperation(directory, "one" as GoalID, "worker", async () => "ran")).toBe("ran")
+  })
+
+  it("keeps the reservation for a different outer call", async () => {
+    const { directory, at } = await reserved()
+    const released = await releaseTerminalWorkspaceCalls(directory, [
+      { sessionID: "worker", callID: "call_other", status: "completed", endedAt: Date.parse(at) + 1_000 },
+    ])
+    expect(released).toBe(0)
+    expect((await readState(directory)).workspaceCalls ?? []).toHaveLength(1)
+  })
+
+  it("keeps the reservation when the outer call ended before it began", async () => {
+    const { directory, at } = await reserved()
+    const released = await releaseTerminalWorkspaceCalls(directory, [
+      { sessionID: "worker", callID: "call_outer", status: "completed", endedAt: Date.parse(at) - 1_000 },
+    ])
+    expect(released).toBe(0)
+    expect((await readState(directory)).workspaceCalls ?? []).toHaveLength(1)
   })
 })

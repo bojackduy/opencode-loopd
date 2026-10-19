@@ -174,4 +174,68 @@ describe("Command tools (permissions + capabilities)", () => {
     )
     expect(JSON.parse(denied.output)).toMatchObject({ ok: false, message: "permission denied" })
   })
+
+  it("start returns a top-level command_id, as its description promises", async () => {
+    const started = JSON.parse(
+      (await tools.loopd_command_start.execute({ title: "top", command: "echo" }, context("owner-1"))).output,
+    )
+    expect(started.ok).toBe(true)
+    expect(started.command_id).toBeDefined()
+    expect(started.command_id).toBe(started.command.id)
+
+    // The follow-up the description tells callers to make, using only what
+    // start handed back. This is the call that used to be impossible.
+    const got = JSON.parse(
+      (await tools.loopd_command_get.execute({ command_id: started.command_id }, context("owner-1"))).output,
+    )
+    expect(got.ok).toBe(true)
+  })
+
+  it("refuses a duplicate start and names the live session instead of spawning a twin", async () => {
+    const host = createFakeCommandHost()
+    const dupTools = commandTools({ directory: dir, commandService: createCommandService(host) })
+    const args = { title: "esp32 ble-kbd compile (port probe)", command: "make", args: ["compile"] }
+
+    const first = JSON.parse((await dupTools.loopd_command_start.execute(args, context("owner-1"))).output)
+    expect(first.ok).toBe(true)
+    expect(host.livePids().size).toBe(1)
+
+    // The retry: same owner, same argv, same cwd. Refused, no second process.
+    const second = JSON.parse((await dupTools.loopd_command_start.execute(args, context("owner-1"))).output)
+    expect(second.ok).toBe(false)
+    expect(second.errorCode).toBe("duplicate_command")
+    expect(second.command_id).toBe(first.command_id)
+    expect(host.livePids().size).toBe(1)
+
+    // A distinct argv is new work, not a duplicate.
+    const distinct = JSON.parse(
+      (await dupTools.loopd_command_start.execute({ ...args, args: ["clean"] }, context("owner-1"))).output,
+    )
+    expect(distinct.ok).toBe(true)
+    expect(host.livePids().size).toBe(2)
+
+    // The guard is owner-scoped, so another session is not blocked by ours.
+    const other = JSON.parse((await dupTools.loopd_command_start.execute(args, context("owner-2"))).output)
+    expect(other.ok).toBe(true)
+    expect(host.livePids().size).toBe(3)
+  })
+
+  it("a failed spawn leaves no live process and no persisted record", async () => {
+    const host = createFakeCommandHost()
+    const broken = { ...host, spawn(): never { throw new Error("spawn exploded") } }
+    const brokenTools = commandTools({
+      directory: dir,
+      commandService: createCommandService(broken as never),
+    })
+
+    const started = JSON.parse(
+      (await brokenTools.loopd_command_start.execute({ title: "boom", command: "make" }, context("owner-1"))).output,
+    )
+    expect(started.ok).toBe(false)
+    expect(started.message).toMatch(/spawn exploded/)
+    expect(host.livePids().size).toBe(0)
+
+    const listed = JSON.parse((await brokenTools.loopd_command_list.execute({}, context("owner-1"))).output)
+    expect(listed.commands).toHaveLength(0)
+  })
 })

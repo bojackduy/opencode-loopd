@@ -96,6 +96,7 @@ loopd_create_goal({
   checks: ["npm test"],                    // mandatory if workspaceWrite:true (or configure defaultChecks)
   checkCwd: "/project/root",               // optional; writers default to project root, readers to artifactDir
   workspaceWrite: true,                    // default true; set false explicitly for artifact-only/read-only
+  write_scope: ["src/a.ts"],               // optional; OMIT to let loopd infer it from file names in the objective
   progressFile: ".opencode/loopd/progress.md", // optional; defaults to <artifactDir>/progress.md
   maxTurns: 50,                            // optional; ≥50 enforces FINAL REPORT REQUIRED
   maxNoProgress: 5,                        // optional; auto-block without progress
@@ -107,6 +108,8 @@ loopd_create_goal({
 ```
 
 Returns `ok:true` with `goalID`, `workerSessionID`, `artifactDir`, `agent`, `model`, `costBudget`, `checks`, `workspaceWrite`, `defaultsApplied:{agent,model,checks}`. On contract violation you get `ok:false` with `errorCode: "missing_agent"` or `"missing_checks"` or `"already active"` (writer serialization) or `"invalid_cost_budget"`.
+
+**Scope is inferred by default.** On scoped hosts, when the objective names files and you do not pass `write_scope`/`workspaceWrite`, loopd sets `write_scope` to those exact paths. That is what lets independent goals run at once instead of serializing on the whole workspace. Pass `write_scope` explicitly when the objective is vague or the real file set differs from the names in the objective, and `workspaceWrite:false` for artifact-only work (which never contends at all).
 
 The goal starts immediately. The user can monitor it via `/loop` (<leader>o). Plugin options `defaultAgent` / `defaultModel` / `defaultChecks` in `opencode.jsonc` can supply defaults so callers don’t have to repeat them.
 
@@ -259,6 +262,18 @@ Abort the worker *session only* (`A` / `:abort` in TUI). Keeps goal+transcript+s
 * `resume_goal` — `paused → active`, reuses the existing worker session if `sessionStatus` is still `idle`/`busy` (preserves transcript), otherwise creates a new one. Fails with `already active` if another writer is active.
 * `retry` (via `resume` on `blocked`) — `blocked → active`, resets `consecutiveFailures`/`forceFinishRequested`.
 * `clear_goal` — aborts worker and removes `goal` + `runtime` + ledger entry (cannot be undone).
+
+### loopd_release_workspace
+
+The escape hatch for a **stuck write fence** — the state where every write, check and goal start fails with `Workspace is busy…`. Call it with no arguments to list every live reservation (`callID`, session, goal, paths, whether it is `releasable`), then call again with `call_id` (or `goal_id`/`session_id`) to release.
+
+It is deliberately narrow:
+
+* A reservation is releasable when you own its goal, **your own session made it**, or its goal no longer exists (nobody could ever free those). Anything else is refused by name. The own-session case is the common shape of a leak: the writing session *is* the chat session, so there is no goal to match through.
+* Refused while the owning session is still the live worker of a non-terminal goal — that write may genuinely be in flight.
+* Refused while a workspace operation is mid-flight.
+
+Automatic self-heal covers the rest: a goal-owned reservation whose owning session the host positively cannot resolve (404 / never seen) is released on the next reconcile. Goal deletion alone is *not* proof the write finished, and an unproven probe (timeout, auth error) never releases. Goal-less owner reservations are never auto-released, however old — a nine-day owner build looks identical to a leak.
 
 ### force_complete_goal / force_block_goal
 

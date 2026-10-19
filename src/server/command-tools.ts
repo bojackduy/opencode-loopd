@@ -5,7 +5,7 @@
 // NEVER silently default-allowed.
 
 import { tool } from "@opencode-ai/plugin/tool"
-import type { CommandService } from "../application/command-service"
+import { DuplicateCommandError, type CommandService } from "../application/command-service"
 import { requestCommandAwait, wakeGoalForAwait, type AwaitContinuation } from "../application/command-await"
 import { COMMAND_HOST_CAPABILITIES, type CommandHostCapabilities } from "./command-host"
 
@@ -161,14 +161,25 @@ export function commandTools(options: CommandToolsOptions) {
             watchIgnoreCase: args.watch_ignore_case,
             watchUntilAction: args.watch_until_action as "stop" | "keep" | undefined,
           })
+          const summary = summarize(session as never)
           return {
             title: "Command started",
-            output: JSON.stringify({ ok: true, command: summarize(session as never), capabilities }, null, 2),
+            // command_id is top-level here like every sibling command tool
+            // (get/write/interrupt/terminate/remove/watch/resize). Nesting it
+            // only under `command` contradicted the documented contract
+            // ("Returns a command_id for loopd_command_get") and made callers
+            // dereference undefined.
+            output: JSON.stringify({ ok: true, command_id: summary.id, command: summary, capabilities }, null, 2),
           }
         } catch (error) {
+          const duplicate = error instanceof DuplicateCommandError ? error : undefined
           return {
-            title: "Command not started",
-            output: JSON.stringify({ ok: false, message: error instanceof Error ? error.message : String(error) }),
+            title: duplicate ? "Command already running" : "Command not started",
+            output: JSON.stringify({
+              ok: false,
+              message: error instanceof Error ? error.message : String(error),
+              ...(duplicate ? { errorCode: "duplicate_command", command_id: duplicate.commandID } : {}),
+            }),
           }
         }
       },

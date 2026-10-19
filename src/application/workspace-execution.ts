@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import path from "node:path"
 import type { ToolEditor as V2ToolEditor } from "@opencode/plugin/promise/tool"
 import type { Goal } from "../domain/goal"
+import { isTerminal } from "../domain/goal"
 import { readState, mutateState, type StoreState } from "../infrastructure/state-repository"
 import type { LoopHost } from "../server/host-adapter"
 import type { TerminalToolExecution } from "../domain/tool-execution"
@@ -176,6 +177,9 @@ function mayBeAlive(pid?: number): boolean {
 }
 
 export function assertScopeAvailable(state: StoreState, goal: Goal): void {
+  // Artifact-only goals have no shared workspace ownership to acquire.
+  // Their private outputs must not contend with writers or verification.
+  if (goal.config.workspaceWrite === false) return
   // No session/generation/age inference can release an existing tool call.
   const now = Date.now()
   const liveCalls = (state.workspaceCalls ?? []).filter(
@@ -185,7 +189,7 @@ export function assertScopeAvailable(state: StoreState, goal: Goal): void {
     throw new Error("Goal still has closing/in-flight writes; ownership cannot be reacquired before quiescence.")
   }
   if (state.workspaceOperation) throw new Error(`Workspace operation ${state.workspaceOperation.id} is active.`)
-  if (goal.config.write_scope !== undefined || goal.config.workspaceWrite === false) {
+  if (goal.config.write_scope !== undefined) {
     const orphan = [...(state.orphanedCommandProcesses || []), ...(state.commands || []).filter((command) => command.status === "missing").map((command) => ({ commandID: command.id, pid: command.pid }))].find((process) => mayBeAlive(process.pid))
     if (orphan) throw new Error(`Protected activation denied: command ${orphan.commandID} lost its handle and process exit is unproved. Stop/verify the orphan process externally; removing its log does not release this fence.`)
     if (state.workspaceCalls?.some((call) => call.uncontrolled)) throw new Error("Protected goal activation denied: an uncontrolled tool/shell is still executing. Wait for its exit event, do not poll claims.")
@@ -200,7 +204,7 @@ export function assertScopeAvailable(state: StoreState, goal: Goal): void {
     }
     throw new Error(scopeConflictMessage(conflict))
   }
-  if (goal.config.workspaceWrite !== false && goal.config.write_scope?.length !== 0) {
+  if (goal.config.write_scope?.length !== 0) {
     const now2 = Date.now()
     const call = state.workspaceCalls?.find((call) => call.goalID !== goal.id && !isSyncStaleWorkspaceCall(state, call, now2) && (goal.config.write_scope === undefined || call.paths.some((file) => goal.config.write_scope!.includes(file))))
     if (call) throw new Error(`Scope conflict with in-flight call ${call.callID}, session ${call.sessionID}, path ${call.paths[0]}.`)
@@ -219,11 +223,26 @@ export async function beforeWorkspaceTool(directory: string, input: { tool: stri
   await mutateState(directory, `workspace.before:${input.callID}`, async (state) => {
     const goal = state.goals.find((item) => item.workerSessionID === input.sessionID)
     if (state.retiredWorkerSessions?.includes(input.sessionID)) throw new Error("Scope denied: retired worker session; goal cleared or worker rotated. Stop work; late executions are fenced.")
+    if (goal?.config.workspaceWrite === false) {
+      // A read-only goal may write ONLY its private artifact directory. These
+      // writes never acquire shared workspace reservations and therefore do
+      // not block writers, checks, or other read-only goals.
+      if (goal.status !== "active" || goal.scopeClosing) throw new Error("Scope denied: read-only worker is not active.")
+      const writes = structuredWritePaths(input.tool, args)
+      if (!writes) throw new Error(`Scope denied: uncontrolled tool "${input.tool}" in read-only goal.`)
+      if (!goal.config.artifactDir) throw new Error("Scope denied: read-only artifact directory is missing.")
+      const artifact = path.relative(directory, goal.config.artifactDir).split(path.sep).join("/")
+      const paths = await Promise.all(writes.map((file) => canonicalScopePath(directory, file)))
+      for (const file of paths) {
+        if (!file.startsWith(`${artifact}/`)) throw new Error(`Scope denied: "${file}" is outside this goal's artifact directory.`)
+      }
+      return state
+    }
     const held = heldGoals(state)
-    const protectedGoals = held.filter((item) => item.config.write_scope !== undefined || item.config.workspaceWrite === false)
+    const protectedGoals = held.filter((item) => item.config.workspaceWrite !== false && item.config.write_scope !== undefined)
     // Preserve legacy operation when no scoped/read-only contract is present.
     if (!goal && ownerTools.has(input.tool) && (!protectedGoals.length || state.goals.some((item) => item.ownerSessionID === input.sessionID))) return state
-    if (!state.workspaceOperation && !protectedGoals.length && (!goal || goal.config.write_scope === undefined && goal.config.workspaceWrite !== false)) {
+    if (!state.workspaceOperation && !protectedGoals.length && (!goal || goal.config.write_scope === undefined)) {
       // Preserve unscoped executors, but reserve them BEFORE execution so a
       // protected goal cannot activate in the middle of an existing shell/tool.
       let paths: string[] = []
@@ -251,7 +270,7 @@ export async function beforeWorkspaceTool(directory: string, input: { tool: stri
     const artifact = goal?.config.artifactDir ? path.relative(directory, goal.config.artifactDir).split(path.sep).join("/") : undefined
     for (const file of paths) {
       const inArtifact = artifact && file.startsWith(`${artifact}/`)
-      if (goal && !inArtifact && (goal.config.workspaceWrite === false || goal.config.write_scope !== undefined && !goal.config.write_scope.includes(file))) {
+      if (goal && !inArtifact && goal.config.write_scope !== undefined && !goal.config.write_scope.includes(file)) {
         throw new Error(`Scope denied: "${file}" is outside this goal's write_scope. Claim it before editing.`)
       }
       const owner = !inArtifact && held.find((item) => item.id !== goal?.id && item.config.workspaceWrite !== false && (item.config.write_scope === undefined || item.config.write_scope.includes(file)))
@@ -290,6 +309,20 @@ export async function afterWorkspaceTool(directory: string, sessionID: string, c
   })
 }
 
+/**
+ * A guarded v2 invocation reserves under `${context.id}:${randomUUID()}` so that
+ * parallel nested calls in one host call stay distinct, while host evidence only
+ * ever names the outer call id. Comparing those two forms for equality can never
+ * succeed, so every missed v2 after-hook became a reservation no evidence could
+ * release — a permanent fence over the whole workspace. A proven-terminal outer
+ * call ends its nested reservations too: the host reports the outer call only
+ * once the executors inside it have returned.
+ */
+function provesSameCall(reservationID: string, evidenceCallID: string): boolean {
+  if (reservationID === evidenceCallID) return true
+  return reservationID.startsWith(`${evidenceCallID}:`)
+}
+
 /** Recover a missed v1 after-hook using exact terminal tool-part evidence. */
 export async function releaseTerminalWorkspaceCalls(directory: string, evidence: TerminalToolExecution[]): Promise<number> {
   if (!evidence.length) return 0
@@ -297,13 +330,13 @@ export async function releaseTerminalWorkspaceCalls(directory: string, evidence:
   // Most terminal events have already run their after-hook (or are unrelated).
   // Do not rewrite the entire store for those events or duplicate replays.
   const relevant = evidence.some((proof) =>
-    snapshot.workspaceCalls?.some((call) => call.sessionID === proof.sessionID && call.callID === proof.callID) ||
-    snapshot.goals.some((goal) => goal.workerSessionID === proof.sessionID && snapshot.runtimes.some((rt) => rt.goalID === goal.id && rt.activeToolCallIDs?.includes(proof.callID))))
+    snapshot.workspaceCalls?.some((call) => call.sessionID === proof.sessionID && provesSameCall(call.callID, proof.callID)) ||
+    snapshot.goals.some((goal) => goal.workerSessionID === proof.sessionID && snapshot.runtimes.some((rt) => rt.goalID === goal.id && rt.activeToolCallIDs?.some((id) => provesSameCall(id, proof.callID)))))
   if (!relevant) return 0
   let released = 0
   await mutateState(directory, "workspace.terminal-evidence", async (state) => {
     state.workspaceCalls = (state.workspaceCalls ?? []).filter((call) => {
-      const proof = evidence.find((item) => item.sessionID === call.sessionID && item.callID === call.callID &&
+      const proof = evidence.find((item) => item.sessionID === call.sessionID && provesSameCall(call.callID, item.callID) &&
         (item.status === "completed" || item.status === "error") && Number.isFinite(item.endedAt) &&
         typeof call.at === "string" && Number.isFinite(Date.parse(call.at)) && item.endedAt >= Date.parse(call.at))
       if (!proof) return true
@@ -311,7 +344,7 @@ export async function releaseTerminalWorkspaceCalls(directory: string, evidence:
       const goal = state.goals.find((item) => item.id === call.goalID && item.workerSessionID === call.sessionID)
       const rt = goal && state.runtimes.find((item) => item.goalID === goal.id)
       if (rt && (call.generation === undefined || rt.runGeneration === call.generation)) {
-        rt.activeToolCallIDs = rt.activeToolCallIDs?.filter((id) => id !== call.callID)
+        rt.activeToolCallIDs = rt.activeToolCallIDs?.filter((id) => id !== call.callID && !provesSameCall(id, proof.callID))
       }
       return false
     })
@@ -326,8 +359,8 @@ export async function releaseTerminalWorkspaceCalls(directory: string, evidence:
         ? Date.parse(rt.turnStartedAt ?? rt.lastRunAt!) : NaN
       if (!rt?.activeToolCallIDs?.length || !Number.isFinite(started)) continue
       rt.activeToolCallIDs = rt.activeToolCallIDs.filter((callID) => {
-        if (state.workspaceCalls?.some((call) => call.sessionID === goal.workerSessionID && call.callID === callID)) return true
-        return !evidence.some((item) => item.sessionID === goal.workerSessionID && item.callID === callID &&
+        if (state.workspaceCalls?.some((call) => call.sessionID === goal.workerSessionID && provesSameCall(call.callID, callID))) return true
+        return !evidence.some((item) => item.sessionID === goal.workerSessionID && provesSameCall(callID, item.callID) &&
           (item.status === "completed" || item.status === "error") && Number.isFinite(item.endedAt) && item.endedAt >= started)
       })
     }
@@ -338,18 +371,80 @@ export async function releaseTerminalWorkspaceCalls(directory: string, evidence:
 }
 
 export async function reconcileTerminalWorkspaceCalls(directory: string, host: LoopHost): Promise<void> {
-  if (!host.readToolExecutions) return
-  const state = await readState(directory)
-  const sessions = [...new Set([
-    ...(state.workspaceCalls ?? []).map((call) => call.sessionID),
-    ...state.goals.filter((goal) => goal.workerSessionID && state.runtimes.some((rt) => rt.goalID === goal.id && rt.activeToolCallIDs?.length)).map((goal) => goal.workerSessionID!),
-  ])]
-  if (!sessions.length) return
-  const proof = await Promise.all(sessions.map(async (sessionID) => {
-    try { return (await host.readToolExecutions!(sessionID)).filter((item) => item.sessionID === sessionID) }
-    catch { return [] }
-  }))
-  await releaseTerminalWorkspaceCalls(directory, proof.flat())
+  if (host.readToolExecutions) {
+    const state = await readState(directory)
+    const sessions = [...new Set([
+      ...(state.workspaceCalls ?? []).map((call) => call.sessionID),
+      ...state.goals.filter((goal) => goal.workerSessionID && state.runtimes.some((rt) => rt.goalID === goal.id && rt.activeToolCallIDs?.length)).map((goal) => goal.workerSessionID!),
+    ])]
+    if (sessions.length) {
+      const proof = await Promise.all(sessions.map(async (sessionID) => {
+        try { return (await host.readToolExecutions!(sessionID)).filter((item) => item.sessionID === sessionID) }
+        catch { return [] }
+      }))
+      await releaseTerminalWorkspaceCalls(directory, proof.flat())
+    }
+  }
+  // Second, independent proof: a session the host positively cannot resolve
+  // can never finish its write, so its goal-owned reservations are released.
+  await releaseAbsentSessionWorkspaceCalls(directory, host)
+}
+
+/**
+ * Release goal-owned reservations whose owning session the host positively
+ * cannot resolve AND whose goal is terminal or already gone.
+ *
+ * Both conditions are required, deliberately:
+ * (a) Goal deletion alone is not proof that a write finished — a retired
+ *     worker can still be mid-write, so tombstones keep their fences.
+ * (b) An unproven probe is never absence. Only a definitive `false` releases;
+ *     a timeout, an auth error or a missing capability leaves the fence.
+ *
+ * Owner-session (goal-less) reservations are never auto-released: a long
+ * owner build is indistinguishable from a leaked one, so that case is left to
+ * the explicit owner release path.
+ */
+export async function releaseAbsentSessionWorkspaceCalls(directory: string, host: LoopHost): Promise<number> {
+  if (!host.sessionKnown) return 0
+  const snapshot = await readState(directory)
+  const orphaned = (snapshot.workspaceCalls ?? []).filter((call) =>
+    Boolean(call.goalID) &&
+    !snapshot.goals.some((goal) => goal.id === call.goalID && !isTerminal(goal.status)),
+  )
+  if (!orphaned.length) return 0
+  const sessions = [...new Set(orphaned.map((call) => call.sessionID))]
+  const known = new Map<string, boolean | undefined>()
+  for (const sessionID of sessions) {
+    try { known.set(sessionID, await host.sessionKnown(sessionID)) }
+    catch { known.set(sessionID, undefined) }
+  }
+  const gone = new Set(sessions.filter((sessionID) => known.get(sessionID) === false))
+  if (!gone.size) return 0
+  let released = 0
+  await mutateState(directory, "workspace.absent-session", async (state) => {
+    state.workspaceCalls = (state.workspaceCalls ?? []).filter((call) => {
+      if (!call.goalID || !gone.has(call.sessionID)) return true
+      if (state.goals.some((goal) => goal.id === call.goalID && !isTerminal(goal.status))) return true
+      released += 1
+      return false
+    })
+    // A fence was the only thing holding a closing goal open; now that it is
+    // gone the flag must not outlive it.
+    for (const goal of state.goals) {
+      if (!goal.scopeClosing) continue
+      if ((state.workspaceCalls ?? []).some((call) => call.goalID === goal.id) || state.workspaceOperation?.goalID === goal.id) continue
+      goal.scopeClosing = false
+      goal.updatedAt = new Date().toISOString()
+    }
+    return state
+  })
+  if (released) {
+    await logServerEvent(directory, "workspace.absent-session-released", {
+      released,
+      sessions: [...gone],
+    }).catch(() => {})
+  }
+  return released
 }
 
 /** Supported v2 execution guard, independent of host handling of hook defects. */

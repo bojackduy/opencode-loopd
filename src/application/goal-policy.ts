@@ -17,6 +17,17 @@ export type GoalConfigResolution =
     }
   | { ok: false; message: string; errorCode: "missing_checks" | "invalid_model" }
 
+/**
+ * Conservatively identify explicit file references in the objective. This is
+ * not a filesystem scope validator: GoalService canonicalizes the result.
+ * Unnamed/broad objectives retain legacy exclusive ownership.
+ */
+export function inferNamedFileWriteScope(objective: string): string[] | undefined {
+  const matches = objective.matchAll(/(?<![\w./:@-])(?:\.\/)?(?:[\w.-]+\/)*[\w.-]+\.(?:tsx?|jsx?|mjs|cjs|jsonc?|md|py|go|rs|java|kt|c|cc|cpp|h|hpp|cs|sh|ya?ml|toml|css|scss|html|sql|vue|svelte|xml|txt|proto|gradle|lock)\b/g)
+  const paths = [...new Set([...matches].map((match) => match[0]!.replace(/^\.\//, "")))].sort()
+  return paths.length ? paths : undefined
+}
+
 export function resolveGoalCreationConfig(input: {
   directory: string
   objective: string

@@ -191,6 +191,19 @@ export interface CommandService {
   dispose(directory: string): Promise<void>
 }
 
+/**
+ * A retried start must never silently spawn a twin. A caller that saw a
+ * failed-looking result retries, and two identical PTYs in the same cwd run the
+ * same work twice (duplicate builds, duplicated make output). Refuse and name
+ * the live session so the caller can reuse it instead of duplicating it.
+ */
+export class DuplicateCommandError extends Error {
+  constructor(readonly commandID: string, readonly title: string) {
+    super(`An identical command is already running: command_id ${commandID} ("${title}", same argv and cwd). Reuse that session instead of starting a twin, or change the argv/cwd to start a distinct one.`)
+    this.name = "DuplicateCommandError"
+  }
+}
+
 function loopCommandsDir(directory: string): string {
   return path.join(directory, ".opencode", "loopd", "commands")
 }
@@ -920,6 +933,35 @@ export function createCommandService(
     return !!cmd && cmd.ownerSessionID === ownerSessionID
   }
 
+  /**
+   * Undo a partially completed start. The child already exists (or may have
+   * exited), so terminate it, drop the live/timeout registrations, and remove
+   * the persisted record — best effort, because the original failure may have
+   * BEEN the state lock. Never throws: the caller's error is the real one.
+   */
+  async function rollbackStart(directory: string, id: CommandSessionID, handle: CommandProcessHandle): Promise<void> {
+    try { handle.terminate() } catch {}
+    const exited = await Promise.race([
+      handle.exited().then(() => true, () => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1000)),
+    ])
+    try { if (!exited && handle.isAlive()) handle.kill() } catch {}
+    live.delete(id)
+    watchers.delete(id)
+    const timer = timeouts.get(id)
+    if (timer) {
+      clearTimeout(timer)
+      timeouts.delete(id)
+    }
+    timeoutOwners.delete(id)
+    try {
+      await mutateState(directory, `cmd.rollback:${id}`, async (s) => {
+        s.commands = (s.commands ?? []).filter((command) => command.id !== id)
+        return s
+      })
+    } catch {}
+  }
+
   const service: CommandService = {
     async start(directory, input) {
       const title = input.title.trim()
@@ -960,9 +1002,24 @@ export function createCommandService(
       const pending: PendingEvent[] = []
       let ready = false
       const scopeCallID = `command-start:${id}`
+      // Refuse a duplicate before spawning: an identical argv+cwd already
+      // running under this owner is a retry, not new work, and a second PTY
+      // would run the same build concurrently. Checked before
+      // beforeWorkspaceTool so a refusal leaves no workspace reservation.
+      const startedArgs = input.args ?? []
+      const duplicate = (await readState(directory)).commands?.find(
+        (c) => c.ownerSessionID === input.ownerSessionID
+          && c.status === "running"
+          && c.command === command
+          && c.cwd === cwd
+          && c.args.length === startedArgs.length
+          && c.args.every((arg, index) => arg === startedArgs[index]),
+      )
+      if (duplicate) throw new DuplicateCommandError(duplicate.id, duplicate.title)
       await beforeWorkspaceTool(directory, { tool: "loopd_command_start", sessionID: input.ownerSessionID, callID: scopeCallID }, {})
+      let handle: CommandProcessHandle | undefined
       try {
-      const handle = host.spawn(
+      handle = host.spawn(
         spawnOpts,
         (chunk) => {
           if (!ready) pending.push({ type: "output", chunk })
@@ -973,6 +1030,7 @@ export function createCommandService(
           else void enqueue(id, () => persistExit(directory, id, info)).catch(() => {})
         },
       )
+      try {
       const session = createCommandSession({
         id,
         title,
@@ -998,20 +1056,10 @@ export function createCommandService(
         watchUntilAction: watcher?.untilAction,
         watchState,
       })
-      try {
-        await mutateState(directory, `cmd.start:${id}`, async (s) => {
-          s.commands = [...(s.commands ?? []), session]
-          return s
-        })
-      } catch (error) {
-        handle.terminate()
-        const exited = await Promise.race([
-          handle.exited().then(() => true, () => true),
-          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1000)),
-        ])
-        if (!exited && handle.isAlive()) handle.kill()
-        throw error
-      }
+      await mutateState(directory, `cmd.start:${id}`, async (s) => {
+        s.commands = [...(s.commands ?? []), session]
+        return s
+      })
       live.set(id, { handle, buffers: [], bufferedBytes: 0 })
       if (watcher) watchers.set(id, watcher)
       if (timeoutSeconds !== undefined) scheduleTimeout(directory, id, input.ownerSessionID, timeoutSeconds)
@@ -1050,6 +1098,16 @@ export function createCommandService(
       }
       await Promise.all(initialOperations)
       return (await service.get(directory, id, input.ownerSessionID)) ?? session
+      } catch (error) {
+        // Atomic start: once the process exists, ANY later failure (ledger
+        // write, broker, timers) must not leave a live PTY or a persisted
+        // record the caller was told failed — that is what made a retry
+        // duplicate the command.
+        // A spawn that throws never produced a process, so there is nothing to
+        // roll back — and `handle` is still unset.
+        if (handle) await rollbackStart(directory, id, handle)
+        throw error
+      }
       } finally { await afterWorkspaceTool(directory, input.ownerSessionID, scopeCallID) }
     },
 

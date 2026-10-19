@@ -761,5 +761,48 @@ export function ownerTools(options: OwnerToolsOptions) {
         }
       },
     }),
+
+    loopd_release_workspace: tool({
+      description:
+        "Diagnose and release stuck workspace write reservations (the fence that makes every write, check and goal start fail with \"Workspace is busy…\"). Call with no arguments to list every live reservation and whether it is releasable; then call again naming call_id, goal_id or session_id to release. Releasable = a goal you own, a reservation your own session made, or one whose goal no longer exists (nobody else can ever free those). A reservation whose session still belongs to a live goal is refused — those may be genuinely mid-write. Prefer this over editing state.json by hand.",
+      args: {
+        call_id: tool.schema.string().optional().describe("Exact reservation to release, from the no-argument listing."),
+        goal_id: tool.schema.string().optional().describe("Release every reservation owned by this goal (only if you own it, or the goal no longer exists)."),
+        session_id: tool.schema.string().optional().describe("Release reservations held by this execution session (only when releasable)."),
+      },
+      execute: async (args, context) => {
+        const ownerID = context?.sessionID
+        if (!ownerID) {
+          return {
+            title: "No session",
+            output: JSON.stringify({ ok: false, message: "No session context available, so reservation ownership cannot be matched." }),
+          }
+        }
+        const selecting = Boolean(args.call_id || args.goal_id || args.session_id)
+        if (!selecting) {
+          const report = await goalService.workspaceReservations(directory, ownerID)
+          return {
+            title: `${report.reservations.length} reservation(s)`,
+            output: JSON.stringify({
+              ok: true,
+              mode: "inspect",
+              message: report.reservations.length
+                ? "Re-call with call_id (or goal_id/session_id) to release a releasable entry."
+                : "No live workspace reservations — nothing is fencing this project.",
+              ...report,
+            }),
+          }
+        }
+        const result = await goalService.releaseWorkspace(directory, ownerID, {
+          callID: args.call_id,
+          goalID: args.goal_id,
+          sessionID: args.session_id,
+        })
+        return {
+          title: result.ok ? `Released ${result.released.length}` : "Release refused",
+          output: JSON.stringify({ mode: "release", ...result }),
+        }
+      },
+    }),
   }
 }

@@ -22,6 +22,7 @@ import { createWorkerManager, type WorkerManager, type WorkerSession, type Conti
 import type { LoopEvent } from "../domain/events"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
 import { assertScopeAvailable, retireWorker, sweepStaleWorkspaceState, isStaleWorkspaceCall, isSyncStaleWorkspaceCall, reconcileTerminalWorkspaceCalls } from "./workspace-execution"
+import { inferNamedFileWriteScope } from "./goal-policy"
 
 /**
  * Structured startup failure. start() persists the goal (and worker, when
@@ -52,6 +53,34 @@ export interface GoalActionResult {
   workerSessionID?: string
   runGeneration?: number
   promptMessageID?: string
+}
+
+/** One durable write reservation, with the ownership a caller needs to judge it. */
+export interface WorkspaceReservation {
+  callID: string
+  sessionID: string
+  goalID?: string
+  goalName?: string
+  goalStatus?: string
+  paths: string[]
+  uncontrolled?: boolean
+  at?: string
+  /** This caller owns the reservation's goal, or the goal is gone. */
+  releasable: boolean
+  /** Why the reservation cannot be released by this caller. */
+  reason?: string
+}
+
+export interface WorkspaceReservations {
+  reservations: WorkspaceReservation[]
+  operation?: { id: string; goalID: string; sessionID: string }
+}
+
+export interface WorkspaceReleaseResult {
+  ok: boolean
+  message: string
+  released: WorkspaceReservation[]
+  remaining: WorkspaceReservations
 }
 
 class GoalDeliveryBlockedError extends Error {
@@ -126,6 +155,19 @@ export interface GoalService {
 
   /** Clear a goal and abort its worker. */
   clear(directory: string, goalID: GoalID): Promise<void>
+
+  /**
+   * Every live write reservation in this project, with the ownership a caller
+   * needs to judge whether it may be released. Diagnosis never mutates.
+   */
+  workspaceReservations(directory: string, ownerSessionID: string): Promise<WorkspaceReservations>
+
+  /**
+   * Owner escape hatch. Releases reservations the caller owns, or those whose
+   * goal no longer exists (nobody can ever release those otherwise), so a
+   * leaked fence never requires editing state.json by hand.
+   */
+  releaseWorkspace(directory: string, ownerSessionID: string, input: { callID?: string; goalID?: string; sessionID?: string }): Promise<WorkspaceReleaseResult>
 
   /** Get the worker session for a goal (for engine to check status). */
   getWorker(goalID: GoalID): WorkerSession | undefined
@@ -876,6 +918,12 @@ export function createGoalService(host: LoopHost): GoalService {
     parentModel?: string
     interactive?: boolean
   }, id: GoalID) {
+    // Prefer enforceable, disjoint file ownership when the user explicitly
+    // names files. Do not silently enable scopes on the legacy host.
+    if (host.scopedExecution && input.config?.workspaceWrite !== false && input.config?.write_scope === undefined) {
+      const inferred = inferNamedFileWriteScope(input.objective)
+      if (inferred) input.config = { ...input.config, write_scope: inferred }
+    }
     // Reject malformed/unavailable alternatives before any worker or goal exists.
     if (input.config?.write_scope !== undefined && !host.scopedExecution) throw new Error("Enforced file scopes are unsupported on this host. Use the guarded v2 tool execution surface; v1 retains legacy exclusivity only.")
     if (input.config?.fallbackModels?.length) {
@@ -1660,6 +1708,110 @@ export function createGoalService(host: LoopHost): GoalService {
     return continueTurnUnlocked(directory, goalID)
   }
 
+  /**
+   * Read-only projection of the fence table. `releasable` is a *ownership*
+   * judgement, not a liveness one: a reservation stays unreleasable while its
+   * session is still the worker of a non-terminal goal, because that session
+   * may legitimately be mid-write.
+   */
+  function describeReservations(state: StoreState, callerSessionID: string): WorkspaceReservations {
+    const liveWorkerSessions = new Set(
+      state.goals.filter((goal) => !isTerminal(goal.status) && goal.workerSessionID).map((goal) => goal.workerSessionID!),
+    )
+    const reservations = (state.workspaceCalls ?? []).map((call) => {
+      const goal = state.goals.find((item) => item.id === call.goalID)
+      const owned = Boolean(call.goalID && goal?.ownerSessionID === callerSessionID)
+      const orphaned = Boolean(call.goalID && !goal)
+      // Your own session's reservations are always yours to release: you are
+      // the only one who can know the call that opened them is dead. This is
+      // the common shape of a leaked fence — the writing session *is* the
+      // chat session, and it has no goal to be matched through.
+      const ownSession = call.sessionID === callerSessionID
+      const liveWorker = liveWorkerSessions.has(call.sessionID)
+      const releasable = (owned || orphaned || ownSession) && !liveWorker
+      return {
+        callID: call.callID,
+        sessionID: call.sessionID,
+        goalID: call.goalID,
+        goalName: goal?.name,
+        goalStatus: goal?.status,
+        paths: call.paths,
+        uncontrolled: call.uncontrolled,
+        at: call.at,
+        releasable,
+        reason: releasable
+          ? undefined
+          : liveWorker
+            ? "Its session is still the worker of a non-terminal goal and may be mid-write."
+            : "Owned by another session. Only a goal you own, your own session's calls, or a goal that no longer exists, can be released here.",
+      }
+    })
+    const operation = state.workspaceOperation
+      ? { id: state.workspaceOperation.id, goalID: state.workspaceOperation.goalID, sessionID: state.workspaceOperation.sessionID }
+      : undefined
+    return { reservations, operation }
+  }
+
+  async function workspaceReservationsUnlocked(directory: string, ownerSessionID: string): Promise<WorkspaceReservations> {
+    return describeReservations(await readState(directory), ownerSessionID)
+  }
+
+  async function releaseWorkspaceUnlocked(
+    directory: string,
+    ownerSessionID: string,
+    input: { callID?: string; goalID?: string; sessionID?: string },
+  ): Promise<WorkspaceReleaseResult> {
+    const pre = await readState(directory)
+    const report = describeReservations(pre, ownerSessionID)
+    if (!input.callID && !input.goalID && !input.sessionID) {
+      return { ok: false, message: "Name a call_id, goal_id or session_id to release. This is a deliberate escape hatch, not a sweep.", released: [], remaining: report }
+    }
+    if (pre.workspaceOperation) {
+      return { ok: false, message: `Workspace operation ${pre.workspaceOperation.id} is mid-flight. Wait for it to finish, then release.`, released: [], remaining: report }
+    }
+    const targets = report.reservations.filter((item) =>
+      (!input.callID || item.callID === input.callID) &&
+      (!input.goalID || item.goalID === input.goalID) &&
+      (!input.sessionID || item.sessionID === input.sessionID),
+    )
+    if (!targets.length) {
+      return { ok: false, message: "No workspace reservation matches that selection.", released: [], remaining: report }
+    }
+    const blocked = targets.filter((item) => !item.releasable)
+    if (blocked.length) {
+      return {
+        ok: false,
+        message: `Refusing to release ${blocked.length} of ${targets.length} reservation(s): ${blocked.map((item) => `${item.callID} — ${item.reason}`).join("; ")}`,
+        released: [],
+        remaining: report,
+      }
+    }
+    const ids = new Set(targets.map((item) => item.callID))
+    const after = await mutateState(directory, "workspace.release-manual", async (state) => {
+      state.workspaceCalls = (state.workspaceCalls ?? []).filter((call) => !ids.has(call.callID))
+      // scopeClosing exists only because in-flight writes did; once the owner
+      // has asserted those writes are dead, keeping the flag would wedge the
+      // goal in "cannot reacquire ownership" forever.
+      for (const goal of state.goals) {
+        if (!goal.scopeClosing) continue
+        if ((state.workspaceCalls ?? []).some((call) => call.goalID === goal.id) || state.workspaceOperation?.goalID === goal.id) continue
+        goal.scopeClosing = false
+        goal.updatedAt = new Date().toISOString()
+      }
+      return state
+    })
+    await logServerEvent(directory, "workspace.released-manual", {
+      released: targets.map((item) => ({ callID: item.callID, sessionID: item.sessionID, goalID: item.goalID })),
+      ownerSessionID,
+    }).catch(() => {})
+    return {
+      ok: true,
+      message: `Released ${targets.length} workspace reservation(s): ${targets.map((item) => item.callID).join(", ")}.`,
+      released: targets,
+      remaining: describeReservations(after, ownerSessionID),
+    }
+  }
+
   async function clearUnlocked(directory: string, goalID: GoalID) {
     // Terminal by design: clear is NEVER gated on quiescence. The old
     // two-step scopeClearPending tombstone kept dead goals visible forever.
@@ -2050,5 +2202,13 @@ export function createGoalService(host: LoopHost): GoalService {
     return withGoalOperation(goalID, () => accountUsageUnlocked(directory, goalID))
   }
 
-  return { scopedExecution: host.scopedExecution === true, start, continueTurn, nudge, pause, resume, retry, clear, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, observeProviderError, compact }
+  function workspaceReservations(directory: string, ownerSessionID: string) {
+    return workspaceReservationsUnlocked(directory, ownerSessionID)
+  }
+
+  function releaseWorkspace(directory: string, ownerSessionID: string, input: { callID?: string; goalID?: string; sessionID?: string }) {
+    return releaseWorkspaceUnlocked(directory, ownerSessionID, input)
+  }
+
+  return { scopedExecution: host.scopedExecution === true, start, continueTurn, nudge, pause, resume, retry, clear, workspaceReservations, releaseWorkspace, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, observeProviderError, compact }
 }
