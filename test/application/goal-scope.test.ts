@@ -38,6 +38,20 @@ function claim(root: string, index: number, paths: string[]) {
 }
 
 describe("persisted scope claims", () => {
+  it("never authorizes arbitrary tools from approved command name and executable matches", async () => {
+    for (const status of ["active", "paused", "blocked", "complete"] as const) {
+      const root = await fixture([[]])
+      await mutateState(root, "command-authority", async (state) => {
+        state.goals[0]!.status = status
+        state.goals[0]!.config.approvedCommands = [{ name: "shell", command: "bun", args: ["run", "build"], cwd: ".", kind: "finite" }]
+        state.workspaceOperation = { id: "checks", goalID: "other", sessionID: "other" }
+        return state
+      })
+      await expect(beforeWorkspaceTool(root, { tool: "shell", sessionID: "worker-0", callID: "injected" }, { command: "bun", args: ["-e", "throw 1"], cwd: "/" })).rejects.toThrow()
+      expect((await readState(root)).workspaceCalls ?? []).toHaveLength(0)
+    }
+  })
+
   it("unsupported v1-like hosts refuse scoped starts/claims and fence persisted scoped workers on restart", async () => {
     const root = await fixture([])
     const host = createFakeHost()

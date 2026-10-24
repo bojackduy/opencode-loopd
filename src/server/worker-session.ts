@@ -134,6 +134,14 @@ function buildContinuationSteering(goal: Goal, runtime: GoalRuntimeState, contex
     ``, `## READ-ONLY OWNERSHIP`, `Shared source writes and arbitrary shell/custom/subagent tools are denied. Write artifacts only under this goal's artifact directory. Use run_goal_checks for trusted configured verification.`,
   ] : []
 
+  const approvedInstructions = goal.config.approvedCommands?.length ? [
+    ``, `## APPROVED COMMANDS`,
+    `Allowed names: ${goal.config.approvedCommands.map((command) => `${command.name} (${command.kind})`).join(", ")}.`,
+    `Finite: run_approved_command({ name }). Server: start_approved_server/read_approved_server/stop_approved_server({ name }).`,
+    `These tools accept a name only. Executable, args, cwd, env, shell, kind and timeout overrides are denied; unknown names and kind mismatches are denied.`,
+    `Finite commands hold the workspace-wide operation lock until the real process exits. Managed servers are stopped when this goal pauses, blocks, completes, clears, aborts, or rotates.`,
+  ] : []
+
   const artifactDir = (goal.config as any).artifactDir as string | undefined
   function outputLocationBlock(): string[] {
     if (!artifactDir) return []
@@ -277,5 +285,6 @@ function buildContinuationSteering(goal: Goal, runtime: GoalRuntimeState, contex
   }
 
   parts.push(...scopeInstructions)
+  parts.push(...approvedInstructions)
   return parts.join("\n")
 }

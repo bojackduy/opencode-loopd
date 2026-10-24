@@ -64,6 +64,14 @@ export function goalTools(
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
         workspaceWrite: tool.schema.boolean().optional().describe("Whether this goal edits the shared project workspace. Defaults to true; explicitly set false for artifact-only/read-only work."),
         write_scope: tool.schema.array(tool.schema.string()).optional().describe("Enforced exact-file ownership on supported hosts. Default: infer explicitly named files from the objective; otherwise legacy exclusive ownership. Supply exact workspace-relative files to override inference, or [] for scoped exploration. No globs. Unsupported hosts must omit this key. Never substitute workspaceWrite:false for coding to bypass protection."),
+        approvedCommands: tool.schema.array(tool.schema.object({
+          name: tool.schema.string(),
+          command: tool.schema.string(),
+          args: tool.schema.array(tool.schema.string()),
+          cwd: tool.schema.string(),
+          kind: tool.schema.enum(["finite", "server"]),
+          timeoutSeconds: tool.schema.number().positive().finite().optional(),
+        }).strict()).optional().describe("Immutable owner-authorized named commands. Fixed executable and argument vector, workspace-relative existing cwd, finite/server kind and optional timeout. Trusted commands may write files; this is not a filesystem sandbox. Authority is never inferred from objective text."),
         progressFile: tool.schema.string().optional().describe("Markdown file the worker reads/writes as its transaction state."),
         maxTurns: tool.schema.number().optional().describe("Max turns before auto-block."),
         maxNoProgress: tool.schema.number().optional().describe("Block after N turns without progress."),
@@ -95,6 +103,7 @@ export function goalTools(
         if (args.checkCwd) config.checkCwd = args.checkCwd
         if (args.workspaceWrite !== undefined) config.workspaceWrite = args.workspaceWrite
         if (args.write_scope !== undefined) config.write_scope = args.write_scope
+        if (args.approvedCommands !== undefined) config.approvedCommands = args.approvedCommands
         if (args.progressFile) config.progressFile = args.progressFile
         if (args.maxTurns !== undefined) config.maxTurns = args.maxTurns
         if (args.maxNoProgress !== undefined) config.maxNoProgress = args.maxNoProgress
@@ -180,6 +189,7 @@ export function goalTools(
               checks: resolution.config.checks || [],
               workspaceWrite: resolution.config.workspaceWrite,
               write_scope: goal.config.write_scope,
+              approvedCommands: goal.config.approvedCommands,
               enforcedScopedExecution: goalService.scopedExecution,
               defaultsApplied: resolution.defaultsApplied,
               name: args.name,
@@ -370,7 +380,10 @@ export function goalTools(
             const failureDetails = checkResults.failures.map((f) => {
               const stdoutSnippet = f.stdout ? `\nStdout: ${f.stdout.slice(0, 500)}` : ""
               const stderrSnippet = f.stderr ? `\nStderr: ${f.stderr.slice(0, 500)}` : ""
-              return `Command: ${f.command}\nExit code: ${f.exitCode}${stdoutSnippet}${stderrSnippet}`
+              const status = f.timedOut
+                ? `Timed out after ${Math.round(CHECK_TIMEOUT_MS / 1000)}s (not a test failure)`
+                : `Exit code: ${f.exitCode}`
+              return `Command: ${f.command}\n${status}${stdoutSnippet}${stderrSnippet}`
             }).join("\n\n")
             let rejectionCount = 0
             let blocked = false
@@ -401,6 +414,7 @@ export function goalTools(
                 checks: checkResults.failures.map((f) => ({
                   command: f.command,
                   exitCode: f.exitCode,
+                  timedOut: f.timedOut,
                   stderr: f.stderr,
                   stdout: f.stdout,
                 })),
@@ -724,6 +738,7 @@ function formatGoalStructured(goal: Goal, runtime?: GoalRuntimeState, enforcedSc
       checkCwd: goal.config.checkCwd,
       workspaceWrite: goal.config.workspaceWrite,
       write_scope: goal.config.write_scope,
+      approvedCommands: goal.config.approvedCommands,
       scopeClosing: goal.scopeClosing === true,
       scopeClearPending: goal.scopeClearPending === true,
       scopeRetryPolicy: "coordinate_then_retry_no_automatic_queue",
@@ -781,9 +796,20 @@ function formatGoalStructured(goal: Goal, runtime?: GoalRuntimeState, enforcedSc
   return JSON.stringify(output, null, 2)
 }
 
+/**
+ * Checks are real build/test commands, so they are bounded by time rather than
+ * trusted. The previous 30 s cap silently SIGTERM-killed any suite slower than
+ * that, then recorded the corpse as an ordinary failure whose "stderr" was the
+ * head of a partial stream — indistinguishable from a genuine test failure, and
+ * impossible for a worker to satisfy or diagnose. A timeout is now reported as
+ * a timeout, and the cap accommodates a real suite (the loopd suite alone runs
+ * ~50 s).
+ */
+const CHECK_TIMEOUT_MS = 180_000
+
 interface CheckResult {
   passed: boolean
-  failures: Array<{ command: string; exitCode: number; stderr: string; stdout: string }>
+  failures: Array<{ command: string; exitCode: number | null; timedOut: boolean; stderr: string; stdout: string }>
 }
 
 /** Publish only worker-owned transition fields, never a stale whole-store snapshot. */
@@ -807,19 +833,26 @@ async function persistWorkerMutation(dir: string, goal: Goal, runtime: GoalRunti
   })
 }
 
-async function runCompletionChecks(checks: string[], cwd?: string): Promise<CheckResult> {
+export async function runCompletionChecks(checks: string[], cwd?: string, timeoutMs = CHECK_TIMEOUT_MS): Promise<CheckResult> {
   const failures: CheckResult["failures"] = []
 
   for (const cmd of checks) {
     try {
-      const { stdout, stderr } = await execAsync(cmd, { timeout: 30_000, cwd }) as any
+      const { stdout, stderr } = await execAsync(cmd, { timeout: timeoutMs, cwd }) as any
       // Success — nothing to record; stdout/stderr ignored for passing checks
       void stdout; void stderr
     } catch (error: any) {
+      // A killed command reports code:null with signal "SIGTERM". Reporting that
+      // as exitCode 1 made a timeout read as a failed test, so it is surfaced as
+      // its own thing and the exit code stays null rather than being invented.
+      const timedOut = error?.killed === true || error?.signal === "SIGTERM" || error?.code === "ETIMEDOUT"
       failures.push({
         command: cmd,
-        exitCode: error.code ?? 1,
-        stderr: String(error.stderr || error.message || "unknown error").slice(0, 1000),
+        exitCode: typeof error?.code === "number" ? error.code : null,
+        timedOut,
+        stderr: timedOut
+          ? `Check exceeded its ${Math.round(timeoutMs / 1000)}s limit and was terminated, so this is not a failure report. Partial output:\n${String(error.stderr || "").slice(0, 1000)}`
+          : String(error.stderr || error.message || "unknown error").slice(0, 1000),
         stdout: String(error.stdout || "").slice(0, 1000),
       })
     }

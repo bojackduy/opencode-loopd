@@ -214,6 +214,49 @@ block_goal({
 })
 ```
 
+### Approved Commands and Managed Servers
+
+Workers cannot use arbitrary shell. Owners can grant **named, immutable commands** at goal creation (`approvedCommands`). Authority is persisted on the goal and re-read on every call; it is never inferred from objective text.
+
+```ts
+// Owner: grant authority once, at creation (all fields are fixed forever).
+loopd_create_goal({
+  name: "web",
+  objective: "keep the dev server healthy and fix build failures",
+  config: {
+    workspaceWrite: true,
+    write_scope: ["src/web/**"],
+    approvedCommands: [
+      { name: "test", command: "bun", args: ["test"], cwd: ".", kind: "finite", timeoutSeconds: 180 },
+      { name: "dev", command: "bun", args: ["run", "dev"], cwd: "web", kind: "server" },
+    ],
+  },
+})
+
+// Worker: finite command by NAME only (executable/args/cwd/env/shell are rejected).
+run_approved_command({ name: "test" })
+// → { ok, exitCode, stdout, stderr, timedOut, durationMs, cwd, command, args }
+
+// Worker: managed server by NAME only.
+start_approved_server({ name: "dev" })
+// → { ok, commandID, status: "running", live, pid, command, args, cwd, output }
+read_approved_server({ name: "dev" })
+// → status/liveness/pid/exitCode + output tail
+stop_approved_server({ name: "dev" })
+// → stopped only after the real process exit is proved
+```
+
+Rules and limitations:
+
+- **Name-only surface.** `run_approved_command`, `start_approved_server`, `read_approved_server` and `stop_approved_server` accept only `name`. Any `command`, `args`, `cwd`, `env`, `shell`, `kind` or `timeoutSeconds` key is refused with `override_denied`. `run_approved_command` refuses `kind: "server"` specs (and vice versa) with `kind_mismatch`.
+- **Finite commands hold the workspace lock.** `run_approved_command` runs `executable + args` without a shell under the workspace-wide operation lock; concurrent source writes, checks and other approved commands are denied until the actual process exits. Output is bounded; the result carries the real exit code, duration and timeout outcome.
+- **Not a filesystem sandbox.** These are owner-trusted executables. The lock is coordination, not isolation: a command can write anything its OS user can write.
+- **Managed servers are not lock-held.** A dev server must keep running while the worker edits, so only finite commands take the operation lock. Servers are refused while a workspace operation *is* active.
+- **Atomic duplicate prevention.** One managed server per `goal + name`. A second start returns `duplicate_server` with the live `command_id`; a fire-and-forget retry can never spawn a twin.
+- **Lifecycle ownership.** Managed servers are cleaned up when their goal pauses, blocks, completes, is cleared, aborts, or when the worker rotates/generation changes. Cleanup stops the process and releases the linkage only after a proved exit; it never relies on tool return, log deletion or age. Ordinary standalone commands keep their display-only `goalID` linkage and are never touched by goal lifecycle.
+- **Fail closed on lost handles.** After a host restart, or when a handle disappears, start/stop/read return `recovery_required` or `stop_unproven` and keep the linkage until exit is proved. Verify/terminate the PID externally, then retry.
+- **Readiness is owner-defined.** The tools never sleep or poll. `start_approved_server` returns the persisted `running` status plus the output snapshot; use `read_approved_server` to observe the owner's readiness lines, and treat an exited status as an honest early failure with its exit code.
+
 ### Worker questions vs owner steering
 
 | Tool | Who calls it | Direction | Turns | When to use |

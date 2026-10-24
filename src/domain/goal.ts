@@ -130,6 +130,21 @@ export interface Goal {
   updatedAt: string
 }
 
+/** Approved executable authority: owner-configured fixed commands that bypass
+ * the blanket shell/command deny. The authorization is separate from file
+ * scopes and checks; it does NOT infer authority from objective text.
+ */
+export interface ApprovedGoalCommand {
+  name: string
+  command: string
+  args: string[]
+  /** Canonical workspace-relative existing directory; "." names the workspace root. */
+  cwd: string
+  kind: "finite" | "server"
+  /** Finite commands default to 180 seconds. Servers may have an explicit deadline. */
+  timeoutSeconds?: number
+}
+
 export interface GoalConfig {
   /** Markdown file with the loop contract. */
   promptFile?: string
@@ -142,6 +157,9 @@ export interface GoalConfig {
 
   /** Shell commands that must pass for completion to be accepted. */
   checks?: string[]
+
+  /** Fixed named executable capabilities granted by the owner, not an OS sandbox. */
+  approvedCommands?: ApprovedGoalCommand[]
 
   /** Directory where completion checks run. Defaults to the artifact directory. */
   checkCwd?: string

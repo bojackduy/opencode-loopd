@@ -27,6 +27,7 @@ import {
 } from "./goal-policy"
 import { describeError, logServerEvent, SERVER_LOG_FILE } from "../infrastructure/server-log"
 import { requestCommandAwait, wakeGoalForAwait } from "./command-await"
+import { reconcileApprovedServers } from "./approved-commands"
 
 const MAX_LEDGER_SIZE = 100
 const RESPONSE_CLEANUP_AGE_MS = 60 * 60 * 1000 // 1 hour
@@ -91,6 +92,15 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
 
   async function processPending() {
     if (!running) return
+
+    // Managed approved servers are lifecycle-owned: pause/block/complete/clear/
+    // abort/rotation must stop them with a proved exit. Reconciliation is
+    // evidence-based (status + actual process exit), never age or tool-return.
+    if (options.commandService) {
+      await reconcileApprovedServers(directory, options.commandService).catch((error) =>
+        logServerEvent(directory, "approved.server.reconcile-failed", { detail: describeError(error) }).catch(() => {}),
+      )
+    }
 
     const requests = await listPendingRequests(directory)
     for (const request of requests) {

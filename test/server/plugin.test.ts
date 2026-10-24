@@ -163,6 +163,10 @@ describe("Server Plugin V2", () => {
       "loopd_command_watch",
       "loopd_command_await",
       "loopd_command_resize",
+      "run_approved_command",
+      "start_approved_server",
+      "read_approved_server",
+      "stop_approved_server",
     ])
     expect(hookNames).toEqual(["execute.before", "execute.after"])
 

@@ -13,6 +13,7 @@ import type { Goal, GoalID } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
 import type { CommandSession } from "../domain/command-session"
 import type { CommandAwait } from "../domain/command-await"
+import type { ApprovedServerRecord } from "../domain/approved-server"
 
 const CURRENT_VERSION = 9
 
@@ -38,6 +39,12 @@ export interface StoreState {
   retiredWorkerSessions?: string[]
   /** Missing handles are not proof of exit; removing logs must not erase fences. */
   orphanedCommandProcesses?: Array<{ commandID: string; pid?: number }>
+  /**
+   * Managed approved servers: processes started from goal.config.approvedCommands
+   * that goal lifecycle owns. Only these command IDs are cleaned up with the
+   * goal; ordinary command goalID linkage stays display-only.
+   */
+  approvedServers?: ApprovedServerRecord[]
 }
 
 export interface WorkspaceCall {

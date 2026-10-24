@@ -7,6 +7,7 @@ import { createFakeHost } from "../../src/server/host-adapter"
 import { readState, readEvents } from "../../src/infrastructure/state-repository"
 import type { GoalID } from "../../src/domain/goal"
 import { goalTools } from "../../src/server/goal-tools"
+import { runCompletionChecks } from "../../src/server/goal-tools"
 
 function tmpDir(): string {
   return path.join(os.tmpdir(), `loopd-tools-test-${crypto.randomUUID()}`)
@@ -385,5 +386,35 @@ describe("Goal Tools", () => {
       const state = await readState(dir)
       expect(state.goals[0].workerSessionID).toBeTruthy()
     })
+  })
+})
+
+describe("runCompletionChecks", () => {
+  it("reports a killed check as a timeout, never as an ordinary failure", async () => {
+    const result = await runCompletionChecks(["sleep 30"], undefined, 300)
+
+    expect(result.passed).toBe(false)
+    expect(result.failures).toHaveLength(1)
+    expect(result.failures[0].timedOut).toBe(true)
+    // A killed child has no exit code. Reporting one is what made a timeout
+    // indistinguishable from a real test failure.
+    expect(result.failures[0].exitCode).toBeNull()
+    expect(result.failures[0].stderr).toContain("exceeded its")
+    expect(result.failures[0].stderr).toContain("not a failure report")
+  })
+
+  it("still reports a genuine failure with its real exit code", async () => {
+    const result = await runCompletionChecks(["exit 7"])
+
+    expect(result.passed).toBe(false)
+    expect(result.failures[0].timedOut).toBe(false)
+    expect(result.failures[0].exitCode).toBe(7)
+  })
+
+  it("passes a check that succeeds", async () => {
+    const result = await runCompletionChecks(["true"])
+
+    expect(result.passed).toBe(true)
+    expect(result.failures).toHaveLength(0)
   })
 })

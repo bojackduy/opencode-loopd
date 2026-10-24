@@ -141,7 +141,7 @@ export function shellJoin(command: string, args: string[]): string {
 }
 
 export interface CommandService {
-  start(directory: string, input: CommandStartInput): Promise<CommandSession>
+  start(directory: string, input: CommandStartInput, opts?: { skipWorkspaceGate?: boolean }): Promise<CommandSession>
   list(directory: string, ownerSessionID: string): Promise<CommandSession[]>
   get(directory: string, id: string, ownerSessionID: string): Promise<CommandSession | undefined>
   read(
@@ -963,7 +963,7 @@ export function createCommandService(
   }
 
   const service: CommandService = {
-    async start(directory, input) {
+    async start(directory, input, opts) {
       const title = input.title.trim()
       const command = input.command.trim()
       if (!title) throw new Error("title is required")
@@ -1016,7 +1016,12 @@ export function createCommandService(
           && c.args.every((arg, index) => arg === startedArgs[index]),
       )
       if (duplicate) throw new DuplicateCommandError(duplicate.id, duplicate.title)
-      await beforeWorkspaceTool(directory, { tool: "loopd_command_start", sessionID: input.ownerSessionID, callID: scopeCallID }, {})
+      // The approved-server path resolves its own authority and refuses while a
+      // workspace operation is active, so it skips this generic reservation
+      // (which would permanently deny a scoped worker). Never set by tools.
+      if (!opts?.skipWorkspaceGate) {
+        await beforeWorkspaceTool(directory, { tool: "loopd_command_start", sessionID: input.ownerSessionID, callID: scopeCallID }, {})
+      }
       let handle: CommandProcessHandle | undefined
       try {
       handle = host.spawn(

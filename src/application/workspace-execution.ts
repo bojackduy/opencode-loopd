@@ -20,6 +20,14 @@ const readTools = new Set([
   "codegraph_codegraph_explore", "codegraph_codegraph_files", "codegraph_codegraph_trace",
   "codegraph_codegraph_callers", "codegraph_codegraph_callees", "codegraph_codegraph_impact",
   "codegraph_codegraph_status",
+  // Self-enforcing dedicated executors: they re-read persisted authority and
+  // take the workspace operation lock themselves, so the generic reservation
+  // path would double-fence (or permanently deny) their own execution.
+  "run_approved_command",
+  // Managed server controls enforce the same persisted authority and refuse
+  // while a workspace operation is active; the generic path would deny every
+  // scoped worker because starting a command is not a structured file write.
+  "start_approved_server", "read_approved_server", "stop_approved_server",
 ])
 const ownerTools = new Set(["loopd_create_goal", "switch_goal_identity", "pause_goal", "resume_goal", "clear_goal", "abort_goal_worker", "nudge_goal", "send_goal_input", "force_block_goal", "force_complete_goal"])
 
@@ -478,9 +486,18 @@ export function guardV2ToolEditor(directory: string, editor: V2ToolEditor, lifec
 }
 
 /** Trusted configured checks only. This is coordination, not a filesystem/OS sandbox. */
-export async function withWorkspaceOperation<T>(directory: string, goalID: string, sessionID: string, run: () => Promise<T>): Promise<T> {
+export async function withWorkspaceOperation<T>(
+  directory: string,
+  goalID: string,
+  sessionID: string,
+  run: () => Promise<T>,
+  opts?: { authorize?: (state: StoreState) => void },
+): Promise<T> {
   const id = randomUUID()
   await mutateState(directory, `workspace.operation:${id}`, async (state) => {
+    // Authority is re-read inside the same transaction that takes the lock, so
+    // a concurrent rotation/retirement cannot authorize a later execution.
+    opts?.authorize?.(state)
     // Every outstanding reservation fences checks until actual completion.
     const now = Date.now()
     const live = (state.workspaceCalls ?? []).filter((call) => !isSyncStaleWorkspaceCall(state, call, now))

@@ -18,6 +18,7 @@ import { createCommandStreamServer } from "./command-stream-server"
 import { goalTools } from "./goal-tools"
 import { ownerTools } from "./owner-tools"
 import { commandTools } from "./command-tools"
+import { approvedCommandTools } from "./approved-command-tools"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
 import { addToolCall, removeToolCall } from "../domain/runtime"
 import { readState, mutateState } from "../infrastructure/state-repository"
@@ -174,7 +175,7 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
       await engine.handleEvent(event)
       if (type?.startsWith("session.")) reconcileInBackground()
     },
-    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }), ...commandTools({ directory, commandService, capabilities: commandHost.capabilities, goalService }) },
+    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }), ...commandTools({ directory, commandService, capabilities: commandHost.capabilities, goalService }), ...approvedCommandTools({ directory, commandService }) },
     "tool.execute.before": async (input, _output) => {
       // Enforcement errors must propagate; tracking's best-effort catch is deliberately separate.
       await beforeWorkspaceTool(directory, input, _output.args)

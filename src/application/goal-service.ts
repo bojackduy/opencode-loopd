@@ -23,6 +23,7 @@ import type { LoopEvent } from "../domain/events"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
 import { assertScopeAvailable, retireWorker, sweepStaleWorkspaceState, isStaleWorkspaceCall, isSyncStaleWorkspaceCall, reconcileTerminalWorkspaceCalls } from "./workspace-execution"
 import { inferNamedFileWriteScope } from "./goal-policy"
+import { canonicalGoalCommands } from "../infrastructure/goal-commands"
 
 /**
  * Structured startup failure. start() persists the goal (and worker, when
@@ -918,6 +919,9 @@ export function createGoalService(host: LoopHost): GoalService {
     parentModel?: string
     interactive?: boolean
   }, id: GoalID) {
+    if (input.config?.approvedCommands !== undefined) {
+      input.config = { ...input.config, approvedCommands: await canonicalGoalCommands(directory, input.config.approvedCommands) }
+    }
     // Prefer enforceable, disjoint file ownership when the user explicitly
     // names files. Do not silently enable scopes on the legacy host.
     if (host.scopedExecution && input.config?.workspaceWrite !== false && input.config?.write_scope === undefined) {
