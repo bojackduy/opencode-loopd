@@ -14,7 +14,7 @@ import {
   markParentNotified,
   type GoalRuntimeState,
 } from "../domain/runtime"
-import type { LoopEvent } from "../domain/events"
+import type { LoopEvent, NativeReconcileBlockedEvent } from "../domain/events"
 import type { GoalService } from "./goal-service"
 import type { LoopHost } from "../server/host-adapter"
 import type { WorkspaceSweepSummary } from "./workspace-execution"
@@ -52,6 +52,8 @@ export interface LoopEngineOptions {
   idleUnconfirmedMs?: number
   /** Quiet time before a running-phase stall on an idle worker is auto-recovered. Default 3 min. */
   idleRecoverMs?: number
+  /** Continuous provider-retry time before one failure is charged. Default 2 min. */
+  providerRetryGraceMs?: number
 }
 
 export interface LoopEngine {
@@ -72,6 +74,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
   const stuckRunningMs = options.stuckRunningMs ?? 10 * 60_000
   const idleUnconfirmedMs = options.idleUnconfirmedMs ?? 5 * 60_000
   const idleRecoverMs = options.idleRecoverMs ?? 3 * 60_000
+  const providerRetryGraceMs = options.providerRetryGraceMs ?? 2 * 60_000
 
   let running = false
   let maintenanceTimer: ReturnType<typeof setInterval> | undefined
@@ -585,18 +588,62 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     return true
   }
 
-  async function reconcileNativeExecution(goal: any, nativeError?: unknown): Promise<boolean> {
+  async function reconcileNativeExecution(goal: any, nativeError?: unknown, recoverOutputless = false): Promise<boolean> {
     const before = await readState(directory)
     const runtime = before.runtimes.find((rt) => rt.goalID === goal.id)
     if (!runtime || !goal.workerSessionID || !host.readExecution) return false
     const observed = await host.readExecution(goal.workerSessionID)
     let completedRunID: string | undefined
+    let blocked: NativeReconcileBlockedEvent | undefined
+    let outputlessRunID: string | undefined
+    // A provider retry is not silence: the host is telling us the model call
+    // keeps failing. readExecution only resolves on idle, so a retrying worker
+    // reads as "unknown" and used to be parked in a no-op forever — the failure
+    // threshold was never reached and the owner was never told.
+    const providerRetry = observed?.status === "unknown" && host.sessionStatus
+      ? (await host.sessionStatus(goal.workerSessionID)) === "retry"
+      : false
+    let retryWindow: { elapsedMs: number; consecutiveFailures: number; runGeneration: number } | undefined
+    let retryBlocked: { failures: number; message: string; notify: boolean } | undefined
     const after = await mutateState(directory, `native.execution:${goal.id}`, async (s) => {
       const g = s.goals.find((item) => item.id === goal.id)
       const rt = s.runtimes.find((item) => item.goalID === goal.id)
       if (!g || g.status !== "active" || g.scopeClosing || g.workerSessionID !== goal.workerSessionID || !rt || rt.runGeneration !== runtime.runGeneration || rt.activePromptMessageID !== runtime.activePromptMessageID) return s
       rt.executionSource = "native"
-      rt.nativeExecutionStatus = observed?.status ?? "unknown"
+      rt.nativeExecutionStatus = providerRetry ? "retry" : (observed?.status ?? "unknown")
+      // Only a live retry may escalate. Any other projection proves the retry
+      // window ended, so a stale timestamp can never charge a later run.
+      if (!providerRetry) rt.providerRetrySince = undefined
+      if (providerRetry) {
+        const since = rt.providerRetrySince
+        if (!since) {
+          rt.providerRetrySince = new Date().toISOString()
+        } else {
+          const elapsedMs = Date.now() - Date.parse(since)
+          if (Number.isFinite(elapsedMs) && elapsedMs >= providerRetryGraceMs) {
+            // One failure per window: a two-second blip must not block a goal,
+            // and a quota wall must not be invisible.
+            rt.providerRetrySince = new Date().toISOString()
+            rt.consecutiveFailures += 1
+            rt.lastError = `OpenCode reports the worker session in provider retry for ${Math.floor(elapsedMs / 1000)}s; the model call keeps failing (commonly a quota-limited model). No turn is being produced.`
+            rt.updatedAt = new Date().toISOString()
+            retryWindow = { elapsedMs, consecutiveFailures: rt.consecutiveFailures, runGeneration: rt.runGeneration }
+            if (rt.consecutiveFailures >= (g.config?.maxFailures || 5)) {
+              g.status = "blocked"
+              g.updatedAt = new Date().toISOString()
+              g.blocker = {
+                reason: `Failed ${rt.consecutiveFailures} times while the provider kept retrying: ${rt.lastError}`,
+                needed: "User intervention required: check the model's quota, switch the goal's model with switch_goal_identity, then retry.",
+                at: new Date().toISOString(),
+                kind: "provider-limit",
+              }
+              const notify = shouldNotifyParent(rt, "failed")
+              if (notify) markParentNotified(rt, "failed")
+              retryBlocked = { failures: rt.consecutiveFailures, message: rt.lastError, notify }
+            }
+          }
+        }
+      }
       if (observed?.status === "busy" || observed?.status === "retry") {
         rt.lastWorkerStatus = observed.status
         return s
@@ -605,23 +652,78 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       const ended = Date.parse(observed?.idleAt ?? "")
       const inboxIDs = rt.nativeInboxMessageIDs ?? []
       const ownsLatest = observed?.latestUserMessageID === rt.activePromptMessageID || inboxIDs.includes(observed?.latestUserMessageID ?? "")
-      if (rt.phase !== "running" || !rt.activeRunID || !rt.activePromptMessageID ||
-          observed?.status !== "idle" || !observed.outcome || !Number.isFinite(started) || !Number.isFinite(ended) || ended < started ||
-          !ownsLatest || (observed.outcome !== "interrupted" && inboxIDs.some((id) => !observed.deliveredMessageIDs?.includes(id))) ||
-          s.workspaceOperation || s.workspaceCalls?.some((call) => call.goalID === goal.id)) return s
+      // Order matters. "missing-outcome" is the one gate the maintenance
+      // no-output recovery may act on, so it must be reachable only after every
+      // conservative gate has already passed: a proven idle read, a valid
+      // terminal time, and our own latest prompt. A foreign prompt or an
+      // unproven read can therefore never be mistaken for a closed turn.
+      const reason = rt.phase !== "running" ? "phase-not-running"
+        : !rt.activeRunID || !rt.activePromptMessageID ? "missing-run-anchor"
+        : observed?.status !== "idle" ? "host-not-idle"
+        : s.workspaceOperation ? "workspace-operation"
+        : s.workspaceCalls?.some((call) => call.goalID === goal.id) ? "workspace-call"
+        : inboxIDs.some((id) => !observed.deliveredMessageIDs?.includes(id)) && observed.outcome !== "interrupted" ? "undelivered-inbox"
+        : !Number.isFinite(started) || !Number.isFinite(ended) || ended < started ? "invalid-terminal-time"
+        : !ownsLatest ? "foreign-prompt"
+        : !observed.outcome ? "missing-outcome" : undefined
+      if (reason) {
+        rt.nativeReconcileBlocked = { reason, runGeneration: rt.runGeneration }
+        if (rt.nativeReconcileBlockedReasons?.runGeneration !== rt.runGeneration) rt.nativeReconcileBlockedReasons = { runGeneration: rt.runGeneration, reasons: [] }
+        if (!rt.nativeReconcileBlockedReasons.reasons.includes(reason)) {
+          rt.nativeReconcileBlockedReasons.reasons.push(reason)
+          blocked = { version: 1, eventID: randomUUID(), goalID: goal.id, type: "native.reconcile-blocked", reason, runGeneration: rt.runGeneration, phase: rt.phase, observedStatus: observed?.status ?? "unknown", observedOutcome: observed?.outcome, idleAt: observed?.idleAt, turnStartedAt: rt.turnStartedAt, ownsLatest, timestamp: new Date().toISOString(), revision: s.revision }
+        }
+        if (recoverOutputless && reason === "missing-outcome" && !g.interactive) outputlessRunID = rt.activeRunID
+        return s
+      }
+      rt.nativeReconcileBlocked = undefined
       completedRunID = rt.activeRunID
-      if (observed.outcome === "failed") return s
+      if (observed?.outcome === "failed") return s
       Object.assign(rt, releaseLease(rt))
       rt.activeRunID = undefined
       rt.lastWorkerStatus = "idle"
       rt.nativeExecutionStatus = "idle"
       rt.nativeInboxMessageIDs = undefined
-      if (observed.outcome === "interrupted") {
+      if (observed?.outcome === "interrupted") {
         g.status = "paused"
         g.updatedAt = new Date().toISOString()
       }
       return s
     })
+    if (blocked) await appendEvent(directory, { ...blocked, revision: after.revision })
+    if (retryWindow) {
+      await appendEvent(directory, {
+        version: 1,
+        eventID: randomUUID(),
+        goalID: goal.id,
+        type: "native.provider-retry",
+        elapsedMs: retryWindow.elapsedMs,
+        consecutiveFailures: retryWindow.consecutiveFailures,
+        runGeneration: retryWindow.runGeneration,
+        timestamp: new Date().toISOString(),
+        revision: after.revision,
+      } satisfies LoopEvent)
+    }
+    if (retryBlocked) {
+      await appendEvent(directory, {
+        version: 1,
+        eventID: randomUUID(),
+        goalID: goal.id,
+        type: "goal.blocked",
+        reason: `Provider retry persisted across ${retryBlocked.failures} failure windows`,
+        needed: "User intervention required: check the model's quota or switch this goal's model.",
+        timestamp: new Date().toISOString(),
+        revision: after.revision,
+      } satisfies LoopEvent)
+      if (retryBlocked.notify) {
+        await host.notifyOwner(
+          goal.ownerSessionID,
+          `Loop goal "${goal.name}" blocked after ${retryBlocked.failures} provider-retry windows. Last error: ${retryBlocked.message}`,
+          (goal as any).parentAgent,
+        )
+      }
+    }
+    if (outputlessRunID) return await handleSessionError(after, goal, { properties: { expectedRunID: outputlessRunID, runID: outputlessRunID, error: { message: "OpenCode closed this turn with no output (no finish reason, no parts, no error). The host accepted the prompt and produced nothing — commonly a quota-limited model." } } })
     if (!completedRunID) return false
     // An interrupted/failed execution is not successful work. Reuse the
     // existing error policy, but only after the host proves the terminal turn.
@@ -1136,7 +1238,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
 
       // Native maintenance reconciles missed durable events, not idle guesses.
       if (host.readExecution) {
-        if (runtime.phase === "running") await reconcileNativeExecution(goal)
+        if (runtime.phase === "running") await reconcileNativeExecution(goal, undefined, true)
         else if (!manual && runtime.phase === "idle" && goal.workerSessionID && (await host.readExecution(goal.workerSessionID))?.status === "idle") await continueGoal(goal.id)
         continue
       }

@@ -78,6 +78,26 @@ export interface RunCompletedEvent extends BaseEvent {
   runID: string
 }
 
+export interface NativeReconcileBlockedEvent extends BaseEvent {
+  type: "native.reconcile-blocked"
+  reason: string
+  runGeneration: number
+  phase: RuntimePhase
+  observedStatus: string
+  observedOutcome?: string
+  idleAt?: string
+  turnStartedAt?: string
+  ownsLatest: boolean
+}
+
+/** One failure charged for a sustained provider retry window. */
+export interface NativeProviderRetryEvent extends BaseEvent {
+  type: "native.provider-retry"
+  elapsedMs: number
+  consecutiveFailures: number
+  runGeneration: number
+}
+
 export interface RunFailedEvent extends BaseEvent {
   type: "run.failed"
   runID: string
@@ -148,6 +168,8 @@ export type LoopEvent =
   | RunCompletedEvent
   | RunFailedEvent
   | IdleConfirmFailedEvent
+  | NativeReconcileBlockedEvent
+  | NativeProviderRetryEvent
   | RunStuckEvent
   | RunRecoveredEvent
   | RuntimePhaseChangedEvent

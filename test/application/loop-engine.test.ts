@@ -912,7 +912,11 @@ describe("Loop Engine", () => {
       // Only supported terminal evidence releases the missed completion.
       expect(recovered[0].clearedToolCalls).toBeGreaterThanOrEqual(0)
       expect((await readState(dir)).runtimes[0].activeToolCallIDs ?? []).toHaveLength(0)
-      // Self-healed without owner action: a fresh prompt went out
+      // Self-healed without owner action: a fresh prompt went out. The recovery
+      // event is emitted by the maintenance tick, but the continuation is
+      // dispatched after it, so wait for the prompt instead of racing it (the
+      // same guard the sibling recovery cases above use).
+      await waitFor(() => host.prompts.length > 1)
       expect(host.prompts.length).toBeGreaterThan(1)
       expect((await readState(dir)).goals[0].status).toBe("active")
     })

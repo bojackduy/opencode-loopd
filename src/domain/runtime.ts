@@ -53,6 +53,14 @@ export interface GoalRuntimeState {
   /** Native host observation, separate from the scheduling lease. */
   executionSource?: "native"
   nativeExecutionStatus?: "idle" | "busy" | "retry" | "unknown"
+  nativeReconcileBlocked?: { reason: string; runGeneration: number }
+  nativeReconcileBlockedReasons?: { runGeneration: number; reasons: string[] }
+  /**
+   * First observation of a sustained provider retry. A retrying worker is
+   * alive but cannot produce a turn, so it is the one failure the host never
+   * reports as an error. Cleared the moment the projection is not a retry.
+   */
+  providerRetrySince?: string
   /** Receipt IDs only; v2 owns the queued message contents and delivery. */
   nativeInboxMessageIDs?: string[]
 

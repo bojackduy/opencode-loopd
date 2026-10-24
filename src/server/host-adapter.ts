@@ -797,12 +797,15 @@ export function createV2Host(
 
     async notifyOwner(ownerSessionID, message) {
       try {
-        // Bounded acceptance like the v1 parent-notify path (10s there).
-        await withTimeout(context.session.prompt({ sessionID: ownerSessionID, text: message }), 10_000, "OpenCode v2 parent notify (acceptance)")
+        // Background reports are synthetic input, not user-composed prompts.
+        // Steering reaches a busy parent's next model step; resume also wakes
+        // an idle parent without waiting for the user to submit anything.
+        await withTimeout(context.session.synthetic({ sessionID: ownerSessionID, text: message, delivery: "steer", resume: true }), 10_000, "OpenCode v2 parent notify (acceptance)")
         await logServerEvent(directory, "parent.notified", { ownerSessionID, preview: message.slice(0, 160) })
         return true
       } catch (error) {
-        await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(error) })
+        const detail = describeError(error) || (error as any)?.name || "(no detail)"
+        await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail })
         return false
       }
     },

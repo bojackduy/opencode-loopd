@@ -36,6 +36,110 @@ async function waitFor(test: () => Promise<boolean>) {
   while (!await test()) { if (Date.now() >= deadline) throw new Error("timed out"); await Bun.sleep(10) }
 }
 
+async function blockedEvents() {
+  return (await fs.readFile(path.join(dir, ".opencode/loopd/events.ndjson"), "utf8")).trim().split("\n").map((line) => JSON.parse(line)).filter((event) => event.type === "native.reconcile-blocked")
+}
+
+// One assignment, so a 20ms maintenance tick can never observe a half-set
+// snapshot (idle with the previous turn's outcome still on it).
+async function provenIdleWithoutOutcome() {
+  const rt = (await readState(dir)).runtimes[0]
+  snapshot = { status: "idle", idleAt: new Date().toISOString(), latestUserMessageID: rt.activePromptMessageID }
+}
+
+it("native gate diagnostics report the blocking gate once per generation, never on busy or success", async () => {
+  const goal = await start()
+  const event = { type: "session.idle", properties: { sessionID: goal.workerSessionID } }
+  // busy/retry are normal in-progress states, not blocks.
+  await engine.handleEvent(event)
+  expect(await blockedEvents()).toHaveLength(0)
+  // An unproven read is a real block, and repeated identical reads stamp once.
+  snapshot = { status: "unknown" }
+  await engine.handleEvent(event)
+  await engine.handleEvent(event)
+  expect(await blockedEvents()).toMatchObject([{ reason: "host-not-idle", runGeneration: 1, phase: "running", observedStatus: "unknown", ownsLatest: false }])
+  expect((await readState(dir)).runtimes[0].nativeReconcileBlocked).toEqual({ reason: "host-not-idle", runGeneration: 1 })
+  // A new generation gets a fresh budget, so the same gate reports again.
+  await mutateState(dir, "new-generation", async (s) => { s.runtimes[0].runGeneration++; return s })
+  await engine.handleEvent(event)
+  expect(await blockedEvents()).toHaveLength(2)
+  // Advancing the turn emits nothing.
+  await terminal()
+  await engine.handleEvent(event)
+  expect(await blockedEvents()).toHaveLength(2)
+})
+
+it("charges a sustained provider retry window and blocks instead of parking silently", async () => {
+  const { goal } = await goals.start(dir, {
+    name: "provider-retry",
+    objective: "verify provider retry escalation",
+    ownerSessionID: "parent",
+    config: { workspaceWrite: false, maxFailures: 1 },
+  })
+  // A retrying worker never proves idle, so readExecution reports unknown while
+  // the host's own status is the only evidence the model call keeps failing.
+  host.sessionStatus = async () => "retry"
+  snapshot = { status: "unknown" }
+  engine = createLoopEngine({ directory: dir, host, goalService: goals, pollIntervalMs: 60_000, confirmIdleMs: 0, providerRetryGraceMs: 20 })
+  engine.start()
+  const event = { type: "session.idle", properties: { sessionID: goal.workerSessionID } }
+  await engine.handleEvent(event)
+  expect((await readState(dir)).runtimes[0].providerRetrySince).toBeTruthy()
+  // A short blip must not block the goal.
+  await engine.handleEvent(event)
+  expect((await readState(dir)).goals[0].status).toBe("active")
+  // One failure per sustained window; maxFailures 1 therefore blocks now.
+  await Bun.sleep(30)
+  await engine.handleEvent(event)
+  const state = await readState(dir)
+  expect(state.runtimes[0].consecutiveFailures).toBe(1)
+  expect(state.goals[0].status).toBe("blocked")
+  expect(state.goals[0].blocker?.kind).toBe("provider-limit")
+  const events = (await fs.readFile(path.join(dir, ".opencode/loopd/events.ndjson"), "utf8")).trim().split("\n")
+    .map((line) => JSON.parse(line)).filter((item) => item.type === "native.provider-retry")
+  expect(events).toMatchObject([{ consecutiveFailures: 1, runGeneration: 1 }])
+  expect((host.sessions as any).notifications ?? []).toHaveLength(1)
+})
+
+it("native maintenance recovers a proven idle turn with no outcome through the no-output retry policy", async () => {
+  await start(false, 20)
+  await provenIdleWithoutOutcome()
+  await waitFor(async () => (await readState(dir)).runtimes[0].phase === "waiting_retry")
+  engine.stop()
+  const rt = (await readState(dir)).runtimes[0]
+  expect(rt.consecutiveFailures).toBe(1)
+  expect(rt.lastError).toContain("OpenCode closed this turn with no output (no finish reason, no parts, no error)")
+  expect(rt.activeRunID).toBeUndefined()
+  expect(rt.nativeInboxMessageIDs).toBeUndefined()
+})
+
+for (const blocker of ["busy", "retry", "unknown", "live-tool", "undelivered", "operation", "interactive", "closing"] as const) {
+  it(`native outputless maintenance preserves the ${blocker} gate`, async () => {
+    const goal = await start(false, 20)
+    // Install the fence while the host still reports busy, so no maintenance
+    // tick can ever observe an unfenced proven-idle turn.
+    await mutateState(dir, "recovery-fence", async (s) => {
+      if (blocker === "live-tool") s.workspaceCalls = [{ callID: "live", sessionID: goal.workerSessionID!, goalID: goal.id, paths: [], at: new Date().toISOString() }]
+      if (blocker === "undelivered") s.runtimes[0].nativeInboxMessageIDs = ["pending"]
+      if (blocker === "operation") s.workspaceOperation = { id: "operation", goalID: goal.id, sessionID: goal.workerSessionID! }
+      if (blocker === "closing") s.goals[0].scopeClosing = true
+      if (blocker === "interactive") s.goals[0].interactive = true
+      return s
+    })
+    if (blocker === "busy" || blocker === "retry" || blocker === "unknown") snapshot = { status: blocker }
+    else await provenIdleWithoutOutcome()
+    await Bun.sleep(120)
+    engine.stop()
+    const rt = (await readState(dir)).runtimes[0]
+    expect(rt.phase).toBe("running")
+    expect(rt.consecutiveFailures).toBe(0)
+    expect(rt.activeRunID).toBeDefined()
+    expect(host.promptCalls).toHaveLength(1)
+    // The manual-goal fence blocks the no-output recovery at its own gate.
+    if (blocker === "interactive") expect(rt.nativeReconcileBlocked?.reason).toBe("missing-outcome")
+  })
+}
+
 it("continues once from native success without idle debounce or transcript completion inference", async () => {
   const goal = await start()
   const windows: Array<number | undefined> = []

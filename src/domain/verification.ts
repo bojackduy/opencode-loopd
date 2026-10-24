@@ -13,7 +13,10 @@ export interface VerificationAttempt {
   cwd: string
   checks: Array<{
     command: string
-    exitCode: number
+    /** null when the check was killed before it could exit (e.g. timeout). */
+    exitCode: number | null
+    /** The check exceeded its time limit; this is not a test failure report. */
+    timedOut?: boolean
     stderr?: string
     stdout?: string
   }>

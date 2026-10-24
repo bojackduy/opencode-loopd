@@ -187,7 +187,21 @@ describe("LoopDashboard shared Goals/Commands (mounted)", () => {
         const terminal = await testRender(() => page.render({ data: current.data }), { width: 120, height: 40 })
         setups.push(terminal)
         await terminal.flush()
-        await terminal.waitFor(() => terminal.captureCharFrame().includes("owned-cmd"), { maxPasses: 2000 })
+        // This page loads its command through the real session driver, so the
+        // content arrives on a later macrotask. waitFor only spins render passes:
+        // while the driver still has I/O in flight the renderer is idle and
+        // nothing is scheduled, so all 2000 passes burn in ~100ms and time out
+        // (frameId 2, cellsUpdated 0). Yield real time against a deadline, as the
+        // v1 fixture loop below does, instead of counting passes.
+        const terminalDeadline = Date.now() + 4000
+        let terminalFrame = ""
+        do {
+          await terminal.renderOnce()
+          terminalFrame = terminal.captureCharFrame()
+          if (terminalFrame.includes("owned-cmd")) break
+          await Bun.sleep(10)
+        } while (Date.now() < terminalDeadline)
+        expect(terminalFrame).toContain("owned-cmd")
         expect(modes).toContain(TERMINAL_INPUT_MODE)
         await terminal.mockInput.pressKey("]", { ctrl: true })
         await terminal.flush()

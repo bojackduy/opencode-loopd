@@ -25,6 +25,8 @@ const check = `test "$(cat verified.txt 2>/dev/null)" = 'checked by real host'`
 let parentStarted = false
 let workerStep = 0
 let parentResults = 0
+let holdParent = true
+let releaseParent: (() => void) | undefined
 let modelCalls = 0
 let scopedStep = 0
 let nextParentCode: string | undefined
@@ -52,6 +54,7 @@ const server = Bun.serve({
           checkCwd: project, checks: [check], workspaceWrite: true, agent: "build", model: "fixture/worker", maxTurns: 8,
         })})`
       } else if (parent) {
+        if (holdParent) await new Promise<void>((resolve) => { releaseParent = resolve })
         if (nextParentCode) { code = nextParentCode; nextParentCode = undefined; action = "owner-control" }
         parentResults = Math.max(parentResults, messages.filter((m: any) => m.role === "user" && JSON.stringify(m.content).includes("completed: real host checked delegation verified")).length)
         text = "The parent remains available during background work."
@@ -148,6 +151,7 @@ try {
   const parentID = created.data.id
   await api(`/api/session/${parentID}/prompt`, { text: "SMOKE_PARENT: create the checked background fixture goal; do not perform the worker's work in this session." })
   let state: any
+  await waitFor("parent-busy-before-notification", () => !!releaseParent)
   await waitFor("checked-goal-completion", async () => {
     try { state = JSON.parse(await readFile(join(project, ".opencode/loopd/state.json"), "utf8")) } catch { return false }
     return state.goals?.[0]?.status === "complete"
@@ -160,6 +164,10 @@ try {
   assert.equal(events.filter((e) => e.type === "goal.completed").length, 1, "completion was not recorded exactly once")
   assert(events.filter((e) => e.type === "run.started").length >= 2, "missing normal native continuation")
   assert(events.some((e) => e.type === "run.completed"), "native execution completion was not reconciled")
+  // No second user submission: the worker's report must steer the held parent
+  // and reach a model request automatically after its current response ends.
+  holdParent = false
+  releaseParent!()
   await waitFor("parent-result", () => parentResults >= 1)
   assert.equal(parentResults, 1, "duplicate completion notices reached the owner")
   await waitFor("native-sessions-idle", async () => {
@@ -235,6 +243,7 @@ try {
   result = { ...result, stage, error: String(error), requests, artifacts: root }
   throw error
 } finally {
+  releaseParent?.()
   releaseInteractive?.()
   await stopHost()
   server.stop(true)

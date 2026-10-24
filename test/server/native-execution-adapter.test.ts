@@ -3,6 +3,7 @@ import { createV2Host } from "../../src/server/host-adapter"
 
 function fixture() {
   const prompts: any[] = []
+  const reports: any[] = []
   const context = {
     location: { directory: "/tmp" },
     session: {
@@ -10,11 +11,32 @@ function fixture() {
       get: async () => ({ time: { idle: 1000 }, outcome: "succeeded" }),
       context: async () => [{ type: "user", id: "msg_owned", time: { created: 500 }, text: "goal" }],
       prompt: async (input: any) => { prompts.push(input); return { id: input.id } },
+      synthetic: async (input: any) => { reports.push(input); return { id: "msg_report" } },
     },
   }
   const statuses = new Map<any, any>()
-  return { context, statuses, prompts, host: createV2Host(context as any, statuses) }
+  return { context, statuses, prompts, reports, host: createV2Host(context as any, statuses) }
 }
+
+for (const status of ["idle", "busy"] as const) {
+  it(`delivers a background report to an ${status} parent as waking synthetic steering, not a user prompt`, async () => {
+    const { host, statuses, prompts, reports } = fixture()
+    statuses.set("parent", status)
+    expect(await host.notifyOwner("parent", "Goal blocked: provider quota exhausted")).toBe(true)
+    expect(reports).toEqual([{
+      sessionID: "parent", text: "Goal blocked: provider quota exhausted", delivery: "steer", resume: true,
+    }])
+    expect(prompts).toEqual([])
+    expect(statuses.get("parent")).toBe(status)
+  })
+}
+
+it("reports failed synthetic delivery without falling back to the user's prompt path", async () => {
+  const { host, context, prompts } = fixture()
+  context.session.synthetic = async () => { throw new Error("parent unavailable") }
+  expect(await host.notifyOwner("parent", "Goal blocked")).toBe(false)
+  expect(prompts).toEqual([])
+})
 
 it("uses native coordinator idle and durable outcome even with an empty status cache after restart", async () => {
   const { host } = fixture()
