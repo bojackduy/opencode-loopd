@@ -1471,7 +1471,7 @@ function scopeConflictMessage(conflict) {
 var init_workspace_scope = () => {};
 
 // src/application/workspace-execution.ts
-import { randomUUID as randomUUID4 } from "crypto";
+import { randomUUID as randomUUID3 } from "crypto";
 import path3 from "path";
 function isWorkspaceToolExempt(tool) {
   return readTools.has(tool);
@@ -1821,7 +1821,7 @@ function guardV2ToolEditor(directory, editor, lifecycle) {
     editor.update(entry.id, (definition) => {
       const execute = definition.execute;
       definition.execute = async (args, context) => {
-        const input = { tool: entry.id, sessionID: context.sessionID, callID: `${context.id}:${randomUUID4()}` };
+        const input = { tool: entry.id, sessionID: context.sessionID, callID: `${context.id}:${randomUUID3()}` };
         const values = args;
         if (lifecycle)
           await lifecycle.before(input, values);
@@ -1842,9 +1842,10 @@ function guardV2ToolEditor(directory, editor, lifecycle) {
   }
   return guarded;
 }
-async function withWorkspaceOperation(directory, goalID, sessionID, run) {
-  const id = randomUUID4();
+async function withWorkspaceOperation(directory, goalID, sessionID, run, opts) {
+  const id = randomUUID3();
   await mutateState(directory, `workspace.operation:${id}`, async (state) => {
+    opts?.authorize?.(state);
     const now = Date.now();
     const live = (state.workspaceCalls ?? []).filter((call) => !isSyncStaleWorkspaceCall(state, call, now));
     if (state.workspaceOperation || live.length)
@@ -1913,7 +1914,11 @@ var init_workspace_execution = __esm(() => {
     "codegraph_codegraph_callers",
     "codegraph_codegraph_callees",
     "codegraph_codegraph_impact",
-    "codegraph_codegraph_status"
+    "codegraph_codegraph_status",
+    "run_approved_command",
+    "start_approved_server",
+    "read_approved_server",
+    "stop_approved_server"
   ]);
   ownerTools = new Set(["loopd_create_goal", "switch_goal_identity", "pause_goal", "resume_goal", "clear_goal", "abort_goal_worker", "nudge_goal", "send_goal_input", "force_block_goal", "force_complete_goal"]);
   STALE_WORKSPACE_CALL_TTL_MS = 10 * 60000;
@@ -1926,7 +1931,7 @@ import { tool as v1Tool } from "@opencode-ai/plugin/tool";
 
 // src/application/control-worker.ts
 init_state_repository();
-import { randomUUID as randomUUID3 } from "crypto";
+import { randomUUID as randomUUID6 } from "crypto";
 
 // src/application/goal-policy.ts
 function inferNamedFileWriteScope(objective) {
@@ -2007,6 +2012,1949 @@ function cleanList(value) {
 // src/application/control-worker.ts
 init_server_log();
 init_command_await2();
+
+// src/application/approved-commands.ts
+init_state_repository();
+import path5 from "path";
+import { randomUUID as randomUUID5 } from "crypto";
+import { spawn } from "child_process";
+
+// src/application/command-service.ts
+import { randomUUID as randomUUID4 } from "crypto";
+import { promises as fs4 } from "fs";
+import path4 from "path";
+
+// src/domain/command-session.ts
+function normalizeTimeoutSeconds(timeoutSeconds) {
+  if (timeoutSeconds === undefined)
+    return;
+  if (!Number.isInteger(timeoutSeconds) || timeoutSeconds <= 0) {
+    throw new Error("timeoutSeconds must be a positive integer in seconds");
+  }
+  return timeoutSeconds;
+}
+function computeDeadlineAt(from, timeoutSeconds) {
+  return new Date(from.getTime() + timeoutSeconds * 1000).toISOString();
+}
+function createCommandSession(input) {
+  const now = new Date().toISOString();
+  const timeout = normalizeTimeoutSeconds(input.timeoutSeconds);
+  return {
+    id: input.id,
+    title: input.title,
+    command: input.command,
+    args: input.args ?? [],
+    shell: input.shell,
+    endReason: input.endReason,
+    timeoutSeconds: timeout,
+    deadlineAt: input.deadlineAt ?? (timeout !== undefined ? computeDeadlineAt(new Date(now), timeout) : undefined),
+    envKeys: input.envKeys,
+    watchFilter: input.watchFilter,
+    watchUntil: input.watchUntil,
+    watchIgnoreCase: input.watchIgnoreCase,
+    watchUntilAction: input.watchUntilAction,
+    watchState: input.watchState,
+    cwd: input.cwd,
+    ownerSessionID: input.ownerSessionID,
+    goalID: input.goalID,
+    notifyOnExit: input.notifyOnExit,
+    notifySuccessfulExit: input.notifySuccessfulExit,
+    status: "running",
+    pid: input.pid,
+    cols: input.cols,
+    rows: input.rows,
+    outputBytes: 0,
+    streamBytes: 0,
+    truncated: false,
+    createdAt: now,
+    updatedAt: now
+  };
+}
+var MAX_COMMAND_OUTPUT_BYTES = 512 * 1024;
+var MAX_COMMAND_READ_LINES = 500;
+var NOTIFY_LONG_RUNNING_MS = 2 * 60 * 1000;
+function shouldNotifyOwnerOnExit(session) {
+  if (session.endReason === "until")
+    return false;
+  if (session.notifyOnExit === false)
+    return false;
+  if (session.notifyOnExit === true)
+    return true;
+  if (session.endReason === "timeout")
+    return true;
+  if (session.status === "missing")
+    return true;
+  if (session.status === "terminated")
+    return false;
+  if (session.status !== "exited")
+    return false;
+  if (session.exitCode !== undefined && session.exitCode !== 0)
+    return true;
+  if (session.notifySuccessfulExit === true)
+    return true;
+  const started = Date.parse(session.createdAt);
+  const ended = session.endedAt ? Date.parse(session.endedAt) : Date.now();
+  if (!Number.isFinite(started) || !Number.isFinite(ended))
+    return false;
+  return ended - started >= NOTIFY_LONG_RUNNING_MS;
+}
+
+// src/application/command-service.ts
+init_command_watch();
+init_command_await();
+
+// src/domain/command-events.ts
+var _encoder = new TextEncoder;
+function utf8ByteLength(data) {
+  return _encoder.encode(data).length;
+}
+function expectedNextEnd(startOffset, data) {
+  return startOffset + utf8ByteLength(data);
+}
+var VALID_STATUSES = [
+  "running",
+  "exited",
+  "terminated",
+  "missing"
+];
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.length > 0;
+}
+function isNonNegativeInt(value) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+function isCommandSessionLike(value) {
+  if (!isRecord(value))
+    return false;
+  if (typeof value["id"] !== "string" || value["id"].length === 0)
+    return false;
+  if (typeof value["title"] !== "string")
+    return false;
+  if (typeof value["command"] !== "string")
+    return false;
+  if (typeof value["cwd"] !== "string")
+    return false;
+  if (typeof value["ownerSessionID"] !== "string")
+    return false;
+  if (typeof value["status"] !== "string")
+    return false;
+  if (!VALID_STATUSES.includes(value["status"]))
+    return false;
+  if (!isNonNegativeInt(value["outputBytes"]))
+    return false;
+  if (typeof value["truncated"] !== "boolean")
+    return false;
+  if (typeof value["createdAt"] !== "string")
+    return false;
+  if (typeof value["updatedAt"] !== "string")
+    return false;
+  if (value["args"] !== undefined && !Array.isArray(value["args"]))
+    return false;
+  if (value["streamBytes"] !== undefined && !isNonNegativeInt(value["streamBytes"]))
+    return false;
+  return true;
+}
+function checkOffsets(startOffset, endOffset, data) {
+  if (typeof data !== "string")
+    return "data must be a string";
+  if (!isNonNegativeInt(startOffset))
+    return "startOffset must be a non-negative integer";
+  if (!isNonNegativeInt(endOffset))
+    return "endOffset must be a non-negative integer";
+  if (endOffset < startOffset)
+    return "endOffset must be >= startOffset";
+  const expected = expectedNextEnd(startOffset, data);
+  if (endOffset !== expected)
+    return `endOffset mismatch: expected ${expected} (startOffset + UTF-8 byte length ${expected - startOffset}), got ${endOffset}`;
+  return null;
+}
+function validateCommandStreamMessage(value) {
+  try {
+    if (!isRecord(value))
+      return { ok: false, error: "message must be an object" };
+    const type = value["type"];
+    if (typeof type !== "string")
+      return { ok: false, error: "missing type field" };
+    switch (type) {
+      case "subscribe": {
+        if (!isNonEmptyString(value["commandID"]))
+          return { ok: false, error: "subscribe.commandID must be a non-empty string" };
+        if (!isNonEmptyString(value["ownerSessionID"]))
+          return { ok: false, error: "subscribe.ownerSessionID must be a non-empty string" };
+        return {
+          ok: true,
+          message: {
+            type: "subscribe",
+            commandID: value["commandID"],
+            ownerSessionID: value["ownerSessionID"]
+          }
+        };
+      }
+      case "snapshot": {
+        if (!isCommandSessionLike(value["command"]))
+          return { ok: false, error: "snapshot.command must be CommandSession metadata" };
+        const offsetError = checkOffsets(value["startOffset"], value["endOffset"], value["data"]);
+        if (offsetError)
+          return { ok: false, error: `snapshot.${offsetError}` };
+        return {
+          ok: true,
+          message: {
+            type: "snapshot",
+            command: value["command"],
+            data: value["data"],
+            startOffset: value["startOffset"],
+            endOffset: value["endOffset"]
+          }
+        };
+      }
+      case "output": {
+        if (!isNonEmptyString(value["commandID"]))
+          return { ok: false, error: "output.commandID must be a non-empty string" };
+        const offsetError = checkOffsets(value["startOffset"], value["endOffset"], value["data"]);
+        if (offsetError)
+          return { ok: false, error: `output.${offsetError}` };
+        return {
+          ok: true,
+          message: {
+            type: "output",
+            commandID: value["commandID"],
+            data: value["data"],
+            startOffset: value["startOffset"],
+            endOffset: value["endOffset"]
+          }
+        };
+      }
+      case "status": {
+        if (!isCommandSessionLike(value["command"]))
+          return { ok: false, error: "status.command must be CommandSession metadata" };
+        return { ok: true, message: { type: "status", command: value["command"] } };
+      }
+      case "input": {
+        if (!isNonEmptyString(value["commandID"]))
+          return { ok: false, error: "input.commandID must be a non-empty string" };
+        if (typeof value["data"] !== "string")
+          return { ok: false, error: "input.data must be a string" };
+        return {
+          ok: true,
+          message: { type: "input", commandID: value["commandID"], data: value["data"] }
+        };
+      }
+      case "interrupt": {
+        if (!isNonEmptyString(value["commandID"]))
+          return { ok: false, error: "interrupt.commandID must be a non-empty string" };
+        return { ok: true, message: { type: "interrupt", commandID: value["commandID"] } };
+      }
+      case "resync": {
+        if (!isNonEmptyString(value["commandID"]))
+          return { ok: false, error: "resync.commandID must be a non-empty string" };
+        return { ok: true, message: { type: "resync", commandID: value["commandID"] } };
+      }
+      case "unsubscribe": {
+        if (!isNonEmptyString(value["commandID"]))
+          return { ok: false, error: "unsubscribe.commandID must be a non-empty string" };
+        return { ok: true, message: { type: "unsubscribe", commandID: value["commandID"] } };
+      }
+      case "error": {
+        if (!isNonEmptyString(value["code"]))
+          return { ok: false, error: "error.code must be a non-empty string" };
+        if (typeof value["message"] !== "string")
+          return { ok: false, error: "error.message must be a string" };
+        return {
+          ok: true,
+          message: { type: "error", code: value["code"], message: value["message"] }
+        };
+      }
+      default:
+        return { ok: false, error: `unknown message type: ${type}` };
+    }
+  } catch (err) {
+    return { ok: false, error: `validation failed: ${String(err)}` };
+  }
+}
+
+// src/application/command-service.ts
+init_server_log();
+init_workspace_execution();
+init_command_await2();
+init_state_repository();
+var ANSI_PATTERN2 = new RegExp("\x1B\\[[0-9;?]*[ -/]*[@-~]|\x1B\\][^\x07]*(?:\x07|\x1B\\\\)|\x1B[()][0-9A-Z]", "g");
+function stripAnsiForMatch(line) {
+  return line.replace(ANSI_PATTERN2, "");
+}
+var DANGEROUS_REGEXES2 = [
+  /\(\?:.*\)\*.*\(\?:.*\)\*/,
+  /.*\(\.\*\?\)\{2,\}.*/,
+  /.*\(.*\|.*\)\{3,\}.*/,
+  /\([^()]*[+*][^()]*\)[+*]/,
+  /\([^()]*(\.\*.*\.\*|\.\+.*\.\+|\\w\+.*\\s\*|\\s\*.*\\w\+)[^()]*\)/
+];
+function validateReadPattern(pattern) {
+  let compiled;
+  try {
+    compiled = new RegExp(pattern);
+  } catch (e) {
+    return { error: `Invalid regex pattern '${pattern}': ${e instanceof Error ? e.message : String(e)}` };
+  }
+  if (DANGEROUS_REGEXES2.some((d) => d.test(pattern))) {
+    return { error: `Potentially dangerous regex pattern rejected: '${pattern}'. Please use a safer pattern.` };
+  }
+  return compiled;
+}
+function shellQuote(word) {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(word))
+    return word;
+  return `'${word.replace(/'/g, `'\\''`)}'`;
+}
+function shellJoin(command, args) {
+  return [command, ...args].map(shellQuote).join(" ");
+}
+
+class DuplicateCommandError extends Error {
+  commandID;
+  title;
+  constructor(commandID, title) {
+    super(`An identical command is already running: command_id ${commandID} ("${title}", same argv and cwd). Reuse that session instead of starting a twin, or change the argv/cwd to start a distinct one.`);
+    this.commandID = commandID;
+    this.title = title;
+    this.name = "DuplicateCommandError";
+  }
+}
+function loopCommandsDir(directory) {
+  return path4.join(directory, ".opencode", "loopd", "commands");
+}
+function createCommandService(host, opts) {
+  const live = new Map;
+  const operations = new Map;
+  const broker = opts?.broker;
+  const commandDirs = new Map;
+  const timeouts = new Map;
+  const timeoutOwners = new Map;
+  const notifyInFlight = new Set;
+  const notifyRetries = new Map;
+  const notifyAttempts = new Map;
+  function clearNotifyRetry(id) {
+    const timer = notifyRetries.get(id);
+    if (timer)
+      clearTimeout(timer);
+    notifyRetries.delete(id);
+    notifyAttempts.delete(id);
+  }
+  function retryOwnerNotification(directory, id) {
+    const attempt = (notifyAttempts.get(id) ?? 0) + 1;
+    notifyAttempts.set(id, attempt);
+    if (attempt > 3 || notifyRetries.has(id))
+      return;
+    const timer = setTimeout(() => {
+      notifyRetries.delete(id);
+      notifyOwnerIfNeeded(directory, id);
+    }, 1000 * 2 ** (attempt - 1));
+    timer.unref?.();
+    notifyRetries.set(id, timer);
+  }
+  const watchers = new Map;
+  const watchTimers = new Map;
+  const awaitAsm = new Map;
+  const watchCoalesceMs = opts?.watchCoalesceMs ?? WATCH_COALESCE_WINDOW_MS;
+  function clearWatchTimer(id) {
+    const t = watchTimers.get(id);
+    if (t) {
+      try {
+        globalThis.clearTimeout(t);
+      } catch {}
+    }
+    watchTimers.delete(id);
+  }
+  function deleteWatch(id) {
+    clearWatchTimer(id);
+    watchers.delete(id);
+    awaitAsm.delete(id);
+  }
+  function scheduleWatchFlush(directory, id) {
+    if (watchTimers.has(id))
+      return;
+    const handle = setTimeout(() => {
+      watchTimers.delete(id);
+      enqueue(id, () => flushWatch(directory, id)).catch(() => {});
+    }, Math.max(0, watchCoalesceMs));
+    try {
+      handle.unref?.();
+    } catch {}
+    watchTimers.set(id, handle);
+  }
+  async function persistWatchState(directory, id, state) {
+    await mutateState(directory, `cmd.watch:${id}`, async (s) => {
+      const c = (s.commands ?? []).find((x) => x.id === id);
+      if (c) {
+        c.watchState = { ...state };
+        c.updatedAt = new Date().toISOString();
+      }
+      return s;
+    });
+  }
+  function watchLedger(directory, commandID, type, extra) {
+    return appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID4(),
+      commandID,
+      type,
+      timestamp: new Date().toISOString(),
+      revision: 0,
+      ...extra
+    }).catch(() => {});
+  }
+  function clearCommandTimeout(id) {
+    const t = timeouts.get(id);
+    if (t) {
+      try {
+        globalThis.clearTimeout(t);
+      } catch {}
+    }
+    timeouts.delete(id);
+    timeoutOwners.delete(id);
+  }
+  function scheduleTimeout(directory, id, ownerSessionID, timeoutSeconds) {
+    clearCommandTimeout(id);
+    const handle = setTimeout(() => {
+      timeouts.delete(id);
+      fireTimeout(directory, id).catch(() => {});
+    }, timeoutSeconds * 1000);
+    try {
+      handle.unref?.();
+    } catch {}
+    timeouts.set(id, handle);
+    timeoutOwners.set(id, { directory, ownerSessionID });
+  }
+  async function fireTimeout(directory, id) {
+    const owner = timeoutOwners.get(id)?.ownerSessionID;
+    timeoutOwners.delete(id);
+    if (!owner)
+      return;
+    const before = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
+    if (!before || before.status !== "running")
+      return;
+    await service.terminate(directory, id, owner).catch(() => {});
+    await mutateState(directory, `cmd.timeout:${id}`, async (s) => {
+      const c = (s.commands ?? []).find((x) => x.id === id);
+      if (!c)
+        return s;
+      c.endReason = "timeout";
+      c.lastError = c.lastError ?? `Command timed out after ${c.timeoutSeconds ?? "?"}s (timeoutSeconds deadline reached; terminated via the standard SIGTERM\u2192SIGKILL path).`;
+      if (!c.endedAt) {
+        c.endedAt = new Date().toISOString();
+        c.updatedAt = c.endedAt;
+      } else {
+        c.updatedAt = new Date().toISOString();
+      }
+      return s;
+    }).catch(() => {});
+    try {
+      const fresh = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
+      if (fresh)
+        emitBroker(id, { type: "status", command: fresh });
+    } catch {}
+    await fireAwaits(directory, id);
+    await notifyOwnerIfNeeded(directory, id);
+  }
+  function tailText(entry, limitBytes = 64 * 1024) {
+    let want = limitBytes;
+    const parts = [];
+    for (let i = entry.buffers.length - 1;i >= 0 && want > 0; i--) {
+      const chunk = entry.buffers[i];
+      if (!chunk)
+        continue;
+      parts.unshift(chunk.subarray(Math.max(0, chunk.length - want)));
+      want -= chunk.length;
+    }
+    return Buffer.concat(parts).toString("utf8");
+  }
+  function enqueue(id, operation) {
+    const previous = operations.get(id) ?? Promise.resolve();
+    const next = previous.then(operation, operation);
+    operations.set(id, next);
+    next.finally(() => {
+      if (operations.get(id) === next)
+        operations.delete(id);
+    }).catch(() => {});
+    return next;
+  }
+  async function waitForOperations(id) {
+    await operations.get(id)?.catch(() => {});
+  }
+  function emitBroker(commandID, message) {
+    if (!broker)
+      return;
+    try {
+      broker.publish(commandID, message);
+    } catch {}
+  }
+  function rememberDir(id, directory) {
+    commandDirs.set(id, directory);
+  }
+  async function fireAwaits(directory, id) {
+    try {
+      const fired = await fireCommandAwaits(directory, id);
+      if (fired.length === 0)
+        return;
+      await opts?.onAwaitFired?.(directory, fired);
+    } catch {}
+  }
+  async function notifyOwnerIfNeeded(directory, id) {
+    if (!opts?.onOwnerNotify || notifyInFlight.has(id))
+      return;
+    notifyInFlight.add(id);
+    try {
+      const target = (await readState(directory)).commands?.find((c) => c.id === id);
+      if (!target || target.ownerNotifiedAt || !isTerminalCommandStatus(target.status) || !shouldNotifyOwnerOnExit(target))
+        return;
+      const tail = await readBoundedTail(directory, id);
+      const message = formatAwaitEvidence({
+        title: target.title,
+        argv: [target.command, ...target.args],
+        commandID: target.id,
+        status: target.status,
+        exitCode: target.exitCode,
+        signal: target.signal,
+        tail
+      });
+      const accepted = await opts.onOwnerNotify(directory, target.ownerSessionID, message);
+      if (accepted === false)
+        throw new Error("host did not accept owner prompt");
+      await mutateState(directory, `cmd.notify-delivered:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id);
+        if (c && !c.ownerNotifiedAt)
+          c.ownerNotifiedAt = new Date().toISOString();
+        return s;
+      });
+      clearNotifyRetry(id);
+    } catch (error) {
+      await logServerEvent(directory, "command.owner-notify-failed", {
+        commandID: id,
+        detail: error instanceof Error ? error.message : String(error)
+      }).catch(() => {});
+      retryOwnerNotification(directory, id);
+    } finally {
+      notifyInFlight.delete(id);
+    }
+  }
+  async function flushWatch(directory, id) {
+    const watcher = watchers.get(id);
+    if (!watcher || watcher.pendingCount === 0)
+      return;
+    let session;
+    try {
+      session = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
+    } catch {
+      return;
+    }
+    if (!session || session.status !== "running")
+      return;
+    const push = watcher.takePush();
+    await persistWatchState(directory, id, watcher.state).catch(() => {});
+    if (!push)
+      return;
+    if (push.exhaustedNow) {
+      await watchLedger(directory, id, "command.watch-suspended", { reason: "budget", pushes: watcher.state.pushes });
+      try {
+        await opts?.onWatchNotify?.(directory, session.ownerSessionID, formatWatchBudgetMessage(session.title));
+      } catch {}
+      return;
+    }
+    await watchLedger(directory, id, "command.watch-matched", {
+      lines: push.lines.length,
+      matches: watcher.state.matches,
+      pushes: watcher.state.pushes
+    });
+    try {
+      await opts?.onWatchNotify?.(directory, session.ownerSessionID, formatWatchMessage(session.title, push.lines));
+    } catch {}
+    if (watcher.pendingCount > 0)
+      scheduleWatchFlush(directory, id);
+  }
+  async function handleUntilMatch(directory, id) {
+    const watcher = watchers.get(id);
+    if (!watcher)
+      return;
+    clearWatchTimer(id);
+    let session;
+    try {
+      session = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
+    } catch {
+      return;
+    }
+    if (!session)
+      return;
+    const action = watcher.untilAction;
+    const lines = watcher.takeUntilPush();
+    const snapshot = { ...watcher.state };
+    const message = formatWatchMessage(session.title, lines, `-- until "${session.watchUntil ?? ""}" matched (action=${action})`);
+    await mutateState(directory, `cmd.until-claim:${id}`, async (s) => {
+      const c = (s.commands ?? []).find((x) => x.id === id);
+      if (!c)
+        return s;
+      c.watchState = { ...snapshot };
+      if (action === "stop" && !c.ownerNotifiedAt)
+        c.ownerNotifiedAt = new Date().toISOString();
+      c.updatedAt = new Date().toISOString();
+      return s;
+    }).catch(() => {});
+    await watchLedger(directory, id, "command.watch-matched", {
+      until: session.watchUntil ?? "",
+      lines: lines.length,
+      pushes: snapshot.pushes
+    });
+    try {
+      await opts?.onWatchNotify?.(directory, session.ownerSessionID, message);
+    } catch {}
+    if (action !== "stop")
+      return;
+    if (session.status !== "running")
+      return;
+    await watchLedger(directory, id, "command.until-stopped", { until: session.watchUntil ?? "" });
+    await service.terminate(directory, id, session.ownerSessionID).catch(() => {});
+    await mutateState(directory, `cmd.until:${id}`, async (s) => {
+      const c = (s.commands ?? []).find((x) => x.id === id);
+      if (!c)
+        return s;
+      if (c.status === "terminated" && c.endReason !== "timeout") {
+        c.endReason = "until";
+        c.lastError = c.lastError ?? `Watch until pattern "${c.watchUntil ?? ""}" matched; command stopped (untilAction=stop).`;
+        c.updatedAt = new Date().toISOString();
+      }
+      return s;
+    }).catch(() => {});
+    try {
+      const fresh = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
+      if (fresh)
+        emitBroker(id, { type: "status", command: fresh });
+    } catch {}
+    await fireAwaits(directory, id);
+  }
+  async function readBrokerSnapshot(commandID, ownerSessionID) {
+    const directory = commandDirs.get(commandID);
+    if (!directory)
+      return;
+    const state = await readState(directory);
+    const session = (state.commands ?? []).find((x) => x.id === commandID && x.ownerSessionID === ownerSessionID);
+    if (!session)
+      return;
+    const log = await readCommandLog(directory, commandID, {
+      offsetBytes: 0,
+      limitBytes: MAX_COMMAND_OUTPUT_BYTES
+    });
+    const data = log.text;
+    const byteLen = utf8ByteLength(data);
+    const lifetime = session.streamBytes ?? 0;
+    const endOffset = lifetime >= byteLen ? lifetime : byteLen;
+    const startOffset = endOffset - byteLen;
+    return { command: session, data, startOffset, endOffset };
+  }
+  if (broker) {
+    broker.setResolver({
+      async getSession(commandID, ownerSessionID) {
+        const directory = commandDirs.get(commandID);
+        if (!directory)
+          return;
+        const s = await readState(directory);
+        const c = (s.commands ?? []).find((x) => x.id === commandID);
+        return c && c.ownerSessionID === ownerSessionID ? c : undefined;
+      },
+      async waitForQuiesce(commandID) {
+        await waitForOperations(commandID);
+      },
+      async readSnapshot(commandID, ownerSessionID) {
+        return readBrokerSnapshot(commandID, ownerSessionID);
+      }
+    });
+  }
+  async function persistOutput(directory, id, chunk) {
+    rememberDir(id, directory);
+    const entry = live.get(id);
+    if (entry) {
+      const bytes = Buffer.from(chunk);
+      entry.buffers.push(bytes);
+      entry.bufferedBytes += bytes.length;
+      while (entry.bufferedBytes > 128 * 1024 && entry.buffers.length > 1) {
+        const dropped = entry.buffers.shift();
+        entry.bufferedBytes -= dropped.length;
+      }
+    }
+    let watcher;
+    let feed;
+    let bareLines = [];
+    try {
+      watcher = watchers.get(id);
+      if (!watcher) {
+        const spec = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id)).catch(() => {
+          return;
+        });
+        if (spec && spec.status === "running" && (spec.watchFilter !== undefined || spec.watchUntil !== undefined)) {
+          try {
+            watcher = new CommandWatcher({
+              ...spec.watchFilter !== undefined ? { filter: spec.watchFilter } : {},
+              ...spec.watchUntil !== undefined ? { until: spec.watchUntil } : {},
+              ...spec.watchIgnoreCase !== undefined ? { ignoreCase: spec.watchIgnoreCase } : {},
+              ...spec.watchUntilAction !== undefined ? { untilAction: spec.watchUntilAction } : {}
+            });
+            watchers.set(id, watcher);
+          } catch {
+            watcher = undefined;
+          }
+        }
+      }
+      if (watcher) {
+        feed = watcher.feedChunk(chunk, Date.now());
+      } else {
+        let asm = awaitAsm.get(id);
+        if (!asm) {
+          asm = createLineAssembler();
+          awaitAsm.set(id, asm);
+        }
+        bareLines = asm.push(chunk).filter((l) => l.trim() !== "");
+      }
+    } catch {
+      watcher = undefined;
+      feed = undefined;
+    }
+    await appendCommandLog(directory, id, chunk);
+    let retainedBytes = 0;
+    let truncated = false;
+    const file = path4.join(loopCommandsDir(directory), `${id}.log`);
+    const stat = await fs4.stat(file);
+    retainedBytes = stat.size;
+    if (stat.size > MAX_COMMAND_OUTPUT_BYTES) {
+      const fh = await fs4.open(file, "r");
+      try {
+        const buf = Buffer.alloc(MAX_COMMAND_OUTPUT_BYTES);
+        await fh.read(buf, 0, buf.length, stat.size - buf.length);
+        await fs4.writeFile(file, buf);
+      } finally {
+        await fh.close();
+      }
+      retainedBytes = MAX_COMMAND_OUTPUT_BYTES;
+      truncated = true;
+    }
+    await mutateState(directory, `cmd.output:${id}`, async (s) => {
+      const c = (s.commands ?? []).find((x) => x.id === id);
+      if (!c)
+        return s;
+      const byteLen = utf8ByteLength(chunk);
+      const startOffset = c.streamBytes ?? 0;
+      const endOffset = startOffset + byteLen;
+      c.streamBytes = endOffset;
+      c.outputBytes = retainedBytes;
+      if (truncated)
+        c.truncated = true;
+      if (watcher)
+        c.watchState = { ...watcher.state };
+      c.updatedAt = new Date().toISOString();
+      return s;
+    });
+    try {
+      const fresh = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
+      const endOffset = fresh?.streamBytes ?? 0;
+      const startOffset = endOffset - utf8ByteLength(chunk);
+      if (fresh && startOffset >= 0) {
+        emitBroker(id, {
+          type: "output",
+          commandID: id,
+          data: chunk,
+          startOffset,
+          endOffset
+        });
+      }
+    } catch {}
+    try {
+      if (watcher && feed) {
+        if (feed.floodNow) {
+          await persistWatchState(directory, id, watcher.state).catch(() => {});
+          const dropped = watcher.state.droppedLines;
+          let owner;
+          let title = id;
+          try {
+            const snap = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
+            owner = snap?.ownerSessionID;
+            title = snap?.title ?? id;
+          } catch {}
+          await watchLedger(directory, id, "command.watch-suspended", { reason: "flood", dropped });
+          if (owner) {
+            try {
+              await opts?.onWatchNotify?.(directory, owner, formatWatchFloodMessage(title, dropped));
+            } catch {}
+          }
+        }
+        if (watcher.pendingCount > 0)
+          scheduleWatchFlush(directory, id);
+        if (feed.untilLine) {
+          clearWatchTimer(id);
+          enqueue(id, () => handleUntilMatch(directory, id)).catch(() => {});
+        }
+      }
+    } catch {}
+    try {
+      const completed = feed ? feed.completed : bareLines;
+      if (completed.length > 0) {
+        const fired = await fireUntilAwaits(directory, id, completed);
+        if (fired.length > 0) {
+          await opts?.onAwaitFired?.(directory, fired);
+        }
+      }
+    } catch {}
+  }
+  async function persistExit(directory, id, info) {
+    rememberDir(id, directory);
+    live.delete(id);
+    clearCommandTimeout(id);
+    const exitWatcher = watchers.get(id);
+    if (exitWatcher) {
+      try {
+        const handledStop = exitWatcher.state.state === "until-matched" && exitWatcher.untilAction === "stop";
+        exitWatcher.finish(Date.now());
+        let snap;
+        try {
+          snap = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
+        } catch {
+          snap = undefined;
+        }
+        if (snap && !handledStop && exitWatcher.pendingCount > 0) {
+          const push = exitWatcher.takePush();
+          await persistWatchState(directory, id, exitWatcher.state).catch(() => {});
+          if (push && !push.exhaustedNow && push.lines.length > 0) {
+            await watchLedger(directory, id, "command.watch-matched", {
+              lines: push.lines.length,
+              atExit: true,
+              pushes: exitWatcher.state.pushes
+            });
+            try {
+              await opts?.onWatchNotify?.(directory, snap.ownerSessionID, formatWatchMessage(snap.title, push.lines));
+            } catch {}
+          } else if (push?.exhaustedNow) {
+            await watchLedger(directory, id, "command.watch-suspended", {
+              reason: "budget",
+              atExit: true,
+              pushes: exitWatcher.state.pushes
+            });
+            try {
+              await opts?.onWatchNotify?.(directory, snap.ownerSessionID, formatWatchBudgetMessage(snap.title));
+            } catch {}
+          }
+        } else {
+          await persistWatchState(directory, id, exitWatcher.state).catch(() => {});
+        }
+      } catch {}
+    }
+    deleteWatch(id);
+    await mutateState(directory, `cmd.exit:${id}`, async (s) => {
+      const c = (s.commands ?? []).find((x) => x.id === id);
+      if (!c || c.status !== "running")
+        return s;
+      if (c.endReason === "timeout") {
+        if (!c.endedAt) {
+          c.endedAt = new Date().toISOString();
+          c.updatedAt = c.endedAt;
+        }
+        return s;
+      }
+      c.exitCode = info.exitCode;
+      if (info.signal && (c.signal === "SIGKILL" || c.signal === "SIGTERM")) {
+        c.status = "terminated";
+        if (c.endReason !== "until")
+          c.endReason = "terminate";
+      } else {
+        c.status = "exited";
+        c.endReason = "exit";
+        if (info.signal)
+          c.signal = info.signal;
+      }
+      c.endedAt = new Date().toISOString();
+      c.updatedAt = c.endedAt;
+      return s;
+    }).catch(() => {});
+    await appendEvent(directory, {
+      version: 1,
+      eventID: randomUUID4(),
+      commandID: id,
+      type: "command.exited",
+      exitCode: info.exitCode,
+      timestamp: new Date().toISOString(),
+      revision: 0
+    }).catch(() => {});
+    try {
+      const fresh = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
+      if (fresh)
+        emitBroker(id, { type: "status", command: fresh });
+    } catch {}
+    await fireAwaits(directory, id);
+    await notifyOwnerIfNeeded(directory, id);
+  }
+  function owned(cmd, ownerSessionID) {
+    return !!cmd && cmd.ownerSessionID === ownerSessionID;
+  }
+  async function rollbackStart(directory, id, handle) {
+    try {
+      handle.terminate();
+    } catch {}
+    const exited = await Promise.race([
+      handle.exited().then(() => true, () => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 1000))
+    ]);
+    try {
+      if (!exited && handle.isAlive())
+        handle.kill();
+    } catch {}
+    live.delete(id);
+    watchers.delete(id);
+    const timer = timeouts.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      timeouts.delete(id);
+    }
+    timeoutOwners.delete(id);
+    try {
+      await mutateState(directory, `cmd.rollback:${id}`, async (s) => {
+        s.commands = (s.commands ?? []).filter((command) => command.id !== id);
+        return s;
+      });
+    } catch {}
+  }
+  const service = {
+    async start(directory, input, opts) {
+      const title = input.title.trim();
+      const command = input.command.trim();
+      if (!title)
+        throw new Error("title is required");
+      if (!command)
+        throw new Error("command is required");
+      if (!input.ownerSessionID || input.ownerSessionID === "main") {
+        throw new Error("A valid owner session is required. Run from an active OpenCode session.");
+      }
+      const timeoutSeconds = normalizeTimeoutSeconds(input.timeoutSeconds);
+      const watchFilter = input.watchFilter !== undefined && input.watchFilter !== "" ? input.watchFilter : undefined;
+      const watchUntil = input.watchUntil !== undefined && input.watchUntil !== "" ? input.watchUntil : undefined;
+      const hasWatch = watchFilter !== undefined || watchUntil !== undefined;
+      let watcher;
+      let watchState;
+      if (hasWatch) {
+        watcher = new CommandWatcher({
+          ...watchFilter !== undefined ? { filter: watchFilter } : {},
+          ...watchUntil !== undefined ? { until: watchUntil } : {},
+          ...input.watchIgnoreCase !== undefined ? { ignoreCase: input.watchIgnoreCase } : {},
+          ...input.watchUntilAction !== undefined ? { untilAction: input.watchUntilAction } : {}
+        });
+        watchState = initialWatchState();
+      }
+      const startedAt = new Date;
+      const id = randomUUID4();
+      const cwd = input.cwd || directory;
+      const useShell = input.shell === true;
+      const spawnOpts = useShell ? { command: "/bin/sh", args: ["-c", shellJoin(command, input.args ?? [])], cwd, cols: input.cols, rows: input.rows, env: input.env } : { command, args: input.args ?? [], cwd, cols: input.cols, rows: input.rows, env: input.env };
+      const pending = [];
+      let ready = false;
+      const scopeCallID = `command-start:${id}`;
+      const startedArgs = input.args ?? [];
+      const duplicate = (await readState(directory)).commands?.find((c) => c.ownerSessionID === input.ownerSessionID && c.status === "running" && c.command === command && c.cwd === cwd && c.args.length === startedArgs.length && c.args.every((arg, index) => arg === startedArgs[index]));
+      if (duplicate)
+        throw new DuplicateCommandError(duplicate.id, duplicate.title);
+      if (!opts?.skipWorkspaceGate) {
+        await beforeWorkspaceTool(directory, { tool: "loopd_command_start", sessionID: input.ownerSessionID, callID: scopeCallID }, {});
+      }
+      let handle;
+      try {
+        handle = host.spawn(spawnOpts, (chunk) => {
+          if (!ready)
+            pending.push({ type: "output", chunk });
+          else
+            enqueue(id, () => persistOutput(directory, id, chunk)).catch(() => {});
+        }, (info) => {
+          if (!ready)
+            pending.push({ type: "exit", info });
+          else
+            enqueue(id, () => persistExit(directory, id, info)).catch(() => {});
+        });
+        try {
+          const session = createCommandSession({
+            id,
+            title,
+            command,
+            args: input.args ?? [],
+            cwd,
+            ownerSessionID: input.ownerSessionID,
+            goalID: input.goalID,
+            notifyOnExit: input.notifyOnExit,
+            notifySuccessfulExit: true,
+            pid: handle.pid,
+            cols: input.cols,
+            rows: input.rows,
+            shell: useShell ? true : undefined,
+            timeoutSeconds,
+            deadlineAt: timeoutSeconds !== undefined ? computeDeadlineAt(startedAt, timeoutSeconds) : undefined,
+            envKeys: input.env ? Object.keys(input.env) : undefined,
+            watchFilter,
+            watchUntil,
+            watchIgnoreCase: input.watchIgnoreCase,
+            watchUntilAction: watcher?.untilAction,
+            watchState
+          });
+          await mutateState(directory, `cmd.start:${id}`, async (s) => {
+            s.commands = [...s.commands ?? [], session];
+            return s;
+          });
+          live.set(id, { handle, buffers: [], bufferedBytes: 0 });
+          if (watcher)
+            watchers.set(id, watcher);
+          if (timeoutSeconds !== undefined)
+            scheduleTimeout(directory, id, input.ownerSessionID, timeoutSeconds);
+          rememberDir(id, directory);
+          await appendEvent(directory, {
+            version: 1,
+            eventID: randomUUID4(),
+            ...input.goalID ? { goalID: input.goalID } : {},
+            commandID: id,
+            type: "command.started",
+            title,
+            timestamp: new Date().toISOString(),
+            revision: 0
+          }).catch(() => {});
+          try {
+            const fresh = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
+            if (fresh)
+              emitBroker(id, { type: "status", command: fresh });
+          } catch {}
+          const initialEvents = pending.splice(0);
+          ready = true;
+          const initialOperations = [];
+          for (const event of initialEvents) {
+            initialOperations.push(event.type === "output" ? enqueue(id, () => persistOutput(directory, id, event.chunk)) : enqueue(id, () => persistExit(directory, id, event.info)));
+          }
+          await Promise.all(initialOperations);
+          return await service.get(directory, id, input.ownerSessionID) ?? session;
+        } catch (error) {
+          if (handle)
+            await rollbackStart(directory, id, handle);
+          throw error;
+        }
+      } finally {
+        await afterWorkspaceTool(directory, input.ownerSessionID, scopeCallID);
+      }
+    },
+    async list(directory, ownerSessionID) {
+      const s = await readState(directory);
+      for (const c of s.commands ?? [])
+        rememberDir(c.id, directory);
+      return (s.commands ?? []).filter((c) => c.ownerSessionID === ownerSessionID);
+    },
+    async get(directory, id, ownerSessionID) {
+      rememberDir(id, directory);
+      const s = await readState(directory);
+      const c = (s.commands ?? []).find((x) => x.id === id);
+      return owned(c, ownerSessionID) ? c : undefined;
+    },
+    async read(directory, id, ownerSessionID, opts) {
+      await waitForOperations(id);
+      const session = await service.get(directory, id, ownerSessionID);
+      if (!session)
+        return;
+      if (opts?.pattern !== undefined) {
+        const flags = opts.ignoreCase ? "i" : "";
+        const checked = validateReadPattern(opts.pattern);
+        if (typeof checked !== "object" || !(checked instanceof RegExp)) {
+          throw new Error(checked.error);
+        }
+        const regex = new RegExp(opts.pattern, flags);
+        const full = await readCommandLog(directory, id, { offsetBytes: 0, limitBytes: MAX_COMMAND_OUTPUT_BYTES });
+        const lines = full.text.length === 0 ? [] : full.text.split(`
+`);
+        const matches = [];
+        for (const line of lines) {
+          let stripped;
+          try {
+            stripped = stripAnsiForMatch(line);
+          } catch {
+            stripped = line;
+          }
+          let hit = false;
+          try {
+            hit = regex.test(stripped);
+          } catch {
+            throw new Error(`Invalid regex pattern '${opts.pattern}'.`);
+          }
+          regex.lastIndex = 0;
+          if (hit)
+            matches.push(line);
+        }
+        const skip = Math.max(0, opts.offsetBytes ?? 0);
+        const take = Math.min(opts.limitBytes ?? MAX_COMMAND_READ_LINES, MAX_COMMAND_READ_LINES);
+        const page = matches.slice(skip, skip + Math.max(0, take));
+        return {
+          session,
+          text: page.join(`
+`) + (page.length > 0 ? `
+` : ""),
+          totalBytes: matches.length,
+          startByte: skip,
+          live: session.status === "running",
+          pattern: opts.pattern,
+          totalMatches: matches.length
+        };
+      }
+      const entry = live.get(id);
+      const offset = opts?.offsetBytes ?? 0;
+      const limit = Math.min(opts?.limitBytes ?? 64 * 1024, 256 * 1024);
+      if (entry && offset === 0) {
+        const mem = tailText(entry, limit);
+        if (entry.bufferedBytes <= limit) {
+          const file = await readCommandLog(directory, id, { offsetBytes: 0, limitBytes: 0 });
+          const memBytes = Buffer.byteLength(mem);
+          return { session, text: mem, totalBytes: session.outputBytes, startByte: Math.max(0, session.outputBytes - memBytes), live: session.status === "running" };
+        }
+      }
+      const file = await readCommandLog(directory, id, { offsetBytes: offset, limitBytes: limit });
+      return { session, text: file.text, totalBytes: session.outputBytes, startByte: file.startByte, live: session.status === "running" };
+    },
+    async write(directory, id, ownerSessionID, data) {
+      const scopeCallID = `command-write:${randomUUID4()}`;
+      await beforeWorkspaceTool(directory, { tool: "loopd_command_write", sessionID: ownerSessionID, callID: scopeCallID }, {});
+      try {
+        const session = await service.get(directory, id, ownerSessionID);
+        if (!session)
+          return { ok: false, message: "Command not found." };
+        if (session.status !== "running")
+          return { ok: false, message: `Command is ${session.status}; only running commands accept input.` };
+        const entry = live.get(id);
+        const ok = entry ? entry.handle.write(data) : false;
+        if (!ok)
+          return { ok: false, message: "Process input unavailable (no live handle \u2014 host may have restarted; reconcile marks it honestly)." };
+        return { ok: true, message: `Sent ${Buffer.byteLength(data)} byte(s) to "${session.title}".` };
+      } finally {
+        await afterWorkspaceTool(directory, ownerSessionID, scopeCallID);
+      }
+    },
+    async resize(directory, id, ownerSessionID, cols, rows) {
+      const session = await service.get(directory, id, ownerSessionID);
+      if (!session)
+        return { ok: false, message: "Command not found." };
+      if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0) {
+        return { ok: false, message: `Invalid size ${cols}x${rows}: cols and rows must be positive integers.` };
+      }
+      const entry = live.get(id);
+      let applied = false;
+      if (entry) {
+        try {
+          applied = entry.handle.resize(cols, rows);
+        } catch {
+          applied = false;
+        }
+      }
+      await mutateState(directory, `cmd.resize:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id);
+        if (c && c.ownerSessionID === ownerSessionID) {
+          c.cols = cols;
+          c.rows = rows;
+          c.updatedAt = new Date().toISOString();
+        }
+        return s;
+      });
+      if (applied)
+        return { ok: true, message: `Terminal resized to ${cols}x${rows} for "${session.title}".` };
+      return { ok: false, unsupported: true, message: "Resize is not supported by the active pipe host (pipes have no tty winsize; the PTY backend was unavailable). Size stored; output remains a byte stream." };
+    },
+    async interrupt(directory, id, ownerSessionID) {
+      const session = await service.get(directory, id, ownerSessionID);
+      if (!session)
+        return { ok: false, message: "Command not found." };
+      if (session.status !== "running")
+        return { ok: false, message: `Command is ${session.status}; nothing to interrupt.` };
+      const entry = live.get(id);
+      if (!entry)
+        return { ok: false, message: "No live handle (host restarted?). Reconcile will mark it missing; use terminate/remove to clean up." };
+      const delivered = entry.handle.interrupt();
+      if (!delivered)
+        return { ok: false, message: "Failed to deliver SIGINT." };
+      await mutateState(directory, `cmd.interrupt:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id);
+        if (c && c.ownerSessionID === ownerSessionID) {
+          c.signal = "SIGINT";
+          c.updatedAt = new Date().toISOString();
+        }
+        return s;
+      });
+      return { ok: true, message: `SIGINT delivered to "${session.title}" (process may continue if it traps the signal).` };
+    },
+    async terminate(directory, id, ownerSessionID, opts) {
+      rememberDir(id, directory);
+      const session = await service.get(directory, id, ownerSessionID);
+      if (!session)
+        return { ok: false, message: "Command not found." };
+      if (session.status !== "running") {
+        if (opts?.remove) {
+          const removed = await service.remove(directory, id, ownerSessionID);
+          return removed.ok ? { ok: true, message: `Command was already ${session.status}; removed.`, removed: true } : { ok: false, message: `Command is ${session.status}; remove failed: ${removed.message}` };
+        }
+        return { ok: false, message: `Command is ${session.status}; nothing to terminate.` };
+      }
+      await mutateState(directory, `cmd.terminate-claim:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id);
+        if (c && c.ownerSessionID === ownerSessionID && c.status === "running") {
+          c.signal = "SIGTERM";
+          if (c.endReason !== "timeout" && c.watchState?.state === "until-matched" && c.watchUntilAction === "stop") {
+            c.endReason = "until";
+          }
+          c.updatedAt = new Date().toISOString();
+        }
+        return s;
+      }).catch(() => {});
+      try {
+        const claimed = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
+        if (claimed)
+          emitBroker(id, { type: "status", command: claimed });
+      } catch {}
+      const entry = live.get(id);
+      let status = "terminated";
+      if (entry) {
+        const aliveBefore = entry.handle.isAlive();
+        if (!aliveBefore) {
+          status = "exited";
+        } else {
+          entry.handle.terminate();
+          const exited = await Promise.race([
+            entry.handle.exited().then(() => true),
+            new Promise((r) => setTimeout(() => r(false), 3000))
+          ]);
+          if (!exited && entry.handle.isAlive())
+            entry.handle.kill();
+          try {
+            await entry.handle.exited();
+          } catch {}
+        }
+        live.delete(id);
+      }
+      const exitCode = status === "terminated" ? 143 : undefined;
+      clearCommandTimeout(id);
+      clearWatchTimer(id);
+      await mutateState(directory, `cmd.terminate:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id);
+        if (!c || c.ownerSessionID !== ownerSessionID)
+          return s;
+        if (c.status === "running") {
+          c.status = status;
+          if (c.endReason !== "timeout") {
+            c.endReason = status === "terminated" ? c.endReason === "until" ? "until" : "terminate" : "exit";
+          }
+          if (exitCode !== undefined)
+            c.exitCode = c.exitCode ?? exitCode;
+          c.signal = c.signal ?? "SIGTERM";
+          c.endedAt = new Date().toISOString();
+          c.updatedAt = c.endedAt;
+        } else if (c.status === "terminated" && !c.endedAt) {
+          if (c.endReason !== "timeout" && !c.endReason)
+            c.endReason = "terminate";
+          if (exitCode !== undefined)
+            c.exitCode = c.exitCode ?? exitCode;
+          c.endedAt = new Date().toISOString();
+          c.updatedAt = c.endedAt;
+        }
+        return s;
+      });
+      try {
+        const fresh = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
+        if (fresh)
+          emitBroker(id, { type: "status", command: fresh });
+      } catch {}
+      await fireAwaits(directory, id);
+      await notifyOwnerIfNeeded(directory, id);
+      if (opts?.remove) {
+        const removed = await service.remove(directory, id, ownerSessionID);
+        if (removed.ok)
+          return { ok: true, message: `Command "${session.title}" ${status}; removed.`, removed: true };
+        return { ok: true, message: `Command "${session.title}" ${status}; remove failed: ${removed.message}` };
+      }
+      return { ok: true, message: `Command "${session.title}" ${status}.` };
+    },
+    async kill(directory, id, ownerSessionID) {
+      rememberDir(id, directory);
+      const session = await service.get(directory, id, ownerSessionID);
+      if (!session)
+        return { ok: false, message: "Command not found." };
+      if (session.status !== "running") {
+        return { ok: false, message: `Command is ${session.status}; nothing to kill.` };
+      }
+      await mutateState(directory, `cmd.kill-claim:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id);
+        if (c && c.ownerSessionID === ownerSessionID && c.status === "running") {
+          c.signal = "SIGKILL";
+          c.updatedAt = new Date().toISOString();
+        }
+        return s;
+      }).catch(() => {});
+      try {
+        const claimed = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
+        if (claimed)
+          emitBroker(id, { type: "status", command: claimed });
+      } catch {}
+      const entry = live.get(id);
+      if (entry) {
+        if (entry.handle.isAlive())
+          entry.handle.kill();
+        try {
+          await entry.handle.exited();
+        } catch {}
+        live.delete(id);
+      }
+      clearCommandTimeout(id);
+      clearWatchTimer(id);
+      await mutateState(directory, `cmd.kill:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id);
+        if (!c || c.ownerSessionID !== ownerSessionID)
+          return s;
+        if (c.status === "running") {
+          c.status = "terminated";
+          if (c.endReason !== "timeout")
+            c.endReason = "terminate";
+          c.exitCode = c.exitCode ?? 137;
+          c.signal = c.signal ?? "SIGKILL";
+          c.endedAt = new Date().toISOString();
+          c.updatedAt = c.endedAt;
+        } else if (c.status === "terminated" && !c.endedAt) {
+          if (c.endReason !== "timeout" && !c.endReason)
+            c.endReason = "terminate";
+          c.exitCode = c.exitCode ?? 137;
+          c.endedAt = new Date().toISOString();
+          c.updatedAt = c.endedAt;
+        }
+        return s;
+      });
+      try {
+        const fresh = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
+        if (fresh)
+          emitBroker(id, { type: "status", command: fresh });
+      } catch {}
+      await fireAwaits(directory, id);
+      await notifyOwnerIfNeeded(directory, id);
+      return { ok: true, message: `Command "${session.title}" killed (SIGKILL).` };
+    },
+    async restart(directory, id, ownerSessionID) {
+      rememberDir(id, directory);
+      const session = await service.get(directory, id, ownerSessionID);
+      if (!session)
+        return { ok: false, message: "Command not found." };
+      const spec = {
+        title: session.title,
+        command: session.command,
+        args: [...session.args],
+        cwd: session.cwd,
+        ownerSessionID,
+        ...session.goalID !== undefined ? { goalID: session.goalID } : {},
+        ...session.notifyOnExit !== undefined ? { notifyOnExit: session.notifyOnExit } : {},
+        ...session.cols !== undefined ? { cols: session.cols } : {},
+        ...session.rows !== undefined ? { rows: session.rows } : {},
+        ...session.shell !== undefined ? { shell: session.shell } : {},
+        ...session.timeoutSeconds !== undefined ? { timeoutSeconds: session.timeoutSeconds } : {},
+        ...session.watchFilter !== undefined ? { watchFilter: session.watchFilter } : {},
+        ...session.watchUntil !== undefined ? { watchUntil: session.watchUntil } : {},
+        ...session.watchIgnoreCase !== undefined ? { watchIgnoreCase: session.watchIgnoreCase } : {},
+        ...session.watchUntilAction !== undefined ? { watchUntilAction: session.watchUntilAction } : {}
+      };
+      if (session.status === "running") {
+        const stopped = await service.terminate(directory, id, ownerSessionID);
+        if (!stopped.ok) {
+          return { ok: false, message: `Restart aborted: could not stop "${session.title}": ${stopped.message}` };
+        }
+      }
+      const next = await service.start(directory, spec);
+      const envNote = (session.envKeys?.length ?? 0) > 0 ? ` (env ${session.envKeys.join(",")} NOT restored \u2014 values are never persisted)` : "";
+      return {
+        ok: true,
+        message: `Command "${session.title}" restarted as ${next.id.slice(0, 8)}...${envNote}`,
+        command: next
+      };
+    },
+    async remove(directory, id, ownerSessionID) {
+      rememberDir(id, directory);
+      const session = await service.get(directory, id, ownerSessionID);
+      if (!session)
+        return { ok: false, message: "Command not found." };
+      if (session.status === "running") {
+        return { ok: false, message: `Command "${session.title}" is still running \u2014 terminate it first (terminate \u2260 remove).` };
+      }
+      clearNotifyRetry(id);
+      deleteWatch(id);
+      const lastKnown = { ...session };
+      await mutateState(directory, `cmd.remove:${id}`, async (s) => {
+        s.commands = (s.commands ?? []).filter((x) => !(x.id === id && x.ownerSessionID === ownerSessionID));
+        return s;
+      });
+      await removeCommandLog(directory, id);
+      emitBroker(id, { type: "status", command: lastKnown });
+      await clearAwaitsForCommand(directory, id, "command removed").catch(() => {});
+      return { ok: true, message: `Command "${session.title}" removed.` };
+    },
+    async watch(directory, id, ownerSessionID, opts) {
+      rememberDir(id, directory);
+      const session = await service.get(directory, id, ownerSessionID);
+      if (!session)
+        return { ok: false, message: "Command not found." };
+      if (session.status !== "running") {
+        return { ok: false, message: `Command is ${session.status}; watch is meaningless after exit.` };
+      }
+      if (opts?.untilAction !== undefined && opts.untilAction !== "stop" && opts.untilAction !== "keep") {
+        throw new Error(`Invalid watch untilAction '${opts.untilAction}': must be "stop" or "keep".`);
+      }
+      if (opts?.clear === true) {
+        deleteWatch(id);
+        await mutateState(directory, `cmd.watch-clear:${id}`, async (s) => {
+          const c = (s.commands ?? []).find((x) => x.id === id);
+          if (c && c.ownerSessionID === ownerSessionID) {
+            delete c.watchFilter;
+            delete c.watchUntil;
+            delete c.watchIgnoreCase;
+            delete c.watchUntilAction;
+            delete c.watchState;
+            c.updatedAt = new Date().toISOString();
+          }
+          return s;
+        });
+        await watchLedger(directory, id, "command.watch-suspended", { reason: "cleared" }).catch(() => {});
+        try {
+          const fresh = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
+          if (fresh)
+            emitBroker(id, { type: "status", command: fresh });
+        } catch {}
+        const cleared = await service.get(directory, id, ownerSessionID);
+        return { ok: true, message: `Watch cleared for "${session.title}".`, command: cleared };
+      }
+      const filter = opts?.filter !== undefined && opts.filter !== "" ? opts.filter : undefined;
+      const until = opts?.until !== undefined && opts.until !== "" ? opts.until : undefined;
+      const watcher = new CommandWatcher({
+        ...filter !== undefined ? { filter } : {},
+        ...until !== undefined ? { until } : {},
+        ...opts?.ignoreCase !== undefined ? { ignoreCase: opts.ignoreCase } : {},
+        ...opts?.untilAction !== undefined ? { untilAction: opts.untilAction } : {}
+      });
+      clearWatchTimer(id);
+      watchers.set(id, watcher);
+      awaitAsm.delete(id);
+      const freshState = initialWatchState();
+      await mutateState(directory, `cmd.watch:${id}`, async (s) => {
+        const c = (s.commands ?? []).find((x) => x.id === id);
+        if (c && c.ownerSessionID === ownerSessionID) {
+          if (filter !== undefined)
+            c.watchFilter = filter;
+          else
+            delete c.watchFilter;
+          if (until !== undefined)
+            c.watchUntil = until;
+          else
+            delete c.watchUntil;
+          if (opts?.ignoreCase !== undefined)
+            c.watchIgnoreCase = opts.ignoreCase;
+          else
+            delete c.watchIgnoreCase;
+          c.watchUntilAction = watcher.untilAction;
+          c.watchState = { ...freshState };
+          c.updatedAt = new Date().toISOString();
+        }
+        return s;
+      });
+      try {
+        const fresh = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
+        if (fresh)
+          emitBroker(id, { type: "status", command: fresh });
+      } catch {}
+      const updated = await service.get(directory, id, ownerSessionID);
+      const desc = [
+        filter !== undefined ? `filter="${filter}"` : "filter=\u2014",
+        until !== undefined ? `until="${until}"` : "until=\u2014",
+        `action=${watcher.untilAction}`
+      ].join(" ");
+      return { ok: true, message: `Watch set for "${session.title}" (${desc}; counters reset to active).`, command: updated };
+    },
+    async reconcile(directory) {
+      const state = await readState(directory);
+      const cmds = state.commands ?? [];
+      for (const c of cmds)
+        rememberDir(c.id, directory);
+      let markedMissing = 0;
+      for (const c of cmds) {
+        if (c.status !== "running") {
+          if ((c.notifySuccessfulExit === true || c.notifyOnExit === true) && !c.ownerNotifiedAt)
+            await notifyOwnerIfNeeded(directory, c.id);
+          continue;
+        }
+        const entry = live.get(c.id);
+        if (entry) {
+          if (!entry.handle.isAlive()) {
+            live.delete(c.id);
+            clearCommandTimeout(c.id);
+            deleteWatch(c.id);
+            await mutateState(directory, `cmd.reconcile-exit:${c.id}`, async (s) => {
+              const x = (s.commands ?? []).find((y) => y.id === c.id);
+              if (x && x.status === "running") {
+                x.status = "exited";
+                x.endReason = "exit";
+                x.endedAt = new Date().toISOString();
+                x.updatedAt = x.endedAt;
+                x.lastError = x.lastError ?? "Process handle died without an exit event.";
+              }
+              return s;
+            }).catch(() => {});
+            try {
+              const fresh = await readState(directory).then((st) => (st.commands ?? []).find((y) => y.id === c.id));
+              if (fresh)
+                emitBroker(c.id, { type: "status", command: fresh });
+            } catch {}
+            await fireAwaits(directory, c.id);
+            await notifyOwnerIfNeeded(directory, c.id);
+          }
+          continue;
+        }
+        clearCommandTimeout(c.id);
+        deleteWatch(c.id);
+        const deadlinePassed = c.deadlineAt ? Date.parse(c.deadlineAt) <= Date.now() : false;
+        await mutateState(directory, `cmd.reconcile-missing:${c.id}`, async (s) => {
+          const x = (s.commands ?? []).find((y) => y.id === c.id);
+          if (x && x.status === "running") {
+            x.status = "missing";
+            s.orphanedCommandProcesses ??= [];
+            if (!s.orphanedCommandProcesses.some((process2) => process2.commandID === x.id))
+              s.orphanedCommandProcesses.push({ commandID: x.id, pid: x.pid });
+            x.endReason = "missing";
+            x.lastError = deadlinePassed ? `Host restarted or handle lost \u2014 no live execution found (timeoutSeconds=${x.timeoutSeconds ?? "?"}s deadline ${x.deadlineAt} already passed; treated as missing, timeout elapsed). Output log retained; remove to clean up.` : "Host restarted or handle lost \u2014 no live execution found. Output log retained; remove to clean up.";
+            x.updatedAt = new Date().toISOString();
+            markedMissing++;
+          }
+          return s;
+        }).catch(() => {});
+        try {
+          const fresh = await readState(directory).then((st) => (st.commands ?? []).find((y) => y.id === c.id));
+          if (fresh && fresh.status === "missing")
+            emitBroker(c.id, { type: "status", command: fresh });
+        } catch {}
+        await fireAwaits(directory, c.id);
+        await notifyOwnerIfNeeded(directory, c.id);
+      }
+      return { markedMissing };
+    },
+    async dispose(directory) {
+      for (const id of [...notifyRetries.keys()])
+        clearNotifyRetry(id);
+      for (const id of [...watchTimers.keys()])
+        clearWatchTimer(id);
+      watchers.clear();
+      awaitAsm.clear();
+      const state = await readState(directory);
+      const owned = new Map((state.commands ?? []).map((command) => [command.id, command.ownerSessionID]));
+      await Promise.all([...live.entries()].map(async ([id, entry]) => {
+        const owner = owned.get(id);
+        if (owner) {
+          await service.terminate(directory, id, owner).catch(() => {});
+          return;
+        }
+        entry.handle.terminate();
+        const exited = await Promise.race([
+          entry.handle.exited().then(() => true, () => true),
+          new Promise((resolve) => setTimeout(() => resolve(false), 1000))
+        ]);
+        if (!exited && entry.handle.isAlive())
+          entry.handle.kill();
+        live.delete(id);
+      }));
+      for (const id of [...timeouts.keys()])
+        clearCommandTimeout(id);
+      for (const id of [...notifyRetries.keys()])
+        clearNotifyRetry(id);
+    }
+  };
+  return service;
+}
+
+// src/application/approved-commands.ts
+init_workspace_execution();
+var DEFAULT_APPROVED_FINITE_TIMEOUT_SECONDS = 180;
+var MAX_APPROVED_OUTPUT_BYTES = 64 * 1024;
+function resolveApprovedCommand(state, sessionID, name, kind) {
+  const deny = (errorCode, message) => ({ ok: false, errorCode, message });
+  if (!sessionID || sessionID === "main")
+    return deny("unapproved_caller", "An active worker session is required.");
+  if (state.retiredWorkerSessions?.includes(sessionID))
+    return deny("unapproved_caller", "Worker session is retired; goal cleared or worker rotated. Late executions are fenced.");
+  const goal = state.goals.find((item) => item.workerSessionID === sessionID);
+  if (!goal)
+    return deny("unapproved_caller", "Session does not own a goal worker.");
+  if (goal.status !== "active" || goal.scopeClosing || goal.scopeClearPending) {
+    return deny("inactive_goal", `Worker goal is ${goal.scopeClosing ? "closing" : goal.status}, not active.`);
+  }
+  const spec = goal.config.approvedCommands?.find((command) => command.name === name);
+  if (!spec)
+    return deny("unknown_approved_command", `No approved command named "${name}" exists for this goal.`);
+  if (spec.kind !== kind)
+    return deny("kind_mismatch", `Approved command "${name}" is ${spec.kind}, not ${kind}.`);
+  const runtime = state.runtimes.find((item) => item.goalID === goal.id);
+  return { ok: true, goal, runtime, spec, generation: runtime?.runGeneration ?? 0 };
+}
+
+class ApprovedAuthorityError extends Error {
+  denial;
+  constructor(denial) {
+    super(denial.message);
+    this.denial = denial;
+    this.name = "ApprovedAuthorityError";
+  }
+}
+function capture(chunks, chunk, state) {
+  if (state.truncated)
+    return;
+  const remaining = MAX_APPROVED_OUTPUT_BYTES - state.bytes;
+  if (chunk.length > remaining) {
+    chunks.push(chunk.subarray(0, Math.max(0, remaining)));
+    state.bytes += Math.max(0, remaining);
+    state.truncated = true;
+    return;
+  }
+  chunks.push(chunk);
+  state.bytes += chunk.length;
+}
+function execute(directory, spec) {
+  const timeoutSeconds = spec.timeoutSeconds ?? DEFAULT_APPROVED_FINITE_TIMEOUT_SECONDS;
+  const cwd = path5.resolve(directory, spec.cwd);
+  const startedAt = Date.now();
+  return new Promise((resolve) => {
+    const stdout = [];
+    const stderr = [];
+    const stdoutState = { bytes: 0, truncated: false };
+    const stderrState = { bytes: 0, truncated: false };
+    let timedOut = false;
+    let settled = false;
+    const child = spawn(spec.command, spec.args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    const finish = (exitCode, signal) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        exitCode,
+        signal,
+        timedOut,
+        durationMs: Date.now() - startedAt,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+        outputTruncated: stdoutState.truncated || stderrState.truncated
+      });
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+    }, timeoutSeconds * 1000);
+    timer.unref?.();
+    child.stdout?.on("data", (chunk) => capture(stdout, chunk, stdoutState));
+    child.stderr?.on("data", (chunk) => capture(stderr, chunk, stderrState));
+    child.on("error", (error) => {
+      capture(stderr, Buffer.from(error instanceof Error ? error.message : String(error)), stderrState);
+      finish(undefined);
+    });
+    child.on("close", (code, signal) => finish(code ?? undefined, signal ?? undefined));
+  });
+}
+async function runApprovedFiniteCommand(directory, sessionID, name) {
+  const pre = resolveApprovedCommand(await readSnapshot(directory), sessionID, name, "finite");
+  if (!pre.ok)
+    return { ok: false, name, command: "", args: [], cwd: "", timeoutSeconds: 0, timedOut: false, durationMs: 0, stdout: "", stderr: "", outputTruncated: false, errorCode: pre.errorCode, message: pre.message };
+  const spec = pre.spec;
+  const timeoutSeconds = spec.timeoutSeconds ?? DEFAULT_APPROVED_FINITE_TIMEOUT_SECONDS;
+  const base = { name, command: spec.command, args: [...spec.args], cwd: spec.cwd, timeoutSeconds };
+  try {
+    const outcome = await withWorkspaceOperation(directory, pre.goal.id, sessionID, () => execute(directory, spec), {
+      authorize(state) {
+        const current = resolveApprovedCommand(state, sessionID, name, "finite");
+        if (!current.ok)
+          throw new ApprovedAuthorityError(current);
+      }
+    });
+    return { ...base, ok: !outcome.timedOut && outcome.exitCode === 0, ...outcome };
+  } catch (error) {
+    if (error instanceof ApprovedAuthorityError) {
+      return { ...base, ok: false, timedOut: false, durationMs: 0, stdout: "", stderr: "", outputTruncated: false, errorCode: error.denial.errorCode, message: error.denial.message };
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      ...base,
+      ok: false,
+      timedOut: false,
+      durationMs: 0,
+      stdout: "",
+      stderr: "",
+      outputTruncated: false,
+      ...message.includes("Workspace is busy") || message.includes("Workspace operation") ? { errorCode: "workspace_busy", message: "Workspace is busy with another operation or in-flight writes; the approved command was not started." } : { message }
+    };
+  }
+}
+async function readSnapshot(directory) {
+  return readState(directory);
+}
+
+class ApprovedServerFailure extends Error {
+  errorCode;
+  constructor(errorCode, message) {
+    super(message);
+    this.errorCode = errorCode;
+    this.name = "ApprovedServerFailure";
+  }
+}
+function failure(name, errorCode, message) {
+  return { ok: false, name, errorCode, message };
+}
+function recordFor(state, goalID, name) {
+  return state.approvedServers?.find((record) => record.goalID === goalID && record.name === name);
+}
+function commandFor(state, commandID) {
+  return state.commands?.find((command) => command.id === commandID);
+}
+function isTerminal2(status) {
+  return status === "exited" || status === "terminated";
+}
+function resolveServerControl(state, sessionID, name) {
+  const deny = (errorCode, message) => ({ ok: false, errorCode, message });
+  if (!sessionID || sessionID === "main")
+    return deny("unapproved_caller", "An active worker or the owning session is required.");
+  if (state.retiredWorkerSessions?.includes(sessionID))
+    return deny("unapproved_caller", "Worker session is retired; goal cleared or worker rotated. Late controls are fenced.");
+  const workerGoal = state.goals.find((item) => item.workerSessionID === sessionID);
+  const ownedGoals = state.goals.filter((item) => item.ownerSessionID === sessionID);
+  const candidates = [workerGoal, ...ownedGoals].filter((goal) => !!goal);
+  for (const goal of candidates) {
+    const record = recordFor(state, goal.id, name);
+    if (!record)
+      continue;
+    if (goal !== workerGoal && goal.ownerSessionID !== sessionID)
+      continue;
+    return { ok: true, record, goal };
+  }
+  return deny("unmanaged_server", `No managed approved server named "${name}" is owned by this session.`);
+}
+async function serverSnapshot(directory, commandService, record) {
+  if (!record.commandID) {
+    return failure(record.name, "recovery_required", `Approved server "${record.name}" has a persisted start reservation without a command id. Its process may exist; verify externally and stop it before starting another.`);
+  }
+  const session = await commandService.get(directory, record.commandID, record.workerSessionID);
+  if (!session) {
+    return failure(record.name, "recovery_required", `Approved server "${record.name}" (command_id ${record.commandID}) has no readable session. Its process exit is unproved; verify externally before restarting.`);
+  }
+  const base = {
+    name: record.name,
+    commandID: session.id,
+    status: session.status,
+    live: session.status === "running",
+    ...session.pid !== undefined ? { pid: session.pid } : {},
+    ...session.exitCode !== undefined ? { exitCode: session.exitCode } : {},
+    ...session.signal !== undefined ? { signal: session.signal } : {},
+    command: session.command,
+    args: [...session.args],
+    cwd: session.cwd,
+    ...session.timeoutSeconds !== undefined ? { timeoutSeconds: session.timeoutSeconds } : {}
+  };
+  const first = await commandService.read(directory, record.commandID, record.workerSessionID);
+  let output = first?.text ?? "";
+  let totalBytes = first?.totalBytes ?? 0;
+  if (totalBytes > MAX_APPROVED_OUTPUT_BYTES) {
+    const tail = await commandService.read(directory, record.commandID, record.workerSessionID, {
+      offsetBytes: totalBytes - MAX_APPROVED_OUTPUT_BYTES,
+      limitBytes: MAX_APPROVED_OUTPUT_BYTES
+    });
+    output = tail?.text ?? output;
+  }
+  return {
+    ok: session.status === "running",
+    ...base,
+    output,
+    totalBytes,
+    outputTruncated: totalBytes > MAX_APPROVED_OUTPUT_BYTES,
+    ...session.status === "missing" ? { message: `Host restart lost the handle for command ${session.id}; exit is unproved. Stop it explicitly or verify the PID externally before restarting.` } : {}
+  };
+}
+async function startApprovedServer(directory, commandService, sessionID, name) {
+  let spec;
+  let goalID;
+  try {
+    const state = await readState(directory);
+    const pre = resolveApprovedCommand(state, sessionID, name, "server");
+    if (!pre.ok)
+      return failure(name, pre.errorCode, pre.message);
+    spec = pre.spec;
+    goalID = pre.goal.id;
+  } catch (error) {
+    return failure(name, "unapproved_caller", error instanceof Error ? error.message : String(error));
+  }
+  try {
+    await mutateState(directory, `approved.server.reserve:${goalID}:${name}`, async (state) => {
+      const current = resolveApprovedCommand(state, sessionID, name, "server");
+      if (!current.ok)
+        throw new ApprovedAuthorityError(current);
+      if (state.workspaceOperation) {
+        throw new ApprovedServerFailure("workspace_busy", `Workspace operation ${state.workspaceOperation.id} is active; a managed server cannot start during source writes or checks.`);
+      }
+      const existing = recordFor(state, goalID, name);
+      if (existing) {
+        const command = commandFor(state, existing.commandID);
+        if (!existing.commandID)
+          throw new ApprovedServerFailure("start_in_progress", `A start for approved server "${name}" is already in progress.`);
+        if (!command || command.status === "missing") {
+          throw new ApprovedServerFailure("recovery_required", `Approved server "${name}" (command_id ${existing.commandID}) lost its handle and exit is unproved. Stop it or verify the process externally before restarting.`);
+        }
+        if (command.status === "running") {
+          throw new ApprovedServerFailure("duplicate_server", `Approved server "${name}" is already running as command_id ${existing.commandID}. Reuse that session.`);
+        }
+      }
+      state.approvedServers = [
+        ...(state.approvedServers ?? []).filter((record) => !(record.goalID === goalID && record.name === name)),
+        { commandID: "", goalID, workerSessionID: sessionID, runGeneration: current.generation, name, startedAt: new Date().toISOString() }
+      ];
+      return state;
+    });
+  } catch (error) {
+    if (error instanceof ApprovedAuthorityError)
+      return failure(name, error.denial.errorCode, error.denial.message);
+    if (error instanceof ApprovedServerFailure)
+      return failure(name, error.errorCode, error.message);
+    return failure(name, "start_in_progress", error instanceof Error ? error.message : String(error));
+  }
+  let session;
+  try {
+    session = await commandService.start(directory, {
+      title: `approved-server:${name}`,
+      command: spec.command,
+      args: [...spec.args],
+      cwd: path5.resolve(directory, spec.cwd),
+      ownerSessionID: sessionID,
+      goalID,
+      notifyOnExit: false,
+      ...spec.timeoutSeconds !== undefined ? { timeoutSeconds: spec.timeoutSeconds } : {}
+    }, { skipWorkspaceGate: true });
+  } catch (error) {
+    const code = error instanceof DuplicateCommandError ? "duplicate_server" : "start_in_progress";
+    await mutateState(directory, `approved.server.release:${goalID}:${name}`, async (state) => {
+      state.approvedServers = (state.approvedServers ?? []).filter((record) => !(record.goalID === goalID && record.name === name && record.commandID === ""));
+      return state;
+    }).catch(() => {});
+    return failure(name, code, error instanceof Error ? error.message : String(error));
+  }
+  const record = {
+    commandID: session.id,
+    goalID,
+    workerSessionID: sessionID,
+    runGeneration: 0,
+    name,
+    startedAt: new Date().toISOString()
+  };
+  try {
+    await mutateState(directory, `approved.server.link:${session.id}`, async (state) => {
+      const current = state.approvedServers?.find((item) => item.goalID === goalID && item.name === name && item.commandID === "");
+      if (!current)
+        throw new Error("Approved server reservation disappeared before linkage was recorded.");
+      current.commandID = session.id;
+      current.startedAt = record.startedAt;
+      return state;
+    });
+  } catch (error) {
+    return failure(name, "recovery_required", `${error instanceof Error ? error.message : String(error)} Command ${session.id} may still be running; stop it before retrying.`);
+  }
+  const snapshot = await serverSnapshot(directory, commandService, record);
+  return { ...snapshot, ok: session.status === "running" };
+}
+async function readApprovedServer(directory, commandService, sessionID, name) {
+  const state = await readState(directory);
+  const control = resolveServerControl(state, sessionID, name);
+  if (!control.ok)
+    return failure(name, control.errorCode, control.message);
+  return { ...await serverSnapshot(directory, commandService, control.record), name };
+}
+async function stopApprovedServer(directory, commandService, sessionID, name) {
+  const state = await readState(directory);
+  const control = resolveServerControl(state, sessionID, name);
+  if (!control.ok)
+    return failure(name, control.errorCode, control.message);
+  const { record } = control;
+  if (!record.commandID)
+    return failure(name, "recovery_required", `Approved server "${name}" has a reservation without a command id; verify the process externally.`);
+  const session = commandFor(await readState(directory), record.commandID);
+  if (!session)
+    return failure(name, "recovery_required", `Approved server "${name}" (command_id ${record.commandID}) has no readable session; exit is unproved.`);
+  if (session.status === "running") {
+    const result = await commandService.terminate(directory, record.commandID, record.workerSessionID);
+    if (!result.ok)
+      return failure(name, "stop_unproven", result.message);
+  }
+  const after = commandFor(await readState(directory), record.commandID);
+  if (!after || !isTerminal2(after.status)) {
+    return failure(name, "stop_unproven", `Approved server "${name}" (command_id ${record.commandID}) exit is unproved; linkage is retained and it must be stopped/verified explicitly.`);
+  }
+  await mutateState(directory, `approved.server.release:${record.commandID}`, async (current) => {
+    current.approvedServers = (current.approvedServers ?? []).filter((item) => item.commandID !== record.commandID);
+    return current;
+  });
+  return {
+    ...await serverSnapshot(directory, commandService, record),
+    name,
+    ok: true,
+    message: `Approved server "${name}" stopped (${after.status}${after.exitCode !== undefined ? `, exit ${after.exitCode}` : ""}).`
+  };
+}
+async function cleanupApprovedServers(directory, commandService, goalID) {
+  const state = await readState(directory);
+  const records = (state.approvedServers ?? []).filter((record) => goalID === undefined || record.goalID === goalID);
+  const stopped = [];
+  const unproven = [];
+  for (const record of records) {
+    const label = `${record.goalID}:${record.name}`;
+    const session = record.commandID ? commandFor(state, record.commandID) : undefined;
+    try {
+      if (record.commandID && session?.status === "running") {
+        await commandService.terminate(directory, record.commandID, record.workerSessionID);
+      }
+    } catch {
+      unproven.push(label);
+      continue;
+    }
+    const after = record.commandID ? commandFor(await readState(directory), record.commandID) : undefined;
+    if (!record.commandID || !after || !isTerminal2(after.status)) {
+      unproven.push(label);
+      continue;
+    }
+    await mutateState(directory, `approved.server.cleanup:${record.commandID || randomUUID5()}`, async (current) => {
+      current.approvedServers = (current.approvedServers ?? []).filter((item) => !(item.goalID === record.goalID && item.name === record.name));
+      return current;
+    });
+    stopped.push(label);
+  }
+  return { stopped, unproven };
+}
+async function reconcileApprovedServers(directory, commandService) {
+  const state = await readState(directory);
+  const stale = new Set;
+  for (const record of state.approvedServers ?? []) {
+    const goal = state.goals.find((item) => item.id === record.goalID);
+    if (!goal) {
+      stale.add(record.goalID);
+      continue;
+    }
+    const generation = state.runtimes.find((item) => item.goalID === goal.id)?.runGeneration ?? 0;
+    if (goal.status !== "active" || goal.workerSessionID !== record.workerSessionID || generation !== record.runGeneration) {
+      stale.add(record.goalID);
+    }
+  }
+  const stopped = [];
+  const unproven = [];
+  for (const goalID of stale) {
+    const result = await cleanupApprovedServers(directory, commandService, goalID);
+    stopped.push(...result.stopped);
+    unproven.push(...result.unproven);
+  }
+  return { stopped, unproven };
+}
+
+// src/application/control-worker.ts
 var MAX_LEDGER_SIZE = 100;
 var RESPONSE_CLEANUP_AGE_MS = 60 * 60 * 1000;
 function createControlWorker(options) {
@@ -2046,6 +3994,9 @@ function createControlWorker(options) {
   async function processPending() {
     if (!running)
       return;
+    if (options.commandService) {
+      await reconcileApprovedServers(directory, options.commandService).catch((error) => logServerEvent(directory, "approved.server.reconcile-failed", { detail: describeError(error) }).catch(() => {}));
+    }
     const requests = await listPendingRequests(directory);
     for (const request of requests) {
       if (processing.has(request.requestID))
@@ -2361,7 +4312,7 @@ function createControlWorker(options) {
         });
         await appendEvent(directory, {
           version: 1,
-          eventID: randomUUID3(),
+          eventID: randomUUID6(),
           goalID: goal.id,
           type: "goal.completed",
           summary: goal.completionEvidence.summary,
@@ -2416,7 +4367,7 @@ function createControlWorker(options) {
         });
         await appendEvent(directory, {
           version: 1,
-          eventID: randomUUID3(),
+          eventID: randomUUID6(),
           goalID: goal.id,
           type: "goal.blocked",
           reason: goal.blocker.reason,
@@ -2585,7 +4536,7 @@ function createControlWorker(options) {
 // src/application/loop-engine.ts
 init_state_repository();
 init_workspace_execution();
-import { randomUUID as randomUUID5 } from "crypto";
+import { randomUUID as randomUUID7 } from "crypto";
 
 // src/domain/tool-execution.ts
 function terminalToolExecution(part) {
@@ -2628,6 +4579,7 @@ function createLoopEngine(options) {
   const stuckRunningMs = options.stuckRunningMs ?? 10 * 60000;
   const idleUnconfirmedMs = options.idleUnconfirmedMs ?? 5 * 60000;
   const idleRecoverMs = options.idleRecoverMs ?? 3 * 60000;
+  const providerRetryGraceMs = options.providerRetryGraceMs ?? 2 * 60000;
   let running = false;
   let maintenanceTimer;
   let maintaining = false;
@@ -2910,7 +4862,7 @@ function createLoopEngine(options) {
         if (newlyStamped) {
           await appendEvent(directory, {
             version: 1,
-            eventID: randomUUID5(),
+            eventID: randomUUID7(),
             goalID,
             type: "idle.confirm-failed",
             reason: failureReason,
@@ -2955,7 +4907,7 @@ function createLoopEngine(options) {
     if (completedRunID) {
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID5(),
+        eventID: randomUUID7(),
         goalID,
         type: "run.completed",
         runID: completedRunID,
@@ -3017,7 +4969,7 @@ function createLoopEngine(options) {
       });
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID5(),
+        eventID: randomUUID7(),
         goalID,
         type: "goal.blocked",
         reason: limitResult.reason + " (force-finish ignored)",
@@ -3041,7 +4993,7 @@ function createLoopEngine(options) {
       });
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID5(),
+        eventID: randomUUID7(),
         goalID,
         type: "goal.status_changed",
         from: "active",
@@ -3058,20 +5010,56 @@ function createLoopEngine(options) {
     await continueGoal(goalID);
     return true;
   }
-  async function reconcileNativeExecution(goal, nativeError) {
+  async function reconcileNativeExecution(goal, nativeError, recoverOutputless = false) {
     const before = await readState(directory);
     const runtime = before.runtimes.find((rt) => rt.goalID === goal.id);
     if (!runtime || !goal.workerSessionID || !host.readExecution)
       return false;
     const observed = await host.readExecution(goal.workerSessionID);
     let completedRunID;
+    let blocked;
+    let outputlessRunID;
+    const providerRetry = observed?.status === "unknown" && host.sessionStatus ? await host.sessionStatus(goal.workerSessionID) === "retry" : false;
+    let retryWindow;
+    let retryBlocked;
     const after = await mutateState(directory, `native.execution:${goal.id}`, async (s) => {
       const g = s.goals.find((item) => item.id === goal.id);
       const rt = s.runtimes.find((item) => item.goalID === goal.id);
       if (!g || g.status !== "active" || g.scopeClosing || g.workerSessionID !== goal.workerSessionID || !rt || rt.runGeneration !== runtime.runGeneration || rt.activePromptMessageID !== runtime.activePromptMessageID)
         return s;
       rt.executionSource = "native";
-      rt.nativeExecutionStatus = observed?.status ?? "unknown";
+      rt.nativeExecutionStatus = providerRetry ? "retry" : observed?.status ?? "unknown";
+      if (!providerRetry)
+        rt.providerRetrySince = undefined;
+      if (providerRetry) {
+        const since = rt.providerRetrySince;
+        if (!since) {
+          rt.providerRetrySince = new Date().toISOString();
+        } else {
+          const elapsedMs = Date.now() - Date.parse(since);
+          if (Number.isFinite(elapsedMs) && elapsedMs >= providerRetryGraceMs) {
+            rt.providerRetrySince = new Date().toISOString();
+            rt.consecutiveFailures += 1;
+            rt.lastError = `OpenCode reports the worker session in provider retry for ${Math.floor(elapsedMs / 1000)}s; the model call keeps failing (commonly a quota-limited model). No turn is being produced.`;
+            rt.updatedAt = new Date().toISOString();
+            retryWindow = { elapsedMs, consecutiveFailures: rt.consecutiveFailures, runGeneration: rt.runGeneration };
+            if (rt.consecutiveFailures >= (g.config?.maxFailures || 5)) {
+              g.status = "blocked";
+              g.updatedAt = new Date().toISOString();
+              g.blocker = {
+                reason: `Failed ${rt.consecutiveFailures} times while the provider kept retrying: ${rt.lastError}`,
+                needed: "User intervention required: check the model's quota, switch the goal's model with switch_goal_identity, then retry.",
+                at: new Date().toISOString(),
+                kind: "provider-limit"
+              };
+              const notify = shouldNotifyParent(rt, "failed");
+              if (notify)
+                markParentNotified(rt, "failed");
+              retryBlocked = { failures: rt.consecutiveFailures, message: rt.lastError, notify };
+            }
+          }
+        }
+      }
       if (observed?.status === "busy" || observed?.status === "retry") {
         rt.lastWorkerStatus = observed.status;
         return s;
@@ -3080,32 +5068,76 @@ function createLoopEngine(options) {
       const ended = Date.parse(observed?.idleAt ?? "");
       const inboxIDs = rt.nativeInboxMessageIDs ?? [];
       const ownsLatest = observed?.latestUserMessageID === rt.activePromptMessageID || inboxIDs.includes(observed?.latestUserMessageID ?? "");
-      if (rt.phase !== "running" || !rt.activeRunID || !rt.activePromptMessageID || observed?.status !== "idle" || !observed.outcome || !Number.isFinite(started) || !Number.isFinite(ended) || ended < started || !ownsLatest || observed.outcome !== "interrupted" && inboxIDs.some((id) => !observed.deliveredMessageIDs?.includes(id)) || s.workspaceOperation || s.workspaceCalls?.some((call) => call.goalID === goal.id))
+      const reason = rt.phase !== "running" ? "phase-not-running" : !rt.activeRunID || !rt.activePromptMessageID ? "missing-run-anchor" : observed?.status !== "idle" ? "host-not-idle" : s.workspaceOperation ? "workspace-operation" : s.workspaceCalls?.some((call) => call.goalID === goal.id) ? "workspace-call" : inboxIDs.some((id) => !observed.deliveredMessageIDs?.includes(id)) && observed.outcome !== "interrupted" ? "undelivered-inbox" : !Number.isFinite(started) || !Number.isFinite(ended) || ended < started ? "invalid-terminal-time" : !ownsLatest ? "foreign-prompt" : !observed.outcome ? "missing-outcome" : undefined;
+      if (reason) {
+        rt.nativeReconcileBlocked = { reason, runGeneration: rt.runGeneration };
+        if (rt.nativeReconcileBlockedReasons?.runGeneration !== rt.runGeneration)
+          rt.nativeReconcileBlockedReasons = { runGeneration: rt.runGeneration, reasons: [] };
+        if (!rt.nativeReconcileBlockedReasons.reasons.includes(reason)) {
+          rt.nativeReconcileBlockedReasons.reasons.push(reason);
+          blocked = { version: 1, eventID: randomUUID7(), goalID: goal.id, type: "native.reconcile-blocked", reason, runGeneration: rt.runGeneration, phase: rt.phase, observedStatus: observed?.status ?? "unknown", observedOutcome: observed?.outcome, idleAt: observed?.idleAt, turnStartedAt: rt.turnStartedAt, ownsLatest, timestamp: new Date().toISOString(), revision: s.revision };
+        }
+        if (recoverOutputless && reason === "missing-outcome" && !g.interactive)
+          outputlessRunID = rt.activeRunID;
         return s;
+      }
+      rt.nativeReconcileBlocked = undefined;
       completedRunID = rt.activeRunID;
-      if (observed.outcome === "failed")
+      if (observed?.outcome === "failed")
         return s;
       Object.assign(rt, releaseLease(rt));
       rt.activeRunID = undefined;
       rt.lastWorkerStatus = "idle";
       rt.nativeExecutionStatus = "idle";
       rt.nativeInboxMessageIDs = undefined;
-      if (observed.outcome === "interrupted") {
+      if (observed?.outcome === "interrupted") {
         g.status = "paused";
         g.updatedAt = new Date().toISOString();
       }
       return s;
     });
+    if (blocked)
+      await appendEvent(directory, { ...blocked, revision: after.revision });
+    if (retryWindow) {
+      await appendEvent(directory, {
+        version: 1,
+        eventID: randomUUID7(),
+        goalID: goal.id,
+        type: "native.provider-retry",
+        elapsedMs: retryWindow.elapsedMs,
+        consecutiveFailures: retryWindow.consecutiveFailures,
+        runGeneration: retryWindow.runGeneration,
+        timestamp: new Date().toISOString(),
+        revision: after.revision
+      });
+    }
+    if (retryBlocked) {
+      await appendEvent(directory, {
+        version: 1,
+        eventID: randomUUID7(),
+        goalID: goal.id,
+        type: "goal.blocked",
+        reason: `Provider retry persisted across ${retryBlocked.failures} failure windows`,
+        needed: "User intervention required: check the model's quota or switch this goal's model.",
+        timestamp: new Date().toISOString(),
+        revision: after.revision
+      });
+      if (retryBlocked.notify) {
+        await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" blocked after ${retryBlocked.failures} provider-retry windows. Last error: ${retryBlocked.message}`, goal.parentAgent);
+      }
+    }
+    if (outputlessRunID)
+      return await handleSessionError(after, goal, { properties: { expectedRunID: outputlessRunID, runID: outputlessRunID, error: { message: "OpenCode closed this turn with no output (no finish reason, no parts, no error). The host accepted the prompt and produced nothing \u2014 commonly a quota-limited model." } } });
     if (!completedRunID)
       return false;
     if (observed?.outcome === "interrupted") {
-      await appendEvent(directory, { version: 1, eventID: randomUUID5(), goalID: goal.id, type: "goal.status_changed", from: "active", to: "paused", timestamp: new Date().toISOString(), revision: after.revision });
+      await appendEvent(directory, { version: 1, eventID: randomUUID7(), goalID: goal.id, type: "goal.status_changed", from: "active", to: "paused", timestamp: new Date().toISOString(), revision: after.revision });
       return true;
     }
     if (observed?.outcome === "failed") {
       return await handleSessionError(after, goal, { properties: { expectedRunID: completedRunID, runID: completedRunID, error: nativeError ?? { message: "OpenCode execution failed (reconciled native outcome)" } } });
     }
-    await appendEvent(directory, { version: 1, eventID: randomUUID5(), goalID: goal.id, type: "run.completed", runID: completedRunID, timestamp: new Date().toISOString(), revision: after.revision });
+    await appendEvent(directory, { version: 1, eventID: randomUUID7(), goalID: goal.id, type: "run.completed", runID: completedRunID, timestamp: new Date().toISOString(), revision: after.revision });
     if (goal.interactive)
       return true;
     return await afterCompletedTurn(goal.id, goal);
@@ -3213,7 +5245,7 @@ function createLoopEngine(options) {
       return false;
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID5(),
+      eventID: randomUUID7(),
       goalID: goal.id,
       type: "run.failed",
       runID: event.properties?.runID || runtime.activeRunID || "unknown",
@@ -3227,7 +5259,7 @@ function createLoopEngine(options) {
     if (updatedGoal?.status === "blocked") {
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID5(),
+        eventID: randomUUID7(),
         goalID: goal.id,
         type: "goal.blocked",
         reason: `Failed ${runtime.consecutiveFailures + 1} times`,
@@ -3255,7 +5287,7 @@ function createLoopEngine(options) {
     });
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID5(),
+      eventID: randomUUID7(),
       goalID: goal.id,
       type: "compaction.completed",
       timestamp: new Date().toISOString(),
@@ -3325,7 +5357,7 @@ function createLoopEngine(options) {
     });
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID5(),
+      eventID: randomUUID7(),
       goalID: goal.id,
       type: "compaction.started",
       timestamp: new Date().toISOString(),
@@ -3383,7 +5415,7 @@ function createLoopEngine(options) {
       return false;
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID5(),
+      eventID: randomUUID7(),
       goalID: goal.id,
       type: "goal.status_changed",
       from: "active",
@@ -3490,7 +5522,7 @@ function createLoopEngine(options) {
       }
       if (host.readExecution) {
         if (runtime.phase === "running")
-          await reconcileNativeExecution(goal);
+          await reconcileNativeExecution(goal, undefined, true);
         else if (!manual && runtime.phase === "idle" && goal.workerSessionID && (await host.readExecution(goal.workerSessionID))?.status === "idle")
           await continueGoal(goal.id);
         continue;
@@ -3582,7 +5614,7 @@ function createLoopEngine(options) {
             if (recovered) {
               await appendEvent(directory, {
                 version: 1,
-                eventID: randomUUID5(),
+                eventID: randomUUID7(),
                 goalID: goal.id,
                 type: "run.recovered",
                 runID: stalledRunID ?? "unknown",
@@ -3616,7 +5648,7 @@ function createLoopEngine(options) {
           const stuckSeconds = Math.floor((Date.now() - Date.parse(failedAt)) / 1000);
           await appendEvent(directory, {
             version: 1,
-            eventID: randomUUID5(),
+            eventID: randomUUID7(),
             goalID: goal.id,
             type: "run.stuck",
             runID: runtime.activeRunID ?? "unknown",
@@ -3656,7 +5688,7 @@ function createLoopEngine(options) {
             });
             await appendEvent(directory, {
               version: 1,
-              eventID: randomUUID5(),
+              eventID: randomUUID7(),
               goalID: goal.id,
               type: "run.stuck",
               runID: runtime.activeRunID,
@@ -3682,13 +5714,13 @@ function createLoopEngine(options) {
 init_goal();
 init_state_repository();
 init_command_await2();
-import { randomUUID as randomUUID7 } from "crypto";
-import * as path4 from "path";
-import { promises as fs4 } from "fs";
+import { randomUUID as randomUUID9 } from "crypto";
+import * as path7 from "path";
+import { promises as fs6 } from "fs";
 
 // src/server/host-adapter.ts
 init_server_log();
-import { randomUUID as randomUUID6 } from "crypto";
+import { randomUUID as randomUUID8 } from "crypto";
 
 // src/v2/native-rpc.ts
 var NATIVE_RPC_ID = "loopd.native";
@@ -3914,7 +5946,7 @@ function parseModelRef(value) {
   return { providerID, modelID };
 }
 function newPromptMessageID() {
-  return `msg_${randomUUID6()}`;
+  return `msg_${randomUUID8()}`;
 }
 function isV2PromptMessageID(messageID) {
   return messageID.startsWith("msg_");
@@ -4430,11 +6462,12 @@ function createV2Host(context, statuses, options = {}) {
     },
     async notifyOwner(ownerSessionID, message) {
       try {
-        await withTimeout(context.session.prompt({ sessionID: ownerSessionID, text: message }), 1e4, "OpenCode v2 parent notify (acceptance)");
+        await withTimeout(context.session.synthetic({ sessionID: ownerSessionID, text: message, delivery: "steer", resume: true }), 1e4, "OpenCode v2 parent notify (acceptance)");
         await logServerEvent(directory, "parent.notified", { ownerSessionID, preview: message.slice(0, 160) });
         return true;
       } catch (error) {
-        await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail: describeError(error) });
+        const detail = describeError(error) || error?.name || "(no detail)";
+        await logServerEvent(directory, "parent.notify.failed", { ownerSessionID, detail });
         return false;
       }
     }
@@ -4556,6 +6589,14 @@ function buildContinuationSteering(goal, runtime, context) {
     `## READ-ONLY OWNERSHIP`,
     `Shared source writes and arbitrary shell/custom/subagent tools are denied. Write artifacts only under this goal's artifact directory. Use run_goal_checks for trusted configured verification.`
   ] : [];
+  const approvedInstructions = goal.config.approvedCommands?.length ? [
+    ``,
+    `## APPROVED COMMANDS`,
+    `Allowed names: ${goal.config.approvedCommands.map((command) => `${command.name} (${command.kind})`).join(", ")}.`,
+    `Finite: run_approved_command({ name }). Server: start_approved_server/read_approved_server/stop_approved_server({ name }).`,
+    `These tools accept a name only. Executable, args, cwd, env, shell, kind and timeout overrides are denied; unknown names and kind mismatches are denied.`,
+    `Finite commands hold the workspace-wide operation lock until the real process exits. Managed servers are stopped when this goal pauses, blocks, completes, clears, aborts, or rotates.`
+  ] : [];
   const artifactDir = goal.config.artifactDir;
   function outputLocationBlock() {
     if (!artifactDir)
@@ -4640,6 +6681,7 @@ function buildContinuationSteering(goal, runtime, context) {
     }
   }
   parts.push(...scopeInstructions);
+  parts.push(...approvedInstructions);
   return parts.join(`
 `);
 }
@@ -4647,6 +6689,63 @@ function buildContinuationSteering(goal, runtime, context) {
 // src/application/goal-service.ts
 init_server_log();
 init_workspace_execution();
+
+// src/infrastructure/goal-commands.ts
+import fs5 from "fs/promises";
+import path6 from "path";
+async function canonicalGoalCommands(directory, input) {
+  if (!Array.isArray(input))
+    throw new Error("approvedCommands must be an array of named command specifications.");
+  const root = await fs5.realpath(directory);
+  const names = new Set;
+  const result = [];
+  const fields = new Set(["name", "command", "args", "cwd", "kind", "timeoutSeconds"]);
+  for (const value of input) {
+    if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some((key) => !fields.has(key))) {
+      throw new Error("approvedCommands entries allow only name, command, args, cwd, kind and timeoutSeconds.");
+    }
+    const { name, command, args, cwd, kind, timeoutSeconds } = value;
+    if (typeof name !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(name) || names.has(name)) {
+      throw new Error("approvedCommands requires unique non-empty names using letters, digits, dots, underscores or hyphens.");
+    }
+    if (typeof command !== "string" || !command.trim() || command.includes("\x00")) {
+      throw new Error(`approvedCommands ${name}: command must be a non-empty executable without NUL bytes.`);
+    }
+    if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string" || arg.includes("\x00"))) {
+      throw new Error(`approvedCommands ${name}: args must be a fixed string array without NUL bytes.`);
+    }
+    if (kind !== "finite" && kind !== "server")
+      throw new Error(`approvedCommands ${name}: kind must be finite or server.`);
+    if (timeoutSeconds !== undefined && (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds <= 0)) {
+      throw new Error(`approvedCommands ${name}: timeoutSeconds must be a positive finite integer.`);
+    }
+    if (typeof cwd !== "string" || !cwd.trim() || cwd.includes("\x00") || path6.isAbsolute(cwd)) {
+      throw new Error(`approvedCommands ${name}: cwd must be a fixed workspace-relative directory.`);
+    }
+    let canonical;
+    try {
+      const resolved = await fs5.realpath(path6.resolve(root, cwd));
+      canonical = path6.relative(root, resolved);
+      if (canonical === ".." || canonical.startsWith(`..${path6.sep}`) || path6.isAbsolute(canonical) || !(await fs5.stat(resolved)).isDirectory()) {
+        throw new Error("cwd escapes the workspace or is not a directory");
+      }
+    } catch {
+      throw new Error(`approvedCommands ${name}: cwd must resolve to an existing directory inside the workspace.`);
+    }
+    names.add(name);
+    result.push({
+      name,
+      command,
+      args: [...args],
+      cwd: canonical.split(path6.sep).join("/") || ".",
+      kind,
+      ...timeoutSeconds !== undefined ? { timeoutSeconds } : {}
+    });
+  }
+  return result;
+}
+
+// src/application/goal-service.ts
 class GoalStartError extends Error {
   goalID;
   workerSessionID;
@@ -5206,7 +7305,7 @@ function createGoalService(host) {
     }
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID7(),
+      eventID: randomUUID9(),
       goalID,
       type: "run.failed",
       runID,
@@ -5218,7 +7317,7 @@ function createGoalService(host) {
     if (blocked) {
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID7(),
+        eventID: randomUUID9(),
         goalID,
         type: "goal.blocked",
         reason: `Worker prompt delivery failed: ${detail}`,
@@ -5362,10 +7461,13 @@ function createGoalService(host) {
     return session;
   }
   async function start(directory, input) {
-    const id = randomUUID7();
+    const id = randomUUID9();
     return withGoalOperation(id, () => startUnlocked(directory, input, id));
   }
   async function startUnlocked(directory, input, id) {
+    if (input.config?.approvedCommands !== undefined) {
+      input.config = { ...input.config, approvedCommands: await canonicalGoalCommands(directory, input.config.approvedCommands) };
+    }
     if (host.scopedExecution && input.config?.workspaceWrite !== false && input.config?.write_scope === undefined) {
       const inferred = inferNamedFileWriteScope(input.objective);
       if (inferred)
@@ -5430,7 +7532,7 @@ function createGoalService(host) {
     const artifactDir = goalArtifactDir(directory, id);
     goal.config.artifactDir = artifactDir;
     if (!goal.config.progressFile)
-      goal.config.progressFile = path4.join(artifactDir, "progress.md");
+      goal.config.progressFile = path7.join(artifactDir, "progress.md");
     await ensureGoalArtifactDir(directory, id);
     const state1 = await mutateState(directory, `goal.create:${id}`, async (state) => {
       assertWorkspaceWriteAvailable(state, goal, goal.ownerSessionID);
@@ -5474,7 +7576,7 @@ function createGoalService(host) {
       });
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID7(),
+        eventID: randomUUID9(),
         goalID: id,
         type: "goal.blocked",
         reason: detail,
@@ -5505,7 +7607,7 @@ function createGoalService(host) {
           rt.executionSource = "native";
           rt.nativeExecutionStatus = "unknown";
         }
-        rt.activeRunID = randomUUID7();
+        rt.activeRunID = randomUUID9();
         rt.activePromptMessageID = newPromptMessageID();
         rt.runCount = 1;
         rt.budgetTurnCount = 1;
@@ -5516,7 +7618,7 @@ function createGoalService(host) {
     runtime = state2.runtimes.find((r) => r.goalID === id);
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID7(),
+      eventID: randomUUID9(),
       goalID: id,
       type: "goal.created",
       name: input.name,
@@ -5528,7 +7630,7 @@ function createGoalService(host) {
     if (runtime) {
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID7(),
+        eventID: randomUUID9(),
         goalID: id,
         type: "run.started",
         runID: runtime.activeRunID,
@@ -5693,7 +7795,7 @@ function createGoalService(host) {
         rt.executionSource = "native";
         rt.nativeExecutionStatus = "unknown";
       }
-      rt.activeRunID = randomUUID7();
+      rt.activeRunID = randomUUID9();
       rt.activePromptMessageID = newPromptMessageID();
       rt.runCount += 1;
       if (rt.freeRetryPending) {
@@ -5730,7 +7832,7 @@ function createGoalService(host) {
       });
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID7(),
+        eventID: randomUUID9(),
         goalID,
         type: "run.started",
         runID: freshRuntime.activeRunID,
@@ -5771,7 +7873,7 @@ function createGoalService(host) {
         const artifactDir = freshGoal.config.artifactDir;
         if (artifactDir) {
           try {
-            const files = await fs4.readdir(artifactDir);
+            const files = await fs6.readdir(artifactDir);
             verification = { artifactSummary: files.length ? `${files.length} file(s): ${files.slice(0, 8).join(", ")}` : "no artifacts yet" };
           } catch {
             verification = { artifactSummary: "no artifacts yet" };
@@ -5829,7 +7931,7 @@ function createGoalService(host) {
       return { ok: false, message: "Goal not found." };
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID7(),
+      eventID: randomUUID9(),
       goalID,
       type: "goal.interactive_changed",
       interactive,
@@ -5890,7 +7992,7 @@ function createGoalService(host) {
     await cancelAwaitsForGoal(directory, goalID, "goal paused").catch(() => {});
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID7(),
+      eventID: randomUUID9(),
       goalID,
       type: "goal.status_changed",
       from: "active",
@@ -5985,7 +8087,7 @@ function createGoalService(host) {
     }
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID7(),
+      eventID: randomUUID9(),
       goalID,
       type: "goal.status_changed",
       from: "paused",
@@ -6067,7 +8169,7 @@ function createGoalService(host) {
     }
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID7(),
+      eventID: randomUUID9(),
       goalID,
       type: "goal.status_changed",
       from: "blocked",
@@ -6173,7 +8275,7 @@ function createGoalService(host) {
     await cancelAwaitsForGoal(directory, goalID, "goal cleared").catch(() => {});
     await appendEvent(directory, {
       version: 1,
-      eventID: randomUUID7(),
+      eventID: randomUUID9(),
       goalID,
       type: "goal.cleared",
       timestamp: new Date().toISOString(),
@@ -6521,7 +8623,7 @@ function createGoalService(host) {
 init_state_repository();
 init_server_log();
 init_workspace_execution();
-import { randomUUID as randomUUID8 } from "crypto";
+import { randomUUID as randomUUID10 } from "crypto";
 function createScheduleWorker(options) {
   const { directory, goalService } = options;
   const intervalMs = options.intervalMs ?? 5000;
@@ -6612,7 +8714,7 @@ function createScheduleWorker(options) {
         continue;
       await appendEvent(directory, {
         version: 1,
-        eventID: randomUUID8(),
+        eventID: randomUUID10(),
         goalID: goal.id,
         type: "schedule.tick",
         scheduleRunCount: count,
@@ -6638,7 +8740,7 @@ function createScheduleWorker(options) {
 }
 
 // src/v2/native-server.ts
-import { randomUUID as randomUUID9 } from "crypto";
+import { randomUUID as randomUUID11 } from "crypto";
 
 // src/v2/native-bridge.ts
 class NativeBridgeError extends Error {
@@ -6780,7 +8882,7 @@ async function setupNativeServer(context) {
     bridge,
     requestWorker: async (input) => {
       const request = {
-        requestID: `req_${randomUUID9()}`,
+        requestID: `req_${randomUUID11()}`,
         goalID: input.goalID ?? "",
         parentSessionID: input.parentSessionID,
         title: input.title,
@@ -7048,1556 +9150,8 @@ function createCommandHost(opts) {
   }
 }
 
-// src/application/command-service.ts
-import { randomUUID as randomUUID10 } from "crypto";
-import { promises as fs5 } from "fs";
-import path5 from "path";
-
-// src/domain/command-session.ts
-function normalizeTimeoutSeconds(timeoutSeconds) {
-  if (timeoutSeconds === undefined)
-    return;
-  if (!Number.isInteger(timeoutSeconds) || timeoutSeconds <= 0) {
-    throw new Error("timeoutSeconds must be a positive integer in seconds");
-  }
-  return timeoutSeconds;
-}
-function computeDeadlineAt(from, timeoutSeconds) {
-  return new Date(from.getTime() + timeoutSeconds * 1000).toISOString();
-}
-function createCommandSession(input) {
-  const now = new Date().toISOString();
-  const timeout = normalizeTimeoutSeconds(input.timeoutSeconds);
-  return {
-    id: input.id,
-    title: input.title,
-    command: input.command,
-    args: input.args ?? [],
-    shell: input.shell,
-    endReason: input.endReason,
-    timeoutSeconds: timeout,
-    deadlineAt: input.deadlineAt ?? (timeout !== undefined ? computeDeadlineAt(new Date(now), timeout) : undefined),
-    envKeys: input.envKeys,
-    watchFilter: input.watchFilter,
-    watchUntil: input.watchUntil,
-    watchIgnoreCase: input.watchIgnoreCase,
-    watchUntilAction: input.watchUntilAction,
-    watchState: input.watchState,
-    cwd: input.cwd,
-    ownerSessionID: input.ownerSessionID,
-    goalID: input.goalID,
-    notifyOnExit: input.notifyOnExit,
-    notifySuccessfulExit: input.notifySuccessfulExit,
-    status: "running",
-    pid: input.pid,
-    cols: input.cols,
-    rows: input.rows,
-    outputBytes: 0,
-    streamBytes: 0,
-    truncated: false,
-    createdAt: now,
-    updatedAt: now
-  };
-}
-var MAX_COMMAND_OUTPUT_BYTES = 512 * 1024;
-var MAX_COMMAND_READ_LINES = 500;
-var NOTIFY_LONG_RUNNING_MS = 2 * 60 * 1000;
-function shouldNotifyOwnerOnExit(session) {
-  if (session.endReason === "until")
-    return false;
-  if (session.notifyOnExit === false)
-    return false;
-  if (session.notifyOnExit === true)
-    return true;
-  if (session.endReason === "timeout")
-    return true;
-  if (session.status === "missing")
-    return true;
-  if (session.status === "terminated")
-    return false;
-  if (session.status !== "exited")
-    return false;
-  if (session.exitCode !== undefined && session.exitCode !== 0)
-    return true;
-  if (session.notifySuccessfulExit === true)
-    return true;
-  const started = Date.parse(session.createdAt);
-  const ended = session.endedAt ? Date.parse(session.endedAt) : Date.now();
-  if (!Number.isFinite(started) || !Number.isFinite(ended))
-    return false;
-  return ended - started >= NOTIFY_LONG_RUNNING_MS;
-}
-
-// src/application/command-service.ts
-init_command_watch();
-init_command_await();
-
-// src/domain/command-events.ts
-var _encoder = new TextEncoder;
-function utf8ByteLength(data) {
-  return _encoder.encode(data).length;
-}
-function expectedNextEnd(startOffset, data) {
-  return startOffset + utf8ByteLength(data);
-}
-var VALID_STATUSES = [
-  "running",
-  "exited",
-  "terminated",
-  "missing"
-];
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function isNonEmptyString(value) {
-  return typeof value === "string" && value.length > 0;
-}
-function isNonNegativeInt(value) {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0;
-}
-function isCommandSessionLike(value) {
-  if (!isRecord(value))
-    return false;
-  if (typeof value["id"] !== "string" || value["id"].length === 0)
-    return false;
-  if (typeof value["title"] !== "string")
-    return false;
-  if (typeof value["command"] !== "string")
-    return false;
-  if (typeof value["cwd"] !== "string")
-    return false;
-  if (typeof value["ownerSessionID"] !== "string")
-    return false;
-  if (typeof value["status"] !== "string")
-    return false;
-  if (!VALID_STATUSES.includes(value["status"]))
-    return false;
-  if (!isNonNegativeInt(value["outputBytes"]))
-    return false;
-  if (typeof value["truncated"] !== "boolean")
-    return false;
-  if (typeof value["createdAt"] !== "string")
-    return false;
-  if (typeof value["updatedAt"] !== "string")
-    return false;
-  if (value["args"] !== undefined && !Array.isArray(value["args"]))
-    return false;
-  if (value["streamBytes"] !== undefined && !isNonNegativeInt(value["streamBytes"]))
-    return false;
-  return true;
-}
-function checkOffsets(startOffset, endOffset, data) {
-  if (typeof data !== "string")
-    return "data must be a string";
-  if (!isNonNegativeInt(startOffset))
-    return "startOffset must be a non-negative integer";
-  if (!isNonNegativeInt(endOffset))
-    return "endOffset must be a non-negative integer";
-  if (endOffset < startOffset)
-    return "endOffset must be >= startOffset";
-  const expected = expectedNextEnd(startOffset, data);
-  if (endOffset !== expected)
-    return `endOffset mismatch: expected ${expected} (startOffset + UTF-8 byte length ${expected - startOffset}), got ${endOffset}`;
-  return null;
-}
-function validateCommandStreamMessage(value) {
-  try {
-    if (!isRecord(value))
-      return { ok: false, error: "message must be an object" };
-    const type = value["type"];
-    if (typeof type !== "string")
-      return { ok: false, error: "missing type field" };
-    switch (type) {
-      case "subscribe": {
-        if (!isNonEmptyString(value["commandID"]))
-          return { ok: false, error: "subscribe.commandID must be a non-empty string" };
-        if (!isNonEmptyString(value["ownerSessionID"]))
-          return { ok: false, error: "subscribe.ownerSessionID must be a non-empty string" };
-        return {
-          ok: true,
-          message: {
-            type: "subscribe",
-            commandID: value["commandID"],
-            ownerSessionID: value["ownerSessionID"]
-          }
-        };
-      }
-      case "snapshot": {
-        if (!isCommandSessionLike(value["command"]))
-          return { ok: false, error: "snapshot.command must be CommandSession metadata" };
-        const offsetError = checkOffsets(value["startOffset"], value["endOffset"], value["data"]);
-        if (offsetError)
-          return { ok: false, error: `snapshot.${offsetError}` };
-        return {
-          ok: true,
-          message: {
-            type: "snapshot",
-            command: value["command"],
-            data: value["data"],
-            startOffset: value["startOffset"],
-            endOffset: value["endOffset"]
-          }
-        };
-      }
-      case "output": {
-        if (!isNonEmptyString(value["commandID"]))
-          return { ok: false, error: "output.commandID must be a non-empty string" };
-        const offsetError = checkOffsets(value["startOffset"], value["endOffset"], value["data"]);
-        if (offsetError)
-          return { ok: false, error: `output.${offsetError}` };
-        return {
-          ok: true,
-          message: {
-            type: "output",
-            commandID: value["commandID"],
-            data: value["data"],
-            startOffset: value["startOffset"],
-            endOffset: value["endOffset"]
-          }
-        };
-      }
-      case "status": {
-        if (!isCommandSessionLike(value["command"]))
-          return { ok: false, error: "status.command must be CommandSession metadata" };
-        return { ok: true, message: { type: "status", command: value["command"] } };
-      }
-      case "input": {
-        if (!isNonEmptyString(value["commandID"]))
-          return { ok: false, error: "input.commandID must be a non-empty string" };
-        if (typeof value["data"] !== "string")
-          return { ok: false, error: "input.data must be a string" };
-        return {
-          ok: true,
-          message: { type: "input", commandID: value["commandID"], data: value["data"] }
-        };
-      }
-      case "interrupt": {
-        if (!isNonEmptyString(value["commandID"]))
-          return { ok: false, error: "interrupt.commandID must be a non-empty string" };
-        return { ok: true, message: { type: "interrupt", commandID: value["commandID"] } };
-      }
-      case "resync": {
-        if (!isNonEmptyString(value["commandID"]))
-          return { ok: false, error: "resync.commandID must be a non-empty string" };
-        return { ok: true, message: { type: "resync", commandID: value["commandID"] } };
-      }
-      case "unsubscribe": {
-        if (!isNonEmptyString(value["commandID"]))
-          return { ok: false, error: "unsubscribe.commandID must be a non-empty string" };
-        return { ok: true, message: { type: "unsubscribe", commandID: value["commandID"] } };
-      }
-      case "error": {
-        if (!isNonEmptyString(value["code"]))
-          return { ok: false, error: "error.code must be a non-empty string" };
-        if (typeof value["message"] !== "string")
-          return { ok: false, error: "error.message must be a string" };
-        return {
-          ok: true,
-          message: { type: "error", code: value["code"], message: value["message"] }
-        };
-      }
-      default:
-        return { ok: false, error: `unknown message type: ${type}` };
-    }
-  } catch (err) {
-    return { ok: false, error: `validation failed: ${String(err)}` };
-  }
-}
-
-// src/application/command-service.ts
-init_server_log();
-init_workspace_execution();
-init_command_await2();
-init_state_repository();
-var ANSI_PATTERN2 = new RegExp("\x1B\\[[0-9;?]*[ -/]*[@-~]|\x1B\\][^\x07]*(?:\x07|\x1B\\\\)|\x1B[()][0-9A-Z]", "g");
-function stripAnsiForMatch(line) {
-  return line.replace(ANSI_PATTERN2, "");
-}
-var DANGEROUS_REGEXES2 = [
-  /\(\?:.*\)\*.*\(\?:.*\)\*/,
-  /.*\(\.\*\?\)\{2,\}.*/,
-  /.*\(.*\|.*\)\{3,\}.*/,
-  /\([^()]*[+*][^()]*\)[+*]/,
-  /\([^()]*(\.\*.*\.\*|\.\+.*\.\+|\\w\+.*\\s\*|\\s\*.*\\w\+)[^()]*\)/
-];
-function validateReadPattern(pattern) {
-  let compiled;
-  try {
-    compiled = new RegExp(pattern);
-  } catch (e) {
-    return { error: `Invalid regex pattern '${pattern}': ${e instanceof Error ? e.message : String(e)}` };
-  }
-  if (DANGEROUS_REGEXES2.some((d) => d.test(pattern))) {
-    return { error: `Potentially dangerous regex pattern rejected: '${pattern}'. Please use a safer pattern.` };
-  }
-  return compiled;
-}
-function shellQuote(word) {
-  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(word))
-    return word;
-  return `'${word.replace(/'/g, `'\\''`)}'`;
-}
-function shellJoin(command, args) {
-  return [command, ...args].map(shellQuote).join(" ");
-}
-
-class DuplicateCommandError extends Error {
-  commandID;
-  title;
-  constructor(commandID, title) {
-    super(`An identical command is already running: command_id ${commandID} ("${title}", same argv and cwd). Reuse that session instead of starting a twin, or change the argv/cwd to start a distinct one.`);
-    this.commandID = commandID;
-    this.title = title;
-    this.name = "DuplicateCommandError";
-  }
-}
-function loopCommandsDir(directory) {
-  return path5.join(directory, ".opencode", "loopd", "commands");
-}
-function createCommandService(host, opts) {
-  const live = new Map;
-  const operations = new Map;
-  const broker = opts?.broker;
-  const commandDirs = new Map;
-  const timeouts = new Map;
-  const timeoutOwners = new Map;
-  const notifyInFlight = new Set;
-  const notifyRetries = new Map;
-  const notifyAttempts = new Map;
-  function clearNotifyRetry(id) {
-    const timer = notifyRetries.get(id);
-    if (timer)
-      clearTimeout(timer);
-    notifyRetries.delete(id);
-    notifyAttempts.delete(id);
-  }
-  function retryOwnerNotification(directory, id) {
-    const attempt = (notifyAttempts.get(id) ?? 0) + 1;
-    notifyAttempts.set(id, attempt);
-    if (attempt > 3 || notifyRetries.has(id))
-      return;
-    const timer = setTimeout(() => {
-      notifyRetries.delete(id);
-      notifyOwnerIfNeeded(directory, id);
-    }, 1000 * 2 ** (attempt - 1));
-    timer.unref?.();
-    notifyRetries.set(id, timer);
-  }
-  const watchers = new Map;
-  const watchTimers = new Map;
-  const awaitAsm = new Map;
-  const watchCoalesceMs = opts?.watchCoalesceMs ?? WATCH_COALESCE_WINDOW_MS;
-  function clearWatchTimer(id) {
-    const t = watchTimers.get(id);
-    if (t) {
-      try {
-        globalThis.clearTimeout(t);
-      } catch {}
-    }
-    watchTimers.delete(id);
-  }
-  function deleteWatch(id) {
-    clearWatchTimer(id);
-    watchers.delete(id);
-    awaitAsm.delete(id);
-  }
-  function scheduleWatchFlush(directory, id) {
-    if (watchTimers.has(id))
-      return;
-    const handle = setTimeout(() => {
-      watchTimers.delete(id);
-      enqueue(id, () => flushWatch(directory, id)).catch(() => {});
-    }, Math.max(0, watchCoalesceMs));
-    try {
-      handle.unref?.();
-    } catch {}
-    watchTimers.set(id, handle);
-  }
-  async function persistWatchState(directory, id, state) {
-    await mutateState(directory, `cmd.watch:${id}`, async (s) => {
-      const c = (s.commands ?? []).find((x) => x.id === id);
-      if (c) {
-        c.watchState = { ...state };
-        c.updatedAt = new Date().toISOString();
-      }
-      return s;
-    });
-  }
-  function watchLedger(directory, commandID, type, extra) {
-    return appendEvent(directory, {
-      version: 1,
-      eventID: randomUUID10(),
-      commandID,
-      type,
-      timestamp: new Date().toISOString(),
-      revision: 0,
-      ...extra
-    }).catch(() => {});
-  }
-  function clearCommandTimeout(id) {
-    const t = timeouts.get(id);
-    if (t) {
-      try {
-        globalThis.clearTimeout(t);
-      } catch {}
-    }
-    timeouts.delete(id);
-    timeoutOwners.delete(id);
-  }
-  function scheduleTimeout(directory, id, ownerSessionID, timeoutSeconds) {
-    clearCommandTimeout(id);
-    const handle = setTimeout(() => {
-      timeouts.delete(id);
-      fireTimeout(directory, id).catch(() => {});
-    }, timeoutSeconds * 1000);
-    try {
-      handle.unref?.();
-    } catch {}
-    timeouts.set(id, handle);
-    timeoutOwners.set(id, { directory, ownerSessionID });
-  }
-  async function fireTimeout(directory, id) {
-    const owner = timeoutOwners.get(id)?.ownerSessionID;
-    timeoutOwners.delete(id);
-    if (!owner)
-      return;
-    const before = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
-    if (!before || before.status !== "running")
-      return;
-    await service.terminate(directory, id, owner).catch(() => {});
-    await mutateState(directory, `cmd.timeout:${id}`, async (s) => {
-      const c = (s.commands ?? []).find((x) => x.id === id);
-      if (!c)
-        return s;
-      c.endReason = "timeout";
-      c.lastError = c.lastError ?? `Command timed out after ${c.timeoutSeconds ?? "?"}s (timeoutSeconds deadline reached; terminated via the standard SIGTERM\u2192SIGKILL path).`;
-      if (!c.endedAt) {
-        c.endedAt = new Date().toISOString();
-        c.updatedAt = c.endedAt;
-      } else {
-        c.updatedAt = new Date().toISOString();
-      }
-      return s;
-    }).catch(() => {});
-    try {
-      const fresh = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
-      if (fresh)
-        emitBroker(id, { type: "status", command: fresh });
-    } catch {}
-    await fireAwaits(directory, id);
-    await notifyOwnerIfNeeded(directory, id);
-  }
-  function tailText(entry, limitBytes = 64 * 1024) {
-    let want = limitBytes;
-    const parts = [];
-    for (let i = entry.buffers.length - 1;i >= 0 && want > 0; i--) {
-      const chunk = entry.buffers[i];
-      if (!chunk)
-        continue;
-      parts.unshift(chunk.subarray(Math.max(0, chunk.length - want)));
-      want -= chunk.length;
-    }
-    return Buffer.concat(parts).toString("utf8");
-  }
-  function enqueue(id, operation) {
-    const previous = operations.get(id) ?? Promise.resolve();
-    const next = previous.then(operation, operation);
-    operations.set(id, next);
-    next.finally(() => {
-      if (operations.get(id) === next)
-        operations.delete(id);
-    }).catch(() => {});
-    return next;
-  }
-  async function waitForOperations(id) {
-    await operations.get(id)?.catch(() => {});
-  }
-  function emitBroker(commandID, message) {
-    if (!broker)
-      return;
-    try {
-      broker.publish(commandID, message);
-    } catch {}
-  }
-  function rememberDir(id, directory) {
-    commandDirs.set(id, directory);
-  }
-  async function fireAwaits(directory, id) {
-    try {
-      const fired = await fireCommandAwaits(directory, id);
-      if (fired.length === 0)
-        return;
-      await opts?.onAwaitFired?.(directory, fired);
-    } catch {}
-  }
-  async function notifyOwnerIfNeeded(directory, id) {
-    if (!opts?.onOwnerNotify || notifyInFlight.has(id))
-      return;
-    notifyInFlight.add(id);
-    try {
-      const target = (await readState(directory)).commands?.find((c) => c.id === id);
-      if (!target || target.ownerNotifiedAt || !isTerminalCommandStatus(target.status) || !shouldNotifyOwnerOnExit(target))
-        return;
-      const tail = await readBoundedTail(directory, id);
-      const message = formatAwaitEvidence({
-        title: target.title,
-        argv: [target.command, ...target.args],
-        commandID: target.id,
-        status: target.status,
-        exitCode: target.exitCode,
-        signal: target.signal,
-        tail
-      });
-      const accepted = await opts.onOwnerNotify(directory, target.ownerSessionID, message);
-      if (accepted === false)
-        throw new Error("host did not accept owner prompt");
-      await mutateState(directory, `cmd.notify-delivered:${id}`, async (s) => {
-        const c = (s.commands ?? []).find((x) => x.id === id);
-        if (c && !c.ownerNotifiedAt)
-          c.ownerNotifiedAt = new Date().toISOString();
-        return s;
-      });
-      clearNotifyRetry(id);
-    } catch (error) {
-      await logServerEvent(directory, "command.owner-notify-failed", {
-        commandID: id,
-        detail: error instanceof Error ? error.message : String(error)
-      }).catch(() => {});
-      retryOwnerNotification(directory, id);
-    } finally {
-      notifyInFlight.delete(id);
-    }
-  }
-  async function flushWatch(directory, id) {
-    const watcher = watchers.get(id);
-    if (!watcher || watcher.pendingCount === 0)
-      return;
-    let session;
-    try {
-      session = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
-    } catch {
-      return;
-    }
-    if (!session || session.status !== "running")
-      return;
-    const push = watcher.takePush();
-    await persistWatchState(directory, id, watcher.state).catch(() => {});
-    if (!push)
-      return;
-    if (push.exhaustedNow) {
-      await watchLedger(directory, id, "command.watch-suspended", { reason: "budget", pushes: watcher.state.pushes });
-      try {
-        await opts?.onWatchNotify?.(directory, session.ownerSessionID, formatWatchBudgetMessage(session.title));
-      } catch {}
-      return;
-    }
-    await watchLedger(directory, id, "command.watch-matched", {
-      lines: push.lines.length,
-      matches: watcher.state.matches,
-      pushes: watcher.state.pushes
-    });
-    try {
-      await opts?.onWatchNotify?.(directory, session.ownerSessionID, formatWatchMessage(session.title, push.lines));
-    } catch {}
-    if (watcher.pendingCount > 0)
-      scheduleWatchFlush(directory, id);
-  }
-  async function handleUntilMatch(directory, id) {
-    const watcher = watchers.get(id);
-    if (!watcher)
-      return;
-    clearWatchTimer(id);
-    let session;
-    try {
-      session = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
-    } catch {
-      return;
-    }
-    if (!session)
-      return;
-    const action = watcher.untilAction;
-    const lines = watcher.takeUntilPush();
-    const snapshot = { ...watcher.state };
-    const message = formatWatchMessage(session.title, lines, `-- until "${session.watchUntil ?? ""}" matched (action=${action})`);
-    await mutateState(directory, `cmd.until-claim:${id}`, async (s) => {
-      const c = (s.commands ?? []).find((x) => x.id === id);
-      if (!c)
-        return s;
-      c.watchState = { ...snapshot };
-      if (action === "stop" && !c.ownerNotifiedAt)
-        c.ownerNotifiedAt = new Date().toISOString();
-      c.updatedAt = new Date().toISOString();
-      return s;
-    }).catch(() => {});
-    await watchLedger(directory, id, "command.watch-matched", {
-      until: session.watchUntil ?? "",
-      lines: lines.length,
-      pushes: snapshot.pushes
-    });
-    try {
-      await opts?.onWatchNotify?.(directory, session.ownerSessionID, message);
-    } catch {}
-    if (action !== "stop")
-      return;
-    if (session.status !== "running")
-      return;
-    await watchLedger(directory, id, "command.until-stopped", { until: session.watchUntil ?? "" });
-    await service.terminate(directory, id, session.ownerSessionID).catch(() => {});
-    await mutateState(directory, `cmd.until:${id}`, async (s) => {
-      const c = (s.commands ?? []).find((x) => x.id === id);
-      if (!c)
-        return s;
-      if (c.status === "terminated" && c.endReason !== "timeout") {
-        c.endReason = "until";
-        c.lastError = c.lastError ?? `Watch until pattern "${c.watchUntil ?? ""}" matched; command stopped (untilAction=stop).`;
-        c.updatedAt = new Date().toISOString();
-      }
-      return s;
-    }).catch(() => {});
-    try {
-      const fresh = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
-      if (fresh)
-        emitBroker(id, { type: "status", command: fresh });
-    } catch {}
-    await fireAwaits(directory, id);
-  }
-  async function readBrokerSnapshot(commandID, ownerSessionID) {
-    const directory = commandDirs.get(commandID);
-    if (!directory)
-      return;
-    const state = await readState(directory);
-    const session = (state.commands ?? []).find((x) => x.id === commandID && x.ownerSessionID === ownerSessionID);
-    if (!session)
-      return;
-    const log = await readCommandLog(directory, commandID, {
-      offsetBytes: 0,
-      limitBytes: MAX_COMMAND_OUTPUT_BYTES
-    });
-    const data = log.text;
-    const byteLen = utf8ByteLength(data);
-    const lifetime = session.streamBytes ?? 0;
-    const endOffset = lifetime >= byteLen ? lifetime : byteLen;
-    const startOffset = endOffset - byteLen;
-    return { command: session, data, startOffset, endOffset };
-  }
-  if (broker) {
-    broker.setResolver({
-      async getSession(commandID, ownerSessionID) {
-        const directory = commandDirs.get(commandID);
-        if (!directory)
-          return;
-        const s = await readState(directory);
-        const c = (s.commands ?? []).find((x) => x.id === commandID);
-        return c && c.ownerSessionID === ownerSessionID ? c : undefined;
-      },
-      async waitForQuiesce(commandID) {
-        await waitForOperations(commandID);
-      },
-      async readSnapshot(commandID, ownerSessionID) {
-        return readBrokerSnapshot(commandID, ownerSessionID);
-      }
-    });
-  }
-  async function persistOutput(directory, id, chunk) {
-    rememberDir(id, directory);
-    const entry = live.get(id);
-    if (entry) {
-      const bytes = Buffer.from(chunk);
-      entry.buffers.push(bytes);
-      entry.bufferedBytes += bytes.length;
-      while (entry.bufferedBytes > 128 * 1024 && entry.buffers.length > 1) {
-        const dropped = entry.buffers.shift();
-        entry.bufferedBytes -= dropped.length;
-      }
-    }
-    let watcher;
-    let feed;
-    let bareLines = [];
-    try {
-      watcher = watchers.get(id);
-      if (!watcher) {
-        const spec = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id)).catch(() => {
-          return;
-        });
-        if (spec && spec.status === "running" && (spec.watchFilter !== undefined || spec.watchUntil !== undefined)) {
-          try {
-            watcher = new CommandWatcher({
-              ...spec.watchFilter !== undefined ? { filter: spec.watchFilter } : {},
-              ...spec.watchUntil !== undefined ? { until: spec.watchUntil } : {},
-              ...spec.watchIgnoreCase !== undefined ? { ignoreCase: spec.watchIgnoreCase } : {},
-              ...spec.watchUntilAction !== undefined ? { untilAction: spec.watchUntilAction } : {}
-            });
-            watchers.set(id, watcher);
-          } catch {
-            watcher = undefined;
-          }
-        }
-      }
-      if (watcher) {
-        feed = watcher.feedChunk(chunk, Date.now());
-      } else {
-        let asm = awaitAsm.get(id);
-        if (!asm) {
-          asm = createLineAssembler();
-          awaitAsm.set(id, asm);
-        }
-        bareLines = asm.push(chunk).filter((l) => l.trim() !== "");
-      }
-    } catch {
-      watcher = undefined;
-      feed = undefined;
-    }
-    await appendCommandLog(directory, id, chunk);
-    let retainedBytes = 0;
-    let truncated = false;
-    const file = path5.join(loopCommandsDir(directory), `${id}.log`);
-    const stat = await fs5.stat(file);
-    retainedBytes = stat.size;
-    if (stat.size > MAX_COMMAND_OUTPUT_BYTES) {
-      const fh = await fs5.open(file, "r");
-      try {
-        const buf = Buffer.alloc(MAX_COMMAND_OUTPUT_BYTES);
-        await fh.read(buf, 0, buf.length, stat.size - buf.length);
-        await fs5.writeFile(file, buf);
-      } finally {
-        await fh.close();
-      }
-      retainedBytes = MAX_COMMAND_OUTPUT_BYTES;
-      truncated = true;
-    }
-    await mutateState(directory, `cmd.output:${id}`, async (s) => {
-      const c = (s.commands ?? []).find((x) => x.id === id);
-      if (!c)
-        return s;
-      const byteLen = utf8ByteLength(chunk);
-      const startOffset = c.streamBytes ?? 0;
-      const endOffset = startOffset + byteLen;
-      c.streamBytes = endOffset;
-      c.outputBytes = retainedBytes;
-      if (truncated)
-        c.truncated = true;
-      if (watcher)
-        c.watchState = { ...watcher.state };
-      c.updatedAt = new Date().toISOString();
-      return s;
-    });
-    try {
-      const fresh = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
-      const endOffset = fresh?.streamBytes ?? 0;
-      const startOffset = endOffset - utf8ByteLength(chunk);
-      if (fresh && startOffset >= 0) {
-        emitBroker(id, {
-          type: "output",
-          commandID: id,
-          data: chunk,
-          startOffset,
-          endOffset
-        });
-      }
-    } catch {}
-    try {
-      if (watcher && feed) {
-        if (feed.floodNow) {
-          await persistWatchState(directory, id, watcher.state).catch(() => {});
-          const dropped = watcher.state.droppedLines;
-          let owner;
-          let title = id;
-          try {
-            const snap = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
-            owner = snap?.ownerSessionID;
-            title = snap?.title ?? id;
-          } catch {}
-          await watchLedger(directory, id, "command.watch-suspended", { reason: "flood", dropped });
-          if (owner) {
-            try {
-              await opts?.onWatchNotify?.(directory, owner, formatWatchFloodMessage(title, dropped));
-            } catch {}
-          }
-        }
-        if (watcher.pendingCount > 0)
-          scheduleWatchFlush(directory, id);
-        if (feed.untilLine) {
-          clearWatchTimer(id);
-          enqueue(id, () => handleUntilMatch(directory, id)).catch(() => {});
-        }
-      }
-    } catch {}
-    try {
-      const completed = feed ? feed.completed : bareLines;
-      if (completed.length > 0) {
-        const fired = await fireUntilAwaits(directory, id, completed);
-        if (fired.length > 0) {
-          await opts?.onAwaitFired?.(directory, fired);
-        }
-      }
-    } catch {}
-  }
-  async function persistExit(directory, id, info) {
-    rememberDir(id, directory);
-    live.delete(id);
-    clearCommandTimeout(id);
-    const exitWatcher = watchers.get(id);
-    if (exitWatcher) {
-      try {
-        const handledStop = exitWatcher.state.state === "until-matched" && exitWatcher.untilAction === "stop";
-        exitWatcher.finish(Date.now());
-        let snap;
-        try {
-          snap = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
-        } catch {
-          snap = undefined;
-        }
-        if (snap && !handledStop && exitWatcher.pendingCount > 0) {
-          const push = exitWatcher.takePush();
-          await persistWatchState(directory, id, exitWatcher.state).catch(() => {});
-          if (push && !push.exhaustedNow && push.lines.length > 0) {
-            await watchLedger(directory, id, "command.watch-matched", {
-              lines: push.lines.length,
-              atExit: true,
-              pushes: exitWatcher.state.pushes
-            });
-            try {
-              await opts?.onWatchNotify?.(directory, snap.ownerSessionID, formatWatchMessage(snap.title, push.lines));
-            } catch {}
-          } else if (push?.exhaustedNow) {
-            await watchLedger(directory, id, "command.watch-suspended", {
-              reason: "budget",
-              atExit: true,
-              pushes: exitWatcher.state.pushes
-            });
-            try {
-              await opts?.onWatchNotify?.(directory, snap.ownerSessionID, formatWatchBudgetMessage(snap.title));
-            } catch {}
-          }
-        } else {
-          await persistWatchState(directory, id, exitWatcher.state).catch(() => {});
-        }
-      } catch {}
-    }
-    deleteWatch(id);
-    await mutateState(directory, `cmd.exit:${id}`, async (s) => {
-      const c = (s.commands ?? []).find((x) => x.id === id);
-      if (!c || c.status !== "running")
-        return s;
-      if (c.endReason === "timeout") {
-        if (!c.endedAt) {
-          c.endedAt = new Date().toISOString();
-          c.updatedAt = c.endedAt;
-        }
-        return s;
-      }
-      c.exitCode = info.exitCode;
-      if (info.signal && (c.signal === "SIGKILL" || c.signal === "SIGTERM")) {
-        c.status = "terminated";
-        if (c.endReason !== "until")
-          c.endReason = "terminate";
-      } else {
-        c.status = "exited";
-        c.endReason = "exit";
-        if (info.signal)
-          c.signal = info.signal;
-      }
-      c.endedAt = new Date().toISOString();
-      c.updatedAt = c.endedAt;
-      return s;
-    }).catch(() => {});
-    await appendEvent(directory, {
-      version: 1,
-      eventID: randomUUID10(),
-      commandID: id,
-      type: "command.exited",
-      exitCode: info.exitCode,
-      timestamp: new Date().toISOString(),
-      revision: 0
-    }).catch(() => {});
-    try {
-      const fresh = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
-      if (fresh)
-        emitBroker(id, { type: "status", command: fresh });
-    } catch {}
-    await fireAwaits(directory, id);
-    await notifyOwnerIfNeeded(directory, id);
-  }
-  function owned(cmd, ownerSessionID) {
-    return !!cmd && cmd.ownerSessionID === ownerSessionID;
-  }
-  async function rollbackStart(directory, id, handle) {
-    try {
-      handle.terminate();
-    } catch {}
-    const exited = await Promise.race([
-      handle.exited().then(() => true, () => true),
-      new Promise((resolve) => setTimeout(() => resolve(false), 1000))
-    ]);
-    try {
-      if (!exited && handle.isAlive())
-        handle.kill();
-    } catch {}
-    live.delete(id);
-    watchers.delete(id);
-    const timer = timeouts.get(id);
-    if (timer) {
-      clearTimeout(timer);
-      timeouts.delete(id);
-    }
-    timeoutOwners.delete(id);
-    try {
-      await mutateState(directory, `cmd.rollback:${id}`, async (s) => {
-        s.commands = (s.commands ?? []).filter((command) => command.id !== id);
-        return s;
-      });
-    } catch {}
-  }
-  const service = {
-    async start(directory, input) {
-      const title = input.title.trim();
-      const command = input.command.trim();
-      if (!title)
-        throw new Error("title is required");
-      if (!command)
-        throw new Error("command is required");
-      if (!input.ownerSessionID || input.ownerSessionID === "main") {
-        throw new Error("A valid owner session is required. Run from an active OpenCode session.");
-      }
-      const timeoutSeconds = normalizeTimeoutSeconds(input.timeoutSeconds);
-      const watchFilter = input.watchFilter !== undefined && input.watchFilter !== "" ? input.watchFilter : undefined;
-      const watchUntil = input.watchUntil !== undefined && input.watchUntil !== "" ? input.watchUntil : undefined;
-      const hasWatch = watchFilter !== undefined || watchUntil !== undefined;
-      let watcher;
-      let watchState;
-      if (hasWatch) {
-        watcher = new CommandWatcher({
-          ...watchFilter !== undefined ? { filter: watchFilter } : {},
-          ...watchUntil !== undefined ? { until: watchUntil } : {},
-          ...input.watchIgnoreCase !== undefined ? { ignoreCase: input.watchIgnoreCase } : {},
-          ...input.watchUntilAction !== undefined ? { untilAction: input.watchUntilAction } : {}
-        });
-        watchState = initialWatchState();
-      }
-      const startedAt = new Date;
-      const id = randomUUID10();
-      const cwd = input.cwd || directory;
-      const useShell = input.shell === true;
-      const spawnOpts = useShell ? { command: "/bin/sh", args: ["-c", shellJoin(command, input.args ?? [])], cwd, cols: input.cols, rows: input.rows, env: input.env } : { command, args: input.args ?? [], cwd, cols: input.cols, rows: input.rows, env: input.env };
-      const pending = [];
-      let ready = false;
-      const scopeCallID = `command-start:${id}`;
-      const startedArgs = input.args ?? [];
-      const duplicate = (await readState(directory)).commands?.find((c) => c.ownerSessionID === input.ownerSessionID && c.status === "running" && c.command === command && c.cwd === cwd && c.args.length === startedArgs.length && c.args.every((arg, index) => arg === startedArgs[index]));
-      if (duplicate)
-        throw new DuplicateCommandError(duplicate.id, duplicate.title);
-      await beforeWorkspaceTool(directory, { tool: "loopd_command_start", sessionID: input.ownerSessionID, callID: scopeCallID }, {});
-      let handle;
-      try {
-        handle = host.spawn(spawnOpts, (chunk) => {
-          if (!ready)
-            pending.push({ type: "output", chunk });
-          else
-            enqueue(id, () => persistOutput(directory, id, chunk)).catch(() => {});
-        }, (info) => {
-          if (!ready)
-            pending.push({ type: "exit", info });
-          else
-            enqueue(id, () => persistExit(directory, id, info)).catch(() => {});
-        });
-        try {
-          const session = createCommandSession({
-            id,
-            title,
-            command,
-            args: input.args ?? [],
-            cwd,
-            ownerSessionID: input.ownerSessionID,
-            goalID: input.goalID,
-            notifyOnExit: input.notifyOnExit,
-            notifySuccessfulExit: true,
-            pid: handle.pid,
-            cols: input.cols,
-            rows: input.rows,
-            shell: useShell ? true : undefined,
-            timeoutSeconds,
-            deadlineAt: timeoutSeconds !== undefined ? computeDeadlineAt(startedAt, timeoutSeconds) : undefined,
-            envKeys: input.env ? Object.keys(input.env) : undefined,
-            watchFilter,
-            watchUntil,
-            watchIgnoreCase: input.watchIgnoreCase,
-            watchUntilAction: watcher?.untilAction,
-            watchState
-          });
-          await mutateState(directory, `cmd.start:${id}`, async (s) => {
-            s.commands = [...s.commands ?? [], session];
-            return s;
-          });
-          live.set(id, { handle, buffers: [], bufferedBytes: 0 });
-          if (watcher)
-            watchers.set(id, watcher);
-          if (timeoutSeconds !== undefined)
-            scheduleTimeout(directory, id, input.ownerSessionID, timeoutSeconds);
-          rememberDir(id, directory);
-          await appendEvent(directory, {
-            version: 1,
-            eventID: randomUUID10(),
-            ...input.goalID ? { goalID: input.goalID } : {},
-            commandID: id,
-            type: "command.started",
-            title,
-            timestamp: new Date().toISOString(),
-            revision: 0
-          }).catch(() => {});
-          try {
-            const fresh = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
-            if (fresh)
-              emitBroker(id, { type: "status", command: fresh });
-          } catch {}
-          const initialEvents = pending.splice(0);
-          ready = true;
-          const initialOperations = [];
-          for (const event of initialEvents) {
-            initialOperations.push(event.type === "output" ? enqueue(id, () => persistOutput(directory, id, event.chunk)) : enqueue(id, () => persistExit(directory, id, event.info)));
-          }
-          await Promise.all(initialOperations);
-          return await service.get(directory, id, input.ownerSessionID) ?? session;
-        } catch (error) {
-          if (handle)
-            await rollbackStart(directory, id, handle);
-          throw error;
-        }
-      } finally {
-        await afterWorkspaceTool(directory, input.ownerSessionID, scopeCallID);
-      }
-    },
-    async list(directory, ownerSessionID) {
-      const s = await readState(directory);
-      for (const c of s.commands ?? [])
-        rememberDir(c.id, directory);
-      return (s.commands ?? []).filter((c) => c.ownerSessionID === ownerSessionID);
-    },
-    async get(directory, id, ownerSessionID) {
-      rememberDir(id, directory);
-      const s = await readState(directory);
-      const c = (s.commands ?? []).find((x) => x.id === id);
-      return owned(c, ownerSessionID) ? c : undefined;
-    },
-    async read(directory, id, ownerSessionID, opts) {
-      await waitForOperations(id);
-      const session = await service.get(directory, id, ownerSessionID);
-      if (!session)
-        return;
-      if (opts?.pattern !== undefined) {
-        const flags = opts.ignoreCase ? "i" : "";
-        const checked = validateReadPattern(opts.pattern);
-        if (typeof checked !== "object" || !(checked instanceof RegExp)) {
-          throw new Error(checked.error);
-        }
-        const regex = new RegExp(opts.pattern, flags);
-        const full = await readCommandLog(directory, id, { offsetBytes: 0, limitBytes: MAX_COMMAND_OUTPUT_BYTES });
-        const lines = full.text.length === 0 ? [] : full.text.split(`
-`);
-        const matches = [];
-        for (const line of lines) {
-          let stripped;
-          try {
-            stripped = stripAnsiForMatch(line);
-          } catch {
-            stripped = line;
-          }
-          let hit = false;
-          try {
-            hit = regex.test(stripped);
-          } catch {
-            throw new Error(`Invalid regex pattern '${opts.pattern}'.`);
-          }
-          regex.lastIndex = 0;
-          if (hit)
-            matches.push(line);
-        }
-        const skip = Math.max(0, opts.offsetBytes ?? 0);
-        const take = Math.min(opts.limitBytes ?? MAX_COMMAND_READ_LINES, MAX_COMMAND_READ_LINES);
-        const page = matches.slice(skip, skip + Math.max(0, take));
-        return {
-          session,
-          text: page.join(`
-`) + (page.length > 0 ? `
-` : ""),
-          totalBytes: matches.length,
-          startByte: skip,
-          live: session.status === "running",
-          pattern: opts.pattern,
-          totalMatches: matches.length
-        };
-      }
-      const entry = live.get(id);
-      const offset = opts?.offsetBytes ?? 0;
-      const limit = Math.min(opts?.limitBytes ?? 64 * 1024, 256 * 1024);
-      if (entry && offset === 0) {
-        const mem = tailText(entry, limit);
-        if (entry.bufferedBytes <= limit) {
-          const file = await readCommandLog(directory, id, { offsetBytes: 0, limitBytes: 0 });
-          const memBytes = Buffer.byteLength(mem);
-          return { session, text: mem, totalBytes: session.outputBytes, startByte: Math.max(0, session.outputBytes - memBytes), live: session.status === "running" };
-        }
-      }
-      const file = await readCommandLog(directory, id, { offsetBytes: offset, limitBytes: limit });
-      return { session, text: file.text, totalBytes: session.outputBytes, startByte: file.startByte, live: session.status === "running" };
-    },
-    async write(directory, id, ownerSessionID, data) {
-      const scopeCallID = `command-write:${randomUUID10()}`;
-      await beforeWorkspaceTool(directory, { tool: "loopd_command_write", sessionID: ownerSessionID, callID: scopeCallID }, {});
-      try {
-        const session = await service.get(directory, id, ownerSessionID);
-        if (!session)
-          return { ok: false, message: "Command not found." };
-        if (session.status !== "running")
-          return { ok: false, message: `Command is ${session.status}; only running commands accept input.` };
-        const entry = live.get(id);
-        const ok = entry ? entry.handle.write(data) : false;
-        if (!ok)
-          return { ok: false, message: "Process input unavailable (no live handle \u2014 host may have restarted; reconcile marks it honestly)." };
-        return { ok: true, message: `Sent ${Buffer.byteLength(data)} byte(s) to "${session.title}".` };
-      } finally {
-        await afterWorkspaceTool(directory, ownerSessionID, scopeCallID);
-      }
-    },
-    async resize(directory, id, ownerSessionID, cols, rows) {
-      const session = await service.get(directory, id, ownerSessionID);
-      if (!session)
-        return { ok: false, message: "Command not found." };
-      if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0) {
-        return { ok: false, message: `Invalid size ${cols}x${rows}: cols and rows must be positive integers.` };
-      }
-      const entry = live.get(id);
-      let applied = false;
-      if (entry) {
-        try {
-          applied = entry.handle.resize(cols, rows);
-        } catch {
-          applied = false;
-        }
-      }
-      await mutateState(directory, `cmd.resize:${id}`, async (s) => {
-        const c = (s.commands ?? []).find((x) => x.id === id);
-        if (c && c.ownerSessionID === ownerSessionID) {
-          c.cols = cols;
-          c.rows = rows;
-          c.updatedAt = new Date().toISOString();
-        }
-        return s;
-      });
-      if (applied)
-        return { ok: true, message: `Terminal resized to ${cols}x${rows} for "${session.title}".` };
-      return { ok: false, unsupported: true, message: "Resize is not supported by the active pipe host (pipes have no tty winsize; the PTY backend was unavailable). Size stored; output remains a byte stream." };
-    },
-    async interrupt(directory, id, ownerSessionID) {
-      const session = await service.get(directory, id, ownerSessionID);
-      if (!session)
-        return { ok: false, message: "Command not found." };
-      if (session.status !== "running")
-        return { ok: false, message: `Command is ${session.status}; nothing to interrupt.` };
-      const entry = live.get(id);
-      if (!entry)
-        return { ok: false, message: "No live handle (host restarted?). Reconcile will mark it missing; use terminate/remove to clean up." };
-      const delivered = entry.handle.interrupt();
-      if (!delivered)
-        return { ok: false, message: "Failed to deliver SIGINT." };
-      await mutateState(directory, `cmd.interrupt:${id}`, async (s) => {
-        const c = (s.commands ?? []).find((x) => x.id === id);
-        if (c && c.ownerSessionID === ownerSessionID) {
-          c.signal = "SIGINT";
-          c.updatedAt = new Date().toISOString();
-        }
-        return s;
-      });
-      return { ok: true, message: `SIGINT delivered to "${session.title}" (process may continue if it traps the signal).` };
-    },
-    async terminate(directory, id, ownerSessionID, opts) {
-      rememberDir(id, directory);
-      const session = await service.get(directory, id, ownerSessionID);
-      if (!session)
-        return { ok: false, message: "Command not found." };
-      if (session.status !== "running") {
-        if (opts?.remove) {
-          const removed = await service.remove(directory, id, ownerSessionID);
-          return removed.ok ? { ok: true, message: `Command was already ${session.status}; removed.`, removed: true } : { ok: false, message: `Command is ${session.status}; remove failed: ${removed.message}` };
-        }
-        return { ok: false, message: `Command is ${session.status}; nothing to terminate.` };
-      }
-      await mutateState(directory, `cmd.terminate-claim:${id}`, async (s) => {
-        const c = (s.commands ?? []).find((x) => x.id === id);
-        if (c && c.ownerSessionID === ownerSessionID && c.status === "running") {
-          c.signal = "SIGTERM";
-          if (c.endReason !== "timeout" && c.watchState?.state === "until-matched" && c.watchUntilAction === "stop") {
-            c.endReason = "until";
-          }
-          c.updatedAt = new Date().toISOString();
-        }
-        return s;
-      }).catch(() => {});
-      try {
-        const claimed = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
-        if (claimed)
-          emitBroker(id, { type: "status", command: claimed });
-      } catch {}
-      const entry = live.get(id);
-      let status = "terminated";
-      if (entry) {
-        const aliveBefore = entry.handle.isAlive();
-        if (!aliveBefore) {
-          status = "exited";
-        } else {
-          entry.handle.terminate();
-          const exited = await Promise.race([
-            entry.handle.exited().then(() => true),
-            new Promise((r) => setTimeout(() => r(false), 3000))
-          ]);
-          if (!exited && entry.handle.isAlive())
-            entry.handle.kill();
-          try {
-            await entry.handle.exited();
-          } catch {}
-        }
-        live.delete(id);
-      }
-      const exitCode = status === "terminated" ? 143 : undefined;
-      clearCommandTimeout(id);
-      clearWatchTimer(id);
-      await mutateState(directory, `cmd.terminate:${id}`, async (s) => {
-        const c = (s.commands ?? []).find((x) => x.id === id);
-        if (!c || c.ownerSessionID !== ownerSessionID)
-          return s;
-        if (c.status === "running") {
-          c.status = status;
-          if (c.endReason !== "timeout") {
-            c.endReason = status === "terminated" ? c.endReason === "until" ? "until" : "terminate" : "exit";
-          }
-          if (exitCode !== undefined)
-            c.exitCode = c.exitCode ?? exitCode;
-          c.signal = c.signal ?? "SIGTERM";
-          c.endedAt = new Date().toISOString();
-          c.updatedAt = c.endedAt;
-        } else if (c.status === "terminated" && !c.endedAt) {
-          if (c.endReason !== "timeout" && !c.endReason)
-            c.endReason = "terminate";
-          if (exitCode !== undefined)
-            c.exitCode = c.exitCode ?? exitCode;
-          c.endedAt = new Date().toISOString();
-          c.updatedAt = c.endedAt;
-        }
-        return s;
-      });
-      try {
-        const fresh = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
-        if (fresh)
-          emitBroker(id, { type: "status", command: fresh });
-      } catch {}
-      await fireAwaits(directory, id);
-      await notifyOwnerIfNeeded(directory, id);
-      if (opts?.remove) {
-        const removed = await service.remove(directory, id, ownerSessionID);
-        if (removed.ok)
-          return { ok: true, message: `Command "${session.title}" ${status}; removed.`, removed: true };
-        return { ok: true, message: `Command "${session.title}" ${status}; remove failed: ${removed.message}` };
-      }
-      return { ok: true, message: `Command "${session.title}" ${status}.` };
-    },
-    async kill(directory, id, ownerSessionID) {
-      rememberDir(id, directory);
-      const session = await service.get(directory, id, ownerSessionID);
-      if (!session)
-        return { ok: false, message: "Command not found." };
-      if (session.status !== "running") {
-        return { ok: false, message: `Command is ${session.status}; nothing to kill.` };
-      }
-      await mutateState(directory, `cmd.kill-claim:${id}`, async (s) => {
-        const c = (s.commands ?? []).find((x) => x.id === id);
-        if (c && c.ownerSessionID === ownerSessionID && c.status === "running") {
-          c.signal = "SIGKILL";
-          c.updatedAt = new Date().toISOString();
-        }
-        return s;
-      }).catch(() => {});
-      try {
-        const claimed = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
-        if (claimed)
-          emitBroker(id, { type: "status", command: claimed });
-      } catch {}
-      const entry = live.get(id);
-      if (entry) {
-        if (entry.handle.isAlive())
-          entry.handle.kill();
-        try {
-          await entry.handle.exited();
-        } catch {}
-        live.delete(id);
-      }
-      clearCommandTimeout(id);
-      clearWatchTimer(id);
-      await mutateState(directory, `cmd.kill:${id}`, async (s) => {
-        const c = (s.commands ?? []).find((x) => x.id === id);
-        if (!c || c.ownerSessionID !== ownerSessionID)
-          return s;
-        if (c.status === "running") {
-          c.status = "terminated";
-          if (c.endReason !== "timeout")
-            c.endReason = "terminate";
-          c.exitCode = c.exitCode ?? 137;
-          c.signal = c.signal ?? "SIGKILL";
-          c.endedAt = new Date().toISOString();
-          c.updatedAt = c.endedAt;
-        } else if (c.status === "terminated" && !c.endedAt) {
-          if (c.endReason !== "timeout" && !c.endReason)
-            c.endReason = "terminate";
-          c.exitCode = c.exitCode ?? 137;
-          c.endedAt = new Date().toISOString();
-          c.updatedAt = c.endedAt;
-        }
-        return s;
-      });
-      try {
-        const fresh = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
-        if (fresh)
-          emitBroker(id, { type: "status", command: fresh });
-      } catch {}
-      await fireAwaits(directory, id);
-      await notifyOwnerIfNeeded(directory, id);
-      return { ok: true, message: `Command "${session.title}" killed (SIGKILL).` };
-    },
-    async restart(directory, id, ownerSessionID) {
-      rememberDir(id, directory);
-      const session = await service.get(directory, id, ownerSessionID);
-      if (!session)
-        return { ok: false, message: "Command not found." };
-      const spec = {
-        title: session.title,
-        command: session.command,
-        args: [...session.args],
-        cwd: session.cwd,
-        ownerSessionID,
-        ...session.goalID !== undefined ? { goalID: session.goalID } : {},
-        ...session.notifyOnExit !== undefined ? { notifyOnExit: session.notifyOnExit } : {},
-        ...session.cols !== undefined ? { cols: session.cols } : {},
-        ...session.rows !== undefined ? { rows: session.rows } : {},
-        ...session.shell !== undefined ? { shell: session.shell } : {},
-        ...session.timeoutSeconds !== undefined ? { timeoutSeconds: session.timeoutSeconds } : {},
-        ...session.watchFilter !== undefined ? { watchFilter: session.watchFilter } : {},
-        ...session.watchUntil !== undefined ? { watchUntil: session.watchUntil } : {},
-        ...session.watchIgnoreCase !== undefined ? { watchIgnoreCase: session.watchIgnoreCase } : {},
-        ...session.watchUntilAction !== undefined ? { watchUntilAction: session.watchUntilAction } : {}
-      };
-      if (session.status === "running") {
-        const stopped = await service.terminate(directory, id, ownerSessionID);
-        if (!stopped.ok) {
-          return { ok: false, message: `Restart aborted: could not stop "${session.title}": ${stopped.message}` };
-        }
-      }
-      const next = await service.start(directory, spec);
-      const envNote = (session.envKeys?.length ?? 0) > 0 ? ` (env ${session.envKeys.join(",")} NOT restored \u2014 values are never persisted)` : "";
-      return {
-        ok: true,
-        message: `Command "${session.title}" restarted as ${next.id.slice(0, 8)}...${envNote}`,
-        command: next
-      };
-    },
-    async remove(directory, id, ownerSessionID) {
-      rememberDir(id, directory);
-      const session = await service.get(directory, id, ownerSessionID);
-      if (!session)
-        return { ok: false, message: "Command not found." };
-      if (session.status === "running") {
-        return { ok: false, message: `Command "${session.title}" is still running \u2014 terminate it first (terminate \u2260 remove).` };
-      }
-      clearNotifyRetry(id);
-      deleteWatch(id);
-      const lastKnown = { ...session };
-      await mutateState(directory, `cmd.remove:${id}`, async (s) => {
-        s.commands = (s.commands ?? []).filter((x) => !(x.id === id && x.ownerSessionID === ownerSessionID));
-        return s;
-      });
-      await removeCommandLog(directory, id);
-      emitBroker(id, { type: "status", command: lastKnown });
-      await clearAwaitsForCommand(directory, id, "command removed").catch(() => {});
-      return { ok: true, message: `Command "${session.title}" removed.` };
-    },
-    async watch(directory, id, ownerSessionID, opts) {
-      rememberDir(id, directory);
-      const session = await service.get(directory, id, ownerSessionID);
-      if (!session)
-        return { ok: false, message: "Command not found." };
-      if (session.status !== "running") {
-        return { ok: false, message: `Command is ${session.status}; watch is meaningless after exit.` };
-      }
-      if (opts?.untilAction !== undefined && opts.untilAction !== "stop" && opts.untilAction !== "keep") {
-        throw new Error(`Invalid watch untilAction '${opts.untilAction}': must be "stop" or "keep".`);
-      }
-      if (opts?.clear === true) {
-        deleteWatch(id);
-        await mutateState(directory, `cmd.watch-clear:${id}`, async (s) => {
-          const c = (s.commands ?? []).find((x) => x.id === id);
-          if (c && c.ownerSessionID === ownerSessionID) {
-            delete c.watchFilter;
-            delete c.watchUntil;
-            delete c.watchIgnoreCase;
-            delete c.watchUntilAction;
-            delete c.watchState;
-            c.updatedAt = new Date().toISOString();
-          }
-          return s;
-        });
-        await watchLedger(directory, id, "command.watch-suspended", { reason: "cleared" }).catch(() => {});
-        try {
-          const fresh = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
-          if (fresh)
-            emitBroker(id, { type: "status", command: fresh });
-        } catch {}
-        const cleared = await service.get(directory, id, ownerSessionID);
-        return { ok: true, message: `Watch cleared for "${session.title}".`, command: cleared };
-      }
-      const filter = opts?.filter !== undefined && opts.filter !== "" ? opts.filter : undefined;
-      const until = opts?.until !== undefined && opts.until !== "" ? opts.until : undefined;
-      const watcher = new CommandWatcher({
-        ...filter !== undefined ? { filter } : {},
-        ...until !== undefined ? { until } : {},
-        ...opts?.ignoreCase !== undefined ? { ignoreCase: opts.ignoreCase } : {},
-        ...opts?.untilAction !== undefined ? { untilAction: opts.untilAction } : {}
-      });
-      clearWatchTimer(id);
-      watchers.set(id, watcher);
-      awaitAsm.delete(id);
-      const freshState = initialWatchState();
-      await mutateState(directory, `cmd.watch:${id}`, async (s) => {
-        const c = (s.commands ?? []).find((x) => x.id === id);
-        if (c && c.ownerSessionID === ownerSessionID) {
-          if (filter !== undefined)
-            c.watchFilter = filter;
-          else
-            delete c.watchFilter;
-          if (until !== undefined)
-            c.watchUntil = until;
-          else
-            delete c.watchUntil;
-          if (opts?.ignoreCase !== undefined)
-            c.watchIgnoreCase = opts.ignoreCase;
-          else
-            delete c.watchIgnoreCase;
-          c.watchUntilAction = watcher.untilAction;
-          c.watchState = { ...freshState };
-          c.updatedAt = new Date().toISOString();
-        }
-        return s;
-      });
-      try {
-        const fresh = await readState(directory).then((st) => (st.commands ?? []).find((x) => x.id === id));
-        if (fresh)
-          emitBroker(id, { type: "status", command: fresh });
-      } catch {}
-      const updated = await service.get(directory, id, ownerSessionID);
-      const desc = [
-        filter !== undefined ? `filter="${filter}"` : "filter=\u2014",
-        until !== undefined ? `until="${until}"` : "until=\u2014",
-        `action=${watcher.untilAction}`
-      ].join(" ");
-      return { ok: true, message: `Watch set for "${session.title}" (${desc}; counters reset to active).`, command: updated };
-    },
-    async reconcile(directory) {
-      const state = await readState(directory);
-      const cmds = state.commands ?? [];
-      for (const c of cmds)
-        rememberDir(c.id, directory);
-      let markedMissing = 0;
-      for (const c of cmds) {
-        if (c.status !== "running") {
-          if ((c.notifySuccessfulExit === true || c.notifyOnExit === true) && !c.ownerNotifiedAt)
-            await notifyOwnerIfNeeded(directory, c.id);
-          continue;
-        }
-        const entry = live.get(c.id);
-        if (entry) {
-          if (!entry.handle.isAlive()) {
-            live.delete(c.id);
-            clearCommandTimeout(c.id);
-            deleteWatch(c.id);
-            await mutateState(directory, `cmd.reconcile-exit:${c.id}`, async (s) => {
-              const x = (s.commands ?? []).find((y) => y.id === c.id);
-              if (x && x.status === "running") {
-                x.status = "exited";
-                x.endReason = "exit";
-                x.endedAt = new Date().toISOString();
-                x.updatedAt = x.endedAt;
-                x.lastError = x.lastError ?? "Process handle died without an exit event.";
-              }
-              return s;
-            }).catch(() => {});
-            try {
-              const fresh = await readState(directory).then((st) => (st.commands ?? []).find((y) => y.id === c.id));
-              if (fresh)
-                emitBroker(c.id, { type: "status", command: fresh });
-            } catch {}
-            await fireAwaits(directory, c.id);
-            await notifyOwnerIfNeeded(directory, c.id);
-          }
-          continue;
-        }
-        clearCommandTimeout(c.id);
-        deleteWatch(c.id);
-        const deadlinePassed = c.deadlineAt ? Date.parse(c.deadlineAt) <= Date.now() : false;
-        await mutateState(directory, `cmd.reconcile-missing:${c.id}`, async (s) => {
-          const x = (s.commands ?? []).find((y) => y.id === c.id);
-          if (x && x.status === "running") {
-            x.status = "missing";
-            s.orphanedCommandProcesses ??= [];
-            if (!s.orphanedCommandProcesses.some((process2) => process2.commandID === x.id))
-              s.orphanedCommandProcesses.push({ commandID: x.id, pid: x.pid });
-            x.endReason = "missing";
-            x.lastError = deadlinePassed ? `Host restarted or handle lost \u2014 no live execution found (timeoutSeconds=${x.timeoutSeconds ?? "?"}s deadline ${x.deadlineAt} already passed; treated as missing, timeout elapsed). Output log retained; remove to clean up.` : "Host restarted or handle lost \u2014 no live execution found. Output log retained; remove to clean up.";
-            x.updatedAt = new Date().toISOString();
-            markedMissing++;
-          }
-          return s;
-        }).catch(() => {});
-        try {
-          const fresh = await readState(directory).then((st) => (st.commands ?? []).find((y) => y.id === c.id));
-          if (fresh && fresh.status === "missing")
-            emitBroker(c.id, { type: "status", command: fresh });
-        } catch {}
-        await fireAwaits(directory, c.id);
-        await notifyOwnerIfNeeded(directory, c.id);
-      }
-      return { markedMissing };
-    },
-    async dispose(directory) {
-      for (const id of [...notifyRetries.keys()])
-        clearNotifyRetry(id);
-      for (const id of [...watchTimers.keys()])
-        clearWatchTimer(id);
-      watchers.clear();
-      awaitAsm.clear();
-      const state = await readState(directory);
-      const owned = new Map((state.commands ?? []).map((command) => [command.id, command.ownerSessionID]));
-      await Promise.all([...live.entries()].map(async ([id, entry]) => {
-        const owner = owned.get(id);
-        if (owner) {
-          await service.terminate(directory, id, owner).catch(() => {});
-          return;
-        }
-        entry.handle.terminate();
-        const exited = await Promise.race([
-          entry.handle.exited().then(() => true, () => true),
-          new Promise((resolve) => setTimeout(() => resolve(false), 1000))
-        ]);
-        if (!exited && entry.handle.isAlive())
-          entry.handle.kill();
-        live.delete(id);
-      }));
-      for (const id of [...timeouts.keys()])
-        clearCommandTimeout(id);
-      for (const id of [...notifyRetries.keys()])
-        clearNotifyRetry(id);
-    }
-  };
-  return service;
-}
-
 // src/application/command-event-broker.ts
-import { randomUUID as randomUUID11 } from "crypto";
+import { randomUUID as randomUUID12 } from "crypto";
 function safeDeliver(sink, msg) {
   try {
     sink(msg);
@@ -8640,7 +9194,7 @@ function createCommandEventBroker(resolver) {
         throw new Error("ownerSessionID is required.");
       if (typeof sink !== "function")
         throw new Error("sink must be a function.");
-      const sinkID = randomUUID11();
+      const sinkID = randomUUID12();
       const entry = { sinkID, sink, state: "subscribing", buffer: [] };
       entriesFor(commandID).set(sinkID, entry);
       try {
@@ -8729,12 +9283,12 @@ function createCommandEventBroker(resolver) {
 }
 
 // src/server/command-stream-server.ts
-import { randomBytes, randomUUID as randomUUID12, timingSafeEqual } from "crypto";
-import { promises as fs6 } from "fs";
-import path6 from "path";
+import { randomBytes, randomUUID as randomUUID13, timingSafeEqual } from "crypto";
+import { promises as fs7 } from "fs";
+import path8 from "path";
 init_server_log();
 function streamEndpointPath(directory) {
-  return path6.join(directory, ".opencode", "loopd", "commands", ".stream-endpoint.json");
+  return path8.join(directory, ".opencode", "loopd", "commands", ".stream-endpoint.json");
 }
 function isPidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0)
@@ -8764,7 +9318,7 @@ var MAX_BUFFERED_BYTES = 512 * 1024;
 function createCommandStreamServer(directory, commandService, broker) {
   const endpointPath = streamEndpointPath(directory);
   const token = randomBytes(32).toString("hex");
-  const generation = randomUUID12();
+  const generation = randomUUID13();
   const startedAt = new Date().toISOString();
   let server;
   let serverURL;
@@ -8980,10 +9534,10 @@ function createCommandStreamServer(directory, commandService, broker) {
       generation,
       startedAt
     };
-    await fs6.mkdir(path6.dirname(endpointPath), { recursive: true });
-    await fs6.writeFile(endpointPath, JSON.stringify(endpoint, null, 2) + `
+    await fs7.mkdir(path8.dirname(endpointPath), { recursive: true });
+    await fs7.writeFile(endpointPath, JSON.stringify(endpoint, null, 2) + `
 `, { mode: 384 });
-    await fs6.chmod(endpointPath, 384);
+    await fs7.chmod(endpointPath, 384);
   }
   return {
     get url() {
@@ -8997,7 +9551,7 @@ function createCommandStreamServer(directory, commandService, broker) {
         return;
       started = true;
       try {
-        const previous = await fs6.readFile(endpointPath, "utf8").then((text) => JSON.parse(text), () => {
+        const previous = await fs7.readFile(endpointPath, "utf8").then((text) => JSON.parse(text), () => {
           return;
         });
         if (previous && typeof previous.pid === "number" && isPidAlive(previous.pid) && previous.pid !== process.pid) {
@@ -9067,10 +9621,10 @@ function createCommandStreamServer(directory, commandService, broker) {
       server = undefined;
       serverURL = undefined;
       try {
-        const text = await fs6.readFile(endpointPath, "utf8");
+        const text = await fs7.readFile(endpointPath, "utf8");
         const current = JSON.parse(text);
         if (current?.generation === generation) {
-          await fs6.unlink(endpointPath);
+          await fs7.unlink(endpointPath);
         } else {
           logServerEvent(directory, "command-stream.keep-endpoint", {
             reason: "generation mismatch \u2014 another server owns the file"
@@ -9085,7 +9639,7 @@ function createCommandStreamServer(directory, commandService, broker) {
 // src/server/goal-tools.ts
 init_state_repository();
 init_goal();
-import { randomUUID as randomUUID13 } from "crypto";
+import { randomUUID as randomUUID14 } from "crypto";
 import { tool } from "@opencode-ai/plugin/tool";
 
 // src/domain/verification.ts
@@ -9164,6 +9718,14 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
         workspaceWrite: tool.schema.boolean().optional().describe("Whether this goal edits the shared project workspace. Defaults to true; explicitly set false for artifact-only/read-only work."),
         write_scope: tool.schema.array(tool.schema.string()).optional().describe("Enforced exact-file ownership on supported hosts. Default: infer explicitly named files from the objective; otherwise legacy exclusive ownership. Supply exact workspace-relative files to override inference, or [] for scoped exploration. No globs. Unsupported hosts must omit this key. Never substitute workspaceWrite:false for coding to bypass protection."),
+        approvedCommands: tool.schema.array(tool.schema.object({
+          name: tool.schema.string(),
+          command: tool.schema.string(),
+          args: tool.schema.array(tool.schema.string()),
+          cwd: tool.schema.string(),
+          kind: tool.schema.enum(["finite", "server"]),
+          timeoutSeconds: tool.schema.number().positive().finite().optional()
+        }).strict()).optional().describe("Immutable owner-authorized named commands. Fixed executable and argument vector, workspace-relative existing cwd, finite/server kind and optional timeout. Trusted commands may write files; this is not a filesystem sandbox. Authority is never inferred from objective text."),
         progressFile: tool.schema.string().optional().describe("Markdown file the worker reads/writes as its transaction state."),
         maxTurns: tool.schema.number().optional().describe("Max turns before auto-block."),
         maxNoProgress: tool.schema.number().optional().describe("Block after N turns without progress."),
@@ -9202,6 +9764,8 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
           config.workspaceWrite = args.workspaceWrite;
         if (args.write_scope !== undefined)
           config.write_scope = args.write_scope;
+        if (args.approvedCommands !== undefined)
+          config.approvedCommands = args.approvedCommands;
         if (args.progressFile)
           config.progressFile = args.progressFile;
         if (args.maxTurns !== undefined)
@@ -9290,6 +9854,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
               checks: resolution.config.checks || [],
               workspaceWrite: resolution.config.workspaceWrite,
               write_scope: goal.config.write_scope,
+              approvedCommands: goal.config.approvedCommands,
               enforcedScopedExecution: goalService.scopedExecution,
               defaultsApplied: resolution.defaultsApplied,
               name: args.name,
@@ -9415,7 +9980,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         state.revision = (await persistWorkerMutation(dir, goal, runtime, ["active"])).revision;
         const event = {
           version: 1,
-          eventID: randomUUID13(),
+          eventID: randomUUID14(),
           goalID: goal.id,
           type: "goal.progress",
           summary: args.summary,
@@ -9460,8 +10025,9 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
 Stdout: ${f.stdout.slice(0, 500)}` : "";
               const stderrSnippet = f.stderr ? `
 Stderr: ${f.stderr.slice(0, 500)}` : "";
+              const status = f.timedOut ? `Timed out after ${Math.round(CHECK_TIMEOUT_MS / 1000)}s (not a test failure)` : `Exit code: ${f.exitCode}`;
               return `Command: ${f.command}
-Exit code: ${f.exitCode}${stdoutSnippet}${stderrSnippet}`;
+${status}${stdoutSnippet}${stderrSnippet}`;
             }).join(`
 
 `);
@@ -9480,7 +10046,7 @@ Exit code: ${f.exitCode}${stdoutSnippet}${stderrSnippet}`;
 Working directory: ${cwd}
 
 ${failureDetails}`;
-              attemptID = randomUUID13();
+              attemptID = randomUUID14();
               const verificationAttempt = {
                 id: attemptID,
                 sequence: runtime.evaluatorRejectionCount,
@@ -9494,6 +10060,7 @@ ${failureDetails}`;
                 checks: checkResults.failures.map((f) => ({
                   command: f.command,
                   exitCode: f.exitCode,
+                  timedOut: f.timedOut,
                   stderr: f.stderr,
                   stdout: f.stdout
                 }))
@@ -9525,7 +10092,7 @@ ${failureDetails.slice(0, 500)}`,
             if (attemptID) {
               await appendEvent(dir, {
                 version: 1,
-                eventID: randomUUID13(),
+                eventID: randomUUID14(),
                 goalID: goal.id,
                 type: "goal.completion_rejected",
                 attemptID,
@@ -9543,7 +10110,7 @@ ${failureDetails.slice(0, 500)}`,
             if (blocked && rejectedGoal?.blocker) {
               await appendEvent(dir, {
                 version: 1,
-                eventID: randomUUID13(),
+                eventID: randomUUID14(),
                 goalID: goal.id,
                 type: "goal.blocked",
                 reason: rejectedGoal.blocker.reason,
@@ -9603,7 +10170,7 @@ ${failureDetails.slice(0, 500)}`,
             }
             runtime.updatedAt = new Date().toISOString();
           }
-          const attemptID = randomUUID13();
+          const attemptID = randomUUID14();
           const cwd = goal.config.checkCwd || goal.config.artifactDir || dir;
           const checks = (goal.config.checks || []).map((cmd) => ({
             command: cmd,
@@ -9627,7 +10194,7 @@ ${failureDetails.slice(0, 500)}`,
         state.revision = (await persistWorkerMutation(dir, goal, runtime, ["active", "budget_limited"])).revision;
         const event = {
           version: 1,
-          eventID: randomUUID13(),
+          eventID: randomUUID14(),
           goalID: goal.id,
           type: "goal.completed",
           summary: args.summary,
@@ -9697,7 +10264,7 @@ ${failureDetails.slice(0, 500)}`,
         state.revision = (await persistWorkerMutation(dir, goal, runtime, ["active", "budget_limited"])).revision;
         const event = {
           version: 1,
-          eventID: randomUUID13(),
+          eventID: randomUUID14(),
           goalID: goal.id,
           type: "goal.blocked",
           reason: args.reason,
@@ -9772,6 +10339,7 @@ function formatGoalStructured(goal, runtime, enforcedScopedExecution = false) {
       checkCwd: goal.config.checkCwd,
       workspaceWrite: goal.config.workspaceWrite,
       write_scope: goal.config.write_scope,
+      approvedCommands: goal.config.approvedCommands,
       scopeClosing: goal.scopeClosing === true,
       scopeClearPending: goal.scopeClearPending === true,
       scopeRetryPolicy: "coordinate_then_retry_no_automatic_queue",
@@ -9826,6 +10394,7 @@ function formatGoalStructured(goal, runtime, enforcedScopedExecution = false) {
   }
   return JSON.stringify(output, null, 2);
 }
+var CHECK_TIMEOUT_MS = 180000;
 async function persistWorkerMutation(dir, goal, runtime, from) {
   return mutateState(dir, `worker.transition:${goal.id}`, async (state) => {
     const current = state.goals.find((item) => item.id === goal.id);
@@ -9845,16 +10414,19 @@ async function persistWorkerMutation(dir, goal, runtime, from) {
     return state;
   });
 }
-async function runCompletionChecks(checks, cwd) {
+async function runCompletionChecks(checks, cwd, timeoutMs = CHECK_TIMEOUT_MS) {
   const failures = [];
   for (const cmd of checks) {
     try {
-      const { stdout, stderr } = await execAsync(cmd, { timeout: 30000, cwd });
+      const { stdout, stderr } = await execAsync(cmd, { timeout: timeoutMs, cwd });
     } catch (error) {
+      const timedOut = error?.killed === true || error?.signal === "SIGTERM" || error?.code === "ETIMEDOUT";
       failures.push({
         command: cmd,
-        exitCode: error.code ?? 1,
-        stderr: String(error.stderr || error.message || "unknown error").slice(0, 1000),
+        exitCode: typeof error?.code === "number" ? error.code : null,
+        timedOut,
+        stderr: timedOut ? `Check exceeded its ${Math.round(timeoutMs / 1000)}s limit and was terminated, so this is not a failure report. Partial output:
+${String(error.stderr || "").slice(0, 1000)}` : String(error.stderr || error.message || "unknown error").slice(0, 1000),
         stdout: String(error.stdout || "").slice(0, 1000)
       });
     }
@@ -9937,7 +10509,7 @@ function describeGoalState(status, phase, now = Date.now()) {
 }
 
 // src/server/owner-tools.ts
-import { promises as fs7 } from "fs";
+import { promises as fs8 } from "fs";
 function withTimeout2(promise, ms) {
   return Promise.race([
     promise,
@@ -10112,7 +10684,7 @@ function ownerTools2(options) {
             if (!dir)
               return;
             try {
-              const files = await fs7.readdir(dir);
+              const files = await fs8.readdir(dir);
               return files.length ? `${files.length} file(s): ${files.slice(0, 8).join(", ")}` : "no artifacts yet";
             } catch {
               return "no artifacts yet";
@@ -10145,6 +10717,7 @@ function ownerTools2(options) {
               checkCwd: goal.config.checkCwd,
               workspaceWrite: goal.config.workspaceWrite,
               write_scope: goal.config.write_scope,
+              approvedCommands: goal.config.approvedCommands,
               scopeClosing: goal.scopeClosing === true,
               scopeClearPending: goal.scopeClearPending === true,
               scopeRetryPolicy: "coordinate_then_retry_no_automatic_queue",
@@ -10175,6 +10748,7 @@ function ownerTools2(options) {
               artifactSummary,
               transcriptTail: transcriptTail ? transcriptTail.map((m) => ({ role: m.role, content: String(m.content || "").slice(0, 400), timestamp: m.timestamp, messageID: m.messageID, parentMessageID: m.parentMessageID })) : undefined,
               activeToolCallIDs,
+              nativeReconcileBlocked: runtime?.nativeReconcileBlocked,
               pendingToolCalls: activeToolCallIDs.length,
               lastActivityAge: runtime?.lastActivityAt ? `${Math.floor((Date.now() - Date.parse(runtime.lastActivityAt)) / 1000)}s ago` : undefined
             },
@@ -10951,11 +11525,91 @@ function commandTools(options) {
   };
 }
 
+// src/server/approved-command-tools.ts
+import { tool as tool4 } from "@opencode-ai/plugin/tool";
+var ALLOWED_RUN_FIELDS = new Set(["name"]);
+function rejected(title, message) {
+  return { title, output: JSON.stringify({ ok: false, errorCode: "override_denied", message }) };
+}
+function approvedCommandTools(options) {
+  const { directory, commandService } = options;
+  return {
+    run_approved_command: tool4({
+      description: "Run one owner-approved FINITE command by name. The executable, argument vector, canonical cwd and timeout are fixed by the owner at goal creation; this tool accepts no executable/args/cwd/env/shell overrides. Finite commands run without a shell under the workspace-wide operation lock, so concurrent source writes and checks are denied until the actual process exits. Returns the real exit code, stdout, stderr, duration and timeout outcome. Owner-trusted commands may write files; this is coordination, not a filesystem sandbox.",
+      args: {
+        name: tool4.schema.string().describe("Approved command name from get_goal config.approvedCommands.")
+      },
+      execute: async (args, context) => {
+        const injected = Object.keys(args).filter((key) => !ALLOWED_RUN_FIELDS.has(key));
+        if (injected.length) {
+          return rejected("Approved command denied", `run_approved_command accepts only a name. Override fields are rejected: ${injected.join(", ")}.`);
+        }
+        const result = await runApprovedFiniteCommand(directory, context?.sessionID, args.name);
+        return {
+          title: result.ok ? `Approved command passed: ${result.name}` : `Approved command failed: ${result.name}`,
+          output: JSON.stringify(result)
+        };
+      }
+    }),
+    start_approved_server: tool4({
+      description: "Start one owner-approved SERVER command by name through the managed command service. The executable, args and canonical cwd are fixed by the owner; only the approved name is accepted. Refused while a workspace operation is active, and duplicates are atomic: a second start for the same goal+name returns the existing command instead of spawning a twin. The returned command_id is the managed handle; read output with read_approved_server and stop it with stop_approved_server. Owner-trusted servers may write files.",
+      args: {
+        name: tool4.schema.string().describe("Approved server name from get_goal config.approvedCommands.")
+      },
+      execute: async (args, context) => {
+        const injected = Object.keys(args).filter((key) => !ALLOWED_RUN_FIELDS.has(key));
+        if (injected.length) {
+          return rejected("Approved server denied", `start_approved_server accepts only a name. Override fields are rejected: ${injected.join(", ")}.`);
+        }
+        const result = await startApprovedServer(directory, commandService, context?.sessionID, args.name);
+        return {
+          title: result.ok ? `Approved server live: ${result.name}` : `Approved server not started: ${result.name}`,
+          output: JSON.stringify(result)
+        };
+      }
+    }),
+    read_approved_server: tool4({
+      description: "Read one managed approved server by name: status, liveness, pid, exit code and the output tail. The worker that started it and the owning session may read. A missing handle reports exit-is-unproved recovery instead of pretending the process stopped.",
+      args: {
+        name: tool4.schema.string().describe("Approved server name from get_goal config.approvedCommands.")
+      },
+      execute: async (args, context) => {
+        const injected = Object.keys(args).filter((key) => !ALLOWED_RUN_FIELDS.has(key));
+        if (injected.length) {
+          return rejected("Approved server read denied", `read_approved_server accepts only a name. Extra fields are rejected: ${injected.join(", ")}.`);
+        }
+        const result = await readApprovedServer(directory, commandService, context?.sessionID, args.name);
+        return {
+          title: `${result.live ? "Live" : "Not live"} approved server: ${result.name}`,
+          output: JSON.stringify(result)
+        };
+      }
+    }),
+    stop_approved_server: tool4({
+      description: "Stop one managed approved server by name (SIGTERM with a kill escalation) and release its linkage only after the process exit is proved. The worker that started it and the owning session may stop. If exit cannot be proved, the fence is retained and the result reports stop_unproven with explicit recovery.",
+      args: {
+        name: tool4.schema.string().describe("Approved server name from get_goal config.approvedCommands.")
+      },
+      execute: async (args, context) => {
+        const injected = Object.keys(args).filter((key) => !ALLOWED_RUN_FIELDS.has(key));
+        if (injected.length) {
+          return rejected("Approved server stop denied", `stop_approved_server accepts only a name. Extra fields are rejected: ${injected.join(", ")}.`);
+        }
+        const result = await stopApprovedServer(directory, commandService, context?.sessionID, args.name);
+        return {
+          title: result.ok ? `Approved server stopped: ${result.name}` : `Approved server stop failed: ${result.name}`,
+          output: JSON.stringify(result)
+        };
+      }
+    })
+  };
+}
+
 // src/server/plugin.ts
 init_server_log();
 init_state_repository();
 // package.json
-var version = "1.14.3";
+var version = "1.14.4";
 
 // src/server/plugin.ts
 init_workspace_execution();
@@ -11081,7 +11735,7 @@ function createServerHooks(directory, host, defaults) {
       if (type?.startsWith("session."))
         reconcileInBackground();
     },
-    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools2({ directory, host, goalService }), ...commandTools({ directory, commandService, capabilities: commandHost.capabilities, goalService }) },
+    tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools2({ directory, host, goalService }), ...commandTools({ directory, commandService, capabilities: commandHost.capabilities, goalService }), ...approvedCommandTools({ directory, commandService }) },
     "tool.execute.before": async (input, _output) => {
       await beforeWorkspaceTool(directory, input, _output.args);
       if (host.readExecution || isWorkspaceToolExempt(input.tool))
