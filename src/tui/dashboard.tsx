@@ -478,7 +478,7 @@ export function LoopDashboard(props: Props) {
     // Goal controls apply to goals only — never to a command selection.
     // Model controls (model/models) are goal verbs too: on the Commands tab
     // they would otherwise be written into a command's stdin.
-    const needsGoalsTab = ["p", "r", "A", "N", "model", "models", "agent", "agents"].includes(key)
+    const needsGoalsTab = ["p", "r", "A", "N", "W", "model", "models", "agent", "agents"].includes(key)
     if (needsGoalsTab && tab() !== "goals") {
       prevent(evt)
       setStatusText("Goal controls need the Goals tab (Tab to switch).")
@@ -490,6 +490,17 @@ export function LoopDashboard(props: Props) {
     if (key === "x") { prevent(evt); void executeCommand("clear"); return }
     if (key === "A") { prevent(evt); void executeCommand("abort"); return }
     if (key === "N") { prevent(evt); void executeCommand("nudge"); return }
+    if (key === "W") {
+      prevent(evt)
+      // One-key fence release for the selected goal. No goal = inspect only.
+      if (fenceCount() === 0) {
+        setStatusText("No workspace fences to release — nothing is blocking writes or checks.")
+        return
+      }
+      const goal = selectedGoal()
+      void releaseWorkspaceFences(goal ? { goalID: goal.id } : {})
+      return
+    }
     if (key === "L") { prevent(evt); setShowLogs((value) => !value); return }
     if (key === "o") {
       prevent(evt)
@@ -564,6 +575,38 @@ export function LoopDashboard(props: Props) {
 
   function selectedCommand(): CommandSession | null {
     return ownerCommands()[cmdSelected()] ?? null
+  }
+
+  /**
+   * Inspect or release workspace fences through the same goalService path the
+   * agent tool uses. No selector = inspect; every safety refusal is reported
+   * verbatim. Refresh afterwards: the fence state is what the user acted on.
+   */
+  async function releaseWorkspaceFences(selection: { callID?: string; goalID?: string; sessionID?: string }) {
+    const owner = ownerSessionID()
+    if (!owner) {
+      setStatusText("No owning session (open from a session view) — release disabled.")
+      return
+    }
+    const selecting = Boolean(selection.callID || selection.goalID || selection.sessionID)
+    if (!selecting && fenceCount() === 0) {
+      setStatusText("No live workspace reservations — nothing is fencing this project.")
+      return
+    }
+    setStatusText(selecting ? "releasing workspace fence…" : "inspecting workspace fences…")
+    try {
+      const r = await client.execute({
+        version: 1,
+        requestID: randomUUID(),
+        requestedAt: new Date().toISOString(),
+        command: "release_workspace",
+        args: { ownerSessionID: owner, ...selection },
+      })
+      setStatusText(r.ok ? r.message : `Release refused: ${r.message}`)
+      await refresh()
+    } catch (e) {
+      setStatusText(`Error: ${e instanceof Error ? e.message : String(e)}`)
+    }
   }
 
   /** Commands-tab process helpers (X/R keys + colon). */
@@ -729,6 +772,14 @@ export function LoopDashboard(props: Props) {
           setStatusText(r.ok ? r.message : `Error: ${r.message}`)
           break
         }
+        case "release": {
+          await releaseWorkspaceFences({
+            callID: parsed.args.call,
+            goalID: parsed.args.goal,
+            sessionID: parsed.args.session,
+          })
+          break
+        }
         // Legacy: keep :goal start but redirect — creation belongs in parent chat
         case "goal": { setStatusText("Create goals via /goal in the parent chat (agent clarifies first). Dashboard: :send to steer the worker."); break }
         case "bug":
@@ -754,6 +805,7 @@ export function LoopDashboard(props: Props) {
 
   const activeGoals = () => state()?.goals.filter((g) => showCompleted() || g.status !== "complete") || []
   const runningCount = () => state()?.runtimes.filter((runtime) => workerActivityLabel(runtime, clock()).acting).length || 0
+  const fenceCount = () => state()?.workspaceCalls?.length || 0
   const runningFrame = () => ["|", "/", "-", "\\"][Math.floor(clock() / 500) % 4]
 
   function handleBugReport() {
@@ -789,6 +841,8 @@ export function LoopDashboard(props: Props) {
             <span style={{ fg: theme().textMuted }}> │ </span>
             <span style={{ fg: runningCount() > 0 ? theme().success : theme().textMuted, bold: runningCount() > 0 }}>{runningCount() > 0 ? runningFrame() : "○"} {runningCount()} observed active</span>
             <span style={{ fg: theme().textMuted }}> │ </span>
+            <span style={{ fg: fenceCount() > 0 ? theme().warning : theme().textMuted, bold: fenceCount() > 0 }}>{fenceCount()} fence{fenceCount() === 1 ? "" : "s"}</span>
+            <span style={{ fg: theme().textMuted }}> │ </span>
             <span style={{ fg: theme().info, bold: true }}>{state()?.goals.filter((g) => g.status === "complete").length || 0}</span>
             <span style={{ fg: theme().textMuted }}> done</span>
             <span style={{ fg: theme().textMuted }}> │ </span>
@@ -817,7 +871,7 @@ export function LoopDashboard(props: Props) {
               <box flexDirection="column" padding={1} border={true} borderColor="yellow" backgroundColor={theme().background} flexShrink={0} maxHeight={22}>
                 <box flexDirection="column" padding={1} backgroundColor={theme().background} flexShrink={1} minHeight={0} overflow="scroll">
                   <text>
-                <span style={{ fg: "yellow", bold: true }}>{tab() === "commands" ? "━━━ Commands: ? help  : insert  c toggle done  X kill  R restart  x remove-done  o fullscreen  q close ━━━" : "━━━ Keys: ? toggle help  c toggle done  : insert  Ctrl+N normal  o open  A abort worker  N nudge  q close ━━━"}</span>
+                <span style={{ fg: "yellow", bold: true }}>{tab() === "commands" ? "━━━ Commands: ? help  : insert  c toggle done  X kill  R restart  x remove-done  o fullscreen  q close ━━━" : "━━━ Keys: ? toggle help  c toggle done  : insert  Ctrl+N normal  o open  A abort worker  N nudge  W release  q close ━━━"}</span>
                 <For each={(tab() === "commands" ? commandTabHelp() : commandHelp()).split("\n")}>{(line) => {
                   // Modes / Nav — split into label + segments, color keys vs descs
                   if (line.startsWith("Modes:") || line.startsWith("Nav:")) {

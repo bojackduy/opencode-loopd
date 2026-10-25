@@ -98,13 +98,13 @@ export const INTERACTIONS: InteractionDef[] = [
     transport: "both",
   },
   {
-    command: "—",
+    command: "release_workspace",
     agentTools: ["loopd_release_workspace"],
-    tuiKeys: [],
+    tuiKeys: ["W", "release"],
     label: "Release workspace",
-    description: "Diagnose and release stuck workspace write reservations (agent-side escape hatch; inspection is read-only)",
+    description: "Inspect or release stuck workspace write reservations (no selector = inspect only; W releases the selected goal's)",
     needsGoal: false,
-    transport: "agent",
+    transport: "both",
   },
   {
     command: "send",

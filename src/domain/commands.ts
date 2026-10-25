@@ -121,6 +121,26 @@ export interface OpenWorkerCommand extends BaseCommand {
   command: "open_worker"
 }
 
+// ─── Workspace ───────────────────────────────────────────────────────────────
+
+/**
+ * Inspect or release workspace write reservations (the fence that blocks
+ * writes, checks and activation). No callID/goalID/sessionID = inspect only:
+ * the response carries the same report the agent tool returns. Releasing is
+ * deliberately selective, never a sweep — goalService owns every safety rule.
+ * `goalID` inside args names a reservation filter, not the display-only
+ * BaseCommand goalID.
+ */
+export interface ReleaseWorkspaceCommand extends BaseCommand {
+  command: "release_workspace"
+  args: {
+    ownerSessionID: string
+    callID?: string
+    goalID?: string
+    sessionID?: string
+  }
+}
+
 // ─── Union ───────────────────────────────────────────────────────────────────
 
 export type LoopCommand =
@@ -142,5 +162,6 @@ export type LoopCommand =
   | CompactCommand
   | InspectCommand
   | OpenWorkerCommand
+  | ReleaseWorkspaceCommand
 
 export type CommandName = LoopCommand["command"]

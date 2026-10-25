@@ -19,7 +19,7 @@ import {
   type ControlRequest,
   type ControlResponse,
 } from "../infrastructure/state-repository"
-import type { GoalService } from "./goal-service"
+import type { GoalService, WorkspaceReservations } from "./goal-service"
 import type { CommandService } from "./command-service"
 import {
   resolveGoalCreationConfig,
@@ -46,6 +46,20 @@ export interface ControlWorker {
   start(): void
   stop(): Promise<void>
   isRunning(): boolean
+}
+
+/** One-line human summary of the workspace fence; structured detail rides in `data`. */
+function describeFenceReport(report: WorkspaceReservations): string {
+  if (!report.reservations.length) return "No live workspace reservations — nothing is fencing this project."
+  const shown = report.reservations.slice(0, 4).map((item) => {
+    const goal = item.goalName ?? item.goalID
+    const where = goal ? `goal "${goal}"` : "no goal"
+    const state = item.releasable ? "releasable" : `refused — ${item.reason ?? "not releasable"}`
+    return `${item.callID} (session ${item.sessionID}, ${where}, ${state})`
+  })
+  const more = report.reservations.length > shown.length ? ` … +${report.reservations.length - shown.length} more` : ""
+  const operation = report.operation ? ` Operation ${report.operation.id} is mid-flight.` : ""
+  return `${report.reservations.length} workspace reservation(s): ${shown.join("; ")}${more}. Release with callID/goalID/sessionID.${operation}`
 }
 
 export function createControlWorker(options: ControlWorkerOptions): ControlWorker {
@@ -348,6 +362,55 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
           ok: result.outcome !== "unsupported",
           message: outcomeMessage[result.outcome] ?? `Identity switch ${result.outcome}.`,
           stateRevision: state.revision,
+        }
+        break
+      }
+
+      case "release_workspace": {
+        const args = (request.args ?? {}) as Record<string, unknown>
+        const named = (key: string) => typeof args[key] === "string" && (args[key] as string).trim() ? (args[key] as string) : undefined
+        // The control bus carries no owner session. The dashboard supplies it;
+        // otherwise source it from the selected goal, exactly like
+        // switch_goal_identity. An unknown session must never be treated as an
+        // owner, so an empty owner fails closed.
+        const ownerSessionID = named("ownerSessionID") && named("ownerSessionID") !== "main"
+          ? named("ownerSessionID")!
+          : request.goalID
+            ? (await readState(directory)).goals.find((goal) => goal.id === request.goalID)?.ownerSessionID ?? ""
+            : ""
+        if (!ownerSessionID) {
+          response = {
+            ...base,
+            ok: false,
+            message: "ownerSessionID is required to inspect or release workspace reservations; open /loop from a session view.",
+            errorCode: "no_session",
+          }
+          break
+        }
+        const callID = named("callID")
+        const goalID = named("goalID")
+        const sessionID = named("sessionID")
+        if (!callID && !goalID && !sessionID) {
+          // No selector = inspect only. Same report shape as the agent tool.
+          const report = await goalSvc.workspaceReservations(directory, ownerSessionID)
+          const state = await readState(directory)
+          response = {
+            ...base,
+            message: describeFenceReport(report),
+            data: report,
+            stateRevision: state.revision,
+          }
+          break
+        }
+        const result = await goalSvc.releaseWorkspace(directory, ownerSessionID, { callID, goalID, sessionID })
+        const state = await readState(directory)
+        response = {
+          ...base,
+          ok: result.ok,
+          message: result.message,
+          data: result,
+          stateRevision: state.revision,
+          errorCode: result.ok ? undefined : "release_refused",
         }
         break
       }

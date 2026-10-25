@@ -83,7 +83,7 @@ function tokenize(input: string): string[] {
 export function commandHelp(): string {
   return [
     "Modes: : insert → send/commands | Ctrl+N → normal | ? toggle help | Shift+B bug report",
-    "Nav: j/k move | g/G top/bottom | o open child | c toggle done | p/r/R/x pause/resume/retry/clear | A abort worker | N nudge | L logs | q close",
+    "Nav: j/k move | g/G top/bottom | o open child | c toggle done | p/r/R/x pause/resume/retry/clear | A abort worker | N nudge | W release fence | L logs | q close",
     "Goal (ownership): Active=loopd owns it | Blocked/Paused=needs you | Out of budget=resume to spend | Waiting for capacity=auto-resumes | Done=verified",
     "Worker (activity now): Running=acting now | Idle=between turns | Retrying=backing off | Queued/Compacting/Stopping=transitional",
     "Commands (insert mode, : prefix):",
@@ -94,6 +94,7 @@ export function commandHelp(): string {
     "  :pause / :resume / :retry / :clear        Quick controls (also p/r/R/x)",
     "  :abort                                   Abort worker session now (status unchanged; A)",
     "  :nudge                                   Force re-prompt now with full steering (N)",
+    "  :release [--call <id>|--goal <id>|--session <id>]  Inspect or release workspace fences (W releases the selected goal's)",
     "  :interactive                             Toggle manual mode (engine never starts turns)",
     "  :model <provider/model>                Switch this goal's model (same worker; :models lists options)",
     "  :agent <name> / :agents                 Switch this goal's agent / list agents (Goals tab only)",
