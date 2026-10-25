@@ -18,6 +18,7 @@ import {
   type CommandSession,
   type CommandSessionID,
   type CommandSessionStatus,
+  type CommandTerminationActor,
 } from "../domain/command-session"
 import {
   CommandWatcher,
@@ -165,7 +166,7 @@ export interface CommandService {
   write(directory: string, id: string, ownerSessionID: string, data: string): Promise<{ ok: boolean; message: string }>
   resize(directory: string, id: string, ownerSessionID: string, cols: number, rows: number): Promise<{ ok: boolean; message: string; unsupported?: boolean }>
   interrupt(directory: string, id: string, ownerSessionID: string): Promise<{ ok: boolean; message: string }>
-  terminate(directory: string, id: string, ownerSessionID: string, opts?: { remove?: boolean }): Promise<{ ok: boolean; message: string; removed?: boolean }>
+  terminate(directory: string, id: string, ownerSessionID: string, opts?: { remove?: boolean; actor?: CommandTerminationActor }): Promise<{ ok: boolean; message: string; removed?: boolean }>
   /**
    * Force kill: SIGKILL immediately, no SIGTERM grace. Same finalize path
    * as terminate (endReason=terminate, signal=SIGKILL) — the only
@@ -1441,6 +1442,7 @@ export function createCommandService(
         const c = (s.commands ?? []).find((x) => x.id === id)
         if (c && c.ownerSessionID === ownerSessionID && c.status === "running") {
           c.signal = "SIGTERM"
+          c.terminatedBy = (opts?.actor as CommandTerminationActor) ?? "tool"
           // Publish the matched-watch reason with termination, not in the
           // later until overlay: terminal readers must never see "terminate".
           if (c.endReason !== "timeout" && c.watchState?.state === "until-matched" && c.watchUntilAction === "stop") {
@@ -1495,6 +1497,7 @@ export function createCommandService(
           }
           if (exitCode !== undefined) c.exitCode = c.exitCode ?? exitCode
           c.signal = c.signal ?? "SIGTERM"
+          c.terminatedBy = c.terminatedBy ?? ((opts?.actor as CommandTerminationActor) ?? "tool")
           c.endedAt = new Date().toISOString()
           c.updatedAt = c.endedAt
         } else if (c.status === "terminated" && !c.endedAt) {
@@ -1838,8 +1841,20 @@ export function createCommandService(
       const owned = new Map<string, string>((state.commands ?? []).map((command) => [command.id, command.ownerSessionID]))
       await Promise.all([...live.entries()].map(async ([id, entry]) => {
         const owner = owned.get(id)
+        const spec = (state.commands ?? []).find((c) => c.id === id)
+        // Never kill a long-running server by accident: the user starts it
+        // deliberately; only terminate timed-out or owner-requested exits.
+        const isServer = !!spec?.watchFilter || !!spec?.watchUntil || (spec?.timeoutSeconds !== undefined && !!(spec?.watchFilter || spec?.watchUntil))
+        if (isServer) {
+          // Preserve the running server across plugin reload; the console
+          // log stays intact. Skip SIGTERM so service-recycle doesn't
+          // terminate deliberate background servers. The owner's explicit
+          // stop, a real timeout (timer path), or a natural exit are the
+          // only ways to end it.
+          return
+        }
         if (owner) {
-          await service.terminate(directory, id, owner).catch(() => {})
+          await service.terminate(directory, id, owner, { actor: "control" }).catch(() => {})
           return
         }
         entry.handle.terminate()

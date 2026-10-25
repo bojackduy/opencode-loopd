@@ -19,6 +19,13 @@ export type CommandSessionStatus =
 
 export type CommandEndReason = "exit" | "terminate" | "timeout" | "until" | "missing"
 
+/**
+ * What asked for the process to stop. A terminal status alone never said who
+ * killed a command, so a SIGTERM at minute 61 was indistinguishable from a
+ * timeout, a dashboard click, or plugin teardown.
+ */
+export type CommandTerminationActor = "tool" | "control" | "until" | "timeout" | "start-rollback"
+
 export interface CommandSession {
   id: CommandSessionID
   /** Short human label shown in lists/TUI. */
@@ -79,6 +86,8 @@ export interface CommandSession {
   exitCode?: number
   /** Signal name that ended the process (e.g. "SIGINT", "SIGKILL"). */
   signal?: string
+  /** What requested the stop (absent for natural exits and legacy records). */
+  terminatedBy?: CommandTerminationActor
   /** Last known pid (observability only — never reused after restart). */
   pid?: number
   /** Requested terminal size (stored even when host cannot apply it). */
