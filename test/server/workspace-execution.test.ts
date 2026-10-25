@@ -135,11 +135,23 @@ describe("real plugin scope enforcement", () => {
     await expect(before("write", { filePath: "../outside.ts" })).rejects.toThrow("outside")
   })
 
-  it("allows parent edits of unclaimed files but denies claimed files and uncontrolled bypasses", async () => {
-    const { before } = await fixture()
-    await before("edit", { filePath: "other.ts" }, "parent")
+  it("allows owner diagnostics and unclaimed owner edits but denies claimed files, workers and unknown children", async () => {
+    const { directory, before, after } = await fixture()
+    await before("edit", { filePath: "other.ts" }, "parent", "parent-edit")
     await expect(before("edit", { filePath: "owned.ts" }, "parent")).rejects.toThrow("owner")
-    for (const session of ["worker", "parent", "unknown-child"]) {
+    // The owner session is trusted for ordinary diagnostics even while a
+    // protected goal exists; the call is coordinated through a reservation.
+    const ownerCalls: string[] = []
+    for (const tool of ["bash", "shell", "loopd_command_start", "loopd_command_write", "task", "batch", "custom_writer"]) {
+      const callID = crypto.randomUUID()
+      await before(tool, { command: "true" }, "parent", callID)
+      ownerCalls.push(callID)
+    }
+    expect((await readState(directory)).workspaceCalls?.filter((call) => call.sessionID === "parent" && call.uncontrolled).map((call) => call.callID)).toEqual(ownerCalls)
+    for (const callID of ownerCalls) await after(callID, "parent")
+    await after("parent-edit", "parent")
+    expect((await readState(directory)).workspaceCalls).toEqual([])
+    for (const session of ["worker", "unknown-child"]) {
       for (const tool of ["bash", "shell", "loopd_command_start", "loopd_command_write", "task", "batch", "custom_writer"]) {
         await expect(before(tool, { command: "true" }, session)).rejects.toThrow("uncontrolled")
       }

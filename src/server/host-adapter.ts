@@ -100,6 +100,12 @@ export interface LoopHost {
    * never be mistaken for a dead session.
    */
   sessionKnown?(sessionID: string): Promise<boolean | undefined>
+  /**
+   * Authoritative main/root-session proof: true only when the host resolved the
+   * session and it has no parent (fork) session. undefined is unproven — a
+   * missing capability, timeout or error must never be read as "main".
+   */
+  isMainSession?(sessionID: string): Promise<boolean | undefined>
   /** True only when an audited execution guard surface is installed. */
   scopedExecution?: boolean
   listAgents?(): Promise<AgentCatalog>
@@ -163,6 +169,10 @@ function markParentNotified(ownerSessionID: string, message: string): void {
 // ─── Real Host (SDK-backed) ─────────────────────────────────────────────────
 
 export function createRealHost(client: any, directory: string): LoopHost {
+  // Parentage is immutable for a session's lifetime; cache only proven roots so
+  // repeated shell/command hooks do not re-probe the host, while an unproven
+  // probe stays uncached and fail-closed.
+  const provenRoots = new Set<string>()
   return {
     async listAgents() {
       const switching = typeof client.session?.switchAgent === "function" ? "session" : "next-prompt"
@@ -278,6 +288,24 @@ export function createRealHost(client: any, directory: string): LoopHost {
         }
         if (!agent && !model) return undefined
         return { agent, model }
+      } catch {
+        return undefined
+      }
+    },
+
+    async isMainSession(sessionID) {
+      if (provenRoots.has(sessionID)) return true
+      try {
+        // Bounded: this sits on the tool hook path; an unproven probe resolves
+        // undefined (fail-closed) rather than hanging the caller.
+        const result = await withTimeout<any>(client.session.get({ path: { id: sessionID } }), 10_000, "OpenCode session.get (parent identity)")
+        if (result?.error) return undefined
+        const data = result?.data
+        if (!data || typeof data !== "object") return undefined
+        const parent = (data as any).fork?.sessionID ?? (data as any).parentID
+        if (parent) return false
+        provenRoots.add(sessionID)
+        return true
       } catch {
         return undefined
       }
@@ -504,6 +532,8 @@ export function createV2Host(
   options: CreateV2HostOptions = {},
 ): LoopHost {
   const directory = context.location.directory
+  // Proven roots only: an unproven probe must be retried, never cached as false.
+  const provenRoots = new Set<string>()
 
   async function readExecution(sessionID: string): Promise<NativeExecutionSnapshot | undefined> {
     try {
@@ -717,6 +747,21 @@ export function createV2Host(
       return typeof context.session.wait === "function" ? (await readExecution(sessionID))?.status ?? "unknown" : statuses.get(sessionID) ?? "unknown"
     },
 
+    async isMainSession(sessionID) {
+      if (provenRoots.has(sessionID)) return true
+      try {
+        const session = await withTimeout(context.session.get({ sessionID }), 10_000, "OpenCode v2 session.get (parent identity)")
+        if (!session) return undefined
+        // Live hosts carry parentage as fork.sessionID; older ones as parentID.
+        const parent = (session as any).fork?.sessionID ?? (session as any).parentID
+        if (parent) return false
+        provenRoots.add(sessionID)
+        return true
+      } catch {
+        return undefined
+      }
+    },
+
     async sessionKnown(sessionID) {
       // v2's session projection throws for both "absent" and "unreachable", so
       // a throw stays unproven rather than being read as a dead session.
@@ -834,6 +879,8 @@ export interface FakeHostOptions {
   autoCompletePrompts?: boolean
   /** Override the existence probe; return undefined to model an unprovable probe. */
   sessionKnown?: (sessionID: string) => boolean | undefined | Promise<boolean | undefined>
+  /** Override main-session proof; omitted means the fake host cannot prove one. */
+  isMainSession?: (sessionID: string) => boolean | undefined | Promise<boolean | undefined>
 }
 
 export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
@@ -927,6 +974,12 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
       // FakeHostOptions.sessionKnown explicitly.
       if (options.sessionKnown) return options.sessionKnown(sessionID)
       return everCreated.has(sessionID)
+    },
+    async isMainSession(sessionID) {
+      // Fail closed by default: the fake host has no parentage registry, so it
+      // cannot prove a root session. Tests opt in explicitly.
+      if (!options.isMainSession) return undefined
+      return options.isMainSession(sessionID)
     },
     async abortSession(sessionID) {
       sessions.delete(sessionID)

@@ -96,12 +96,12 @@ describe("v2 CodeMode orchestration guards", () => {
   for (const [id, name] of [["execute", "execute"], ["custom_edit", "edit"]]) {
     it(`keeps the registered ${id} executor guarded instead of trusting its short name`, async () => {
       const f = await fixture()
-      await f.service.start(f.directory, { name: "protected", objective: "test", ownerSessionID: "parent",
+      const { goal } = await f.service.start(f.directory, { name: "protected", objective: "test", ownerSessionID: "parent",
         config: { workspaceWrite: true, write_scope: [] } })
       let executed = false
       const definition = { id, name, description: "custom", input: {}, execute: async () => { executed = true; return { content: "unsafe" } } }
       guardV2ToolEditor(f.directory, { list: () => [definition], update: (_id: string, update: any) => update(definition) } as any)
-      await expect(definition.execute({ filePath: "outside.ts" }, f.context)).rejects.toThrow("uncontrolled")
+      await expect(definition.execute({ filePath: "outside.ts" }, { ...f.context, sessionID: goal.workerSessionID! })).rejects.toThrow("uncontrolled")
       expect(executed).toBe(false)
     })
   }

@@ -106,9 +106,10 @@ describe("persisted scope claims", () => {
     await expect(start()).rejects.toThrow("still running")
     await commands.terminate(root, command.id, "parent")
     await start()
-    await expect(commands.start(root, { title: "bypass", command: "anything", ownerSessionID: "parent" })).rejects.toThrow("uncontrolled")
+    const workerSessionID = (await readState(root)).goals[0]!.workerSessionID!
+    await expect(commands.start(root, { title: "bypass", command: "anything", ownerSessionID: workerSessionID })).rejects.toThrow("uncontrolled")
     expect(commandHost.procs.size).toBe(1)
-    await expect(commands.write(root, command.id, "parent", "anything")).rejects.toThrow("uncontrolled")
+    await expect(commands.write(root, command.id, workerSessionID, "anything")).rejects.toThrow("uncontrolled")
     const result = await createControlService().execute(root, { command: "clear", requestID: "legacy", goalID: (await readState(root)).goals[0]!.id } as any)
     expect(result.errorCode).toBe("unsupported_scope")
     expect((await readState(root)).goals).toHaveLength(1)

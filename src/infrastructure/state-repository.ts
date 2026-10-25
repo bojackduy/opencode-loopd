@@ -444,6 +444,8 @@ export interface ControlResponse {
   requestID: string
   ok: boolean
   message: string
+  /** Structured result for commands that return a report (e.g. workspace reservations). */
+  data?: unknown
   stateRevision?: number
   errorCode?: string
   completedAt: string

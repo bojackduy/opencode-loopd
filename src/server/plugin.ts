@@ -178,7 +178,10 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
     tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }), ...commandTools({ directory, commandService, capabilities: commandHost.capabilities, goalService }), ...approvedCommandTools({ directory, commandService }) },
     "tool.execute.before": async (input, _output) => {
       // Enforcement errors must propagate; tracking's best-effort catch is deliberately separate.
-      await beforeWorkspaceTool(directory, input, _output.args)
+      // Main-session proof is host-authoritative; absence stays fail-closed.
+      await beforeWorkspaceTool(directory, input, _output.args, {
+        isMainSession: (sessionID) => host.isMainSession?.(sessionID) ?? Promise.resolve(undefined),
+      })
       if (host.readExecution || isWorkspaceToolExempt(input.tool)) return
       // Track tool call start for worker sessions only
       const activeWorkers = goalService.getActiveWorkers()

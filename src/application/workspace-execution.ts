@@ -224,10 +224,53 @@ export function retireWorker(state: StoreState, goal: Goal): void {
   state.retiredWorkerSessions = [...new Set([...(state.retiredWorkerSessions || []), goal.workerSessionID])]
 }
 
-export async function beforeWorkspaceTool(directory: string, input: { tool: string; sessionID: string; callID: string }, args: Record<string, unknown>): Promise<void> {
+/**
+ * Authoritative host evidence for a genuine main session that has no persisted
+ * goal record yet. `undefined` (capability missing, timeout, error) is unproven
+ * and must stay fail-closed: an unknown child is never an owner by default.
+ */
+export interface SessionIdentityProof {
+  isMainSession?: (sessionID: string) => Promise<boolean | undefined>
+}
+
+/** A live uncontrolled call owned by another session — unsafe to write beside. */
+function foreignUncontrolledCall(state: StoreState, input: { sessionID: string; callID: string }) {
+  return (state.workspaceCalls ?? []).find(
+    (call) => call.uncontrolled && call.sessionID !== input.sessionID && !(call.callID === input.callID && call.sessionID === input.sessionID),
+  )
+}
+
+function busyMessage(call: NonNullable<StoreState["workspaceCalls"]>[number], state: StoreState): string {
+  const holder = call.goalID ? state.goals.find((goal) => goal.id === call.goalID) : undefined
+  return `Workspace busy: session ${call.sessionID} is executing tool call ${call.callID}${holder ? ` for goal "${holder.name}"` : ""}. Wait for that call's exit event, then retry. If that session is gone, pause or clear its goal to release the fence.`
+}
+
+function assertCommandQuiescence(state: StoreState): void {
+  const command = state.commands?.find((item) => item.status === "running" || (item.status === "missing" && mayBeAlive(item.pid)))
+  if (command) throw new Error(`Workspace busy: command ${command.id} has not proved exit. Stop it or wait for its exit event before source writes, shell or checks.`)
+  const orphan = state.orphanedCommandProcesses?.find((item) => mayBeAlive(item.pid))
+  if (orphan) throw new Error(`Workspace busy: command ${orphan.commandID} has not proved exit. Verify process exit before retrying.`)
+}
+
+export async function beforeWorkspaceTool(
+  directory: string,
+  input: { tool: string; sessionID: string; callID: string },
+  args: Record<string, unknown>,
+  identity: SessionIdentityProof = {},
+): Promise<void> {
   // These tools were already unconditionally exempt, including retired
   // sessions. No shared-state decision or reservation needs a transaction.
   if (readTools.has(input.tool)) return
+  // Host evidence is gathered before the transaction: never await network I/O
+  // while holding the store lock. It only matters for sessions with no record.
+  let hostMain = false
+  if (identity.isMainSession) {
+    const known = await readState(directory)
+    const recorded = known.goals.some((item) => item.workerSessionID === input.sessionID || item.ownerSessionID === input.sessionID)
+    if (!recorded) {
+      try { hostMain = (await identity.isMainSession(input.sessionID)) === true } catch { hostMain = false }
+    }
+  }
   await mutateState(directory, `workspace.before:${input.callID}`, async (state) => {
     const goal = state.goals.find((item) => item.workerSessionID === input.sessionID)
     if (state.retiredWorkerSessions?.includes(input.sessionID)) throw new Error("Scope denied: retired worker session; goal cleared or worker rotated. Stop work; late executions are fenced.")
@@ -250,9 +293,17 @@ export async function beforeWorkspaceTool(directory: string, input: { tool: stri
     const protectedGoals = held.filter((item) => item.config.workspaceWrite !== false && item.config.write_scope !== undefined)
     // Preserve legacy operation when no scoped/read-only contract is present.
     if (!goal && ownerTools.has(input.tool) && (!protectedGoals.length || state.goals.some((item) => item.ownerSessionID === input.sessionID))) return state
+    // Trusted owner/main authority. A persisted owner session, or a session the
+    // host proves is a root session, may run ordinary tools even while protected
+    // goals exist. Scoped-worker restrictions win: `goal` is only set for the
+    // session that is the current worker of a goal.
+    const isOwner = !goal && (state.goals.some((item) => item.ownerSessionID === input.sessionID) || hostMain)
+    if (protectedGoals.length && input.tool !== "loopd_command_write") assertCommandQuiescence(state)
     if (!state.workspaceOperation && !protectedGoals.length && (!goal || goal.config.write_scope === undefined)) {
       // Preserve unscoped executors, but reserve them BEFORE execution so a
       // protected goal cannot activate in the middle of an existing shell/tool.
+      const concurrent = foreignUncontrolledCall(state, input)
+      if (concurrent) throw new Error(`Workspace busy: uncontrolled tool call ${concurrent.callID} from session ${concurrent.sessionID} is still executing; wait for its exit event before writing source.`)
       let paths: string[] = []
       let uncontrolled = false
       try {
@@ -267,11 +318,30 @@ export async function beforeWorkspaceTool(directory: string, input: { tool: stri
       return state
     }
     const writes = structuredWritePaths(input.tool, args)
-    if (!writes) throw new Error(`Scope denied: uncontrolled tool "${input.tool}". Shell, commands, custom tools, batch and subagents are not allowed while protected goals exist. Use structured edits or run_goal_checks.`)
+    if (!writes) {
+      if (!isOwner) throw new Error(`Scope denied: uncontrolled tool "${input.tool}". Shell, commands, custom tools, batch and subagents are not allowed while protected goals exist. Use structured edits or run_goal_checks.`)
+      // Owner diagnostics are coordinated, never silent: they cannot start
+      // beside a running verification or another session's live call.
+      if (state.workspaceOperation) throw new Error(`Workspace busy: completion checks (operation ${state.workspaceOperation.id}) are running; retry after they finish.`)
+      // Parking or deleting a goal cannot prove an already admitted tool ended.
+      // Keep its reservation until an after-hook or terminal evidence releases it.
+      const blocking = (state.workspaceCalls ?? []).find((call) => call.sessionID !== input.sessionID)
+      if (blocking) throw new Error(busyMessage(blocking, state))
+      state.workspaceCalls ??= []
+      if (!state.workspaceCalls.some((call) => call.callID === input.callID && call.sessionID === input.sessionID)) {
+        // No path claim: the owner's tool body is not parsed, so it fences the
+        // whole workspace through `uncontrolled` rather than guessing safety.
+        state.workspaceCalls.push({ callID: input.callID, sessionID: input.sessionID, paths: [], uncontrolled: true, at: new Date().toISOString() })
+      }
+      return state
+    }
+    const concurrent = foreignUncontrolledCall(state, input)
+    if (concurrent) throw new Error(`Workspace busy: uncontrolled tool call ${concurrent.callID} from session ${concurrent.sessionID} is still executing; wait for its exit event before writing source.`)
     if (state.workspaceOperation) throw new Error(`Workspace operation ${state.workspaceOperation.id} is active; source writes are denied until it finishes.`)
     if (goal && (goal.status !== "active" || goal.scopeClosing)) throw new Error(`Scope denied: worker goal is ${goal.scopeClosing ? "closing" : goal.status}.`)
-    // Unknown child sessions fail closed; only explicitly persisted workers and owners may write.
-    if (!goal && !state.goals.some((item) => item.ownerSessionID === input.sessionID)) {
+    // Unknown child sessions fail closed; only explicitly persisted workers, owners
+    // and host-proven main sessions may write.
+    if (!goal && !isOwner) {
       throw new Error("Scope denied: unrecognized session/child. Subagent writes are unsupported.")
     }
     const paths = await Promise.all(writes.map((file) => canonicalScopePath(directory, file)))
@@ -498,6 +568,7 @@ export async function withWorkspaceOperation<T>(
     // Authority is re-read inside the same transaction that takes the lock, so
     // a concurrent rotation/retirement cannot authorize a later execution.
     opts?.authorize?.(state)
+    assertCommandQuiescence(state)
     // Every outstanding reservation fences checks until actual completion.
     const now = Date.now()
     const live = (state.workspaceCalls ?? []).filter((call) => !isSyncStaleWorkspaceCall(state, call, now))
