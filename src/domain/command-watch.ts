@@ -17,6 +17,7 @@
 //   processes.
 
 import { tailLastBytes } from "./command-await"
+import type { ConsoleByteRange } from "./command-agent-event"
 
 // ─── Spec ────────────────────────────────────────────────────────────────────
 
@@ -131,6 +132,19 @@ function cleanRawLine(raw: string): string {
   return parts[parts.length - 1] ?? ""
 }
 
+export interface AssembledLine {
+  line: string
+  /** Present only when the caller supplied absolute console chunk offsets. */
+  range?: ConsoleByteRange
+}
+
+export interface SpanAssembler {
+  /** Feed a chunk beginning at `chunkStartOffset` (absolute console bytes). */
+  push(chunk: string, chunkStartOffset?: number): AssembledLine[]
+  /** Treat the trailing partial line as complete (call at process exit). */
+  flush(endOffset?: number): AssembledLine[]
+}
+
 export interface LineAssembler {
   /** Feed a chunk; returns newly completed cleaned lines (blank lines included). */
   push(chunk: string): string[]
@@ -138,22 +152,63 @@ export interface LineAssembler {
   flush(): string[]
 }
 
-export function createLineAssembler(): LineAssembler {
+/**
+ * Line assembly with optional absolute byte ranges. `\r\n` counts as one
+ * newline even when the pair straddles a chunk boundary; a bare `\r` overwrites
+ * the current line (so `progress 10%\rprogress 20%\n` is one console span).
+ * Ranges stay exact because the carry's absolute start is tracked across chunks.
+ */
+export function createSpanAssembler(): SpanAssembler {
   let carry = ""
+  let carryStart = 0
+  let tracking = false
   return {
-    push(chunk: string): string[] {
-      carry += chunk
-      // Normalize \r\n first so a split pair spanning the chunk boundary
-      // still counts as one newline; remaining \r are bare overwrites.
-      const parts = carry.replace(/\r\n/g, "\n").split("\n")
-      carry = parts.pop() ?? ""
-      return parts.map(cleanRawLine)
+    push(chunk: string, chunkStartOffset?: number): AssembledLine[] {
+      if (chunkStartOffset !== undefined) {
+        tracking = true
+        // Offsets are absolute: the carry began this many bytes before the chunk.
+        carryStart = chunkStartOffset - byteLen(carry)
+      }
+      const combined = carry + chunk
+      const out: AssembledLine[] = []
+      let segStart = 0
+      let segBytes = 0
+      for (let i = 0; i < combined.length; i++) {
+        if (combined[i] !== "\n") continue
+        let textEnd = i
+        if (textEnd > segStart && combined[textEnd - 1] === "\r") textEnd--
+        const span = byteLen(combined.slice(segStart, i + 1))
+        out.push({
+          line: cleanRawLine(combined.slice(segStart, textEnd)),
+          ...(tracking
+            ? { range: { startOffset: carryStart + segBytes, endOffset: carryStart + segBytes + span } }
+            : {}),
+        })
+        segBytes += span
+        segStart = i + 1
+      }
+      carry = combined.slice(segStart)
+      carryStart += segBytes
+      return out
     },
-    flush(): string[] {
+    flush(endOffset?: number): AssembledLine[] {
       if (!carry) return []
       const line = cleanRawLine(carry)
+      const range = tracking && endOffset !== undefined ? { startOffset: carryStart, endOffset } : undefined
       carry = ""
-      return [line]
+      return [range ? { line, range } : { line }]
+    },
+  }
+}
+
+export function createLineAssembler(): LineAssembler {
+  const spans = createSpanAssembler()
+  return {
+    push(chunk: string): string[] {
+      return spans.push(chunk).map((part) => part.line)
+    },
+    flush(): string[] {
+      return spans.flush().map((part) => part.line)
     },
   }
 }
@@ -199,6 +254,8 @@ export interface WatchPush {
   lines: string[]
   /** True when this push IS the one-shot budget-exhausted notice (lines empty). */
   exhaustedNow: boolean
+  /** Console byte range covering `lines` (absent when offsets were unknown). */
+  range?: ConsoleByteRange
 }
 
 function byteLen(s: string): number {
@@ -208,8 +265,9 @@ function byteLen(s: string): number {
 export class CommandWatcher {
   readonly compiled: CompiledWatch
   readonly state: WatchState = initialWatchState()
-  private assembler = createLineAssembler()
+  private assembler = createSpanAssembler()
   private pending: string[] = []
+  private pendingSpans: (ConsoleByteRange | undefined)[] = []
   private pendingBytes = 0
   private stamps: number[] = []
 
@@ -225,15 +283,19 @@ export class CommandWatcher {
     return this.pending.length
   }
 
-  feedChunk(chunk: string, now: number): WatchFeedResult {
+  feedChunk(chunk: string, now: number, chunkStartOffset?: number): WatchFeedResult {
+    return this.feedParts(this.assembler.push(chunk, chunkStartOffset), now)
+  }
+
+  private feedParts(parts: AssembledLine[], now: number): WatchFeedResult {
     const completed: string[] = []
     const matched: string[] = []
     let untilLine: string | null = null
     let floodNow = false
     const suspended =
       this.state.state === "flood-suspended" || this.state.state === "budget-exhausted"
-    const lines = this.assembler.push(chunk)
-    for (const line of lines) {
+    for (const part of parts) {
+      const line = part.line
       if (line.trim() === "") continue
       if (suspended) {
         this.state.droppedLines++
@@ -254,7 +316,7 @@ export class CommandWatcher {
       if (m.until && this.state.state === "active") {
         this.state.state = "until-matched"
         this.state.matches++
-        this.buffer(line)
+        this.buffer(line, part.range)
         untilLine = line
         continue
       }
@@ -264,23 +326,35 @@ export class CommandWatcher {
         continue
       }
       this.state.matches++
-      this.buffer(line)
+      this.buffer(line, part.range)
       matched.push(line)
     }
     return { completed, matched, untilLine, floodNow }
   }
 
   /** Assemble the trailing partial line through the same pipeline (call at exit). */
-  finish(now: number): WatchFeedResult {
-    const trailing = this.assembler.flush()
+  finish(now: number, endOffset?: number): WatchFeedResult {
+    const trailing = this.assembler.flush(endOffset)
     if (trailing.length === 0) return { completed: [], matched: [], untilLine: null, floodNow: false }
-    // Re-inject with a newline so it flows through feedChunk unchanged.
-    return this.feedChunk(trailing[0] + "\n", now)
+    return this.feedParts(trailing, now)
   }
 
-  private buffer(line: string): void {
+  private buffer(line: string, range?: ConsoleByteRange): void {
     this.pending.push(line)
+    this.pendingSpans.push(range)
     this.pendingBytes += byteLen(line)
+  }
+
+  private mergeRange(
+    a: ConsoleByteRange | undefined,
+    b: ConsoleByteRange | undefined,
+  ): ConsoleByteRange | undefined {
+    if (!a) return b
+    if (!b) return a
+    return {
+      startOffset: Math.min(a.startOffset, b.startOffset),
+      endOffset: Math.max(a.endOffset, b.endOffset),
+    }
   }
 
   /**
@@ -293,6 +367,7 @@ export class CommandWatcher {
     if (this.state.state === "budget-exhausted") {
       this.state.droppedLines += this.pending.length
       this.pending = []
+      this.pendingSpans = []
       this.pendingBytes = 0
       return null
     }
@@ -300,10 +375,12 @@ export class CommandWatcher {
       this.state.state = "budget-exhausted"
       this.state.droppedLines += this.pending.length
       this.pending = []
+      this.pendingSpans = []
       this.pendingBytes = 0
       return { lines: [], exhaustedNow: true }
     }
     const lines: string[] = []
+    let range: ConsoleByteRange | undefined
     let bytes = 0
     while (this.pending.length > 0 && lines.length < WATCH_MAX_LINES_PER_PUSH) {
       const next = this.pending[0]!
@@ -312,12 +389,13 @@ export class CommandWatcher {
       // A single line larger than the byte cap still goes out alone (bounded
       // by the message formatter's tail cut) rather than wedging the queue.
       this.pending.shift()
+      range = this.mergeRange(range, this.pendingSpans.shift())
       this.pendingBytes -= byteLen(next)
       lines.push(next)
       bytes += nextBytes
     }
     this.state.pushes++
-    return { lines, exhaustedNow: false }
+    return { lines, exhaustedNow: false, ...(range ? { range } : {}) }
   }
 
   /**
@@ -326,26 +404,37 @@ export class CommandWatcher {
    * Always delivers (until outranks the push budget); counts one push.
    */
   takeUntilPush(): string[] {
+    return this.takeUntilPushWithRange().lines
+  }
+
+  /** Until delivery plus the console range of the window actually sent. */
+  takeUntilPushWithRange(): WatchPush {
     const lines: string[] = []
+    const spans: (ConsoleByteRange | undefined)[] = []
     let bytes = 0
     while (this.pending.length > 0 && lines.length < WATCH_MAX_LINES_PER_PUSH) {
       const next = this.pending.pop()!
+      const span = this.pendingSpans.pop()
       this.pendingBytes -= byteLen(next)
       const nextBytes = byteLen(next) + (lines.length > 0 ? 1 : 0)
       if (bytes + nextBytes > WATCH_MAX_BYTES_PER_PUSH && lines.length > 0) {
         this.pending.push(next)
+        this.pendingSpans.push(span)
         this.pendingBytes += byteLen(next)
         break
       }
       lines.unshift(next)
+      spans.unshift(span)
       bytes += nextBytes
     }
     // Anything older than the window is dropped, not re-queued.
     this.state.droppedLines += this.pending.length
     this.pending = []
+    this.pendingSpans = []
     this.pendingBytes = 0
     this.state.pushes++
-    return lines
+    const range = spans.reduce<ConsoleByteRange | undefined>((acc, s) => this.mergeRange(acc, s), undefined)
+    return { lines, exhaustedNow: false, ...(range ? { range } : {}) }
   }
 }
 

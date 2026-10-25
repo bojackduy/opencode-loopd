@@ -7,6 +7,7 @@
 // terminates — termination is an explicit action only.
 
 import type { WatchState, WatchUntilAction } from "./command-watch"
+import type { AgentEventSummary } from "./command-agent-event"
 
 export type CommandSessionID = string & { readonly __brand: "CommandSessionID" }
 
@@ -65,6 +66,14 @@ export interface CommandSession {
   watchUntilAction?: WatchUntilAction
   /** Last persisted watcher snapshot (live counters live in the in-memory watcher). */
   watchState?: WatchState
+  // ─── Agent channel (derived from the console channel) ────────────────────
+  // The console log stays the source of truth; these records say what the
+  // agent was actually told, so a human can tell "no agent events" apart from
+  // "output was filtered out".
+  /** Last delivered agent-event sequence (1-based, monotonic). */
+  agentEventSeq?: number
+  /** Bounded log of recent agent deliveries (newest last). */
+  agentEvents?: AgentEventSummary[]
   status: CommandSessionStatus
   /** Process exit code when known (exited or terminated-after-exit). */
   exitCode?: number

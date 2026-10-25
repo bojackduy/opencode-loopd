@@ -21,6 +21,7 @@ import type { ParsedKey, InputRenderable } from "@opentui/core"
 import { readState, readCommandLog } from "../infrastructure/state-repository"
 import { createControlClient } from "../infrastructure/control-client"
 import type { CommandSession } from "../domain/command-session"
+import { formatAgentChannelStatus } from "../domain/command-agent-event"
 import {
   emptyCommandPanelState,
   refreshCommandList,
@@ -870,6 +871,17 @@ export function CommandPanel(props: Props) {
                   <span style={{ fg: theme().textMuted }}>{formatWatchDetail(cmd())}</span>
                 </text>
               ) : undefined}
+              <Show when={cmd().truncated}>
+                <text>
+                  <span style={{ fg: theme().warning }}>
+                    earlier output not retained: keeping the last {outputMeta().totalBytes} of {cmd().streamBytes} bytes
+                    (console offsets stay absolute)
+                  </span>
+                </text>
+              </Show>
+              <text>
+                <span style={{ fg: theme().textMuted }}>{formatAgentChannelStatus(cmd())}</span>
+              </text>
               <Show
                 when={emulated() && screenRows().length > 0}
                 fallback={

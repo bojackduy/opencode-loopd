@@ -33,7 +33,19 @@ import {
   type WatchState,
   type WatchUntilAction,
 } from "../domain/command-watch"
-import { isTerminalCommandStatus, formatAwaitEvidence } from "../domain/command-await"
+import { isTerminalCommandStatus, formatAwaitEvidence, safeCommandText } from "../domain/command-await"
+import {
+  appendAgentEventSummary,
+  boundTailPayload,
+  buildAgentEventEnvelope,
+  formatAgentEventEnvelope,
+  nextAgentEventSequence,
+  summarizeAgentEvent,
+  tailRange,
+  type AgentEventEnvelope,
+  type AgentEventTrigger,
+  type ConsoleByteRange,
+} from "../domain/command-agent-event"
 import type { CommandHost, CommandProcessHandle } from "../server/command-host"
 import { utf8ByteLength, type CommandStreamMessage } from "../domain/command-events"
 import type { CommandEventBroker } from "./command-event-broker"
@@ -287,6 +299,10 @@ export function createCommandService(
   const watchTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const awaitAsm = new Map<string, LineAssembler>()
   const watchCoalesceMs = opts?.watchCoalesceMs ?? WATCH_COALESCE_WINDOW_MS
+  // Absolute console offset of the next byte this service instance will append.
+  // Output is serialized per command, so this stays exact across the 512KB ring
+  // trim (offsets are lifetime bytes, not file positions).
+  const streamOffsets = new Map<string, number>()
 
   function clearWatchTimer(id: string): void {
     const t = watchTimers.get(id)
@@ -344,6 +360,60 @@ export function createCommandService(
       revision: 0,
       ...extra,
     }).catch(() => {})
+  }
+
+  /**
+   * Record one derived agent delivery atomically (sequence + bounded summary)
+   * and return the envelope the owner message is formatted from. The console
+   * log is never touched: an agent event can never own or rewrite raw output.
+   */
+  async function recordAgentEvent(
+    directory: string,
+    id: string,
+    decide: (
+      session: CommandSession,
+    ) => { trigger: AgentEventTrigger; range: ConsoleByteRange; lines: number; dropped?: number } | undefined,
+  ): Promise<AgentEventEnvelope | undefined> {
+    let event: AgentEventEnvelope | undefined
+    await mutateState(directory, `cmd.agent-event:${id}`, async (s) => {
+      const c = (s.commands ?? []).find((x) => x.id === id)
+      if (!c) return s
+      const spec = decide(c)
+      if (!spec) return s
+      const sequence = nextAgentEventSequence(c)
+      event = buildAgentEventEnvelope({
+        session: c,
+        trigger: spec.trigger,
+        sequence,
+        range: spec.range,
+        lines: spec.lines,
+        ...(spec.dropped !== undefined ? { dropped: spec.dropped } : {}),
+      })
+      c.agentEventSeq = sequence
+      c.agentEvents = appendAgentEventSummary(c.agentEvents, summarizeAgentEvent(event))
+      c.updatedAt = new Date().toISOString()
+      return s
+    }).catch(() => {})
+    return event
+  }
+
+  /** Envelope facts ride the existing watch ledger (human inspect + audit). */
+  function agentLedgerExtra(event: AgentEventEnvelope | undefined): Record<string, unknown> {
+    if (!event) return {}
+    return {
+      eventSequence: event.sequence,
+      startOffset: event.range.startOffset,
+      endOffset: event.range.endOffset,
+      lines: event.lines,
+      retainedBytes: event.retainedBytes,
+      truncated: event.truncated,
+      ...(event.dropped !== undefined ? { dropped: event.dropped } : {}),
+    }
+  }
+
+  function emptyRange(session: Pick<CommandSession, "streamBytes">): ConsoleByteRange {
+    const at = session.streamBytes ?? 0
+    return { startOffset: at, endOffset: at }
   }
 
   function clearCommandTimeout(id: string): void {
@@ -484,15 +554,25 @@ export function createCommandService(
       const target = (await readState(directory)).commands?.find((c) => c.id === id)
       if (!target || target.ownerNotifiedAt || !isTerminalCommandStatus(target.status) || !shouldNotifyOwnerOnExit(target)) return
       const tail = await readBoundedTail(directory, id)
-      const message = formatAwaitEvidence({
-        title: target.title,
-        argv: [target.command, ...target.args],
-        commandID: target.id,
-        status: target.status,
-        exitCode: target.exitCode,
-        signal: target.signal,
-        tail,
-      })
+      // Exit/timeout deliveries carry the same bounded envelope as watch
+      // events: newest 20 lines / 4KB, mapped to its exact console range.
+      const payload = boundTailPayload(safeCommandText(tail))
+      const event = await recordAgentEvent(directory, id, () => ({
+        trigger: target.endReason === "timeout" ? "timeout" : "exit",
+        range: tailRange(target.streamBytes ?? 0, payload.bytes),
+        lines: payload.lines.length,
+      }))
+      const message = event
+        ? formatAgentEventEnvelope(event, payload.lines)
+        : formatAwaitEvidence({
+            title: target.title,
+            argv: [target.command, ...target.args],
+            commandID: target.id,
+            status: target.status,
+            exitCode: target.exitCode,
+            signal: target.signal,
+            tail,
+          })
       const accepted = await opts.onOwnerNotify(directory, target.ownerSessionID, message)
       if (accepted === false) throw new Error("host did not accept owner prompt")
       await mutateState(directory, `cmd.notify-delivered:${id}`, async (s) => {
@@ -532,22 +612,48 @@ export function createCommandService(
     const push = watcher.takePush()
     await persistWatchState(directory, id, watcher.state).catch(() => {})
     if (!push) return
+    const range = push.range ?? emptyRange(session)
     if (push.exhaustedNow) {
-      await watchLedger(directory, id, "command.watch-suspended", { reason: "budget", pushes: watcher.state.pushes })
+      const event = await recordAgentEvent(directory, id, () => ({
+        trigger: "budget",
+        range,
+        lines: 0,
+        dropped: watcher.state.droppedLines,
+      }))
+      await watchLedger(directory, id, "command.watch-suspended", {
+        reason: "budget",
+        pushes: watcher.state.pushes,
+        ...agentLedgerExtra(event),
+      })
+      if (!event) return
       try {
-        await opts?.onWatchNotify?.(directory, session.ownerSessionID, formatWatchBudgetMessage(session.title))
+        await opts?.onWatchNotify?.(
+          directory,
+          session.ownerSessionID,
+          formatAgentEventEnvelope(event, [], formatWatchBudgetMessage(session.title)),
+        )
       } catch {
         // Notify delivery never breaks command persistence.
       }
       return
     }
-    await watchLedger(directory, id, "command.watch-matched", {
+    const event = await recordAgentEvent(directory, id, () => ({
+      trigger: "watch-match",
+      range,
       lines: push.lines.length,
+    }))
+    await watchLedger(directory, id, "command.watch-matched", {
       matches: watcher.state.matches,
       pushes: watcher.state.pushes,
+      ...agentLedgerExtra(event),
     })
+    if (!event) return
     try {
-      await opts?.onWatchNotify?.(directory, session.ownerSessionID, formatWatchMessage(session.title, push.lines))
+      await opts?.onWatchNotify?.(
+        directory,
+        session.ownerSessionID,
+        formatAgentEventEnvelope(event, push.lines),
+      )
     } catch {
       // Notify delivery never breaks command persistence.
     }
@@ -574,13 +680,10 @@ export function createCommandService(
     }
     if (!session) return
     const action = watcher.untilAction
-    const lines = watcher.takeUntilPush()
+    const push = watcher.takeUntilPushWithRange()
+    const lines = push.lines
     const snapshot: WatchState = { ...watcher.state }
-    const message = formatWatchMessage(
-      session.title,
-      lines,
-      `-- until "${session.watchUntil ?? ""}" matched (action=${action})`,
-    )
+    const note = `-- until "${session.watchUntil ?? ""}" matched (action=${action})`
     // Claim the exactly-once owner marker NOW so the subsequent standard exit
     // notify (from terminate/persistExit below) skips: exactly one owner
     // message total for an until-stop. For keep the until notice is
@@ -593,13 +696,24 @@ export function createCommandService(
       c.updatedAt = new Date().toISOString()
       return s
     }).catch(() => {})
+    const event = await recordAgentEvent(directory, id, () => ({
+      trigger: "until-match",
+      range: push.range ?? emptyRange(session),
+      lines: lines.length,
+    }))
     await watchLedger(directory, id, "command.watch-matched", {
       until: session.watchUntil ?? "",
-      lines: lines.length,
       pushes: snapshot.pushes,
+      ...agentLedgerExtra(event),
     })
     try {
-      await opts?.onWatchNotify?.(directory, session.ownerSessionID, message)
+      await opts?.onWatchNotify?.(
+        directory,
+        session.ownerSessionID,
+        event
+          ? formatAgentEventEnvelope(event, lines, note)
+          : formatWatchMessage(session.title, lines, note),
+      )
     } catch {
       // Notify delivery never breaks command persistence.
     }
@@ -671,6 +785,9 @@ export function createCommandService(
 
   async function persistOutput(directory: string, id: string, chunk: string): Promise<void> {
     rememberDir(id, directory)
+    // Absolute console offset of this chunk. Monotonic across the ring trim;
+    // initialized at start and only used by this serialized output path.
+    const chunkStart = streamOffsets.get(id) ?? 0
     const entry = live.get(id)
     if (entry) {
       const bytes = Buffer.from(chunk)
@@ -708,7 +825,7 @@ export function createCommandService(
         }
       }
       if (watcher) {
-        feed = watcher.feedChunk(chunk, Date.now())
+        feed = watcher.feedChunk(chunk, Date.now(), chunkStart)
       } else {
         let asm = awaitAsm.get(id)
         if (!asm) {
@@ -758,6 +875,7 @@ export function createCommandService(
       c.updatedAt = new Date().toISOString()
       return s
     })
+    streamOffsets.set(id, chunkStart + utf8ByteLength(chunk))
     // Persist-first-then-emit: offsets are absolute lifetime bytes. Re-read
     // the fresh counter so a concurrent legacy record cannot skew math.
     try {
@@ -794,10 +912,24 @@ export function createCommandService(
             owner = snap?.ownerSessionID
             title = snap?.title ?? id
           } catch {}
-          await watchLedger(directory, id, "command.watch-suspended", { reason: "flood", dropped })
-          if (owner) {
+          const event = await recordAgentEvent(directory, id, () => ({
+            trigger: "flood",
+            range: { startOffset: chunkStart, endOffset: chunkStart + utf8ByteLength(chunk) },
+            lines: 0,
+            dropped,
+          }))
+          await watchLedger(directory, id, "command.watch-suspended", {
+            reason: "flood",
+            dropped,
+            ...agentLedgerExtra(event),
+          })
+          if (owner && event) {
             try {
-              await opts?.onWatchNotify?.(directory, owner, formatWatchFloodMessage(title, dropped))
+              await opts?.onWatchNotify?.(
+                directory,
+                owner,
+                formatAgentEventEnvelope(event, [], formatWatchFloodMessage(title, dropped)),
+              )
             } catch {}
           }
         }
@@ -842,7 +974,6 @@ export function createCommandService(
         // — the process is already gone, endReason stays honest).
         const handledStop =
           exitWatcher.state.state === "until-matched" && exitWatcher.untilAction === "stop"
-        exitWatcher.finish(Date.now())
         let snap: CommandSession | undefined
         try {
           snap = await readState(directory).then(
@@ -851,27 +982,53 @@ export function createCommandService(
         } catch {
           snap = undefined
         }
+        // The trailing partial line ends at the persisted lifetime offset.
+        exitWatcher.finish(Date.now(), snap?.streamBytes)
         if (snap && !handledStop && exitWatcher.pendingCount > 0) {
           const push = exitWatcher.takePush()
           await persistWatchState(directory, id, exitWatcher.state).catch(() => {})
           if (push && !push.exhaustedNow && push.lines.length > 0) {
-            await watchLedger(directory, id, "command.watch-matched", {
+            const event = await recordAgentEvent(directory, id, () => ({
+              trigger: "watch-match",
+              range: push.range ?? emptyRange(snap),
               lines: push.lines.length,
+            }))
+            await watchLedger(directory, id, "command.watch-matched", {
               atExit: true,
               pushes: exitWatcher.state.pushes,
+              ...agentLedgerExtra(event),
             })
-            try {
-              await opts?.onWatchNotify?.(directory, snap.ownerSessionID, formatWatchMessage(snap.title, push.lines))
-            } catch {}
+            if (event) {
+              try {
+                await opts?.onWatchNotify?.(
+                  directory,
+                  snap.ownerSessionID,
+                  formatAgentEventEnvelope(event, push.lines),
+                )
+              } catch {}
+            }
           } else if (push?.exhaustedNow) {
+            const event = await recordAgentEvent(directory, id, () => ({
+              trigger: "budget",
+              range: emptyRange(snap),
+              lines: 0,
+              dropped: exitWatcher.state.droppedLines,
+            }))
             await watchLedger(directory, id, "command.watch-suspended", {
               reason: "budget",
               atExit: true,
               pushes: exitWatcher.state.pushes,
+              ...agentLedgerExtra(event),
             })
-            try {
-              await opts?.onWatchNotify?.(directory, snap.ownerSessionID, formatWatchBudgetMessage(snap.title))
-            } catch {}
+            if (event) {
+              try {
+                await opts?.onWatchNotify?.(
+                  directory,
+                  snap.ownerSessionID,
+                  formatAgentEventEnvelope(event, [], formatWatchBudgetMessage(snap.title)),
+                )
+              } catch {}
+            }
           }
         } else {
           await persistWatchState(directory, id, exitWatcher.state).catch(() => {})
@@ -948,6 +1105,7 @@ export function createCommandService(
     try { if (!exited && handle.isAlive()) handle.kill() } catch {}
     live.delete(id)
     watchers.delete(id)
+    streamOffsets.delete(id)
     const timer = timeouts.get(id)
     if (timer) {
       clearTimeout(timer)
@@ -1066,6 +1224,7 @@ export function createCommandService(
         return s
       })
       live.set(id, { handle, buffers: [], bufferedBytes: 0 })
+      streamOffsets.set(id, 0)
       if (watcher) watchers.set(id, watcher)
       if (timeoutSeconds !== undefined) scheduleTimeout(directory, id, input.ownerSessionID, timeoutSeconds)
       rememberDir(id, directory)

@@ -16,6 +16,7 @@ import {
 } from "../../src/infrastructure/state-repository"
 import { createFakeHost } from "../../src/server/host-adapter"
 import { createFakeCommandHost } from "../../src/server/command-host"
+import { formatAgentChannelStatus } from "../../src/domain/command-agent-event"
 
 function tmpDir(): string {
   return path.join(os.tmpdir(), `loopd-watch-test-${crypto.randomUUID()}`)
@@ -323,6 +324,95 @@ describe("Command watch (M2 line-level filter/until)", () => {
     expect(after!.status).toBe("missing")
     expect(after!.watchFilter).toBe("ERROR")
     expect(after!.watchUntil).toBe("READY")
+  })
+
+  it("filter matches 1 of N: console keeps all N, mid-run event only the match, exit event is bounded", async () => {
+    const lines = Array.from({ length: 60 }, (_, i) => `line-${i}`)
+    lines[37] = "MATCH one"
+    const s = await svc.start(dir, {
+      title: "build",
+      command: "make",
+      ownerSessionID: "owner-1",
+      notifyOnExit: true,
+      watchFilter: "^MATCH",
+    })
+    const proc = lastProc()
+    proc.emitOutput(lines.join("\n") + "\n")
+
+    // Mid-run: one agent event, only the matched line.
+    await waitFor(() => watchNotifies.length >= 1)
+    const mid = watchNotifies[0]!.message
+    expect(mid).toContain("MATCH one")
+    expect(mid).not.toContain("line-0")
+    expect(mid).toContain("console [")
+    expect(mid).toContain("loopd_command_get")
+
+    // Console: the retained log is unfiltered and complete.
+    const read = await svc.read(dir, s.id, "owner-1", { offsetBytes: 0, limitBytes: 64 * 1024 })
+    expect(read!.text).toContain("line-0\n")
+    expect(read!.text).toContain("line-59")
+    expect(read!.text).toContain("MATCH one")
+    expect(read!.totalBytes).toBe(Buffer.byteLength(lines.join("\n") + "\n"))
+    expect(read!.session.watchFilter).toBe("^MATCH")
+
+    // Exit: bounded tail, terminal facts, exact console range.
+    proc.emitExit({ exitCode: 0 })
+    await waitFor(() => ownerNotifies.length >= 1)
+    const msg = ownerNotifies[0]!.message
+    expect(msg).toContain("exitCode=0")
+    expect(msg).toContain("loopd_command_get")
+    expect(Buffer.byteLength(msg)).toBeLessThanOrEqual(4 * 1024)
+    expect(msg).toContain("line-59")
+    expect(msg).not.toContain("line-0\n") // 60 lines never fit one event
+    const range = msg.match(/console \[(\d+),(\d+)\)/)
+    expect(range).not.toBeNull()
+    const start = Number(range![1])
+    const end = Number(range![2])
+    const fresh = (await svc.get(dir, s.id, "owner-1"))!
+    expect(end).toBe(fresh.streamBytes)
+    // Paging the console at the event range returns the delivered bytes.
+    const page = await svc.read(dir, s.id, "owner-1", { offsetBytes: start, limitBytes: end - start })
+    expect(page!.startByte).toBe(start)
+    expect(page!.text).toContain("line-59")
+  })
+
+  it("512KB ring: both channels declare truncation with absolute offsets", async () => {
+    const s = await svc.start(dir, {
+      title: "noisy",
+      command: "noisy",
+      ownerSessionID: "owner-1",
+      notifyOnExit: true,
+    })
+    const rows = Array.from({ length: 20_000 }, (_, i) => `row-${String(i).padStart(5, "0")} ${"x".repeat(30)}`)
+    const chunk = rows.join("\n") + "\n"
+    lastProc().emitOutput(chunk)
+    await waitFor(async () => (await svc.get(dir, s.id, "owner-1"))?.truncated === true)
+
+    const trimmed = (await svc.get(dir, s.id, "owner-1"))!
+    expect(trimmed.outputBytes).toBe(512 * 1024)
+    expect(trimmed.streamBytes).toBe(Buffer.byteLength(chunk))
+    expect(trimmed.truncated).toBe(true)
+    // Human channel: retained tail only, and it says so explicitly.
+    expect(formatAgentChannelStatus(trimmed)).toContain("truncated")
+    const tailOffset = 512 * 1024 - 64 * 1024
+    const read = await svc.read(dir, s.id, "owner-1", { offsetBytes: tailOffset, limitBytes: 64 * 1024 })
+    expect(read!.text).toContain("row-19999")
+    expect(read!.text).not.toContain("row-00000")
+    expect(read!.totalBytes).toBe(512 * 1024)
+    expect(read!.startByte).toBe(tailOffset)
+
+    lastProc().emitExit({ exitCode: 0 })
+    await waitFor(() => ownerNotifies.length >= 1)
+    const msg = ownerNotifies[0]!.message
+    expect(msg).toContain("truncated")
+    expect(msg).toContain("exitCode=0")
+    const range = msg.match(/console \[(\d+),(\d+)\)/)
+    const start = Number(range![1])
+    const end = Number(range![2])
+    const fresh = (await svc.get(dir, s.id, "owner-1"))!
+    expect(end).toBe(fresh.streamBytes)
+    expect(start).toBeGreaterThan(512 * 1024) // absolute, not file-relative
+    expect(msg).toContain("row-19999")
   })
 
   it("await-until wakes the goal once on first match without stopping the command", async () => {
