@@ -785,23 +785,57 @@ function cleanRawLine(raw) {
   const parts = stripped.split("\r");
   return parts[parts.length - 1] ?? "";
 }
-function createLineAssembler() {
+function createSpanAssembler() {
   let carry = "";
+  let carryStart = 0;
+  let tracking = false;
   return {
-    push(chunk) {
-      carry += chunk;
-      const parts = carry.replace(/\r\n/g, `
-`).split(`
-`);
-      carry = parts.pop() ?? "";
-      return parts.map(cleanRawLine);
+    push(chunk, chunkStartOffset) {
+      if (chunkStartOffset !== undefined) {
+        tracking = true;
+        carryStart = chunkStartOffset - byteLen(carry);
+      }
+      const combined = carry + chunk;
+      const out = [];
+      let segStart = 0;
+      let segBytes = 0;
+      for (let i = 0;i < combined.length; i++) {
+        if (combined[i] !== `
+`)
+          continue;
+        let textEnd = i;
+        if (textEnd > segStart && combined[textEnd - 1] === "\r")
+          textEnd--;
+        const span = byteLen(combined.slice(segStart, i + 1));
+        out.push({
+          line: cleanRawLine(combined.slice(segStart, textEnd)),
+          ...tracking ? { range: { startOffset: carryStart + segBytes, endOffset: carryStart + segBytes + span } } : {}
+        });
+        segBytes += span;
+        segStart = i + 1;
+      }
+      carry = combined.slice(segStart);
+      carryStart += segBytes;
+      return out;
     },
-    flush() {
+    flush(endOffset) {
       if (!carry)
         return [];
       const line = cleanRawLine(carry);
+      const range = tracking && endOffset !== undefined ? { startOffset: carryStart, endOffset } : undefined;
       carry = "";
-      return [line];
+      return [range ? { line, range } : { line }];
+    }
+  };
+}
+function createLineAssembler() {
+  const spans = createSpanAssembler();
+  return {
+    push(chunk) {
+      return spans.push(chunk).map((part) => part.line);
+    },
+    flush() {
+      return spans.flush().map((part) => part.line);
     }
   };
 }
@@ -824,8 +858,9 @@ function byteLen(s) {
 class CommandWatcher {
   compiled;
   state = initialWatchState();
-  assembler = createLineAssembler();
+  assembler = createSpanAssembler();
   pending = [];
+  pendingSpans = [];
   pendingBytes = 0;
   stamps = [];
   constructor(spec) {
@@ -837,14 +872,17 @@ class CommandWatcher {
   get pendingCount() {
     return this.pending.length;
   }
-  feedChunk(chunk, now) {
+  feedChunk(chunk, now, chunkStartOffset) {
+    return this.feedParts(this.assembler.push(chunk, chunkStartOffset), now);
+  }
+  feedParts(parts, now) {
     const completed = [];
     const matched = [];
     let untilLine = null;
     let floodNow = false;
     const suspended = this.state.state === "flood-suspended" || this.state.state === "budget-exhausted";
-    const lines = this.assembler.push(chunk);
-    for (const line of lines) {
+    for (const part of parts) {
+      const line = part.line;
       if (line.trim() === "")
         continue;
       if (suspended) {
@@ -867,7 +905,7 @@ class CommandWatcher {
       if (m.until && this.state.state === "active") {
         this.state.state = "until-matched";
         this.state.matches++;
-        this.buffer(line);
+        this.buffer(line, part.range);
         untilLine = line;
         continue;
       }
@@ -876,21 +914,31 @@ class CommandWatcher {
         continue;
       }
       this.state.matches++;
-      this.buffer(line);
+      this.buffer(line, part.range);
       matched.push(line);
     }
     return { completed, matched, untilLine, floodNow };
   }
-  finish(now) {
-    const trailing = this.assembler.flush();
+  finish(now, endOffset) {
+    const trailing = this.assembler.flush(endOffset);
     if (trailing.length === 0)
       return { completed: [], matched: [], untilLine: null, floodNow: false };
-    return this.feedChunk(trailing[0] + `
-`, now);
+    return this.feedParts(trailing, now);
   }
-  buffer(line) {
+  buffer(line, range) {
     this.pending.push(line);
+    this.pendingSpans.push(range);
     this.pendingBytes += byteLen(line);
+  }
+  mergeRange(a, b) {
+    if (!a)
+      return b;
+    if (!b)
+      return a;
+    return {
+      startOffset: Math.min(a.startOffset, b.startOffset),
+      endOffset: Math.max(a.endOffset, b.endOffset)
+    };
   }
   takePush() {
     if (this.pending.length === 0)
@@ -898,6 +946,7 @@ class CommandWatcher {
     if (this.state.state === "budget-exhausted") {
       this.state.droppedLines += this.pending.length;
       this.pending = [];
+      this.pendingSpans = [];
       this.pendingBytes = 0;
       return null;
     }
@@ -905,10 +954,12 @@ class CommandWatcher {
       this.state.state = "budget-exhausted";
       this.state.droppedLines += this.pending.length;
       this.pending = [];
+      this.pendingSpans = [];
       this.pendingBytes = 0;
       return { lines: [], exhaustedNow: true };
     }
     const lines = [];
+    let range;
     let bytes = 0;
     while (this.pending.length > 0 && lines.length < WATCH_MAX_LINES_PER_PUSH) {
       const next = this.pending[0];
@@ -916,33 +967,43 @@ class CommandWatcher {
       if (bytes + nextBytes > WATCH_MAX_BYTES_PER_PUSH && lines.length > 0)
         break;
       this.pending.shift();
+      range = this.mergeRange(range, this.pendingSpans.shift());
       this.pendingBytes -= byteLen(next);
       lines.push(next);
       bytes += nextBytes;
     }
     this.state.pushes++;
-    return { lines, exhaustedNow: false };
+    return { lines, exhaustedNow: false, ...range ? { range } : {} };
   }
   takeUntilPush() {
+    return this.takeUntilPushWithRange().lines;
+  }
+  takeUntilPushWithRange() {
     const lines = [];
+    const spans = [];
     let bytes = 0;
     while (this.pending.length > 0 && lines.length < WATCH_MAX_LINES_PER_PUSH) {
       const next = this.pending.pop();
+      const span = this.pendingSpans.pop();
       this.pendingBytes -= byteLen(next);
       const nextBytes = byteLen(next) + (lines.length > 0 ? 1 : 0);
       if (bytes + nextBytes > WATCH_MAX_BYTES_PER_PUSH && lines.length > 0) {
         this.pending.push(next);
+        this.pendingSpans.push(span);
         this.pendingBytes += byteLen(next);
         break;
       }
       lines.unshift(next);
+      spans.unshift(span);
       bytes += nextBytes;
     }
     this.state.droppedLines += this.pending.length;
     this.pending = [];
+    this.pendingSpans = [];
     this.pendingBytes = 0;
     this.state.pushes++;
-    return lines;
+    const range = spans.reduce((acc, s) => this.mergeRange(acc, s), undefined);
+    return { lines, exhaustedNow: false, ...range ? { range } : {} };
   }
 }
 function formatWatchMessage(title, lines, note) {
@@ -1603,9 +1664,36 @@ function retireWorker(state, goal) {
     return;
   state.retiredWorkerSessions = [...new Set([...state.retiredWorkerSessions || [], goal.workerSessionID])];
 }
-async function beforeWorkspaceTool(directory, input, args) {
+function foreignUncontrolledCall(state, input) {
+  return (state.workspaceCalls ?? []).find((call) => call.uncontrolled && call.sessionID !== input.sessionID && !(call.callID === input.callID && call.sessionID === input.sessionID));
+}
+function busyMessage(call, state) {
+  const holder = call.goalID ? state.goals.find((goal) => goal.id === call.goalID) : undefined;
+  return `Workspace busy: session ${call.sessionID} is executing tool call ${call.callID}${holder ? ` for goal "${holder.name}"` : ""}. Wait for that call's exit event, then retry. If that session is gone, pause or clear its goal to release the fence.`;
+}
+function assertCommandQuiescence(state) {
+  const command = state.commands?.find((item) => item.status === "running" || item.status === "missing" && mayBeAlive(item.pid));
+  if (command)
+    throw new Error(`Workspace busy: command ${command.id} has not proved exit. Stop it or wait for its exit event before source writes, shell or checks.`);
+  const orphan = state.orphanedCommandProcesses?.find((item) => mayBeAlive(item.pid));
+  if (orphan)
+    throw new Error(`Workspace busy: command ${orphan.commandID} has not proved exit. Verify process exit before retrying.`);
+}
+async function beforeWorkspaceTool(directory, input, args, identity = {}) {
   if (readTools.has(input.tool))
     return;
+  let hostMain = false;
+  if (identity.isMainSession) {
+    const known = await readState(directory);
+    const recorded = known.goals.some((item) => item.workerSessionID === input.sessionID || item.ownerSessionID === input.sessionID);
+    if (!recorded) {
+      try {
+        hostMain = await identity.isMainSession(input.sessionID) === true;
+      } catch {
+        hostMain = false;
+      }
+    }
+  }
   await mutateState(directory, `workspace.before:${input.callID}`, async (state) => {
     const goal = state.goals.find((item) => item.workerSessionID === input.sessionID);
     if (state.retiredWorkerSessions?.includes(input.sessionID))
@@ -1630,7 +1718,13 @@ async function beforeWorkspaceTool(directory, input, args) {
     const protectedGoals = held.filter((item) => item.config.workspaceWrite !== false && item.config.write_scope !== undefined);
     if (!goal && ownerTools.has(input.tool) && (!protectedGoals.length || state.goals.some((item) => item.ownerSessionID === input.sessionID)))
       return state;
+    const isOwner = !goal && (state.goals.some((item) => item.ownerSessionID === input.sessionID) || hostMain);
+    if (protectedGoals.length && input.tool !== "loopd_command_write")
+      assertCommandQuiescence(state);
     if (!state.workspaceOperation && !protectedGoals.length && (!goal || goal.config.write_scope === undefined)) {
+      const concurrent = foreignUncontrolledCall(state, input);
+      if (concurrent)
+        throw new Error(`Workspace busy: uncontrolled tool call ${concurrent.callID} from session ${concurrent.sessionID} is still executing; wait for its exit event before writing source.`);
       let paths = [];
       let uncontrolled = false;
       try {
@@ -1649,13 +1743,28 @@ async function beforeWorkspaceTool(directory, input, args) {
       return state;
     }
     const writes = structuredWritePaths(input.tool, args);
-    if (!writes)
-      throw new Error(`Scope denied: uncontrolled tool "${input.tool}". Shell, commands, custom tools, batch and subagents are not allowed while protected goals exist. Use structured edits or run_goal_checks.`);
+    if (!writes) {
+      if (!isOwner)
+        throw new Error(`Scope denied: uncontrolled tool "${input.tool}". Shell, commands, custom tools, batch and subagents are not allowed while protected goals exist. Use structured edits or run_goal_checks.`);
+      if (state.workspaceOperation)
+        throw new Error(`Workspace busy: completion checks (operation ${state.workspaceOperation.id}) are running; retry after they finish.`);
+      const blocking = (state.workspaceCalls ?? []).find((call) => call.sessionID !== input.sessionID);
+      if (blocking)
+        throw new Error(busyMessage(blocking, state));
+      state.workspaceCalls ??= [];
+      if (!state.workspaceCalls.some((call) => call.callID === input.callID && call.sessionID === input.sessionID)) {
+        state.workspaceCalls.push({ callID: input.callID, sessionID: input.sessionID, paths: [], uncontrolled: true, at: new Date().toISOString() });
+      }
+      return state;
+    }
+    const concurrent = foreignUncontrolledCall(state, input);
+    if (concurrent)
+      throw new Error(`Workspace busy: uncontrolled tool call ${concurrent.callID} from session ${concurrent.sessionID} is still executing; wait for its exit event before writing source.`);
     if (state.workspaceOperation)
       throw new Error(`Workspace operation ${state.workspaceOperation.id} is active; source writes are denied until it finishes.`);
     if (goal && (goal.status !== "active" || goal.scopeClosing))
       throw new Error(`Scope denied: worker goal is ${goal.scopeClosing ? "closing" : goal.status}.`);
-    if (!goal && !state.goals.some((item) => item.ownerSessionID === input.sessionID)) {
+    if (!goal && !isOwner) {
       throw new Error("Scope denied: unrecognized session/child. Subagent writes are unsupported.");
     }
     const paths = await Promise.all(writes.map((file) => canonicalScopePath(directory, file)));
@@ -1846,6 +1955,7 @@ async function withWorkspaceOperation(directory, goalID, sessionID, run, opts) {
   const id = randomUUID3();
   await mutateState(directory, `workspace.operation:${id}`, async (state) => {
     opts?.authorize?.(state);
+    assertCommandQuiescence(state);
     const now = Date.now();
     const live = (state.workspaceCalls ?? []).filter((call) => !isSyncStaleWorkspaceCall(state, call, now));
     if (state.workspaceOperation || live.length)
@@ -2103,6 +2213,113 @@ function shouldNotifyOwnerOnExit(session) {
 init_command_watch();
 init_command_await();
 
+// src/domain/command-agent-event.ts
+init_command_await();
+var MAX_AGENT_EVENT_SUMMARIES = 20;
+var MAX_AGENT_EVENT_BYTES = 4 * 1024;
+var AGENT_EVENT_MAX_LINES = 20;
+var AGENT_EVENT_MAX_PAYLOAD_BYTES = 4 * 1024;
+function byteLen2(s) {
+  return Buffer.byteLength(s, "utf8");
+}
+function boundTailPayload(text) {
+  const normalized = text.replace(/\n+$/, "");
+  if (!normalized)
+    return { lines: [], bytes: 0 };
+  const all = normalized.split(`
+`);
+  let start = Math.max(0, all.length - AGENT_EVENT_MAX_LINES);
+  const joined = () => all.slice(start).join(`
+`);
+  while (start < all.length - 1 && byteLen2(joined()) > AGENT_EVENT_MAX_PAYLOAD_BYTES)
+    start++;
+  let body = joined();
+  if (byteLen2(body) > AGENT_EVENT_MAX_PAYLOAD_BYTES)
+    body = tailLastBytes(body, AGENT_EVENT_MAX_PAYLOAD_BYTES);
+  return { lines: body.split(`
+`), bytes: byteLen2(body) };
+}
+function nextAgentEventSequence(session) {
+  return (session.agentEventSeq ?? 0) + 1;
+}
+function tailRange(streamBytes, bytes) {
+  const end = Math.max(0, streamBytes);
+  const start = Math.max(0, end - Math.max(0, bytes));
+  return { startOffset: start, endOffset: end };
+}
+function buildAgentEventEnvelope(input) {
+  const { session } = input;
+  const started = Date.parse(session.createdAt);
+  const ended = session.endedAt ? Date.parse(session.endedAt) : Date.now();
+  const durationMs = Number.isFinite(started) && Number.isFinite(ended) ? Math.max(0, ended - started) : undefined;
+  const range = input.range;
+  return {
+    commandID: input.session.id,
+    title: session.title,
+    trigger: input.trigger,
+    sequence: input.sequence,
+    timestamp: input.timestamp ?? new Date().toISOString(),
+    status: session.status,
+    ...session.exitCode !== undefined ? { exitCode: session.exitCode } : {},
+    ...session.signal !== undefined ? { signal: session.signal } : {},
+    ...durationMs !== undefined ? { durationMs } : {},
+    retainedBytes: session.outputBytes,
+    streamBytes: session.streamBytes,
+    truncated: session.truncated,
+    range: { startOffset: Math.max(0, range.startOffset), endOffset: Math.max(0, range.endOffset) },
+    lines: input.lines,
+    ...input.dropped !== undefined ? { dropped: input.dropped } : {}
+  };
+}
+function summarizeAgentEvent(event) {
+  return {
+    sequence: event.sequence,
+    trigger: event.trigger,
+    timestamp: event.timestamp,
+    status: event.status,
+    lines: event.lines,
+    startOffset: event.range.startOffset,
+    endOffset: event.range.endOffset,
+    ...event.dropped !== undefined ? { dropped: event.dropped } : {}
+  };
+}
+function appendAgentEventSummary(log, summary) {
+  return [...log ?? [], summary].slice(-MAX_AGENT_EVENT_SUMMARIES);
+}
+function describeTerminal(event) {
+  const parts = [event.status];
+  if (event.exitCode !== undefined)
+    parts.push(`exitCode=${event.exitCode}`);
+  if (event.signal)
+    parts.push(`signal=${event.signal}`);
+  if (event.durationMs !== undefined)
+    parts.push(`${Math.round(event.durationMs / 1000)}s`);
+  return parts.join(" \xB7 ");
+}
+function watchLine(event) {
+  if (event.trigger === "exit" || event.trigger === "timeout")
+    return "";
+  return `[watch "${event.title}"]
+`;
+}
+function formatAgentEventEnvelope(event, payloadLines, note) {
+  const terminal = describeTerminal(event);
+  const retained = event.truncated ? `${event.retainedBytes}B retained of ${event.streamBytes}B (truncated)` : `${event.retainedBytes}B retained`;
+  const header = `${watchLine(event)}[command "${event.title}"] event #${event.sequence} ${event.trigger} \xB7 ${terminal} \xB7 ${retained} \xB7 ` + `console [${event.range.startOffset},${event.range.endOffset}) \xB7 ${event.lines} line(s)` + (event.dropped !== undefined ? ` \xB7 ${event.dropped} dropped` : "");
+  const hint = `-- console is the source of truth; page raw output with loopd_command_get ` + `id=${event.commandID} offsetBytes=${event.range.startOffset}`;
+  const body = (() => {
+    const bounded = payloadLines.slice(-AGENT_EVENT_MAX_LINES);
+    const withNote = note ? [...bounded, note] : bounded;
+    return withNote.join(`
+`);
+  })();
+  const tail = body ? `${body}
+${hint}` : hint;
+  const room = Math.max(0, MAX_AGENT_EVENT_BYTES - byteLen2(header) - 1);
+  return `${header}
+${tailLastBytes(tail, room)}`;
+}
+
 // src/domain/command-events.ts
 var _encoder = new TextEncoder;
 function utf8ByteLength(data) {
@@ -2358,6 +2575,7 @@ function createCommandService(host, opts) {
   const watchTimers = new Map;
   const awaitAsm = new Map;
   const watchCoalesceMs = opts?.watchCoalesceMs ?? WATCH_COALESCE_WINDOW_MS;
+  const streamOffsets = new Map;
   function clearWatchTimer(id) {
     const t = watchTimers.get(id);
     if (t) {
@@ -2404,6 +2622,48 @@ function createCommandService(host, opts) {
       revision: 0,
       ...extra
     }).catch(() => {});
+  }
+  async function recordAgentEvent(directory, id, decide) {
+    let event;
+    await mutateState(directory, `cmd.agent-event:${id}`, async (s) => {
+      const c = (s.commands ?? []).find((x) => x.id === id);
+      if (!c)
+        return s;
+      const spec = decide(c);
+      if (!spec)
+        return s;
+      const sequence = nextAgentEventSequence(c);
+      event = buildAgentEventEnvelope({
+        session: c,
+        trigger: spec.trigger,
+        sequence,
+        range: spec.range,
+        lines: spec.lines,
+        ...spec.dropped !== undefined ? { dropped: spec.dropped } : {}
+      });
+      c.agentEventSeq = sequence;
+      c.agentEvents = appendAgentEventSummary(c.agentEvents, summarizeAgentEvent(event));
+      c.updatedAt = new Date().toISOString();
+      return s;
+    }).catch(() => {});
+    return event;
+  }
+  function agentLedgerExtra(event) {
+    if (!event)
+      return {};
+    return {
+      eventSequence: event.sequence,
+      startOffset: event.range.startOffset,
+      endOffset: event.range.endOffset,
+      lines: event.lines,
+      retainedBytes: event.retainedBytes,
+      truncated: event.truncated,
+      ...event.dropped !== undefined ? { dropped: event.dropped } : {}
+    };
+  }
+  function emptyRange(session) {
+    const at = session.streamBytes ?? 0;
+    return { startOffset: at, endOffset: at };
   }
   function clearCommandTimeout(id) {
     const t = timeouts.get(id);
@@ -2510,7 +2770,13 @@ function createCommandService(host, opts) {
       if (!target || target.ownerNotifiedAt || !isTerminalCommandStatus(target.status) || !shouldNotifyOwnerOnExit(target))
         return;
       const tail = await readBoundedTail(directory, id);
-      const message = formatAwaitEvidence({
+      const payload = boundTailPayload(safeCommandText(tail));
+      const event = await recordAgentEvent(directory, id, () => ({
+        trigger: target.endReason === "timeout" ? "timeout" : "exit",
+        range: tailRange(target.streamBytes ?? 0, payload.bytes),
+        lines: payload.lines.length
+      }));
+      const message = event ? formatAgentEventEnvelope(event, payload.lines) : formatAwaitEvidence({
         title: target.title,
         argv: [target.command, ...target.args],
         commandID: target.id,
@@ -2555,20 +2821,40 @@ function createCommandService(host, opts) {
     await persistWatchState(directory, id, watcher.state).catch(() => {});
     if (!push)
       return;
+    const range = push.range ?? emptyRange(session);
     if (push.exhaustedNow) {
-      await watchLedger(directory, id, "command.watch-suspended", { reason: "budget", pushes: watcher.state.pushes });
+      const event = await recordAgentEvent(directory, id, () => ({
+        trigger: "budget",
+        range,
+        lines: 0,
+        dropped: watcher.state.droppedLines
+      }));
+      await watchLedger(directory, id, "command.watch-suspended", {
+        reason: "budget",
+        pushes: watcher.state.pushes,
+        ...agentLedgerExtra(event)
+      });
+      if (!event)
+        return;
       try {
-        await opts?.onWatchNotify?.(directory, session.ownerSessionID, formatWatchBudgetMessage(session.title));
+        await opts?.onWatchNotify?.(directory, session.ownerSessionID, formatAgentEventEnvelope(event, [], formatWatchBudgetMessage(session.title)));
       } catch {}
       return;
     }
+    const event = await recordAgentEvent(directory, id, () => ({
+      trigger: "watch-match",
+      range,
+      lines: push.lines.length
+    }));
     await watchLedger(directory, id, "command.watch-matched", {
-      lines: push.lines.length,
       matches: watcher.state.matches,
-      pushes: watcher.state.pushes
+      pushes: watcher.state.pushes,
+      ...agentLedgerExtra(event)
     });
+    if (!event)
+      return;
     try {
-      await opts?.onWatchNotify?.(directory, session.ownerSessionID, formatWatchMessage(session.title, push.lines));
+      await opts?.onWatchNotify?.(directory, session.ownerSessionID, formatAgentEventEnvelope(event, push.lines));
     } catch {}
     if (watcher.pendingCount > 0)
       scheduleWatchFlush(directory, id);
@@ -2587,9 +2873,10 @@ function createCommandService(host, opts) {
     if (!session)
       return;
     const action = watcher.untilAction;
-    const lines = watcher.takeUntilPush();
+    const push = watcher.takeUntilPushWithRange();
+    const lines = push.lines;
     const snapshot = { ...watcher.state };
-    const message = formatWatchMessage(session.title, lines, `-- until "${session.watchUntil ?? ""}" matched (action=${action})`);
+    const note = `-- until "${session.watchUntil ?? ""}" matched (action=${action})`;
     await mutateState(directory, `cmd.until-claim:${id}`, async (s) => {
       const c = (s.commands ?? []).find((x) => x.id === id);
       if (!c)
@@ -2600,13 +2887,18 @@ function createCommandService(host, opts) {
       c.updatedAt = new Date().toISOString();
       return s;
     }).catch(() => {});
+    const event = await recordAgentEvent(directory, id, () => ({
+      trigger: "until-match",
+      range: push.range ?? emptyRange(session),
+      lines: lines.length
+    }));
     await watchLedger(directory, id, "command.watch-matched", {
       until: session.watchUntil ?? "",
-      lines: lines.length,
-      pushes: snapshot.pushes
+      pushes: snapshot.pushes,
+      ...agentLedgerExtra(event)
     });
     try {
-      await opts?.onWatchNotify?.(directory, session.ownerSessionID, message);
+      await opts?.onWatchNotify?.(directory, session.ownerSessionID, event ? formatAgentEventEnvelope(event, lines, note) : formatWatchMessage(session.title, lines, note));
     } catch {}
     if (action !== "stop")
       return;
@@ -2671,6 +2963,7 @@ function createCommandService(host, opts) {
   }
   async function persistOutput(directory, id, chunk) {
     rememberDir(id, directory);
+    const chunkStart = streamOffsets.get(id) ?? 0;
     const entry = live.get(id);
     if (entry) {
       const bytes = Buffer.from(chunk);
@@ -2705,7 +2998,7 @@ function createCommandService(host, opts) {
         }
       }
       if (watcher) {
-        feed = watcher.feedChunk(chunk, Date.now());
+        feed = watcher.feedChunk(chunk, Date.now(), chunkStart);
       } else {
         let asm = awaitAsm.get(id);
         if (!asm) {
@@ -2752,6 +3045,7 @@ function createCommandService(host, opts) {
       c.updatedAt = new Date().toISOString();
       return s;
     });
+    streamOffsets.set(id, chunkStart + utf8ByteLength(chunk));
     try {
       const fresh = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
       const endOffset = fresh?.streamBytes ?? 0;
@@ -2778,10 +3072,20 @@ function createCommandService(host, opts) {
             owner = snap?.ownerSessionID;
             title = snap?.title ?? id;
           } catch {}
-          await watchLedger(directory, id, "command.watch-suspended", { reason: "flood", dropped });
-          if (owner) {
+          const event = await recordAgentEvent(directory, id, () => ({
+            trigger: "flood",
+            range: { startOffset: chunkStart, endOffset: chunkStart + utf8ByteLength(chunk) },
+            lines: 0,
+            dropped
+          }));
+          await watchLedger(directory, id, "command.watch-suspended", {
+            reason: "flood",
+            dropped,
+            ...agentLedgerExtra(event)
+          });
+          if (owner && event) {
             try {
-              await opts?.onWatchNotify?.(directory, owner, formatWatchFloodMessage(title, dropped));
+              await opts?.onWatchNotify?.(directory, owner, formatAgentEventEnvelope(event, [], formatWatchFloodMessage(title, dropped)));
             } catch {}
           }
         }
@@ -2811,34 +3115,50 @@ function createCommandService(host, opts) {
     if (exitWatcher) {
       try {
         const handledStop = exitWatcher.state.state === "until-matched" && exitWatcher.untilAction === "stop";
-        exitWatcher.finish(Date.now());
         let snap;
         try {
           snap = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
         } catch {
           snap = undefined;
         }
+        exitWatcher.finish(Date.now(), snap?.streamBytes);
         if (snap && !handledStop && exitWatcher.pendingCount > 0) {
           const push = exitWatcher.takePush();
           await persistWatchState(directory, id, exitWatcher.state).catch(() => {});
           if (push && !push.exhaustedNow && push.lines.length > 0) {
+            const event = await recordAgentEvent(directory, id, () => ({
+              trigger: "watch-match",
+              range: push.range ?? emptyRange(snap),
+              lines: push.lines.length
+            }));
             await watchLedger(directory, id, "command.watch-matched", {
-              lines: push.lines.length,
               atExit: true,
-              pushes: exitWatcher.state.pushes
+              pushes: exitWatcher.state.pushes,
+              ...agentLedgerExtra(event)
             });
-            try {
-              await opts?.onWatchNotify?.(directory, snap.ownerSessionID, formatWatchMessage(snap.title, push.lines));
-            } catch {}
+            if (event) {
+              try {
+                await opts?.onWatchNotify?.(directory, snap.ownerSessionID, formatAgentEventEnvelope(event, push.lines));
+              } catch {}
+            }
           } else if (push?.exhaustedNow) {
+            const event = await recordAgentEvent(directory, id, () => ({
+              trigger: "budget",
+              range: emptyRange(snap),
+              lines: 0,
+              dropped: exitWatcher.state.droppedLines
+            }));
             await watchLedger(directory, id, "command.watch-suspended", {
               reason: "budget",
               atExit: true,
-              pushes: exitWatcher.state.pushes
+              pushes: exitWatcher.state.pushes,
+              ...agentLedgerExtra(event)
             });
-            try {
-              await opts?.onWatchNotify?.(directory, snap.ownerSessionID, formatWatchBudgetMessage(snap.title));
-            } catch {}
+            if (event) {
+              try {
+                await opts?.onWatchNotify?.(directory, snap.ownerSessionID, formatAgentEventEnvelope(event, [], formatWatchBudgetMessage(snap.title)));
+              } catch {}
+            }
           }
         } else {
           await persistWatchState(directory, id, exitWatcher.state).catch(() => {});
@@ -2906,6 +3226,7 @@ function createCommandService(host, opts) {
     } catch {}
     live.delete(id);
     watchers.delete(id);
+    streamOffsets.delete(id);
     const timer = timeouts.get(id);
     if (timer) {
       clearTimeout(timer);
@@ -3002,6 +3323,7 @@ function createCommandService(host, opts) {
             return s;
           });
           live.set(id, { handle, buffers: [], bufferedBytes: 0 });
+          streamOffsets.set(id, 0);
           if (watcher)
             watchers.set(id, watcher);
           if (timeoutSeconds !== undefined)
@@ -3957,6 +4279,19 @@ async function reconcileApprovedServers(directory, commandService) {
 // src/application/control-worker.ts
 var MAX_LEDGER_SIZE = 100;
 var RESPONSE_CLEANUP_AGE_MS = 60 * 60 * 1000;
+function describeFenceReport(report) {
+  if (!report.reservations.length)
+    return "No live workspace reservations \u2014 nothing is fencing this project.";
+  const shown = report.reservations.slice(0, 4).map((item) => {
+    const goal = item.goalName ?? item.goalID;
+    const where = goal ? `goal "${goal}"` : "no goal";
+    const state = item.releasable ? "releasable" : `refused \u2014 ${item.reason ?? "not releasable"}`;
+    return `${item.callID} (session ${item.sessionID}, ${where}, ${state})`;
+  });
+  const more = report.reservations.length > shown.length ? ` \u2026 +${report.reservations.length - shown.length} more` : "";
+  const operation = report.operation ? ` Operation ${report.operation.id} is mid-flight.` : "";
+  return `${report.reservations.length} workspace reservation(s): ${shown.join("; ")}${more}. Release with callID/goalID/sessionID.${operation}`;
+}
 function createControlWorker(options) {
   const directory = options.directory;
   const pollMs = options.pollIntervalMs ?? 1000;
@@ -4198,6 +4533,45 @@ function createControlWorker(options) {
           ok: result.outcome !== "unsupported",
           message: outcomeMessage[result.outcome] ?? `Identity switch ${result.outcome}.`,
           stateRevision: state.revision
+        };
+        break;
+      }
+      case "release_workspace": {
+        const args = request.args ?? {};
+        const named = (key) => typeof args[key] === "string" && args[key].trim() ? args[key] : undefined;
+        const ownerSessionID = named("ownerSessionID") && named("ownerSessionID") !== "main" ? named("ownerSessionID") : request.goalID ? (await readState(directory)).goals.find((goal) => goal.id === request.goalID)?.ownerSessionID ?? "" : "";
+        if (!ownerSessionID) {
+          response = {
+            ...base,
+            ok: false,
+            message: "ownerSessionID is required to inspect or release workspace reservations; open /loop from a session view.",
+            errorCode: "no_session"
+          };
+          break;
+        }
+        const callID = named("callID");
+        const goalID = named("goalID");
+        const sessionID = named("sessionID");
+        if (!callID && !goalID && !sessionID) {
+          const report = await goalSvc.workspaceReservations(directory, ownerSessionID);
+          const state = await readState(directory);
+          response = {
+            ...base,
+            message: describeFenceReport(report),
+            data: report,
+            stateRevision: state.revision
+          };
+          break;
+        }
+        const result = await goalSvc.releaseWorkspace(directory, ownerSessionID, { callID, goalID, sessionID });
+        const state = await readState(directory);
+        response = {
+          ...base,
+          ok: result.ok,
+          message: result.message,
+          data: result,
+          stateRevision: state.revision,
+          errorCode: result.ok ? undefined : "release_refused"
         };
         break;
       }
@@ -5969,6 +6343,7 @@ function markParentNotified2(ownerSessionID, message) {
   recentParentNotifies.set(`${ownerSessionID}:${message.slice(0, 200)}`, Date.now());
 }
 function createRealHost(client, directory) {
+  const provenRoots = new Set;
   return {
     async listAgents() {
       const switching = typeof client.session?.switchAgent === "function" ? "session" : "next-prompt";
@@ -6073,6 +6448,25 @@ function createRealHost(client, directory) {
         if (!agent && !model)
           return;
         return { agent, model };
+      } catch {
+        return;
+      }
+    },
+    async isMainSession(sessionID) {
+      if (provenRoots.has(sessionID))
+        return true;
+      try {
+        const result = await withTimeout(client.session.get({ path: { id: sessionID } }), 1e4, "OpenCode session.get (parent identity)");
+        if (result?.error)
+          return;
+        const data = result?.data;
+        if (!data || typeof data !== "object")
+          return;
+        const parent = data.fork?.sessionID ?? data.parentID;
+        if (parent)
+          return false;
+        provenRoots.add(sessionID);
+        return true;
       } catch {
         return;
       }
@@ -6224,6 +6618,7 @@ function toWorkerCreation(result) {
 }
 function createV2Host(context, statuses, options = {}) {
   const directory = context.location.directory;
+  const provenRoots = new Set;
   async function readExecution(sessionID) {
     try {
       await withTimeout(context.session.wait({ sessionID }, { signal: AbortSignal.timeout(500) }), 750, "OpenCode v2 idle observation");
@@ -6393,6 +6788,22 @@ function createV2Host(context, statuses, options = {}) {
     },
     async sessionStatus(sessionID) {
       return typeof context.session.wait === "function" ? (await readExecution(sessionID))?.status ?? "unknown" : statuses.get(sessionID) ?? "unknown";
+    },
+    async isMainSession(sessionID) {
+      if (provenRoots.has(sessionID))
+        return true;
+      try {
+        const session = await withTimeout(context.session.get({ sessionID }), 1e4, "OpenCode v2 session.get (parent identity)");
+        if (!session)
+          return;
+        const parent = session.fork?.sessionID ?? session.parentID;
+        if (parent)
+          return false;
+        provenRoots.add(sessionID);
+        return true;
+      } catch {
+        return;
+      }
     },
     async sessionKnown(sessionID) {
       try {
@@ -11737,7 +12148,9 @@ function createServerHooks(directory, host, defaults) {
     },
     tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools2({ directory, host, goalService }), ...commandTools({ directory, commandService, capabilities: commandHost.capabilities, goalService }), ...approvedCommandTools({ directory, commandService }) },
     "tool.execute.before": async (input, _output) => {
-      await beforeWorkspaceTool(directory, input, _output.args);
+      await beforeWorkspaceTool(directory, input, _output.args, {
+        isMainSession: (sessionID) => host.isMainSession?.(sessionID) ?? Promise.resolve(undefined)
+      });
       if (host.readExecution || isWorkspaceToolExempt(input.tool))
         return;
       const activeWorkers = goalService.getActiveWorkers();
