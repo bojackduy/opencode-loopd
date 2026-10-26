@@ -89,8 +89,7 @@ async function seedDir(): Promise<string> {
   return dir
 }
 
-/** Same as seedDir plus one finished owned command (hidden by default). */
-async function seedDirWithFinishedCommand(): Promise<string> {
+/** Same as seedDir plus one finished owned command (hidden by default). */async function seedDirWithFinishedCommand(): Promise<string> {
   const dir = await seedDir()
   const finished = {
     ...createCommandSession({ id: "cmd-done", title: "done-cmd", command: "true", cwd: "/tmp", ownerSessionID: "ses-owner" }),
@@ -102,6 +101,28 @@ async function seedDirWithFinishedCommand(): Promise<string> {
     commands: [finished as never, ...(s.commands ?? [])],
   }))
   return dir
+}
+
+/**
+ * Real-time wait for rendered text. The renderer's own waitFor/waitForFrame
+ * count render PASSES and abort as soon as the scheduler goes idle, so a
+ * dashboard still waiting on disk I/O burns its budget in milliseconds and
+ * fails. Yield real time against a deadline instead.
+ */
+async function waitForText(
+  view: { renderOnce(): Promise<void>; captureCharFrame(): string },
+  needle: string,
+  timeoutMs = 4000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs
+  let frame = ""
+  do {
+    await view.renderOnce()
+    frame = view.captureCharFrame()
+    if (frame.includes(needle)) return frame
+    await Bun.sleep(10)
+  } while (Date.now() < deadline)
+  return frame
 }
 
 describe("LoopDashboard shared Goals/Commands (mounted)", () => {
@@ -156,10 +177,11 @@ describe("LoopDashboard shared Goals/Commands (mounted)", () => {
         const dashboard = await testRender(() => dialog!(), { width: 120, height: 40 })
         setups.push(dashboard)
         await dashboard.flush()
-        await dashboard.waitForFrame((frame) => frame.includes(entry === "loop" ? "goal-one" : "owned-cmd"))
+        const firstFrame = await waitForText(dashboard, entry === "loop" ? "goal-one" : "owned-cmd")
+        expect(firstFrame).toContain(entry === "loop" ? "goal-one" : "owned-cmd")
         if (entry === "loop") {
           dashboard.mockInput.pressKey("l")
-          await dashboard.waitFor(() => dashboard.captureCharFrame().includes("owned-cmd"))
+          expect(await waitForText(dashboard, "owned-cmd")).toContain("owned-cmd")
         }
         expect(dashboard.captureCharFrame()).not.toContain("foreign-cmd")
         // The dashboard focuses its input after mount; flush runs that timer
