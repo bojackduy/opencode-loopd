@@ -5856,7 +5856,7 @@ function CommandPanel(props) {
         _$insert2(_el$32, () => cmd().truncated ? " \xB7 truncated" : "", null);
         _$insert2(_el$32, (() => {
           var _c$2 = _$memo2(() => !!(cmd().status !== "running" && cmd().endReason));
-          return () => _c$2() ? ` \xB7 end:${cmd().endReason}` : "";
+          return () => _c$2() ? ` \xB7 end:${cmd().endReason}${cmd().terminatedBy ? `(${cmd().terminatedBy})` : ""}` : "";
         })(), null);
         _$insert2(_el$32, (() => {
           var _c$3 = _$memo2(() => !!(emulated() && screen && feedForID === cmd().id));

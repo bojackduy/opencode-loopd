@@ -2695,7 +2695,7 @@ function createCommandService(host, opts) {
     const before = await readState(directory).then((s) => (s.commands ?? []).find((x) => x.id === id));
     if (!before || before.status !== "running")
       return;
-    await service.terminate(directory, id, owner).catch(() => {});
+    await service.terminate(directory, id, owner, { actor: "timeout" }).catch(() => {});
     await mutateState(directory, `cmd.timeout:${id}`, async (s) => {
       const c = (s.commands ?? []).find((x) => x.id === id);
       if (!c)
@@ -2905,7 +2905,7 @@ function createCommandService(host, opts) {
     if (session.status !== "running")
       return;
     await watchLedger(directory, id, "command.until-stopped", { until: session.watchUntil ?? "" });
-    await service.terminate(directory, id, session.ownerSessionID).catch(() => {});
+    await service.terminate(directory, id, session.ownerSessionID, { actor: "until" }).catch(() => {});
     await mutateState(directory, `cmd.until:${id}`, async (s) => {
       const c = (s.commands ?? []).find((x) => x.id === id);
       if (!c)
@@ -3520,6 +3520,7 @@ function createCommandService(host, opts) {
         const c = (s.commands ?? []).find((x) => x.id === id);
         if (c && c.ownerSessionID === ownerSessionID && c.status === "running") {
           c.signal = "SIGTERM";
+          c.terminatedBy = opts?.actor ?? "tool";
           if (c.endReason !== "timeout" && c.watchState?.state === "until-matched" && c.watchUntilAction === "stop") {
             c.endReason = "until";
           }
@@ -3567,6 +3568,7 @@ function createCommandService(host, opts) {
           if (exitCode !== undefined)
             c.exitCode = c.exitCode ?? exitCode;
           c.signal = c.signal ?? "SIGTERM";
+          c.terminatedBy = c.terminatedBy ?? (opts?.actor ?? "tool");
           c.endedAt = new Date().toISOString();
           c.updatedAt = c.endedAt;
         } else if (c.status === "terminated" && !c.endedAt) {
@@ -3594,7 +3596,7 @@ function createCommandService(host, opts) {
       }
       return { ok: true, message: `Command "${session.title}" ${status}.` };
     },
-    async kill(directory, id, ownerSessionID) {
+    async kill(directory, id, ownerSessionID, opts) {
       rememberDir(id, directory);
       const session = await service.get(directory, id, ownerSessionID);
       if (!session)
@@ -3606,6 +3608,7 @@ function createCommandService(host, opts) {
         const c = (s.commands ?? []).find((x) => x.id === id);
         if (c && c.ownerSessionID === ownerSessionID && c.status === "running") {
           c.signal = "SIGKILL";
+          c.terminatedBy = opts?.actor ?? "tool";
           c.updatedAt = new Date().toISOString();
         }
         return s;
@@ -3636,6 +3639,7 @@ function createCommandService(host, opts) {
             c.endReason = "terminate";
           c.exitCode = c.exitCode ?? 137;
           c.signal = c.signal ?? "SIGKILL";
+          c.terminatedBy = c.terminatedBy ?? (opts?.actor ?? "tool");
           c.endedAt = new Date().toISOString();
           c.updatedAt = c.endedAt;
         } else if (c.status === "terminated" && !c.endedAt) {
@@ -3869,8 +3873,13 @@ function createCommandService(host, opts) {
       const owned = new Map((state.commands ?? []).map((command) => [command.id, command.ownerSessionID]));
       await Promise.all([...live.entries()].map(async ([id, entry]) => {
         const owner = owned.get(id);
+        const spec = (state.commands ?? []).find((c) => c.id === id);
+        const isServer = !!spec?.watchFilter || !!spec?.watchUntil || spec?.timeoutSeconds !== undefined && !!(spec?.watchFilter || spec?.watchUntil);
+        if (isServer) {
+          return;
+        }
         if (owner) {
-          await service.terminate(directory, id, owner).catch(() => {});
+          await service.terminate(directory, id, owner, { actor: "control" }).catch(() => {});
           return;
         }
         entry.handle.terminate();
@@ -4834,11 +4843,11 @@ function createControlWorker(options) {
               const state = await readState(directory);
               response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision };
             } else if (request.command === "cmd_terminate") {
-              const r = await cmdSvc.terminate(directory, id, ownerSessionID);
+              const r = await cmdSvc.terminate(directory, id, ownerSessionID, { actor: "control" });
               const state = await readState(directory);
               response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision };
             } else if (request.command === "cmd_kill") {
-              const r = await cmdSvc.kill(directory, id, ownerSessionID);
+              const r = await cmdSvc.kill(directory, id, ownerSessionID, { actor: "control" });
               const state = await readState(directory);
               response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision };
             } else if (request.command === "cmd_restart") {
@@ -11649,6 +11658,7 @@ function summarize(c) {
     status: c.status,
     exitCode: c.exitCode,
     signal: c.signal,
+    terminatedBy: c.terminatedBy,
     endReason: c.endReason,
     timeoutSeconds: c.timeoutSeconds,
     deadlineAt: c.deadlineAt,

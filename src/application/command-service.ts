@@ -174,7 +174,7 @@ export interface CommandService {
    * ignore SIGTERM. Auto-notify policy identical to terminate (silent
    * unless the command opted into notifyOnExit).
    */
-  kill(directory: string, id: string, ownerSessionID: string): Promise<{ ok: boolean; message: string }>
+  kill(directory: string, id: string, ownerSessionID: string, opts?: { actor?: CommandTerminationActor }): Promise<{ ok: boolean; message: string }>
   /**
    * Restart: gracefully terminate the old command if running, then respawn
    * a NEW command (new ID) with the same spec — title/command/args/cwd/
@@ -459,7 +459,7 @@ export function createCommandService(
       (s) => (s.commands ?? []).find((x) => x.id === id),
     )
     if (!before || before.status !== "running") return
-    await service.terminate(directory, id, owner).catch(() => {})
+    await service.terminate(directory, id, owner, { actor: "timeout" }).catch(() => {})
     await mutateState(directory, `cmd.timeout:${id}`, async (s) => {
       const c = (s.commands ?? []).find((x) => x.id === id)
       if (!c) return s
@@ -721,7 +721,7 @@ export function createCommandService(
     if (action !== "stop") return // keep: filter stream continues, until spent
     if (session.status !== "running") return // already terminal: nothing to stop
     await watchLedger(directory, id, "command.until-stopped", { until: session.watchUntil ?? "" })
-    await service.terminate(directory, id, session.ownerSessionID).catch(() => {})
+    await service.terminate(directory, id, session.ownerSessionID, { actor: "until" }).catch(() => {})
     // Stamp endReason=until over the "terminate" the standard path produced
     // (same overlay pattern as the timeout path).
     await mutateState(directory, `cmd.until:${id}`, async (s) => {
@@ -1537,7 +1537,7 @@ export function createCommandService(
       return { ok: true, message: `Command "${session.title}" ${status}.` }
     },
 
-    async kill(directory, id, ownerSessionID) {
+    async kill(directory, id, ownerSessionID, opts) {
       rememberDir(id, directory)
       const session = await service.get(directory, id, ownerSessionID)
       if (!session) return { ok: false, message: "Command not found." }
@@ -1550,6 +1550,7 @@ export function createCommandService(
         const c = (s.commands ?? []).find((x) => x.id === id)
         if (c && c.ownerSessionID === ownerSessionID && c.status === "running") {
           c.signal = "SIGKILL"
+          c.terminatedBy = (opts?.actor as CommandTerminationActor) ?? "tool"
           c.updatedAt = new Date().toISOString()
         }
         return s
@@ -1579,6 +1580,7 @@ export function createCommandService(
           if (c.endReason !== "timeout") c.endReason = "terminate"
           c.exitCode = c.exitCode ?? 137
           c.signal = c.signal ?? "SIGKILL"
+          c.terminatedBy = c.terminatedBy ?? ((opts?.actor as CommandTerminationActor) ?? "tool")
           c.endedAt = new Date().toISOString()
           c.updatedAt = c.endedAt
         } else if (c.status === "terminated" && !c.endedAt) {

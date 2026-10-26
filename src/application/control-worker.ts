@@ -683,11 +683,11 @@ export function createControlWorker(options: ControlWorkerOptions): ControlWorke
               const state = await readState(directory)
               response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision }
             } else if (request.command === "cmd_terminate") {
-              const r = await cmdSvc.terminate(directory, id, ownerSessionID)
+              const r = await cmdSvc.terminate(directory, id, ownerSessionID, { actor: "control" })
               const state = await readState(directory)
               response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision }
             } else if (request.command === "cmd_kill") {
-              const r = await cmdSvc.kill(directory, id, ownerSessionID)
+              const r = await cmdSvc.kill(directory, id, ownerSessionID, { actor: "control" })
               const state = await readState(directory)
               response = { ...base, ok: r.ok, message: r.message, stateRevision: state.revision }
             } else if (request.command === "cmd_restart") {

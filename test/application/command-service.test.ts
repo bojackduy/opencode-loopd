@@ -119,7 +119,26 @@ describe("CommandService", () => {
     const session = await svc.start(dir, { title: "server", command: "sleep", ownerSessionID: "owner-1" })
     await svc.dispose(dir)
     expect((await svc.get(dir, session.id, "owner-1"))?.status).toBe("terminated")
+    expect((await svc.get(dir, session.id, "owner-1"))?.terminatedBy).toBe("control")
     expect([...host.procs.values()].at(-1)?.signals).toContain("SIGTERM")
+  })
+
+  it("preserves a watched server across dispose instead of SIGTERMing it", async () => {
+    // A dev server is started deliberately; host service-recycle (plugin
+    // reload) must not kill it. Root cause of the dx serve SIGTERM at minute 61.
+    const server = await svc.start(dir, {
+      title: "dev server",
+      command: "sleep",
+      ownerSessionID: "owner-1",
+      watchUntil: "ready",
+      watchUntilAction: "keep",
+    })
+    const proc = [...host.procs.values()].at(-1)!
+    await svc.dispose(dir)
+    const after = await svc.get(dir, server.id, "owner-1")
+    expect(after?.status).toBe("running")
+    expect(proc.signals).toEqual([])
+    expect(proc.alive).toBe(true)
   })
 
   it("terminate stops a running command; remove refuses while running (terminate ≠ remove)", async () => {
@@ -131,6 +150,7 @@ describe("CommandService", () => {
     expect(t.ok).toBe(true)
     const after = await svc.get(dir, s.id, "owner-1")
     expect(after!.status).toBe("terminated")
+    expect(after!.terminatedBy).toBe("tool")
     const removed = await svc.remove(dir, s.id, "owner-1")
     expect(removed.ok).toBe(true)
     expect(await svc.get(dir, s.id, "owner-1")).toBeUndefined()

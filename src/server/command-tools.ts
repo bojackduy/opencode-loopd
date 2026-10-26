@@ -47,6 +47,8 @@ function summarize(c: {
   status: string
   exitCode?: number
   signal?: string
+  /** Who asked for the stop; absent for natural exits and legacy records. */
+  terminatedBy?: string
   outputBytes: number
   truncated: boolean
   goalID?: string
@@ -70,6 +72,7 @@ function summarize(c: {
     status: c.status,
     exitCode: c.exitCode,
     signal: c.signal,
+    terminatedBy: c.terminatedBy,
     endReason: c.endReason,
     timeoutSeconds: c.timeoutSeconds,
     deadlineAt: c.deadlineAt,
