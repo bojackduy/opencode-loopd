@@ -49,6 +49,8 @@ function summarize(c: {
   signal?: string
   /** Who asked for the stop; absent for natural exits and legacy records. */
   terminatedBy?: string
+  /** Adopted by pid after a host restart; output is frozen at the detach point. */
+  detached?: boolean
   outputBytes: number
   truncated: boolean
   goalID?: string
@@ -73,6 +75,7 @@ function summarize(c: {
     exitCode: c.exitCode,
     signal: c.signal,
     terminatedBy: c.terminatedBy,
+    detached: c.detached,
     endReason: c.endReason,
     timeoutSeconds: c.timeoutSeconds,
     deadlineAt: c.deadlineAt,

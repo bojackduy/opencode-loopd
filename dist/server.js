@@ -2542,6 +2542,38 @@ class DuplicateCommandError extends Error {
 function loopCommandsDir(directory) {
   return path4.join(directory, ".opencode", "loopd", "commands");
 }
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function pidLooksLike(pid, command) {
+  try {
+    const probe = Bun.spawnSync(["ps", "-p", String(pid), "-o", "command="]);
+    const line = probe.stdout?.toString() ?? "";
+    return line.includes(path4.basename(command));
+  } catch {
+    return false;
+  }
+}
+async function signalAdoptedPid(pid, signal) {
+  try {
+    process.kill(pid, signal);
+  } catch {
+    return;
+  }
+  if (signal === "SIGKILL")
+    return;
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  if (pidAlive(pid)) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {}
+  }
+}
 function createCommandService(host, opts) {
   const live = new Map;
   const operations = new Map;
@@ -3552,6 +3584,8 @@ function createCommandService(host, opts) {
           } catch {}
         }
         live.delete(id);
+      } else if (session.pid && pidAlive(session.pid) && pidLooksLike(session.pid, session.command)) {
+        await signalAdoptedPid(session.pid, "SIGTERM");
       }
       const exitCode = status === "terminated" ? 143 : undefined;
       clearCommandTimeout(id);
@@ -3626,6 +3660,8 @@ function createCommandService(host, opts) {
           await entry.handle.exited();
         } catch {}
         live.delete(id);
+      } else if (session.pid && pidAlive(session.pid) && pidLooksLike(session.pid, session.command)) {
+        await signalAdoptedPid(session.pid, "SIGKILL");
       }
       clearCommandTimeout(id);
       clearWatchTimer(id);
@@ -3835,6 +3871,24 @@ function createCommandService(host, opts) {
           }
           continue;
         }
+        if (c.preserved && c.pid && pidAlive(c.pid) && pidLooksLike(c.pid, c.command)) {
+          await mutateState(directory, `cmd.reconcile-adopt:${c.id}`, async (s) => {
+            const x = (s.commands ?? []).find((y) => y.id === c.id);
+            if (x && x.status === "running") {
+              x.detached = true;
+              x.lastError = `Detached after a host restart; pid ${x.pid} is still alive. Terminate or kill stops it. Output ended at the detach point.`;
+              x.updatedAt = new Date().toISOString();
+              s.orphanedCommandProcesses = (s.orphanedCommandProcesses ?? []).filter((process2) => process2.commandID !== x.id);
+            }
+            return s;
+          }).catch(() => {});
+          try {
+            const fresh = await readState(directory).then((st) => (st.commands ?? []).find((y) => y.id === c.id));
+            if (fresh)
+              emitBroker(c.id, { type: "status", command: fresh });
+          } catch {}
+          continue;
+        }
         clearCommandTimeout(c.id);
         deleteWatch(c.id);
         const deadlinePassed = c.deadlineAt ? Date.parse(c.deadlineAt) <= Date.now() : false;
@@ -3876,6 +3930,14 @@ function createCommandService(host, opts) {
         const spec = (state.commands ?? []).find((c) => c.id === id);
         const isServer = !!spec?.watchFilter || !!spec?.watchUntil || spec?.timeoutSeconds !== undefined && !!(spec?.watchFilter || spec?.watchUntil);
         if (isServer) {
+          await mutateState(directory, `cmd.preserve:${id}`, async (s) => {
+            const c = (s.commands ?? []).find((x) => x.id === id);
+            if (c && c.status === "running") {
+              c.preserved = true;
+              c.updatedAt = new Date().toISOString();
+            }
+            return s;
+          }).catch(() => {});
           return;
         }
         if (owner) {
@@ -11659,6 +11721,7 @@ function summarize(c) {
     exitCode: c.exitCode,
     signal: c.signal,
     terminatedBy: c.terminatedBy,
+    detached: c.detached,
     endReason: c.endReason,
     timeoutSeconds: c.timeoutSeconds,
     deadlineAt: c.deadlineAt,

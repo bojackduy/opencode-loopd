@@ -86,6 +86,18 @@ export interface CommandSession {
   exitCode?: number
   /** Signal name that ended the process (e.g. "SIGINT", "SIGKILL"). */
   signal?: string
+  /**
+   * True when the record was deliberately kept alive across a host restart
+   * (dispose detaches instead of signalling). Only preserved records are
+   * eligible for pid adoption at reconcile.
+   */
+  preserved?: boolean
+  /**
+   * True when this record was adopted by pid after the host instance that
+   * spawned it went away. The process is alive and stoppable, but its output
+   * stream ended with the old host, so the retained log is final.
+   */
+  detached?: boolean
   /** What requested the stop (absent for natural exits and legacy records). */
   terminatedBy?: CommandTerminationActor
   /** Last known pid (observability only — never reused after restart). */

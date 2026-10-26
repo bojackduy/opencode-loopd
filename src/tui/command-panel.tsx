@@ -864,7 +864,7 @@ export function CommandPanel(props: Props) {
             <box flexDirection="column" border={true} borderColor={theme().border} padding={1} flexShrink={0} maxHeight={16} overflow="hidden">
               <text>
                 <span style={{ fg: theme().primary, bold: true }}>{cmd().title}</span>
-                <span style={{ fg: theme().textMuted }}> │ {[cmd().command, ...cmd().args].join(" ")} │ {cmd().status} │ {outputMeta().totalBytes} bytes{outputMeta().live ? " · live" : ""}{cmd().truncated ? " · truncated" : ""}{cmd().status !== "running" && cmd().endReason ? ` · end:${cmd().endReason}${cmd().terminatedBy ? `(${cmd().terminatedBy})` : ""}` : ""}{emulated() && screen && feedForID === cmd().id ? ` · ${screen.cols}x${screen.rows} screen${screen.activeBuffer === "alternate" ? " · alt-screen" : ""}` : ""}</span>
+                <span style={{ fg: theme().textMuted }}> │ {[cmd().command, ...cmd().args].join(" ")} │ {cmd().status}{cmd().detached ? " · detached (output frozen)" : ""} │ {outputMeta().totalBytes} bytes{outputMeta().live ? " · live" : ""}{cmd().truncated ? " · truncated" : ""}{cmd().status !== "running" && cmd().endReason ? ` · end:${cmd().endReason}${cmd().terminatedBy ? `(${cmd().terminatedBy})` : ""}` : ""}{emulated() && screen && feedForID === cmd().id ? ` · ${screen.cols}x${screen.rows} screen${screen.activeBuffer === "alternate" ? " · alt-screen" : ""}` : ""}</span>
               </text>
               {formatWatchDetail(cmd()) ? (
                 <text>

@@ -5851,6 +5851,7 @@ function CommandPanel(props) {
         _$insertNode2(_el$32, _el$36);
         _$insert2(_el$32, () => [cmd().command, ...cmd().args].join(" "), _el$34);
         _$insert2(_el$32, () => cmd().status, _el$35);
+        _$insert2(_el$32, () => cmd().detached ? " \xB7 detached (output frozen)" : "", _el$35);
         _$insert2(_el$32, () => outputMeta().totalBytes, _el$36);
         _$insert2(_el$32, () => outputMeta().live ? " \xB7 live" : "", null);
         _$insert2(_el$32, () => cmd().truncated ? " \xB7 truncated" : "", null);

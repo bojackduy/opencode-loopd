@@ -221,6 +221,47 @@ function loopCommandsDir(directory: string): string {
   return path.join(directory, ".opencode", "loopd", "commands")
 }
 
+/** Best-effort liveness for a pid recorded by a previous host instance. */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * A pid alone is not an identity — the OS reuses pids. Only adopt a record
+ * whose live process still looks like the executable we spawned, so a
+ * recycled pid is never signalled as if it were our server.
+ */
+function pidLooksLike(pid: number, command: string): boolean {
+  try {
+    const probe = Bun.spawnSync(["ps", "-p", String(pid), "-o", "command="])
+    const line = probe.stdout?.toString() ?? ""
+    return line.includes(path.basename(command))
+  } catch {
+    return false
+  }
+}
+
+/** SIGTERM, brief grace, then SIGKILL. Used only for detached (adopted) pids. */
+async function signalAdoptedPid(pid: number, signal: "SIGTERM" | "SIGKILL"): Promise<void> {
+  try {
+    process.kill(pid, signal)
+  } catch {
+    return
+  }
+  if (signal === "SIGKILL") return
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  if (pidAlive(pid)) {
+    try {
+      process.kill(pid, "SIGKILL")
+    } catch {}
+  }
+}
+
 export function createCommandService(
   host: CommandHost,
   opts?: {
@@ -1479,6 +1520,11 @@ export function createCommandService(
           } catch {}
         }
         live.delete(id)
+      } else if (session.pid && pidAlive(session.pid) && pidLooksLike(session.pid, session.command)) {
+        // Adopted after a host restart: no handle, but the process is ours.
+        // Signal it directly so the dashboard can still stop a server that
+        // survived a plugin reload.
+        await signalAdoptedPid(session.pid, "SIGTERM")
       }
       const exitCode = status === "terminated" ? 143 : undefined
       clearCommandTimeout(id)
@@ -1569,6 +1615,9 @@ export function createCommandService(
           await entry.handle.exited()
         } catch {}
         live.delete(id)
+      } else if (session.pid && pidAlive(session.pid) && pidLooksLike(session.pid, session.command)) {
+        // Adopted after a host restart: signal the pid directly.
+        await signalAdoptedPid(session.pid, "SIGKILL")
       }
       clearCommandTimeout(id)
       clearWatchTimer(id)
@@ -1801,6 +1850,33 @@ export function createCommandService(
         // persisted deadlineAt already passed, record that the timeout elapsed
         // so a later start doesn't resurrect the deadline — status stays
         // missing, endReason stays missing, but lastError says timeout.
+        // A preserved background server outlives the plugin instance that
+        // spawned it (dispose detaches instead of killing). Adopt it by pid
+        // while it is still alive and still looks like our executable, so the
+        // dashboard can stop it instead of calling it "missing" and leaving an
+        // unreachable process behind. Output ends at the detach point: the pipe
+        // reader died with the old host, so the retained log is final.
+        if (c.preserved && c.pid && pidAlive(c.pid) && pidLooksLike(c.pid, c.command)) {
+          await mutateState(directory, `cmd.reconcile-adopt:${c.id}`, async (s) => {
+            const x = (s.commands ?? []).find((y) => y.id === c.id)
+            if (x && x.status === "running") {
+              x.detached = true
+              x.lastError = `Detached after a host restart; pid ${x.pid} is still alive. Terminate or kill stops it. Output ended at the detach point.`
+              x.updatedAt = new Date().toISOString()
+              s.orphanedCommandProcesses = (s.orphanedCommandProcesses ?? []).filter(
+                (process) => process.commandID !== x.id,
+              )
+            }
+            return s
+          }).catch(() => {})
+          try {
+            const fresh = await readState(directory).then(
+              (st) => (st.commands ?? []).find((y) => y.id === c.id),
+            )
+            if (fresh) emitBroker(c.id, { type: "status", command: fresh })
+          } catch {}
+          continue
+        }
         // M2: in-memory watcher dropped (nothing can feed it); persisted watch
         // fields stay as-is by design.
         clearCommandTimeout(c.id)
@@ -1853,6 +1929,14 @@ export function createCommandService(
           // terminate deliberate background servers. The owner's explicit
           // stop, a real timeout (timer path), or a natural exit are the
           // only ways to end it.
+          await mutateState(directory, `cmd.preserve:${id}`, async (s) => {
+            const c = (s.commands ?? []).find((x) => x.id === id)
+            if (c && c.status === "running") {
+              c.preserved = true
+              c.updatedAt = new Date().toISOString()
+            }
+            return s
+          }).catch(() => {})
           return
         }
         if (owner) {
