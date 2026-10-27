@@ -184,6 +184,36 @@ function mayBeAlive(pid?: number): boolean {
   try { process.kill(pid, 0); return true } catch (error: any) { return error?.code !== "ESRCH" }
 }
 
+/**
+ * Best-effort executable identity for a live pid. Guard against OS pid reuse:
+ * a `kill(pid, 0)` success only proves SOME process holds the pid, not ours.
+ * Returns true (matches) when the probe cannot run or the command is unknown
+ * — fail closed; only a successful probe with a clear mismatch returns false.
+ */
+function pidMatchesCommand(pid: number | undefined, command: string | undefined): boolean {
+  if (!pid || pid < 1 || !command) return true
+  try {
+    const probe = Bun.spawnSync(["ps", "-p", String(pid), "-o", "command="])
+    const line = probe.stdout?.toString() ?? ""
+    if (!line.trim()) return true // probe inconclusive: fail closed
+    return line.includes(path.basename(command))
+  } catch {
+    return true
+  }
+}
+
+/**
+ * Whether an orphaned/missing process entry genuinely fences work. Dead pids
+ * never fence. Live pids fence only while they still look like our executable
+ * — a recycled pid running something else is proof the original is gone.
+ * Unknown pids and failed probes fence (fail closed); pid-less entries are
+ * released only through explicit operator removal, never silently.
+ */
+function orphanBlocks(entry: { pid?: number; command?: string }): boolean {
+  if (!mayBeAlive(entry.pid)) return false
+  return pidMatchesCommand(entry.pid, entry.command)
+}
+
 export function assertScopeAvailable(state: StoreState, goal: Goal): void {
   // Artifact-only goals have no shared workspace ownership to acquire.
   // Their private outputs must not contend with writers or verification.
@@ -198,8 +228,8 @@ export function assertScopeAvailable(state: StoreState, goal: Goal): void {
   }
   if (state.workspaceOperation) throw new Error(`Workspace operation ${state.workspaceOperation.id} is active.`)
   if (goal.config.write_scope !== undefined) {
-    const orphan = [...(state.orphanedCommandProcesses || []), ...(state.commands || []).filter((command) => command.status === "missing").map((command) => ({ commandID: command.id, pid: command.pid }))].find((process) => mayBeAlive(process.pid))
-    if (orphan) throw new Error(`Protected activation denied: command ${orphan.commandID} lost its handle and process exit is unproved. Stop/verify the orphan process externally; removing its log does not release this fence.`)
+    const orphan = [...(state.orphanedCommandProcesses || []), ...(state.commands || []).filter((command) => command.status === "missing").map((command) => ({ commandID: command.id, pid: command.pid, command: command.command }))].find((process) => orphanBlocks(process))
+    if (orphan) throw new Error(`Protected activation denied: command ${orphan.commandID} lost its handle and process exit is unproved. Stop it with loopd_command_terminate (works on missing commands), verify exit externally, then loopd_command_remove to clear the fence. Removing the record alone never clears a live process's fence.`)
     if (state.workspaceCalls?.some((call) => call.uncontrolled)) throw new Error("Protected goal activation denied: an uncontrolled tool/shell is still executing. Wait for its exit event, do not poll claims.")
     const running = state.commands?.find((command) => command.status === "running")
     if (running) throw new Error(`Protected goal activation denied: uncontrolled command ${running.id} is still running. Terminate it before starting scoped/read-only work.`)
@@ -242,13 +272,13 @@ function foreignUncontrolledCall(state: StoreState, input: { sessionID: string; 
 
 function busyMessage(call: NonNullable<StoreState["workspaceCalls"]>[number], state: StoreState): string {
   const holder = call.goalID ? state.goals.find((goal) => goal.id === call.goalID) : undefined
-  return `Workspace busy: session ${call.sessionID} is executing tool call ${call.callID}${holder ? ` for goal "${holder.name}"` : ""}. Wait for that call's exit event, then retry. If that session is gone, pause or clear its goal to release the fence.`
+  return `Workspace busy: session ${call.sessionID} is executing tool call ${call.callID}${holder ? ` for goal "${holder.name}"` : ""}. Wait for that call's exit event, then retry. If the owning session is gone but the fence persists, use loopd_release_workspace to release it (your own calls, goals you own, or orphaned ones) — pausing or clearing a goal does not release another session's live reservation.`
 }
 
 function assertCommandQuiescence(state: StoreState): void {
-  const command = state.commands?.find((item) => item.status === "running" || (item.status === "missing" && mayBeAlive(item.pid)))
+  const command = state.commands?.find((item) => item.status === "running" || (item.status === "missing" && orphanBlocks({ pid: item.pid, command: item.command })))
   if (command) throw new Error(`Workspace busy: command ${command.id} has not proved exit. Stop it or wait for its exit event before source writes, shell or checks.`)
-  const orphan = state.orphanedCommandProcesses?.find((item) => mayBeAlive(item.pid))
+  const orphan = state.orphanedCommandProcesses?.find((item) => orphanBlocks(item))
   if (orphan) throw new Error(`Workspace busy: command ${orphan.commandID} has not proved exit. Verify process exit before retrying.`)
 }
 
@@ -297,6 +327,10 @@ export async function beforeWorkspaceTool(
     // host proves is a root session, may run ordinary tools even while protected
     // goals exist. Scoped-worker restrictions win: `goal` is only set for the
     // session that is the current worker of a goal.
+    // NOTE (accepted hole): stdin written into a command (loopd_command_write,
+    // exempt from quiescence below) can drive the child to write files the
+    // fence cannot see — e.g. typing into a shell REPL. Interactive typing
+    // must work, so the fence stays at process start/stop, not at keystrokes.
     const isOwner = !goal && (state.goals.some((item) => item.ownerSessionID === input.sessionID) || hostMain)
     if (protectedGoals.length && input.tool !== "loopd_command_write") assertCommandQuiescence(state)
     if (!state.workspaceOperation && !protectedGoals.length && (!goal || goal.config.write_scope === undefined)) {
@@ -341,9 +375,12 @@ export async function beforeWorkspaceTool(
     if (state.workspaceOperation) throw new Error(`Workspace operation ${state.workspaceOperation.id} is active; source writes are denied until it finishes.`)
     if (goal && (goal.status !== "active" || goal.scopeClosing)) throw new Error(`Scope denied: worker goal is ${goal.scopeClosing ? "closing" : goal.status}.`)
     // Unknown child sessions fail closed; only explicitly persisted workers, owners
-    // and host-proven main sessions may write.
+    // and host-proven main sessions may write. Nested subagents run under their
+    // own session IDs, so their file writes land here: route file writes
+    // through the worker (or owning main) session instead — never from inside
+    // a subagent.
     if (!goal && !isOwner) {
-      throw new Error("Scope denied: unrecognized session/child. Subagent writes are unsupported.")
+      throw new Error(`Scope denied: unrecognized session/child "${input.sessionID}". Subagent writes are unsupported — make file writes from the worker session (or the owning main session), not from a nested subagent.`)
     }
     const paths = await Promise.all(writes.map((file) => canonicalScopePath(directory, file)))
     const artifact = goal?.config.artifactDir ? path.relative(directory, goal.config.artifactDir).split(path.sep).join("/") : undefined

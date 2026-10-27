@@ -246,6 +246,12 @@ function pidLooksLike(pid: number, command: string): boolean {
   }
 }
 
+/** Adopted pid for a handle-less record: alive AND still our executable. */
+function adoptedPid(session: { pid?: number; command: string }): number | undefined {
+  if (session.pid && pidAlive(session.pid) && pidLooksLike(session.pid, session.command)) return session.pid
+  return undefined
+}
+
 /** SIGTERM, brief grace, then SIGKILL. Used only for detached (adopted) pids. */
 async function signalAdoptedPid(pid: number, signal: "SIGTERM" | "SIGKILL" | "SIGINT"): Promise<void> {
   try {
@@ -1463,13 +1469,15 @@ export function createCommandService(
     async interrupt(directory, id, ownerSessionID) {
       const session = await service.get(directory, id, ownerSessionID)
       if (!session) return { ok: false, message: "Command not found." }
-      if (session.status !== "running") return { ok: false, message: `Command is ${session.status}; nothing to interrupt.` }
+      if (session.status !== "running" && session.status !== "missing" && session.status !== "terminated") return { ok: false, message: `Command is ${session.status}; nothing to interrupt.` }
       const entry = live.get(id)
       if (!entry) {
         // Adopted after a host restart: no handle, but the process is ours.
-        // Ctrl+C semantics stay: SIGINT only, never a kill.
-        if (session.pid && pidAlive(session.pid) && pidLooksLike(session.pid, session.command)) {
-          await signalAdoptedPid(session.pid, "SIGINT")
+        // Ctrl+C semantics stay: SIGINT only, never a kill. Also covers
+        // `missing` records whose pid is still alive and provably ours.
+        const pid = adoptedPid(session)
+        if (pid) {
+          await signalAdoptedPid(pid, "SIGINT")
           await mutateState(directory, `cmd.interrupt:${id}`, async (s) => {
             const c = (s.commands ?? []).find((x) => x.id === id)
             if (c && c.ownerSessionID === ownerSessionID) {
@@ -1483,9 +1491,9 @@ export function createCommandService(
             title: session.title,
             ownerSessionID,
           }).catch(() => {})
-          return { ok: true, message: `SIGINT delivered to adopted pid ${session.pid} ("${session.title}").` }
+          return { ok: true, message: `SIGINT delivered to adopted pid ${pid} ("${session.title}").` }
         }
-        return { ok: false, message: "No live handle (host restarted?). Reconcile will mark it missing; use terminate/remove to clean up." }
+        return { ok: false, message: "No live handle and no adoptable pid (host restarted?). Reconcile will mark it missing; use terminate/remove to clean up." }
       }
       // Ctrl+C semantics: deliver SIGINT, do NOT kill. The process may trap
       // and continue — that is correct behavior, not a failure.
@@ -1514,6 +1522,35 @@ export function createCommandService(
           return removed.ok
             ? { ok: true, message: `Command was already ${session.status}; removed.`, removed: true }
             : { ok: false, message: `Command is ${session.status}; remove failed: ${removed.message}` }
+        }
+        // A `missing` (or `terminated`-but-still-alive, e.g. trapped SIGTERM)
+        // record whose pid is still alive and provably ours is stoppable even
+        // though the handle is gone. Never `exited`: death was observed, so a
+        // live pid must be a recycled lookalike — signaling it could kill an
+        // innocent process. The record stays as-is; the fence clears once the
+        // process exit is proved (see remove).
+        if (session.status === "missing" || session.status === "terminated") {
+          const pid = adoptedPid(session)
+          if (!pid) return { ok: false, message: `Command is missing and its process is gone; nothing to terminate.` }
+          await signalAdoptedPid(pid, "SIGTERM")
+          await mutateState(directory, `cmd.terminate-missing:${id}`, async (s) => {
+            const c = (s.commands ?? []).find((x) => x.id === id)
+            if (c && c.ownerSessionID === ownerSessionID) {
+              c.terminatedBy = (opts?.actor as CommandTerminationActor) ?? "tool"
+              c.lastError = `SIGTERM delivered to adopted pid ${pid} after host restart.`
+              c.updatedAt = new Date().toISOString()
+            }
+            if (!pidAlive(pid)) s.orphanedCommandProcesses = (s.orphanedCommandProcesses ?? []).filter((p) => p.commandID !== id)
+            return s
+          }).catch(() => {})
+          void logServerEvent(directory, "command.terminated", {
+            commandID: id,
+            title: session.title,
+            actor: (opts?.actor as CommandTerminationActor) ?? "tool",
+            status: "missing-signalled",
+            ownerSessionID,
+          }).catch(() => {})
+          return { ok: true, message: `SIGTERM delivered to adopted pid ${pid} ("${session.title}"); record stays missing, fence clears when the process exit is proved.` }
         }
         return { ok: false, message: `Command is ${session.status}; nothing to terminate.` }
       }
@@ -1561,11 +1598,11 @@ export function createCommandService(
           } catch {}
         }
         live.delete(id)
-      } else if (session.pid && pidAlive(session.pid) && pidLooksLike(session.pid, session.command)) {
+      } else if (adoptedPid(session)) {
         // Adopted after a host restart: no handle, but the process is ours.
         // Signal it directly so the dashboard can still stop a server that
         // survived a plugin reload.
-        await signalAdoptedPid(session.pid, "SIGTERM")
+        await signalAdoptedPid(adoptedPid(session)!, "SIGTERM")
       }
       const exitCode = status === "terminated" ? 143 : undefined
       clearCommandTimeout(id)
@@ -1636,6 +1673,30 @@ export function createCommandService(
       const session = await service.get(directory, id, ownerSessionID)
       if (!session) return { ok: false, message: "Command not found." }
       if (session.status !== "running") {
+        // Missing/terminated-but-adoptable mirrors terminate: SIGKILL the live,
+        // provably-ours pid; the record stays as-is. Never `exited` (see above).
+        if (session.status === "missing" || session.status === "terminated") {
+          const pid = adoptedPid(session)
+          if (!pid) return { ok: false, message: `Command is missing and its process is gone; nothing to kill.` }
+          await signalAdoptedPid(pid, "SIGKILL")
+          await mutateState(directory, `cmd.kill-missing:${id}`, async (s) => {
+            const c = (s.commands ?? []).find((x) => x.id === id)
+            if (c && c.ownerSessionID === ownerSessionID) {
+              c.terminatedBy = (opts?.actor as CommandTerminationActor) ?? "tool"
+              c.lastError = `SIGKILL delivered to adopted pid ${pid} after host restart.`
+              c.updatedAt = new Date().toISOString()
+            }
+            if (!pidAlive(pid)) s.orphanedCommandProcesses = (s.orphanedCommandProcesses ?? []).filter((p) => p.commandID !== id)
+            return s
+          }).catch(() => {})
+          void logServerEvent(directory, "command.killed", {
+            commandID: id,
+            title: session.title,
+            actor: (opts?.actor as CommandTerminationActor) ?? "tool",
+            ownerSessionID,
+          }).catch(() => {})
+          return { ok: true, message: `SIGKILL delivered to adopted pid ${pid} ("${session.title}"); record stays missing, fence clears when the process exit is proved.` }
+        }
         return { ok: false, message: `Command is ${session.status}; nothing to kill.` }
       }
       // Claim BEFORE signaling (same race discipline as terminate): onExit
@@ -1663,9 +1724,9 @@ export function createCommandService(
           await entry.handle.exited()
         } catch {}
         live.delete(id)
-      } else if (session.pid && pidAlive(session.pid) && pidLooksLike(session.pid, session.command)) {
+      } else if (adoptedPid(session)) {
         // Adopted after a host restart: signal the pid directly.
-        await signalAdoptedPid(session.pid, "SIGKILL")
+        await signalAdoptedPid(adoptedPid(session)!, "SIGKILL")
       }
       clearCommandTimeout(id)
       clearWatchTimer(id)
@@ -1758,12 +1819,23 @@ export function createCommandService(
       if (session.status === "running") {
         return { ok: false, message: `Command "${session.title}" is still running — terminate it first (terminate ≠ remove).` }
       }
+      // A live, provably-ours process must be stopped before its record and
+      // fence may go: removing first would hide a live writer. Terminate/kill
+      // work on `missing`/`terminated` records, so there is always a path
+      // forward. `exited` means death was observed — a live pid can only be a
+      // recycled lookalike, so removal always proceeds.
+      if (session.status !== "exited" && adoptedPid(session)) {
+        return { ok: false, message: `Command "${session.title}" is missing but pid ${session.pid} is still alive and looks like this command — terminate or kill it first, then remove. The orphan fence stays until the process exit is proved.` }
+      }
       clearNotifyRetry(id)
       deleteWatch(id)
       // Capture pre-delete metadata for the post-persistence status emit.
       const lastKnown = { ...session }
       await mutateState(directory, `cmd.remove:${id}`, async (s) => {
         s.commands = (s.commands ?? []).filter((x) => !(x.id === id && x.ownerSessionID === ownerSessionID))
+        // The process is provably dead, mismatched, or pid-less here (a live
+        // match was refused above): its orphan fence entry may go with it.
+        s.orphanedCommandProcesses = (s.orphanedCommandProcesses ?? []).filter((p) => p.commandID !== id)
         return s
       })
       await removeCommandLog(directory, id)

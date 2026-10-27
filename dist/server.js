@@ -1654,6 +1654,24 @@ function mayBeAlive(pid) {
     return error?.code !== "ESRCH";
   }
 }
+function pidMatchesCommand(pid, command) {
+  if (!pid || pid < 1 || !command)
+    return true;
+  try {
+    const probe = Bun.spawnSync(["ps", "-p", String(pid), "-o", "command="]);
+    const line = probe.stdout?.toString() ?? "";
+    if (!line.trim())
+      return true;
+    return line.includes(path3.basename(command));
+  } catch {
+    return true;
+  }
+}
+function orphanBlocks(entry) {
+  if (!mayBeAlive(entry.pid))
+    return false;
+  return pidMatchesCommand(entry.pid, entry.command);
+}
 function assertScopeAvailable(state, goal) {
   if (goal.config.workspaceWrite === false)
     return;
@@ -1665,9 +1683,9 @@ function assertScopeAvailable(state, goal) {
   if (state.workspaceOperation)
     throw new Error(`Workspace operation ${state.workspaceOperation.id} is active.`);
   if (goal.config.write_scope !== undefined) {
-    const orphan = [...state.orphanedCommandProcesses || [], ...(state.commands || []).filter((command) => command.status === "missing").map((command) => ({ commandID: command.id, pid: command.pid }))].find((process2) => mayBeAlive(process2.pid));
+    const orphan = [...state.orphanedCommandProcesses || [], ...(state.commands || []).filter((command) => command.status === "missing").map((command) => ({ commandID: command.id, pid: command.pid, command: command.command }))].find((process2) => orphanBlocks(process2));
     if (orphan)
-      throw new Error(`Protected activation denied: command ${orphan.commandID} lost its handle and process exit is unproved. Stop/verify the orphan process externally; removing its log does not release this fence.`);
+      throw new Error(`Protected activation denied: command ${orphan.commandID} lost its handle and process exit is unproved. Stop it with loopd_command_terminate (works on missing commands), verify exit externally, then loopd_command_remove to clear the fence. Removing the record alone never clears a live process's fence.`);
     if (state.workspaceCalls?.some((call) => call.uncontrolled))
       throw new Error("Protected goal activation denied: an uncontrolled tool/shell is still executing. Wait for its exit event, do not poll claims.");
     const running = state.commands?.find((command) => command.status === "running");
@@ -1699,13 +1717,13 @@ function foreignUncontrolledCall(state, input) {
 }
 function busyMessage(call, state) {
   const holder = call.goalID ? state.goals.find((goal) => goal.id === call.goalID) : undefined;
-  return `Workspace busy: session ${call.sessionID} is executing tool call ${call.callID}${holder ? ` for goal "${holder.name}"` : ""}. Wait for that call's exit event, then retry. If that session is gone, pause or clear its goal to release the fence.`;
+  return `Workspace busy: session ${call.sessionID} is executing tool call ${call.callID}${holder ? ` for goal "${holder.name}"` : ""}. Wait for that call's exit event, then retry. If the owning session is gone but the fence persists, use loopd_release_workspace to release it (your own calls, goals you own, or orphaned ones) \u2014 pausing or clearing a goal does not release another session's live reservation.`;
 }
 function assertCommandQuiescence(state) {
-  const command = state.commands?.find((item) => item.status === "running" || item.status === "missing" && mayBeAlive(item.pid));
+  const command = state.commands?.find((item) => item.status === "running" || item.status === "missing" && orphanBlocks({ pid: item.pid, command: item.command }));
   if (command)
     throw new Error(`Workspace busy: command ${command.id} has not proved exit. Stop it or wait for its exit event before source writes, shell or checks.`);
-  const orphan = state.orphanedCommandProcesses?.find((item) => mayBeAlive(item.pid));
+  const orphan = state.orphanedCommandProcesses?.find((item) => orphanBlocks(item));
   if (orphan)
     throw new Error(`Workspace busy: command ${orphan.commandID} has not proved exit. Verify process exit before retrying.`);
 }
@@ -1792,7 +1810,7 @@ async function beforeWorkspaceTool(directory, input, args, identity = {}) {
     if (goal && (goal.status !== "active" || goal.scopeClosing))
       throw new Error(`Scope denied: worker goal is ${goal.scopeClosing ? "closing" : goal.status}.`);
     if (!goal && !isOwner) {
-      throw new Error("Scope denied: unrecognized session/child. Subagent writes are unsupported.");
+      throw new Error(`Scope denied: unrecognized session/child "${input.sessionID}". Subagent writes are unsupported \u2014 make file writes from the worker session (or the owning main session), not from a nested subagent.`);
     }
     const paths = await Promise.all(writes.map((file) => canonicalScopePath(directory, file)));
     const artifact = goal?.config.artifactDir ? path3.relative(directory, goal.config.artifactDir).split(path3.sep).join("/") : undefined;
@@ -2585,6 +2603,11 @@ function pidLooksLike(pid, command) {
   } catch {
     return false;
   }
+}
+function adoptedPid(session) {
+  if (session.pid && pidAlive(session.pid) && pidLooksLike(session.pid, session.command))
+    return session.pid;
+  return;
 }
 async function signalAdoptedPid(pid, signal) {
   try {
@@ -3563,12 +3586,13 @@ function createCommandService(host, opts) {
       const session = await service.get(directory, id, ownerSessionID);
       if (!session)
         return { ok: false, message: "Command not found." };
-      if (session.status !== "running")
+      if (session.status !== "running" && session.status !== "missing" && session.status !== "terminated")
         return { ok: false, message: `Command is ${session.status}; nothing to interrupt.` };
       const entry = live.get(id);
       if (!entry) {
-        if (session.pid && pidAlive(session.pid) && pidLooksLike(session.pid, session.command)) {
-          await signalAdoptedPid(session.pid, "SIGINT");
+        const pid = adoptedPid(session);
+        if (pid) {
+          await signalAdoptedPid(pid, "SIGINT");
           await mutateState(directory, `cmd.interrupt:${id}`, async (s) => {
             const c = (s.commands ?? []).find((x) => x.id === id);
             if (c && c.ownerSessionID === ownerSessionID) {
@@ -3582,9 +3606,9 @@ function createCommandService(host, opts) {
             title: session.title,
             ownerSessionID
           }).catch(() => {});
-          return { ok: true, message: `SIGINT delivered to adopted pid ${session.pid} ("${session.title}").` };
+          return { ok: true, message: `SIGINT delivered to adopted pid ${pid} ("${session.title}").` };
         }
-        return { ok: false, message: "No live handle (host restarted?). Reconcile will mark it missing; use terminate/remove to clean up." };
+        return { ok: false, message: "No live handle and no adoptable pid (host restarted?). Reconcile will mark it missing; use terminate/remove to clean up." };
       }
       const delivered = entry.handle.interrupt();
       if (!delivered)
@@ -3608,6 +3632,31 @@ function createCommandService(host, opts) {
         if (opts?.remove) {
           const removed = await service.remove(directory, id, ownerSessionID);
           return removed.ok ? { ok: true, message: `Command was already ${session.status}; removed.`, removed: true } : { ok: false, message: `Command is ${session.status}; remove failed: ${removed.message}` };
+        }
+        if (session.status === "missing" || session.status === "terminated") {
+          const pid = adoptedPid(session);
+          if (!pid)
+            return { ok: false, message: `Command is missing and its process is gone; nothing to terminate.` };
+          await signalAdoptedPid(pid, "SIGTERM");
+          await mutateState(directory, `cmd.terminate-missing:${id}`, async (s) => {
+            const c = (s.commands ?? []).find((x) => x.id === id);
+            if (c && c.ownerSessionID === ownerSessionID) {
+              c.terminatedBy = opts?.actor ?? "tool";
+              c.lastError = `SIGTERM delivered to adopted pid ${pid} after host restart.`;
+              c.updatedAt = new Date().toISOString();
+            }
+            if (!pidAlive(pid))
+              s.orphanedCommandProcesses = (s.orphanedCommandProcesses ?? []).filter((p) => p.commandID !== id);
+            return s;
+          }).catch(() => {});
+          logServerEvent(directory, "command.terminated", {
+            commandID: id,
+            title: session.title,
+            actor: opts?.actor ?? "tool",
+            status: "missing-signalled",
+            ownerSessionID
+          }).catch(() => {});
+          return { ok: true, message: `SIGTERM delivered to adopted pid ${pid} ("${session.title}"); record stays missing, fence clears when the process exit is proved.` };
         }
         return { ok: false, message: `Command is ${session.status}; nothing to terminate.` };
       }
@@ -3647,8 +3696,8 @@ function createCommandService(host, opts) {
           } catch {}
         }
         live.delete(id);
-      } else if (session.pid && pidAlive(session.pid) && pidLooksLike(session.pid, session.command)) {
-        await signalAdoptedPid(session.pid, "SIGTERM");
+      } else if (adoptedPid(session)) {
+        await signalAdoptedPid(adoptedPid(session), "SIGTERM");
       }
       const exitCode = status === "terminated" ? 143 : undefined;
       clearCommandTimeout(id);
@@ -3706,6 +3755,30 @@ function createCommandService(host, opts) {
       if (!session)
         return { ok: false, message: "Command not found." };
       if (session.status !== "running") {
+        if (session.status === "missing" || session.status === "terminated") {
+          const pid = adoptedPid(session);
+          if (!pid)
+            return { ok: false, message: `Command is missing and its process is gone; nothing to kill.` };
+          await signalAdoptedPid(pid, "SIGKILL");
+          await mutateState(directory, `cmd.kill-missing:${id}`, async (s) => {
+            const c = (s.commands ?? []).find((x) => x.id === id);
+            if (c && c.ownerSessionID === ownerSessionID) {
+              c.terminatedBy = opts?.actor ?? "tool";
+              c.lastError = `SIGKILL delivered to adopted pid ${pid} after host restart.`;
+              c.updatedAt = new Date().toISOString();
+            }
+            if (!pidAlive(pid))
+              s.orphanedCommandProcesses = (s.orphanedCommandProcesses ?? []).filter((p) => p.commandID !== id);
+            return s;
+          }).catch(() => {});
+          logServerEvent(directory, "command.killed", {
+            commandID: id,
+            title: session.title,
+            actor: opts?.actor ?? "tool",
+            ownerSessionID
+          }).catch(() => {});
+          return { ok: true, message: `SIGKILL delivered to adopted pid ${pid} ("${session.title}"); record stays missing, fence clears when the process exit is proved.` };
+        }
         return { ok: false, message: `Command is ${session.status}; nothing to kill.` };
       }
       await mutateState(directory, `cmd.kill-claim:${id}`, async (s) => {
@@ -3730,8 +3803,8 @@ function createCommandService(host, opts) {
           await entry.handle.exited();
         } catch {}
         live.delete(id);
-      } else if (session.pid && pidAlive(session.pid) && pidLooksLike(session.pid, session.command)) {
-        await signalAdoptedPid(session.pid, "SIGKILL");
+      } else if (adoptedPid(session)) {
+        await signalAdoptedPid(adoptedPid(session), "SIGKILL");
       }
       clearCommandTimeout(id);
       clearWatchTimer(id);
@@ -3816,11 +3889,15 @@ function createCommandService(host, opts) {
       if (session.status === "running") {
         return { ok: false, message: `Command "${session.title}" is still running \u2014 terminate it first (terminate \u2260 remove).` };
       }
+      if (session.status !== "exited" && adoptedPid(session)) {
+        return { ok: false, message: `Command "${session.title}" is missing but pid ${session.pid} is still alive and looks like this command \u2014 terminate or kill it first, then remove. The orphan fence stays until the process exit is proved.` };
+      }
       clearNotifyRetry(id);
       deleteWatch(id);
       const lastKnown = { ...session };
       await mutateState(directory, `cmd.remove:${id}`, async (s) => {
         s.commands = (s.commands ?? []).filter((x) => !(x.id === id && x.ownerSessionID === ownerSessionID));
+        s.orphanedCommandProcesses = (s.orphanedCommandProcesses ?? []).filter((p) => p.commandID !== id);
         return s;
       });
       await removeCommandLog(directory, id);

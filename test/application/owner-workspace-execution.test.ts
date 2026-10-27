@@ -223,3 +223,64 @@ describe("unscoped concurrent shells (no protected goals)", () => {
     expect((await readState(root)).workspaceCalls ?? []).toHaveLength(0)
   })
 })
+
+describe("orphan fence identity (pid reuse guard)", () => {
+  async function fixtureWithMissing(records: Array<{ id: string; pid?: number; command?: string }>, orphans: Array<{ commandID: string; pid?: number }>) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "loopd-orphan-fence-"))
+    roots.push(root)
+    await mutateState(root, "fixture", async (state) => {
+      const id = "goal-1" as GoalID
+      state.goals.push(createGoal({
+        id,
+        name: "scoped",
+        objective: "test",
+        status: "active",
+        ownerSessionID: "main",
+        workerSessionID: "worker-1",
+        config: { workspaceWrite: true, write_scope: [] },
+      }))
+      const runtime = createRuntimeState(id)
+      runtime.runGeneration = 1
+      state.runtimes.push(runtime)
+      const { createCommandSession } = await import("../../src/domain/command-session")
+      for (const rec of records) {
+        state.commands = [...(state.commands ?? []), {
+          ...createCommandSession({ id: rec.id as never, title: rec.id, command: rec.command ?? "sleep", cwd: "/tmp", ownerSessionID: "main" }),
+          status: "missing",
+          pid: rec.pid,
+          endReason: "missing",
+        } as never]
+      }
+      state.orphanedCommandProcesses = orphans as never
+      return state
+    })
+    const state = await readState(root)
+    return { root, goal: state.goals[0]! }
+  }
+
+  it("ignores a recycled pid running an unrelated executable", async () => {
+    // Own test-runner pid is alive but is `bun`, not `sleep`: proof the
+    // original is gone, so it must not fence activation.
+    const { root, goal } = await fixtureWithMissing(
+      [{ id: "cmd-old", pid: process.pid, command: "sleep-no-such-binary-xyz" }],
+      [],
+    )
+    const state = await readState(root)
+    expect(() => assertScopeAvailable(state, goal)).not.toThrow()
+  })
+
+  it("still fences a live pid that matches the recorded executable", async () => {
+    const { root, goal } = await fixtureWithMissing(
+      [{ id: "cmd-live", pid: process.pid, command: "bun" }],
+      [],
+    )
+    const state = await readState(root)
+    expect(() => assertScopeAvailable(state, goal)).toThrow(/has not proved exit|Protected activation denied/)
+  })
+
+  it("still fences pid-less orphan entries (fail closed, operator removes)", async () => {
+    const { root, goal } = await fixtureWithMissing([], [{ commandID: "cmd-gone" }])
+    const state = await readState(root)
+    expect(() => assertScopeAvailable(state, goal)).toThrow(/Protected activation denied/)
+  })
+})

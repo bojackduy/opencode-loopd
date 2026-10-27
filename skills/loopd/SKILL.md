@@ -180,6 +180,8 @@ These tools are available to the worker session doing the actual work:
 
 Call at the start of every turn to read the objective, config, and current state. Always call this first.
 
+File writes must come from the worker session itself — never from a nested subagent (it runs under its own session ID, which the fence does not recognize, so every write fails closed). Steer subagents toward read-only recon; do the edits yourself.
+
 ### report_goal_progress
 
 Call after durable state changes (file writes, verifications). Resets failure and no-progress counters.
@@ -399,6 +401,8 @@ running → missing     (plugin restart found no live execution — log retained
 
 - **Detach ≠ terminate.** Closing the fullscreen terminal page, switching tabs, or the TUI restarting never stops the process. Only `loopd_command_terminate` (or the process exiting on its own) does.
 - **`terminate ≠ remove`.** `remove` deletes the record + log and refuses while `running`.
+- **Orphan commands (`missing`).** A restart that finds no live handle marks the record `missing` (log retained) and fences protected-goal activation until the process exit is proved. `loopd_command_terminate`/`kill`/`interrupt` also work on `missing` records — they signal the pid directly when it is provably still ours. `remove` clears the fence once the process is provably dead (or pid-less), and refuses while the pid is provably alive — terminate first. A pid recycled by the OS to an unrelated executable never fences (identity-checked).
+- **Commands and protected goals are mutually exclusive.** While a protected goal is active, any running command freezes all writes/shells/checks, and a new protected goal cannot start while any command runs. To keep a dev server up beside scoped work, use a managed server (approved `kind: "server"`, auto-stopped with the goal) — never a plain command.
 - Every response carries the active backend's `capabilities` so you never have to guess (`terminalEmulation` is always `false` — the host captures a byte stream; the TUI's terminal page emulates a screen client-side from it).
 
 ### Monitoring in the Dashboard

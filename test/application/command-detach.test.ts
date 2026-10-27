@@ -105,3 +105,88 @@ describe("Command detach across host restart", () => {
     expect(after?.detached).toBeFalsy()
   })
 })
+
+describe("missing-command lifecycle (no stuck states)", () => {
+  function alive(pid: number | undefined): boolean {
+    if (!pid) return false
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  async function waitFor(cond: () => boolean, timeoutMs = 5000): Promise<void> {
+    const start = Date.now()
+    while (!cond()) {
+      if (Date.now() - start > timeoutMs) throw new Error("timed out")
+      await new Promise((r) => setTimeout(r, 25))
+    }
+  }
+
+  it("terminate/kill work on missing records with a live provably-ours pid", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "loopd-missing-sig-"))
+    try {
+      const svc = createCommandService(createLocalProcessHost())
+      const server = await svc.start(dir, {
+        title: "lost server",
+        command: "sleep",
+        args: ["299"],
+        cwd: dir,
+        ownerSessionID: "owner-1",
+        watchUntil: "ready",
+        watchUntilAction: "keep",
+      })
+      const pid = server.pid!
+      await waitFor(() => alive(pid))
+      // Simulate a reload crash: no dispose, new instance, reconcile finds no
+      // handle. (Preserved flag absent on purpose — plain crash path.)
+      const svc2 = createCommandService(createLocalProcessHost())
+      await svc2.reconcile(dir)
+      expect((await svc2.get(dir, server.id, "owner-1"))?.status).toBe("missing")
+      expect(alive(pid)).toBe(true)
+
+      const stopped = await svc2.terminate(dir, server.id, "owner-1", { actor: "control" })
+      expect(stopped.ok).toBe(true)
+      await waitFor(() => !alive(pid))
+      // Record stays missing; the orphan fence cleared with the process.
+      expect((await svc2.get(dir, server.id, "owner-1"))?.status).toBe("missing")
+      expect((await readState(dir)).orphanedCommandProcesses ?? []).toEqual([])
+      const removed = await svc2.remove(dir, server.id, "owner-1")
+      expect(removed.ok).toBe(true)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("remove refuses while the missing pid is provably alive, then clears after kill", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "loopd-missing-refuse-"))
+    try {
+      const svc = createCommandService(createLocalProcessHost())
+      const server = await svc.start(dir, {
+        title: "lost server 2",
+        command: "sleep",
+        args: ["300"],
+        cwd: dir,
+        ownerSessionID: "owner-1",
+      })
+      const pid = server.pid!
+      await waitFor(() => alive(pid))
+      const svc2 = createCommandService(createLocalProcessHost())
+      await svc2.reconcile(dir)
+      expect((await svc2.get(dir, server.id, "owner-1"))?.status).toBe("missing")
+
+      const refused = await svc2.remove(dir, server.id, "owner-1")
+      expect(refused.ok).toBe(false)
+      expect(refused.message).toMatch(/still alive/)
+
+      const killed = await svc2.kill(dir, server.id, "owner-1")
+      expect(killed.ok).toBe(true)
+      await waitFor(() => !alive(pid))
+      expect((await svc2.remove(dir, server.id, "owner-1")).ok).toBe(true)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+})
