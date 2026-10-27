@@ -174,3 +174,45 @@ describe("command-screen-feed", () => {
     screen.dispose()
   })
 })
+
+describe("terminal-screen scrollback", () => {
+  test("overflow keeps history and scrolls the viewport", async () => {
+    const screen = createTerminalScreen(10, 4)
+    screen.write("l0\r\nl1\r\nl2\r\nl3\r\nl4\r\nl5\r\n")
+    await screen.flush()
+    let cells = screen.readScreen()
+    // Following live output: newest rows visible.
+    expect(rowText(cells, 10, 0)).toBe("l3")
+    expect(rowText(cells, 10, 2)).toBe("l5")
+    expect(screen.scrollOffset).toBe(0)
+    // Scroll up two lines into history.
+    screen.scrollBy(-2)
+    cells = screen.readScreen()
+    expect(rowText(cells, 10, 0)).toBe("l1")
+    expect(screen.scrollOffset).toBe(2)
+    // New output pins the scrolled viewport instead of yanking it.
+    screen.write("l6\r\n")
+    await screen.flush()
+    cells = screen.readScreen()
+    expect(rowText(cells, 10, 0)).toBe("l1")
+    expect(screen.scrollPosition).toEqual({ above: 1, below: 3 })
+    // Back to live.
+    screen.scrollToBottom()
+    cells = screen.readScreen()
+    expect(screen.scrollOffset).toBe(0)
+    expect(rowText(cells, 10, 2)).toBe("l6")
+    screen.dispose()
+  })
+
+  test("alt-screen refuses local scroll", async () => {
+    const screen = createTerminalScreen(10, 4)
+    screen.write("\x1b[?1049h")
+    await screen.flush()
+    expect(screen.activeBuffer).toBe("alternate")
+    screen.scrollBy(-2)
+    expect(screen.scrollOffset).toBe(0)
+    screen.write("\x1b[?1049l")
+    await screen.flush()
+    screen.dispose()
+  })
+})

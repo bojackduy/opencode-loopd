@@ -1752,9 +1752,6 @@ async function beforeWorkspaceTool(directory, input, args, identity = {}) {
     if (protectedGoals.length && input.tool !== "loopd_command_write")
       assertCommandQuiescence(state);
     if (!state.workspaceOperation && !protectedGoals.length && (!goal || goal.config.write_scope === undefined)) {
-      const concurrent = foreignUncontrolledCall(state, input);
-      if (concurrent)
-        throw new Error(`Workspace busy: uncontrolled tool call ${concurrent.callID} from session ${concurrent.sessionID} is still executing; wait for its exit event before writing source.`);
       let paths = [];
       let uncontrolled = false;
       try {
@@ -2595,7 +2592,7 @@ async function signalAdoptedPid(pid, signal) {
   } catch {
     return;
   }
-  if (signal === "SIGKILL")
+  if (signal === "SIGKILL" || signal === "SIGINT")
     return;
   await new Promise((resolve) => setTimeout(resolve, 500));
   if (pidAlive(pid)) {
@@ -3569,8 +3566,26 @@ function createCommandService(host, opts) {
       if (session.status !== "running")
         return { ok: false, message: `Command is ${session.status}; nothing to interrupt.` };
       const entry = live.get(id);
-      if (!entry)
+      if (!entry) {
+        if (session.pid && pidAlive(session.pid) && pidLooksLike(session.pid, session.command)) {
+          await signalAdoptedPid(session.pid, "SIGINT");
+          await mutateState(directory, `cmd.interrupt:${id}`, async (s) => {
+            const c = (s.commands ?? []).find((x) => x.id === id);
+            if (c && c.ownerSessionID === ownerSessionID) {
+              c.signal = "SIGINT";
+              c.updatedAt = new Date().toISOString();
+            }
+            return s;
+          });
+          logServerEvent(directory, "command.interrupted", {
+            commandID: id,
+            title: session.title,
+            ownerSessionID
+          }).catch(() => {});
+          return { ok: true, message: `SIGINT delivered to adopted pid ${session.pid} ("${session.title}").` };
+        }
         return { ok: false, message: "No live handle (host restarted?). Reconcile will mark it missing; use terminate/remove to clean up." };
+      }
       const delivered = entry.handle.interrupt();
       if (!delivered)
         return { ok: false, message: "Failed to deliver SIGINT." };
@@ -11835,9 +11850,9 @@ function commandTools(options) {
       description: "PREFER THIS over the built-in shell/bash tool whenever a command might take a while or never return: installs (npm/pip/brew/cargo...), builds, test suites, downloads, migrations, dev servers, watchers, log tails, REPLs, or anything interactive. The built-in shell BLOCKS your whole turn until the process exits \u2014 a long install freezes you (and can time out); this returns immediately with a command_id and pushes you a message on exit or pattern match, so you stay responsive and can do other work meanwhile. Only use the built-in shell for quick one-shots (ls, git status, a single fast test) that finish in seconds. " + "Start a standalone interactive OS process (arbitrary shell command) in the background \u2014 a dev server, `npm test --watch`, a REPL, a log tail, a build, or a one-off script. This is a raw process, NOT an AI worker: no agent, no checks, no turn loop. For multi-turn autonomous AI work with completion criteria, use loopd_create_goal instead. " + "Returns a command_id for loopd_command_get (read output)/loopd_command_write (send stdin)/loopd_command_interrupt (Ctrl+C)/loopd_command_terminate (kill)/loopd_command_remove (delete). " + "The user can also open it live: /loop or /commands \u2192 Tab/l to the Commands tab \u2192 select it \u2192 `o` opens a fullscreen interactive terminal page (type directly, Ctrl+C interrupts, Ctrl+] detaches without stopping it). " + "Independent from goals: an optional goal_id is display-only metadata and never couples lifecycles \u2014 pausing/clearing a goal never touches the command, and terminating a command never touches the goal. " + "To make a specific goal wake up when this command finishes, call loopd_command_await separately after starting it (linking alone does not wake anything). " + "The OWNER session gets a notification on natural exit (including code 0), missing process, or timeout \u2014 no polling required for completion. Manual terminate stays silent by default. Raw PTY output stays in the log; any short tail included in the notification is sanitized for chat. Set notify_on_exit:false to suppress owner exit notifications." + " HOW TO WAIT \u2014 declare your wake upfront, then go do other work; you will be pushed. Never poll loopd_command_get in a loop and never sleep-then-read: quick one-shot finishing in seconds \u2192 built-in bash, or start here and read once. " + "Minutes-long or never-exiting where only FINISHING matters \u2192 just start it; the automatic exit/timeout notification is your wake. " + "Never-exiting where a LINE appearing matters (dev-server READY, deploy COMPLETED) \u2192 pass watch_until (+ watch_filter to cut noise); stop (default) ends the command with exactly one message, keep lets it run on. " + "A GOAL worker that must block until that happens \u2192 call loopd_command_await (passing goal_id alone never wakes anything). " + "Polling the WORLD inside the command (a shell loop curling an endpoint until it flips) is fine and costs no turns; polling loopd from YOUR side is the forbidden pattern \u2014 one mid-run peek is fine, a timer loop is not. " + "Emit a printed marker line for EVERY outcome (DONE and FAILED), or a silent failure wakes nobody. " + "Watches longer than ~30min are fragile (in-memory only, die on restart) \u2014 prefer a scheduled goal that checks state and completes.",
       args: {
         title: tool3.schema.string().describe("Short human label for the session."),
-        command: tool3.schema.string().describe('Executable to spawn (e.g. "bun", "python3").'),
-        args: tool3.schema.array(tool3.schema.string()).optional().describe("Arguments for the command."),
-        cwd: tool3.schema.string().optional().describe("Working directory. Defaults to the project root."),
+        command: tool3.schema.string().describe('Executable ONLY (e.g. "bash", "bun", "python3") \u2014 never a full shell string. The script and flags go in `args`, not here. WRONG: {command: "bash pull.sh"}. RIGHT: {command: "bash", args: ["pull.sh"]}. For pipes/redirects/globs use shell:true instead.'),
+        args: tool3.schema.array(tool3.schema.string()).optional().describe("Arguments for the command (argv[1:]). One array element per argument."),
+        cwd: tool3.schema.string().optional().describe("Working directory for the child process. Defaults to the project root. This is the ONLY directory field \u2014 there is no `workdir`, `dir`, or `path` parameter; those are rejected."),
         goal_id: tool3.schema.string().optional().describe("Optional goal linkage (display only \u2014 no lifecycle coupling)."),
         notify_on_exit: tool3.schema.boolean().optional().describe("Owner-exit-notification override. Omit to notify on natural exits (including quick success), missing or timeout; manual terminate stays silent. true also notifies on manual terminate; false disables owner exit notifications."),
         cols: tool3.schema.number().optional().describe(`Requested terminal width (${sizeNote}).`),

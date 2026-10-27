@@ -300,10 +300,11 @@ export async function beforeWorkspaceTool(
     const isOwner = !goal && (state.goals.some((item) => item.ownerSessionID === input.sessionID) || hostMain)
     if (protectedGoals.length && input.tool !== "loopd_command_write") assertCommandQuiescence(state)
     if (!state.workspaceOperation && !protectedGoals.length && (!goal || goal.config.write_scope === undefined)) {
-      // Preserve unscoped executors, but reserve them BEFORE execution so a
-      // protected goal cannot activate in the middle of an existing shell/tool.
-      const concurrent = foreignUncontrolledCall(state, input)
-      if (concurrent) throw new Error(`Workspace busy: uncontrolled tool call ${concurrent.callID} from session ${concurrent.sessionID} is still executing; wait for its exit event before writing source.`)
+      // No protected goals, no checks running: shells from sibling sessions
+      // run concurrently. The reservation below is still recorded BEFORE
+      // execution, so a protected goal activating later sees it and refuses
+      // (assertScopeAvailable fences on live uncontrolled calls) — the fence
+      // lives at activation time, not at every unrelated shell.
       let paths: string[] = []
       let uncontrolled = false
       try {

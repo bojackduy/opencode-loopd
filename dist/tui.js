@@ -4742,13 +4742,13 @@ function paletteToHex(index) {
   const g = 8 + (index - 232) * 10;
   return toHex(g << 16 | g << 8 | g);
 }
-function createTerminalScreen(cols, rows) {
+function createTerminalScreen(cols, rows, opts) {
   const { Terminal } = __require("@xterm/headless");
   function makeTerm(nextCols, nextRows) {
     return new Terminal({
       cols: nextCols,
       rows: nextRows,
-      scrollback: 0,
+      scrollback: opts?.scrollback ?? 1000,
       allowProposedApi: true
     });
   }
@@ -4871,10 +4871,20 @@ function createTerminalScreen(cols, rows) {
       }
       const c = term.cols;
       const r = term.rows;
+      let base = 0;
+      try {
+        const viewY = active.viewportY;
+        const len = active.length ?? r;
+        if (typeof viewY === "number" && Number.isFinite(viewY)) {
+          base = Math.max(0, Math.min(viewY, Math.max(0, len - r)));
+        }
+      } catch {
+        base = 0;
+      }
       for (let y = 0;y < r; y++) {
         let line;
         try {
-          line = active.getLine(y);
+          line = active.getLine(base + y);
         } catch {
           line = undefined;
         }
@@ -4941,6 +4951,51 @@ function createTerminalScreen(cols, rows) {
         rows.push(row);
       }
       return rows;
+    },
+    get scrollOffset() {
+      if (disposed)
+        return 0;
+      try {
+        const active = term.buffer.active;
+        if (typeof active.viewportY !== "number" || typeof active.baseY !== "number")
+          return 0;
+        return Math.max(0, active.baseY - active.viewportY);
+      } catch {
+        return 0;
+      }
+    },
+    get scrollPosition() {
+      const none = { above: 0, below: 0 };
+      if (disposed)
+        return none;
+      try {
+        if (term.buffer.active.type === "alternate")
+          return none;
+        const active = term.buffer.active;
+        const r = term.rows;
+        const len = typeof active.length === "number" ? active.length : r;
+        let v = typeof active.viewportY === "number" && Number.isFinite(active.viewportY) ? active.viewportY : 0;
+        v = Math.max(0, Math.min(v, Math.max(0, len - r)));
+        return { above: v, below: Math.max(0, len - (v + r)) };
+      } catch {
+        return none;
+      }
+    },
+    scrollBy(lines) {
+      if (disposed || !Number.isFinite(lines) || lines === 0)
+        return;
+      try {
+        if (term.buffer.active.type === "alternate")
+          return;
+        term.scrollLines(Math.trunc(lines));
+      } catch {}
+    },
+    scrollToBottom() {
+      if (disposed)
+        return;
+      try {
+        term.scrollToBottom();
+      } catch {}
     },
     dispose() {
       disposed = true;
@@ -6081,6 +6136,7 @@ function createTerminalSession(options) {
   let emitTimer;
   let lastEmitAt = 0;
   const EMIT_MIN_MS = 120;
+  let pendingScrollRestore = 0;
   let paintRevision = 0;
   function ensureEmulator() {
     if (screen && feed)
@@ -6110,9 +6166,14 @@ function createTerminalSession(options) {
   }
   function applySnapshotBytes(snapshotData, startOffset, endOffset) {
     ensureEmulator();
+    if (feed?.endOffset === endOffset)
+      return;
+    const keepOffset = screen?.scrollOffset ?? 0;
     const revision = ++paintRevision;
     feed.applySnapshot(snapshotData, startOffset, endOffset);
     totalBytes = endOffset;
+    if (keepOffset > 0)
+      pendingScrollRestore = keepOffset;
     flushThenEmit(revision);
   }
   function applyDeltaBytes(deltaData, startOffset, endOffset) {
@@ -6130,6 +6191,14 @@ function createTerminalSession(options) {
     } catch {}
     if (disposed || revision !== paintRevision)
       return;
+    if (pendingScrollRestore > 0) {
+      const keep = pendingScrollRestore;
+      pendingScrollRestore = 0;
+      try {
+        screen?.scrollToBottom();
+        screen?.scrollBy(-keep);
+      } catch {}
+    }
     emitSoon();
   }
   function streamLive() {
@@ -6296,12 +6365,16 @@ function createTerminalSession(options) {
       return;
     if (command && command.status !== "running")
       return;
+    if (command?.detached === true)
+      return;
     if (streamLive() && stream.sendInput(data.commandID, bytes).ok)
       return;
     control.executeRaw({ command: "cmd_write", goalID: data.commandID, args: { commandID: data.commandID, input: bytes, ownerSessionID: data.ownerSessionID } }).catch(() => {});
   }
   function paste(text) {
     if (disposed || !data || !text)
+      return;
+    if (command?.detached === true)
       return;
     writeInput(text);
   }
@@ -6311,6 +6384,8 @@ function createTerminalSession(options) {
     if (connection === "error")
       return;
     if (command && command.status !== "running")
+      return;
+    if (command?.detached === true)
       return;
     if (streamLive() && stream.sendInterrupt(data.commandID).ok)
       return;
@@ -6348,6 +6423,24 @@ function createTerminalSession(options) {
         return;
       applyResize(next.cols, next.rows);
     }, resizeDebounceMs);
+  }
+  function scrollBy(lines) {
+    if (disposed || !data)
+      return;
+    if (!Number.isFinite(lines) || lines === 0)
+      return;
+    try {
+      screen?.scrollBy(Math.trunc(lines));
+    } catch {}
+    emitSoon();
+  }
+  function scrollToBottom() {
+    if (disposed)
+      return;
+    try {
+      screen?.scrollToBottom();
+    } catch {}
+    emitSoon();
   }
   function cleanup() {
     if (pollTimer)
@@ -6404,6 +6497,17 @@ function createTerminalSession(options) {
     try {
       activeBuffer = screen.activeBuffer;
     } catch {}
+    let scrollOffset = 0;
+    let scrollAbove = 0;
+    let scrollBelow = 0;
+    try {
+      scrollOffset = screen?.scrollOffset ?? 0;
+      const pos = screen?.scrollPosition;
+      scrollAbove = pos?.above ?? 0;
+      scrollBelow = pos?.below ?? 0;
+    } catch {
+      scrollOffset = 0;
+    }
     return {
       rows,
       cols: screen.cols,
@@ -6415,6 +6519,9 @@ function createTerminalSession(options) {
       connectionDetail,
       totalBytes,
       live,
+      scrollOffset,
+      scrollAbove,
+      scrollBelow,
       invalid: routeReason
     };
   }
@@ -6431,6 +6538,8 @@ function createTerminalSession(options) {
     interrupt,
     detach,
     requestViewportSize,
+    scrollBy,
+    scrollToBottom,
     get appliedSize() {
       return { ...appliedSize };
     },
@@ -6743,22 +6852,36 @@ function TerminalView(props) {
     session.dispose();
   });
   useKeyboard3((evt) => {
-    if (isDetachChord(toKeyEvent(evt))) {
+    const keyEvt = toKeyEvent(evt);
+    if (keyEvt.shift && !keyEvt.release) {
+      const nm = (keyEvt.name ?? "").toLowerCase();
+      if (nm === "pageup" || nm === "page_up") {
+        prevent3(evt);
+        session.scrollBy(-Math.max(1, session.appliedSize.rows));
+        return;
+      }
+      if (nm === "pagedown" || nm === "page_down") {
+        prevent3(evt);
+        session.scrollBy(Math.max(1, session.appliedSize.rows));
+        return;
+      }
+    }
+    if (isDetachChord(keyEvt)) {
       prevent3(evt);
       session.detach();
       return;
     }
-    if (isInterruptChord(toKeyEvent(evt))) {
+    if (isInterruptChord(keyEvt)) {
       prevent3(evt);
-      if (view()?.command && view()?.command?.status !== "running")
+      if (detachedCmd() || view()?.command && view()?.command?.status !== "running")
         return;
       session.interrupt();
       return;
     }
-    const bytes = encodeTerminalKey(toKeyEvent(evt));
+    const bytes = encodeTerminalKey(keyEvt);
     if (bytes !== undefined) {
       prevent3(evt);
-      if (view()?.command && view()?.command?.status !== "running")
+      if (detachedCmd() || view()?.command && view()?.command?.status !== "running")
         return;
       session.writeInput(bytes);
     }
@@ -6772,6 +6895,7 @@ function TerminalView(props) {
   });
   const cmd = () => view()?.command;
   const processRunning = () => cmd()?.status === "running" && view()?.live === true;
+  const detachedCmd = () => cmd()?.detached === true && cmd()?.status === "running";
   const dims = () => {
     const v = view();
     if (!v)
@@ -6779,10 +6903,10 @@ function TerminalView(props) {
     return `${v.cols}x${v.viewportRows}`;
   };
   return (() => {
-    var _el$ = _$createElement3("box"), _el$2 = _$createElement3("box"), _el$3 = _$createElement3("text"), _el$4 = _$createElement3("span"), _el$5 = _$createTextNode3(`\u2B22 `), _el$9 = _$createElement3("span"), _el$1 = _$createElement3("span"), _el$12 = _$createElement3("text"), _el$13 = _$createElement3("span"), _el$26 = _$createElement3("box"), _el$27 = _$createElement3("box"), _el$28 = _$createElement3("text"), _el$29 = _$createElement3("span"), _el$30 = _$createElement3("span"), _el$32 = _$createElement3("span"), _el$34 = _$createElement3("span"), _el$36 = _$createElement3("span"), _el$38 = _$createElement3("text"), _el$39 = _$createElement3("span"), _el$40 = _$createTextNode3(` \xB7 `), _el$41 = _$createTextNode3(` bytes`);
+    var _el$ = _$createElement3("box"), _el$2 = _$createElement3("box"), _el$3 = _$createElement3("text"), _el$4 = _$createElement3("span"), _el$5 = _$createTextNode3(`\u2B22 `), _el$9 = _$createElement3("span"), _el$1 = _$createElement3("span"), _el$12 = _$createElement3("text"), _el$13 = _$createElement3("span"), _el$30 = _$createElement3("box"), _el$31 = _$createElement3("box"), _el$32 = _$createElement3("text"), _el$33 = _$createElement3("span"), _el$43 = _$createElement3("span"), _el$45 = _$createElement3("span"), _el$47 = _$createElement3("span"), _el$49 = _$createElement3("span"), _el$51 = _$createElement3("text"), _el$52 = _$createElement3("span"), _el$53 = _$createTextNode3(` \xB7 `), _el$54 = _$createTextNode3(` bytes`);
     _$insertNode3(_el$, _el$2);
-    _$insertNode3(_el$, _el$26);
-    _$insertNode3(_el$, _el$27);
+    _$insertNode3(_el$, _el$30);
+    _$insertNode3(_el$, _el$31);
     _$setProp3(_el$, "flexDirection", "column");
     _$setProp3(_el$, "width", "100%");
     _$setProp3(_el$, "height", "100%");
@@ -6870,7 +6994,7 @@ Press Ctrl+] to go back. Nothing was subscribed or written.`);
         });
         return _el$14;
       }
-    }), _el$26);
+    }), _el$30);
     _$insert3(_el$, _$createComponent3(Show3, {
       get when() {
         return _$memo3(() => !!cmd())() && !processRunning();
@@ -6904,31 +7028,66 @@ Press Ctrl+] to go back. Nothing was subscribed or written.`);
         });
         return _el$21;
       }
-    }), _el$26);
+    }), _el$30);
+    _$insert3(_el$, _$createComponent3(Show3, {
+      get when() {
+        return detachedCmd();
+      },
+      get children() {
+        var _el$26 = _$createElement3("box"), _el$27 = _$createElement3("text"), _el$28 = _$createElement3("span");
+        _$insertNode3(_el$26, _el$27);
+        _$setProp3(_el$26, "border", true);
+        _$setProp3(_el$26, "paddingLeft", 1);
+        _$setProp3(_el$26, "paddingRight", 1);
+        _$setProp3(_el$26, "flexShrink", 0);
+        _$insertNode3(_el$27, _el$28);
+        _$insertNode3(_el$28, _$createTextNode3(`DETACHED \u2014 survived a host restart. Output frozen at the detach point; typing cannot reach it. Terminate/kill from Commands still stops the pid.`));
+        _$effect3((_p$) => {
+          var _v$6 = theme().info, _v$7 = {
+            fg: theme().info,
+            bold: true
+          };
+          _v$6 !== _p$.e && (_p$.e = _$setProp3(_el$26, "borderColor", _v$6, _p$.e));
+          _v$7 !== _p$.t && (_p$.t = _$setProp3(_el$28, "style", _v$7, _p$.t));
+          return _p$;
+        }, {
+          e: undefined,
+          t: undefined
+        });
+        return _el$26;
+      }
+    }), _el$30);
     _$use3((el) => {
       viewportEl = el;
       try {
         el.onSizeChange = () => measureViewport();
       } catch {}
       setTimeout(measureViewport, 50);
-    }, _el$26);
-    _$setProp3(_el$26, "flexDirection", "column");
-    _$setProp3(_el$26, "flexGrow", 1);
-    _$setProp3(_el$26, "minHeight", 0);
-    _$setProp3(_el$26, "overflow", "hidden");
-    _$insert3(_el$26, _$createComponent3(Show3, {
+    }, _el$30);
+    _$setProp3(_el$30, "flexDirection", "column");
+    _$setProp3(_el$30, "flexGrow", 1);
+    _$setProp3(_el$30, "minHeight", 0);
+    _$setProp3(_el$30, "overflow", "hidden");
+    _$setProp3(_el$30, "onMouseScroll", (evt) => {
+      const dir = evt.scroll?.direction;
+      if (dir !== "up" && dir !== "down")
+        return;
+      const step = Math.max(1, evt.scroll?.delta ?? 1) * 3;
+      session.scrollBy(dir === "up" ? -step : step);
+    });
+    _$insert3(_el$30, _$createComponent3(Show3, {
       get when() {
         return _$memo3(() => !!view())() && view().rows.length > 0;
       },
       get fallback() {
         return (() => {
-          var _el$42 = _$createElement3("text"), _el$43 = _$createElement3("span");
-          _$insertNode3(_el$42, _el$43);
-          _$insert3(_el$43, () => view()?.invalid ? "" : "(no output yet)");
-          _$effect3((_$p) => _$setProp3(_el$43, "style", {
+          var _el$55 = _$createElement3("text"), _el$56 = _$createElement3("span");
+          _$insertNode3(_el$55, _el$56);
+          _$insert3(_el$56, () => view()?.invalid ? "" : "(no output yet)");
+          _$effect3((_$p) => _$setProp3(_el$56, "style", {
             fg: theme().textMuted
           }, _$p));
-          return _el$42;
+          return _el$55;
         })();
       },
       get children() {
@@ -6940,63 +7099,110 @@ Press Ctrl+] to go back. Nothing was subscribed or written.`);
             });
           },
           children: (runs) => (() => {
-            var _el$44 = _$createElement3("text");
-            _$setProp3(_el$44, "wrapMode", "none");
-            _$setProp3(_el$44, "truncate", true);
-            _$insert3(_el$44, _$createComponent3(For3, {
+            var _el$57 = _$createElement3("text");
+            _$setProp3(_el$57, "wrapMode", "none");
+            _$setProp3(_el$57, "truncate", true);
+            _$insert3(_el$57, _$createComponent3(For3, {
               each: runs,
               children: (run) => (() => {
-                var _el$45 = _$createElement3("span");
-                _$insert3(_el$45, () => run.text);
-                _$effect3((_$p) => _$setProp3(_el$45, "style", {
+                var _el$58 = _$createElement3("span");
+                _$insert3(_el$58, () => run.text);
+                _$effect3((_$p) => _$setProp3(_el$58, "style", {
                   fg: run.cursor ? theme().background : run.inverse ? run.fg ?? theme().background : run.fg ?? theme().text,
                   bg: run.cursor ? theme().primary : run.inverse ? run.bg ?? theme().text : run.bg,
                   bold: run.bold ?? run.cursor,
                   underline: run.underline
                 }, _$p));
-                return _el$45;
+                return _el$58;
               })()
             }));
-            return _el$44;
+            return _el$57;
           })()
         });
       }
     }));
-    _$insertNode3(_el$27, _el$28);
-    _$insertNode3(_el$27, _el$38);
-    _$setProp3(_el$27, "flexDirection", "row");
-    _$setProp3(_el$27, "justifyContent", "space-between");
-    _$setProp3(_el$27, "flexShrink", 0);
-    _$insertNode3(_el$28, _el$29);
-    _$insertNode3(_el$28, _el$30);
-    _$insertNode3(_el$28, _el$32);
-    _$insertNode3(_el$28, _el$34);
-    _$insertNode3(_el$28, _el$36);
-    _$insert3(_el$29, () => processRunning() ? "type to write \xB7 " : "saved log \xB7 ");
-    _$insertNode3(_el$30, _$createTextNode3(`Ctrl+C`));
-    _$insertNode3(_el$32, _$createTextNode3(` interrupt \xB7 `));
-    _$insertNode3(_el$34, _$createTextNode3(`Ctrl+]`));
-    _$insertNode3(_el$36, _$createTextNode3(` detach (keeps running)`));
-    _$insertNode3(_el$38, _el$39);
-    _$insertNode3(_el$39, _el$40);
-    _$insertNode3(_el$39, _el$41);
-    _$insert3(_el$39, dims, _el$40);
-    _$insert3(_el$39, () => view()?.totalBytes ?? 0, _el$41);
+    _$insertNode3(_el$31, _el$32);
+    _$insertNode3(_el$31, _el$51);
+    _$setProp3(_el$31, "flexDirection", "row");
+    _$setProp3(_el$31, "justifyContent", "space-between");
+    _$setProp3(_el$31, "flexShrink", 0);
+    _$insertNode3(_el$32, _el$33);
+    _$insertNode3(_el$32, _el$43);
+    _$insertNode3(_el$32, _el$45);
+    _$insertNode3(_el$32, _el$47);
+    _$insertNode3(_el$32, _el$49);
+    _$insert3(_el$33, (() => {
+      var _c$3 = _$memo3(() => !!detachedCmd());
+      return () => _c$3() ? "detached \u2014 input unavailable \xB7 " : processRunning() ? "type to write \xB7 " : "saved log \xB7 ";
+    })());
+    _$insert3(_el$32, _$createComponent3(Show3, {
+      get when() {
+        return !detachedCmd();
+      },
+      get children() {
+        return [(() => {
+          var _el$34 = _$createElement3("span");
+          _$insertNode3(_el$34, _$createTextNode3(`Ctrl+C`));
+          _$effect3((_$p) => _$setProp3(_el$34, "style", {
+            fg: theme().warning,
+            bold: true
+          }, _$p));
+          return _el$34;
+        })(), (() => {
+          var _el$36 = _$createElement3("span");
+          _$insertNode3(_el$36, _$createTextNode3(` interrupt \xB7 `));
+          _$effect3((_$p) => _$setProp3(_el$36, "style", {
+            fg: theme().textMuted
+          }, _$p));
+          return _el$36;
+        })()];
+      }
+    }), _el$43);
+    _$insert3(_el$32, _$createComponent3(Show3, {
+      get when() {
+        return (view()?.scrollBelow ?? 0) > 0;
+      },
+      get children() {
+        return [(() => {
+          var _el$38 = _$createElement3("span"), _el$39 = _$createTextNode3(`\u2191`), _el$40 = _$createTextNode3(` \u2193`);
+          _$insertNode3(_el$38, _el$39);
+          _$insertNode3(_el$38, _el$40);
+          _$insert3(_el$38, () => view()?.scrollAbove, _el$40);
+          _$insert3(_el$38, () => view()?.scrollBelow, null);
+          _$effect3((_$p) => _$setProp3(_el$38, "style", {
+            fg: theme().accent,
+            bold: true
+          }, _$p));
+          return _el$38;
+        })(), (() => {
+          var _el$41 = _$createElement3("span");
+          _$insertNode3(_el$41, _$createTextNode3(` \xB7 `));
+          _$effect3((_$p) => _$setProp3(_el$41, "style", {
+            fg: theme().textMuted
+          }, _$p));
+          return _el$41;
+        })()];
+      }
+    }), _el$43);
+    _$insertNode3(_el$43, _$createTextNode3(`Shift+PgUp/PgDn`));
+    _$insertNode3(_el$45, _$createTextNode3(` or wheel scroll \xB7 `));
+    _$insertNode3(_el$47, _$createTextNode3(`Ctrl+]`));
+    _$insertNode3(_el$49, _$createTextNode3(` detach (keeps running)`));
+    _$insertNode3(_el$51, _el$52);
+    _$insertNode3(_el$52, _el$53);
+    _$insertNode3(_el$52, _el$54);
+    _$insert3(_el$52, dims, _el$53);
+    _$insert3(_el$52, () => view()?.totalBytes ?? 0, _el$54);
     _$effect3((_p$) => {
-      var _v$6 = {
+      var _v$8 = {
         fg: theme().primary,
         bold: true
-      }, _v$7 = {
-        fg: theme().textMuted
-      }, _v$8 = {
-        fg: cmd() && !processRunning() ? theme().warning : view()?.connection === "stream" ? theme().success : view()?.connection === "polling" ? theme().warning : theme().error
       }, _v$9 = {
         fg: theme().textMuted
       }, _v$0 = {
-        fg: theme().textMuted
+        fg: cmd() && !processRunning() ? theme().warning : view()?.connection === "stream" ? theme().success : view()?.connection === "polling" ? theme().warning : theme().error
       }, _v$1 = {
-        fg: theme().warning,
-        bold: true
+        fg: theme().textMuted
       }, _v$10 = {
         fg: theme().textMuted
       }, _v$11 = {
@@ -7005,18 +7211,23 @@ Press Ctrl+] to go back. Nothing was subscribed or written.`);
       }, _v$12 = {
         fg: theme().textMuted
       }, _v$13 = {
+        fg: theme().warning,
+        bold: true
+      }, _v$14 = {
+        fg: theme().textMuted
+      }, _v$15 = {
         fg: theme().textMuted
       };
-      _v$6 !== _p$.e && (_p$.e = _$setProp3(_el$4, "style", _v$6, _p$.e));
-      _v$7 !== _p$.t && (_p$.t = _$setProp3(_el$9, "style", _v$7, _p$.t));
-      _v$8 !== _p$.a && (_p$.a = _$setProp3(_el$1, "style", _v$8, _p$.a));
-      _v$9 !== _p$.o && (_p$.o = _$setProp3(_el$13, "style", _v$9, _p$.o));
-      _v$0 !== _p$.i && (_p$.i = _$setProp3(_el$29, "style", _v$0, _p$.i));
-      _v$1 !== _p$.n && (_p$.n = _$setProp3(_el$30, "style", _v$1, _p$.n));
-      _v$10 !== _p$.s && (_p$.s = _$setProp3(_el$32, "style", _v$10, _p$.s));
-      _v$11 !== _p$.h && (_p$.h = _$setProp3(_el$34, "style", _v$11, _p$.h));
-      _v$12 !== _p$.r && (_p$.r = _$setProp3(_el$36, "style", _v$12, _p$.r));
-      _v$13 !== _p$.d && (_p$.d = _$setProp3(_el$39, "style", _v$13, _p$.d));
+      _v$8 !== _p$.e && (_p$.e = _$setProp3(_el$4, "style", _v$8, _p$.e));
+      _v$9 !== _p$.t && (_p$.t = _$setProp3(_el$9, "style", _v$9, _p$.t));
+      _v$0 !== _p$.a && (_p$.a = _$setProp3(_el$1, "style", _v$0, _p$.a));
+      _v$1 !== _p$.o && (_p$.o = _$setProp3(_el$13, "style", _v$1, _p$.o));
+      _v$10 !== _p$.i && (_p$.i = _$setProp3(_el$33, "style", _v$10, _p$.i));
+      _v$11 !== _p$.n && (_p$.n = _$setProp3(_el$43, "style", _v$11, _p$.n));
+      _v$12 !== _p$.s && (_p$.s = _$setProp3(_el$45, "style", _v$12, _p$.s));
+      _v$13 !== _p$.h && (_p$.h = _$setProp3(_el$47, "style", _v$13, _p$.h));
+      _v$14 !== _p$.r && (_p$.r = _$setProp3(_el$49, "style", _v$14, _p$.r));
+      _v$15 !== _p$.d && (_p$.d = _$setProp3(_el$52, "style", _v$15, _p$.d));
       return _p$;
     }, {
       e: undefined,

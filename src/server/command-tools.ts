@@ -120,9 +120,9 @@ export function commandTools(options: CommandToolsOptions) {
         "Watches longer than ~30min are fragile (in-memory only, die on restart) — prefer a scheduled goal that checks state and completes.",
       args: {
         title: tool.schema.string().describe("Short human label for the session."),
-        command: tool.schema.string().describe("Executable to spawn (e.g. \"bun\", \"python3\")."),
-        args: tool.schema.array(tool.schema.string()).optional().describe("Arguments for the command."),
-        cwd: tool.schema.string().optional().describe("Working directory. Defaults to the project root."),
+        command: tool.schema.string().describe("Executable ONLY (e.g. \"bash\", \"bun\", \"python3\") — never a full shell string. The script and flags go in `args`, not here. WRONG: {command: \"bash pull.sh\"}. RIGHT: {command: \"bash\", args: [\"pull.sh\"]}. For pipes/redirects/globs use shell:true instead."),
+        args: tool.schema.array(tool.schema.string()).optional().describe("Arguments for the command (argv[1:]). One array element per argument."),
+        cwd: tool.schema.string().optional().describe("Working directory for the child process. Defaults to the project root. This is the ONLY directory field — there is no `workdir`, `dir`, or `path` parameter; those are rejected."),
         goal_id: tool.schema.string().optional().describe("Optional goal linkage (display only — no lifecycle coupling)."),
         notify_on_exit: tool.schema.boolean().optional().describe("Owner-exit-notification override. Omit to notify on natural exits (including quick success), missing or timeout; manual terminate stays silent. true also notifies on manual terminate; false disables owner exit notifications."),
         cols: tool.schema.number().optional().describe(`Requested terminal width (${sizeNote}).`),

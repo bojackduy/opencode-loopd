@@ -429,3 +429,42 @@ describe("terminal-session", () => {
     session.dispose()
   })
 })
+
+describe("terminal-session scroll + detached", () => {
+  it("scrollBy moves the viewport and reports scrollOffset", async () => {
+    const stream = makeStreamStub()
+    const session = createTerminalSession({ ...baseOptions(), createStreamClient: () => stream.client })
+    await session.start()
+    const h = stream.handlers.get("cmd-1")!
+    const lines = Array.from({ length: 40 }, (_, i) => `line${i}\r\n`).join("")
+    h.onSnapshot!({ command: ownedCmd() as never, data: lines, startOffset: 0, endOffset: lines.length })
+    await new Promise((r) => setTimeout(r, 300))
+    expect(session.readView().scrollOffset).toBe(0)
+    session.scrollBy(-3)
+    const view = session.readView()
+    expect(view.scrollOffset).toBe(3)
+    session.scrollToBottom()
+    expect(session.readView().scrollOffset).toBe(0)
+    session.dispose()
+  })
+
+  it("detached commands never receive input", async () => {
+    const stream = makeStreamStub()
+    const control = makeControlStub()
+    const session = createTerminalSession({
+      ...baseOptions(),
+      createStreamClient: () => stream.client,
+      createControl: () => control.client as never,
+      readStateFn: async () => ({ commands: [ownedCmd({ detached: true })], goals: [], runtimes: [], events: [] }) as never,
+    })
+    await session.start()
+    stream.live.add("cmd-1")
+    session.writeInput("r")
+    session.paste("r")
+    session.interrupt()
+    expect(stream.inputs).toEqual([])
+    expect(stream.interrupts).toEqual([])
+    expect(control.calls).toEqual([])
+    session.dispose()
+  })
+})

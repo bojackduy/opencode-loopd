@@ -42,6 +42,11 @@ export interface TerminalSessionSnapshot {
   connectionDetail: string
   totalBytes: number
   live: boolean
+  /** Lines scrolled up from live output (0 = following). */
+  scrollOffset: number
+  /** Lines hidden above / below the viewport (alt-screen: 0,0). */
+  scrollAbove: number
+  scrollBelow: number
   invalid: string | undefined
 }
 
@@ -80,6 +85,10 @@ export interface TerminalSession {
   detach(): void
   /** Viewport-measured size; debounced to emulator + real PTY winsize. */
   requestViewportSize(cols: number, rows: number): void
+  /** Scroll the viewport into scrollback (negative = up) or toward live. */
+  scrollBy(lines: number): void
+  /** Resume following live output. */
+  scrollToBottom(): void
   /** Last applied viewport size (fallback 80x24 until measured). */
   readonly appliedSize: { cols: number; rows: number }
   readView(): TerminalSessionSnapshot
@@ -135,6 +144,8 @@ export function createTerminalSession(options: TerminalSessionOptions): Terminal
   let emitTimer: ReturnType<typeof setTimeout> | undefined
   let lastEmitAt = 0
   const EMIT_MIN_MS = 120
+  /** Scroll offset carried across a resnapshot grid rebuild. */
+  let pendingScrollRestore = 0
   /**
    * Paint revision: incremented on every feed write and every reset. Async
    * flush continuations capture their revision and skip emission when a
@@ -171,9 +182,16 @@ export function createTerminalSession(options: TerminalSessionOptions): Terminal
 
   function applySnapshotBytes(snapshotData: string, startOffset: number, endOffset: number): void {
     ensureEmulator()
+    // Unchanged window: skip the reset+repaint so a scrolled-up viewport is
+    // never yanked back to the bottom by an idle poll.
+    if (feed?.endOffset === endOffset) return
+    // A resnapshot rebuilds the grid from the retained window: carry the
+    // scroll offset across the reset so new output doesn't yank the view.
+    const keepOffset = screen?.scrollOffset ?? 0
     const revision = ++paintRevision
     feed!.applySnapshot(snapshotData, startOffset, endOffset)
     totalBytes = endOffset
+    if (keepOffset > 0) pendingScrollRestore = keepOffset
     void flushThenEmit(revision)
   }
 
@@ -197,6 +215,15 @@ export function createTerminalSession(options: TerminalSessionOptions): Terminal
       await screen?.flush()
     } catch {}
     if (disposed || revision !== paintRevision) return
+    // Restore a carried scroll offset after a resnapshot rebuilds the grid.
+    if (pendingScrollRestore > 0) {
+      const keep = pendingScrollRestore
+      pendingScrollRestore = 0
+      try {
+        screen?.scrollToBottom()
+        screen?.scrollBy(-keep)
+      } catch {}
+    }
     emitSoon()
   }
 
@@ -370,6 +397,9 @@ export function createTerminalSession(options: TerminalSessionOptions): Terminal
     if (disposed || !data || !bytes) return
     if (connection === "error") return // invalid/cross-owner: never write
     if (command && command.status !== "running") return
+    // Adopted after a host restart: stdin died with the old host, so bytes
+    // have nowhere to go. The view guards this too; belt-and-braces here.
+    if ((command as unknown as { detached?: boolean } | null)?.detached === true) return
     if (streamLive() && stream.sendInput(data.commandID, bytes).ok) return
     // Fallback to the control bus (never double-send on both paths).
     void control
@@ -380,6 +410,7 @@ export function createTerminalSession(options: TerminalSessionOptions): Terminal
   function paste(text: string): void {
     // Paste bytes forward immediately as raw stdin — never key-encoded.
     if (disposed || !data || !text) return
+    if ((command as unknown as { detached?: boolean } | null)?.detached === true) return
     writeInput(text)
   }
 
@@ -387,6 +418,9 @@ export function createTerminalSession(options: TerminalSessionOptions): Terminal
     if (disposed || !data) return
     if (connection === "error") return
     if (command && command.status !== "running") return
+    // Adopted stdin is gone; SIGINT-by-write is impossible. Terminate/kill
+    // from Commands still stops the pid (they signal it directly).
+    if ((command as unknown as { detached?: boolean } | null)?.detached === true) return
     if (streamLive() && stream.sendInterrupt(data.commandID).ok) return
     void control
       .executeRaw({ command: "cmd_interrupt", goalID: data.commandID, args: { commandID: data.commandID, ownerSessionID: data.ownerSessionID } })
@@ -410,8 +444,7 @@ export function createTerminalSession(options: TerminalSessionOptions): Terminal
     emitSoon()
   }
 
-  function requestViewportSize(cols: number, rows: number): void {
-    if (disposed) return
+  function requestViewportSize(cols: number, rows: number): void {    if (disposed) return
     if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1) return
     if (cols === appliedSize.cols && rows === appliedSize.rows && !pendingResize) return
     pendingResize = { cols, rows }
@@ -423,6 +456,23 @@ export function createTerminalSession(options: TerminalSessionOptions): Terminal
       if (!next || disposed) return
       applyResize(next.cols, next.rows)
     }, resizeDebounceMs)
+  }
+
+  function scrollBy(lines: number): void {
+    if (disposed || !data) return
+    if (!Number.isFinite(lines) || lines === 0) return
+    try {
+      screen?.scrollBy(Math.trunc(lines))
+    } catch {}
+    emitSoon()
+  }
+
+  function scrollToBottom(): void {
+    if (disposed) return
+    try {
+      screen?.scrollToBottom()
+    } catch {}
+    emitSoon()
   }
 
   function cleanup(): void {
@@ -479,6 +529,17 @@ export function createTerminalSession(options: TerminalSessionOptions): Terminal
     try {
       activeBuffer = screen!.activeBuffer
     } catch {}
+    let scrollOffset = 0
+    let scrollAbove = 0
+    let scrollBelow = 0
+    try {
+      scrollOffset = screen?.scrollOffset ?? 0
+      const pos = screen?.scrollPosition
+      scrollAbove = pos?.above ?? 0
+      scrollBelow = pos?.below ?? 0
+    } catch {
+      scrollOffset = 0
+    }
     return {
       rows,
       cols: screen!.cols,
@@ -490,6 +551,9 @@ export function createTerminalSession(options: TerminalSessionOptions): Terminal
       connectionDetail,
       totalBytes,
       live,
+      scrollOffset,
+      scrollAbove,
+      scrollBelow,
       invalid: routeReason,
     }
   }
@@ -507,6 +571,8 @@ export function createTerminalSession(options: TerminalSessionOptions): Terminal
     interrupt,
     detach,
     requestViewportSize,
+    scrollBy,
+    scrollToBottom,
     get appliedSize() {
       return { ...appliedSize }
     },

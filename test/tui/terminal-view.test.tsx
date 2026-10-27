@@ -66,6 +66,9 @@ function snapshot(overrides: Partial<TerminalSessionSnapshot> = {}): TerminalSes
     connectionDetail: "live",
     totalBytes: 0,
     live: true,
+    scrollOffset: 0,
+    scrollAbove: 0,
+    scrollBelow: 0,
     invalid: undefined,
     ...overrides,
   }
@@ -80,6 +83,7 @@ interface FakeDriver {
   detaches: number
   starts: number
   resizes: Array<{ cols: number; rows: number }>
+  scrolls: number[]
   emit: (snap: TerminalSessionSnapshot) => void
 }
 
@@ -93,6 +97,7 @@ function makeFakeDriver(): FakeDriver & { create: (opts: TerminalSessionOptions)
     detaches: 0,
     starts: 0,
     resizes: [],
+    scrolls: [],
     emit: () => {},
   }
   const session: TerminalSession = {
@@ -122,6 +127,12 @@ function makeFakeDriver(): FakeDriver & { create: (opts: TerminalSessionOptions)
     },
     requestViewportSize: (cols, rows) => {
       fake.resizes.push({ cols, rows })
+    },
+    scrollBy: (lines) => {
+      fake.scrolls.push(lines)
+    },
+    scrollToBottom: () => {
+      fake.scrolls.push(Number.NaN)
     },
     get appliedSize() {
       return { cols: 20, rows: 6 }
@@ -370,6 +381,29 @@ describe("buildTerminalRows", () => {
     // Subsequent host resize flows through onSizeChange → debounced request.
     setup.resize(100, 30)
     await setup.waitFor(() => fake.resizes.some((r) => r.cols !== first.cols || r.rows !== first.rows))
+    setup.renderer.destroy()
+  })
+})
+
+describe("TerminalView mouse scroll", () => {
+  it("wheel over the viewport scrolls history without writing input", async () => {
+    const fake = makeFakeDriver()
+    const cmd = {
+      ...createCommandSession({ id: "cmd-1", title: "repl", command: "sh", cwd: "/tmp", ownerSessionID: "owner-1" }),
+      status: "running",
+    } as never
+    const { setup } = await renderView({ commandID: "cmd-1", ownerSessionID: "owner-1", returnSessionID: "s" }, fake)
+    fake.emit(snapshot({ rows: cellsFromText("hello-wheel", 20, 6), command: cmd, totalBytes: 10 }))
+    await setup.flush()
+    await setup.mockMouse.scroll(40, 10, "up")
+    await setup.flush()
+    expect(fake.scrolls.length).toBeGreaterThan(0)
+    expect(fake.scrolls.every((n) => n < 0)).toBe(true)
+    expect(fake.inputs).toEqual([])
+    // Scrolled-up indicator renders both directions.
+    fake.emit(snapshot({ rows: cellsFromText("hello-wheel", 20, 6), command: cmd, totalBytes: 10, scrollOffset: 6, scrollAbove: 2, scrollBelow: 6 }))
+    await setup.flush()
+    expect(setup.captureCharFrame()).toContain("↑2 ↓6")
     setup.renderer.destroy()
   })
 })

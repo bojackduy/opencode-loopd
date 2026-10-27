@@ -208,3 +208,18 @@ describe("host main-session proof", () => {
     expect(await host.isMainSession?.("child")).toBeUndefined()
   })
 })
+
+describe("unscoped concurrent shells (no protected goals)", () => {
+  it("lets sibling sessions run shells concurrently and still records both reservations", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "loopd-unscoped-shell-"))
+    roots.push(root)
+    // No goals at all: a scratch project like ~/.
+    await shell(root, "main", "call-main")
+    await shell(root, "other", "call-other")
+    const calls = (await readState(root)).workspaceCalls ?? []
+    expect(calls.map((call) => call.callID).sort()).toEqual(["call-main", "call-other"])
+    await afterWorkspaceTool(root, "main", "call-main", "shell")
+    await afterWorkspaceTool(root, "other", "call-other", "shell")
+    expect((await readState(root)).workspaceCalls ?? []).toHaveLength(0)
+  })
+})

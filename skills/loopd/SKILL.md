@@ -360,6 +360,19 @@ Agent: loopd_command_start({ title: "npm install", command: "npm", args: ["insta
 # → returns immediately; you keep working, and get pushed when it finishes.
 ```
 
+### Calling convention (read before every start)
+
+`command` is the executable **only** — never a shell string. Script/flags go in `args` (one element each). Directory goes in `cwd` (the only directory field).
+
+```
+# WRONG — two errors: "bash pull2.sh" is not an executable, and `workdir` is not a parameter:
+loopd_command_start({ title: "pull", command: "bash pull2.sh", workdir: "/Users/duytrinh/Archives/staging" })
+# RIGHT:
+loopd_command_start({ title: "pull", command: "bash", args: ["pull2.sh"], cwd: "/Users/duytrinh/Archives/staging" })
+# Shell syntax (pipes, redirects, &&, globs) needs shell:true instead of argv splitting:
+loopd_command_start({ title: "tail", command: "tail -f app.log | grep ERROR", shell: true })
+```
+
 ### Agent Tools
 
 | Tool | Purpose |
@@ -399,6 +412,8 @@ On the Commands tab, `o` **never** opens a chat session or a dialog — it close
 - `Ctrl+]` detaches back to where you came from — the process keeps running.
 - Paste forwards raw bytes immediately.
 - The viewport is measured and resizes both the emulator and the real PTY.
+- Scrollback: the emulator keeps 1000 lines. Mouse wheel or `Shift+PgUp/PgDn` scrolls history (`↑N` in the footer); new output pins your position until you return to the bottom. Refused on alt-screen apps (vim/less/htop).
+- Detached servers (survived a host restart, marked `detached`) show a banner: output is frozen at the detach point and typing cannot reach them, but terminate/kill/interrupt still stop the pid.
 
 Single-key helpers on the Commands tab: `X` force-kill (SIGKILL now, no grace — for hung processes), `R` restart with the same spec (new ID, old record kept; env values are never persisted so restarted env commands lose their env), `x` remove finished (running commands get a hint, never a kill). Colon commands (before opening fullscreen): `:new <command> [args...]` (quoted args preserved, e.g. `:new bash -c "echo hi"`), `:interrupt`, `:terminate`, `:kill`, `:restart`, `:remove`, `:await <goalID>`, and bare text + Enter writes stdin to the selected command. Goal-only keys (`p`/`r`/`A`/`N`) never fire on the Commands tab; `R`/`x` are tab-scoped (retry/clear on Goals, restart/remove-done on Commands).
 

@@ -247,13 +247,15 @@ function pidLooksLike(pid: number, command: string): boolean {
 }
 
 /** SIGTERM, brief grace, then SIGKILL. Used only for detached (adopted) pids. */
-async function signalAdoptedPid(pid: number, signal: "SIGTERM" | "SIGKILL"): Promise<void> {
+async function signalAdoptedPid(pid: number, signal: "SIGTERM" | "SIGKILL" | "SIGINT"): Promise<void> {
   try {
     process.kill(pid, signal)
   } catch {
     return
   }
-  if (signal === "SIGKILL") return
+  // SIGKILL never escalates; SIGINT never escalates either (Ctrl+C semantics:
+  // the process may trap and continue — that is correct, not a failure).
+  if (signal === "SIGKILL" || signal === "SIGINT") return
   await new Promise((resolve) => setTimeout(resolve, 500))
   if (pidAlive(pid)) {
     try {
@@ -1463,7 +1465,28 @@ export function createCommandService(
       if (!session) return { ok: false, message: "Command not found." }
       if (session.status !== "running") return { ok: false, message: `Command is ${session.status}; nothing to interrupt.` }
       const entry = live.get(id)
-      if (!entry) return { ok: false, message: "No live handle (host restarted?). Reconcile will mark it missing; use terminate/remove to clean up." }
+      if (!entry) {
+        // Adopted after a host restart: no handle, but the process is ours.
+        // Ctrl+C semantics stay: SIGINT only, never a kill.
+        if (session.pid && pidAlive(session.pid) && pidLooksLike(session.pid, session.command)) {
+          await signalAdoptedPid(session.pid, "SIGINT")
+          await mutateState(directory, `cmd.interrupt:${id}`, async (s) => {
+            const c = (s.commands ?? []).find((x) => x.id === id)
+            if (c && c.ownerSessionID === ownerSessionID) {
+              c.signal = "SIGINT"
+              c.updatedAt = new Date().toISOString()
+            }
+            return s
+          })
+          void logServerEvent(directory, "command.interrupted", {
+            commandID: id,
+            title: session.title,
+            ownerSessionID,
+          }).catch(() => {})
+          return { ok: true, message: `SIGINT delivered to adopted pid ${session.pid} ("${session.title}").` }
+        }
+        return { ok: false, message: "No live handle (host restarted?). Reconcile will mark it missing; use terminate/remove to clean up." }
+      }
       // Ctrl+C semantics: deliver SIGINT, do NOT kill. The process may trap
       // and continue — that is correct behavior, not a failure.
       const delivered = entry.handle.interrupt()

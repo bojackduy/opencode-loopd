@@ -224,22 +224,39 @@ export function TerminalView(props: Props) {
   })
 
   useKeyboard((evt: ParsedKey) => {
-    if (isDetachChord(toKeyEvent(evt))) {
+    const keyEvt = toKeyEvent(evt)
+    // Local scrollback navigation: Shift+PageUp/PageDown scrolls the
+    // viewport through history WITHOUT sending bytes to the PTY. Plain
+    // PageUp/PageDown still forward (programs like less/vim use them).
+    if (keyEvt.shift && !keyEvt.release) {
+      const nm = (keyEvt.name ?? "").toLowerCase()
+      if (nm === "pageup" || nm === "page_up") {
+        prevent(evt)
+        session.scrollBy(-Math.max(1, session.appliedSize.rows))
+        return
+      }
+      if (nm === "pagedown" || nm === "page_down") {
+        prevent(evt)
+        session.scrollBy(Math.max(1, session.appliedSize.rows))
+        return
+      }
+    }
+    if (isDetachChord(keyEvt)) {
       prevent(evt)
       session.detach()
       return
     }
-    if (isInterruptChord(toKeyEvent(evt))) {
+    if (isInterruptChord(keyEvt)) {
       // Ctrl+C is interrupt INPUT to the PTY — prevent it from closing OpenCode.
       prevent(evt)
-      if (view()?.command && view()?.command?.status !== "running") return
+      if (detachedCmd() || (view()?.command && view()?.command?.status !== "running")) return
       session.interrupt()
       return
     }
-    const bytes = encodeTerminalKey(toKeyEvent(evt))
+    const bytes = encodeTerminalKey(keyEvt)
     if (bytes !== undefined) {
       prevent(evt)
-      if (view()?.command && view()?.command?.status !== "running") return
+      if (detachedCmd() || (view()?.command && view()?.command?.status !== "running")) return
       session.writeInput(bytes)
     }
   })
@@ -253,6 +270,8 @@ export function TerminalView(props: Props) {
 
   const cmd = () => view()?.command
   const processRunning = () => cmd()?.status === "running" && view()?.live === true
+  /** Adopted after a host restart: alive and stoppable, but stdin died with the old host. */
+  const detachedCmd = () => (cmd() as unknown as { detached?: boolean } | null)?.detached === true && cmd()?.status === "running"
   const dims = () => {
     const v = view()
     if (!v) return `${TERMINAL_FALLBACK_COLS}x${TERMINAL_FALLBACK_ROWS}`
@@ -297,12 +316,26 @@ export function TerminalView(props: Props) {
         </box>
       </Show>
 
+      <Show when={detachedCmd()}>
+        <box border={true} borderColor={theme().info} paddingLeft={1} paddingRight={1} flexShrink={0}>
+          <text><span style={{ fg: theme().info, bold: true }}>DETACHED — survived a host restart. Output frozen at the detach point; typing cannot reach it. Terminate/kill from Commands still stops the pid.</span></text>
+        </box>
+      </Show>
+
       {/* Viewport — flexes to all remaining space, NO maxHeight constraint. */}
       <box
         flexDirection="column"
         flexGrow={1}
         minHeight={0}
         overflow="hidden"
+        onMouseScroll={(evt: { scroll?: { direction?: string; delta?: number } }) => {
+          // Wheel scrolls local history; never forwards bytes to the PTY.
+          // (If the host never delivers mouse events, Shift+PgUp/PgDn covers it.)
+          const dir = evt.scroll?.direction
+          if (dir !== "up" && dir !== "down") return
+          const step = Math.max(1, evt.scroll?.delta ?? 1) * 3
+          session.scrollBy(dir === "up" ? -step : step)
+        }}
         ref={(el: Renderable) => {
           viewportEl = el
           try {
@@ -357,9 +390,17 @@ export function TerminalView(props: Props) {
       {/* Footer — controls + dimensions */}
       <box flexDirection="row" justifyContent="space-between" flexShrink={0}>
         <text>
-          <span style={{ fg: theme().textMuted }}>{processRunning() ? "type to write · " : "saved log · "}</span>
-          <span style={{ fg: theme().warning, bold: true }}>Ctrl+C</span>
-          <span style={{ fg: theme().textMuted }}> interrupt · </span>
+          <span style={{ fg: theme().textMuted }}>{detachedCmd() ? "detached — input unavailable · " : processRunning() ? "type to write · " : "saved log · "}</span>
+          <Show when={!detachedCmd()}>
+            <span style={{ fg: theme().warning, bold: true }}>Ctrl+C</span>
+            <span style={{ fg: theme().textMuted }}> interrupt · </span>
+          </Show>
+          <Show when={(view()?.scrollBelow ?? 0) > 0}>
+            <span style={{ fg: theme().accent, bold: true }}>↑{view()?.scrollAbove} ↓{view()?.scrollBelow}</span>
+            <span style={{ fg: theme().textMuted }}> · </span>
+          </Show>
+          <span style={{ fg: theme().warning, bold: true }}>Shift+PgUp/PgDn</span>
+          <span style={{ fg: theme().textMuted }}> or wheel scroll · </span>
           <span style={{ fg: theme().warning, bold: true }}>Ctrl+]</span>
           <span style={{ fg: theme().textMuted }}> detach (keeps running)</span>
         </text>

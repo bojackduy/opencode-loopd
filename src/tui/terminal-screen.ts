@@ -59,6 +59,23 @@ export interface TerminalScreen {
   readScreen(): ScreenCell[]
   /** Serialize the ACTIVE viewport to plain text rows (trailing spaces kept). */
   serialize(): string[]
+  /**
+   * Local scrollback navigation (normal buffer only; refused on alt-screen).
+   * Positive scrolls down toward live output, negative scrolls up into
+   * history. New PTY bytes never move a scrolled-up viewport — output pins
+   * until scrollToBottom() resumes follow.
+   */
+  scrollBy(lines: number): void
+  /** Resume following live output. */
+  scrollToBottom(): void
+  /** Lines scrolled up from live output (0 = following). */
+  readonly scrollOffset: number
+  /**
+   * Viewport position in history: lines hidden above / below the viewport.
+   * At the bottom both are... above = history depth, below = 0. Refused
+   * (0,0) on alt-screen.
+   */
+  readonly scrollPosition: { above: number; below: number }
   dispose(): void
 }
 
@@ -90,7 +107,7 @@ function paletteToHex(index: number): string | undefined {
   return toHex((g << 16) | (g << 8) | g)
 }
 
-export function createTerminalScreen(cols: number, rows: number): TerminalScreen {
+export function createTerminalScreen(cols: number, rows: number, opts?: { scrollback?: number }): TerminalScreen {
   // allowProposedApi unlocks the buffer namespace (cell/cursor/alt-screen
   // readout) — verified against @xterm/headless 6.0.0 types + probe script.
   // Loaded lazily (not at module top-level) so merely importing the TUI
@@ -102,7 +119,7 @@ export function createTerminalScreen(cols: number, rows: number): TerminalScreen
     return new Terminal({
       cols: nextCols,
       rows: nextRows,
-      scrollback: 0,
+      scrollback: opts?.scrollback ?? 1000,
       allowProposedApi: true,
     } as unknown as Record<string, unknown> as never)
   }
@@ -238,12 +255,24 @@ export function createTerminalScreen(cols: number, rows: number): TerminalScreen
       }
       const c = term.cols
       const r = term.rows
-      // scrollback: 0 pins baseY/viewportY at 0, so lines 0..rows-1 ARE the
-      // visible screen (verified by probe). Read defensively anyway.
+      // Visible viewport starts at viewportY (0 while content fits or while
+      // following live output; lower when the user scrolled into scrollback).
+      // Proven by probe: with scrollback, length=rows+history, viewportY ==
+      // baseY at the bottom, and getLine(viewportY+y) is the visible row.
+      let base = 0
+      try {
+        const viewY = (active as unknown as { viewportY?: number }).viewportY
+        const len = active.length ?? r
+        if (typeof viewY === "number" && Number.isFinite(viewY)) {
+          base = Math.max(0, Math.min(viewY, Math.max(0, len - r)))
+        }
+      } catch {
+        base = 0
+      }
       for (let y = 0; y < r; y++) {
         let line: ReturnType<typeof active.getLine>
         try {
-          line = active.getLine(y)
+          line = active.getLine(base + y)
         } catch {
           line = undefined
         }
@@ -311,6 +340,50 @@ export function createTerminalScreen(cols: number, rows: number): TerminalScreen
         rows.push(row)
       }
       return rows
+    },
+    get scrollOffset(): number {
+      if (disposed) return 0
+      try {
+        const active = term.buffer.active as unknown as { viewportY?: number; baseY?: number }
+        if (typeof active.viewportY !== "number" || typeof active.baseY !== "number") return 0
+        return Math.max(0, active.baseY - active.viewportY)
+      } catch {
+        return 0
+      }
+    },
+    get scrollPosition(): { above: number; below: number } {
+      const none = { above: 0, below: 0 }
+      if (disposed) return none
+      try {
+        if (term.buffer.active.type === "alternate") return none
+        const active = term.buffer.active as unknown as { viewportY?: number; length?: number }
+        const r = term.rows
+        const len = typeof active.length === "number" ? active.length : r
+        let v = typeof active.viewportY === "number" && Number.isFinite(active.viewportY) ? active.viewportY : 0
+        v = Math.max(0, Math.min(v, Math.max(0, len - r)))
+        return { above: v, below: Math.max(0, len - (v + r)) }
+      } catch {
+        return none
+      }
+    },
+    scrollBy(lines: number): void {
+      if (disposed || !Number.isFinite(lines) || lines === 0) return
+      try {
+        // Alt-screen apps (vim/less/htop) own the full screen: no history
+        // exists above it, so local scrolling is refused there.
+        if (term.buffer.active.type === "alternate") return
+        term.scrollLines(Math.trunc(lines))
+      } catch {
+        // Best-effort view: never throw into the render path.
+      }
+    },
+    scrollToBottom(): void {
+      if (disposed) return
+      try {
+        term.scrollToBottom()
+      } catch {
+        // Best-effort view only.
+      }
     },
     dispose(): void {
       disposed = true
