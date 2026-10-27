@@ -336,6 +336,10 @@ From the `/loop` dashboard a human has the same escape hatch without an agent: t
 
 Owner-side equivalents of TUI `:force` / `:block`. Bypass checks — use only when you have verified manually that the artifact is correct or that the blocker is real.
 
+### Diagnostics (global flow trace)
+
+Every step appends JSONL to `/tmp/loopd-server.log` (one line per event, `tail -f` it live). Agent tool calls: `tool.call.started` → `tool.call.finished` (or `tool.call.denied` with the reason — this is where scope denials land). Spawning: `worker.created` / `worker.prompted` (failures: `worker.create.failed`, `worker.prompt.failed`). Commands: `command.started` / `command.terminated` / `command.killed`, plus `command.dispose.preserved`, `command.reconcile.adopted`, `command.reconcile.missing` across host reloads. Args are summarized as keys + sizes, never values — no prompt text or secrets in the log.
+
 ## Command Sessions (Standalone Interactive Processes)
 
 A **command session** is a raw OS process (spawned via `bun-pty`, falling back to a plain pipe) — no agent, no turns, no checks. It is completely independent from goals: starting/stopping one never pauses, blocks, or completes any goal, and vice versa. Use it whenever the request is "run X and let me watch/type into it" rather than "figure out/build X". By default, natural exits (including code 0), timeouts, and missing processes notify the owner; manual termination stays silent. Notification tails are sanitized for chat, while the retained terminal log remains raw. A finished command can still be opened to read its saved output; Ctrl+C/input cannot affect it.

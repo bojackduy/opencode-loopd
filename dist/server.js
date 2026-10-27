@@ -690,6 +690,36 @@ async function logServerEvent(directory, event, details = {}) {
 `);
   } catch {}
 }
+function summarizeArgs(args) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return { shape: Array.isArray(args) ? `array[${args.length}]` : typeof args };
+  }
+  const out = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (typeof value === "string")
+      out[key] = `string:${value.length}`;
+    else if (typeof value === "number" || typeof value === "boolean")
+      out[key] = typeof value;
+    else if (value === null || value === undefined)
+      out[key] = String(value);
+    else if (Array.isArray(value))
+      out[key] = `array[${value.length}]`;
+    else if (typeof value === "object")
+      out[key] = `object[${Object.keys(value).length}]`;
+    else
+      out[key] = typeof value;
+  }
+  return out;
+}
+function outputSize(output) {
+  try {
+    if (typeof output === "string")
+      return Buffer.byteLength(output);
+    return Buffer.byteLength(JSON.stringify(output ?? ""));
+  } catch {
+    return -1;
+  }
+}
 function describeError(value) {
   if (value instanceof Error)
     return value.message;
@@ -3383,8 +3413,26 @@ function createCommandService(host, opts) {
             initialOperations.push(event.type === "output" ? enqueue(id, () => persistOutput(directory, id, event.chunk)) : enqueue(id, () => persistExit(directory, id, event.info)));
           }
           await Promise.all(initialOperations);
+          logServerEvent(directory, "command.started", {
+            commandID: id,
+            title,
+            command,
+            args: (input.args ?? []).length,
+            cwd,
+            pid: handle?.pid,
+            ownerSessionID: input.ownerSessionID,
+            watchFilter,
+            watchUntil,
+            timeoutSeconds
+          }).catch(() => {});
           return await service.get(directory, id, input.ownerSessionID) ?? session;
         } catch (error) {
+          logServerEvent(directory, "command.start.failed", {
+            title,
+            command,
+            ownerSessionID: input.ownerSessionID,
+            detail: describeError(error)
+          }).catch(() => {});
           if (handle)
             await rollbackStart(directory, id, handle);
           throw error;
@@ -3622,6 +3670,13 @@ function createCommandService(host, opts) {
       } catch {}
       await fireAwaits(directory, id);
       await notifyOwnerIfNeeded(directory, id);
+      logServerEvent(directory, "command.terminated", {
+        commandID: id,
+        title: session.title,
+        actor: opts?.actor ?? "tool",
+        status,
+        ownerSessionID
+      }).catch(() => {});
       if (opts?.remove) {
         const removed = await service.remove(directory, id, ownerSessionID);
         if (removed.ok)
@@ -3694,6 +3749,12 @@ function createCommandService(host, opts) {
       } catch {}
       await fireAwaits(directory, id);
       await notifyOwnerIfNeeded(directory, id);
+      logServerEvent(directory, "command.killed", {
+        commandID: id,
+        title: session.title,
+        actor: opts?.actor ?? "tool",
+        ownerSessionID
+      }).catch(() => {});
       return { ok: true, message: `Command "${session.title}" killed (SIGKILL).` };
     },
     async restart(directory, id, ownerSessionID) {
@@ -3887,6 +3948,11 @@ function createCommandService(host, opts) {
             if (fresh)
               emitBroker(c.id, { type: "status", command: fresh });
           } catch {}
+          logServerEvent(directory, "command.reconcile.adopted", {
+            commandID: c.id,
+            title: c.title,
+            pid: c.pid
+          }).catch(() => {});
           continue;
         }
         clearCommandTimeout(c.id);
@@ -3913,6 +3979,11 @@ function createCommandService(host, opts) {
         } catch {}
         await fireAwaits(directory, c.id);
         await notifyOwnerIfNeeded(directory, c.id);
+        logServerEvent(directory, "command.reconcile.missing", {
+          commandID: c.id,
+          title: c.title,
+          pid: c.pid
+        }).catch(() => {});
       }
       return { markedMissing };
     },
@@ -3938,10 +4009,19 @@ function createCommandService(host, opts) {
             }
             return s;
           }).catch(() => {});
+          logServerEvent(directory, "command.dispose.preserved", {
+            commandID: id,
+            title: spec?.title,
+            pid: spec?.pid
+          }).catch(() => {});
           return;
         }
         if (owner) {
           await service.terminate(directory, id, owner, { actor: "control" }).catch(() => {});
+          logServerEvent(directory, "command.dispose.terminated", {
+            commandID: id,
+            title: spec?.title
+          }).catch(() => {});
           return;
         }
         entry.handle.terminate();
@@ -8130,6 +8210,13 @@ function createGoalService(host) {
         });
       }
     }
+    logServerEvent(directory, "goal.created", {
+      goalID: id,
+      name: goal.name,
+      ownerSessionID: goal.ownerSessionID,
+      workerSessionID: worker.workerSessionID,
+      topology: worker.topology
+    }).catch(() => {});
     return { goal, worker };
   }
   async function accountTailUsage(directory, goalID, runtime, tail) {
@@ -12093,7 +12180,7 @@ function approvedCommandTools(options) {
 init_server_log();
 init_state_repository();
 // package.json
-var version = "1.14.4";
+var version = "1.14.5";
 
 // src/server/plugin.ts
 init_workspace_execution();
@@ -12221,9 +12308,25 @@ function createServerHooks(directory, host, defaults) {
     },
     tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools2({ directory, host, goalService }), ...commandTools({ directory, commandService, capabilities: commandHost.capabilities, goalService }), ...approvedCommandTools({ directory, commandService }) },
     "tool.execute.before": async (input, _output) => {
-      await beforeWorkspaceTool(directory, input, _output.args, {
-        isMainSession: (sessionID) => host.isMainSession?.(sessionID) ?? Promise.resolve(undefined)
-      });
+      logServerEvent(directory, "tool.call.started", {
+        tool: input.tool,
+        sessionID: input.sessionID,
+        callID: input.callID,
+        args: summarizeArgs(_output.args)
+      }).catch(() => {});
+      try {
+        await beforeWorkspaceTool(directory, input, _output.args, {
+          isMainSession: (sessionID) => host.isMainSession?.(sessionID) ?? Promise.resolve(undefined)
+        });
+      } catch (error) {
+        logServerEvent(directory, "tool.call.denied", {
+          tool: input.tool,
+          sessionID: input.sessionID,
+          callID: input.callID,
+          detail: describeError(error)
+        }).catch(() => {});
+        throw error;
+      }
       if (host.readExecution || isWorkspaceToolExempt(input.tool))
         return;
       const activeWorkers = goalService.getActiveWorkers();
@@ -12247,6 +12350,12 @@ function createServerHooks(directory, host, defaults) {
     },
     "tool.execute.after": async (input, output) => {
       await afterWorkspaceTool(directory, input.sessionID, input.callID, input.tool);
+      logServerEvent(directory, "tool.call.finished", {
+        tool: input.tool,
+        sessionID: input.sessionID,
+        callID: input.callID,
+        outputBytes: outputSize(output?.output)
+      }).catch(() => {});
       if (input.tool === "loopd_create_goal" || input.tool === "get_goal" || input.tool === "report_goal_progress") {
         ensureStarted();
         reconcileInBackground();

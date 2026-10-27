@@ -50,7 +50,7 @@ import {
 import type { CommandHost, CommandProcessHandle } from "../server/command-host"
 import { utf8ByteLength, type CommandStreamMessage } from "../domain/command-events"
 import type { CommandEventBroker } from "./command-event-broker"
-import { logServerEvent } from "../infrastructure/server-log"
+import { logServerEvent, describeError } from "../infrastructure/server-log"
 import { beforeWorkspaceTool, afterWorkspaceTool } from "./workspace-execution"
 import { clearAwaitsForCommand, fireCommandAwaits, fireUntilAwaits, readBoundedTail, type FiredAwait } from "./command-await"
 import {
@@ -1303,6 +1303,18 @@ export function createCommandService(
           : enqueue(id, () => persistExit(directory, id, event.info)))
       }
       await Promise.all(initialOperations)
+      void logServerEvent(directory, "command.started", {
+        commandID: id,
+        title,
+        command,
+        args: (input.args ?? []).length,
+        cwd,
+        pid: handle?.pid,
+        ownerSessionID: input.ownerSessionID,
+        watchFilter,
+        watchUntil,
+        timeoutSeconds,
+      }).catch(() => {})
       return (await service.get(directory, id, input.ownerSessionID)) ?? session
       } catch (error) {
         // Atomic start: once the process exists, ANY later failure (ledger
@@ -1311,6 +1323,12 @@ export function createCommandService(
         // duplicate the command.
         // A spawn that throws never produced a process, so there is nothing to
         // roll back — and `handle` is still unset.
+        void logServerEvent(directory, "command.start.failed", {
+          title,
+          command,
+          ownerSessionID: input.ownerSessionID,
+          detail: describeError(error),
+        }).catch(() => {})
         if (handle) await rollbackStart(directory, id, handle)
         throw error
       }
@@ -1573,6 +1591,13 @@ export function createCommandService(
       // command opted in with notifyOnExit: true, or the timer path already
       // stamped endReason=timeout (never caller-initiated: always notifies).
       await notifyOwnerIfNeeded(directory, id)
+      void logServerEvent(directory, "command.terminated", {
+        commandID: id,
+        title: session.title,
+        actor: (opts?.actor as CommandTerminationActor) ?? "tool",
+        status,
+        ownerSessionID,
+      }).catch(() => {})
       if (opts?.remove) {
         const removed = await service.remove(directory, id, ownerSessionID)
         // The notify claim above already fired at most once (exactly-once
@@ -1653,6 +1678,12 @@ export function createCommandService(
       // timer-stamped timeout, which kill can never produce on a running
       // command, guarded the same way for uniformity).
       await notifyOwnerIfNeeded(directory, id)
+      void logServerEvent(directory, "command.killed", {
+        commandID: id,
+        title: session.title,
+        actor: (opts?.actor as CommandTerminationActor) ?? "tool",
+        ownerSessionID,
+      }).catch(() => {})
       return { ok: true, message: `Command "${session.title}" killed (SIGKILL).` }
     },
 
@@ -1875,6 +1906,11 @@ export function createCommandService(
             )
             if (fresh) emitBroker(c.id, { type: "status", command: fresh })
           } catch {}
+          void logServerEvent(directory, "command.reconcile.adopted", {
+            commandID: c.id,
+            title: c.title,
+            pid: c.pid,
+          }).catch(() => {})
           continue
         }
         // M2: in-memory watcher dropped (nothing can feed it); persisted watch
@@ -1906,6 +1942,11 @@ export function createCommandService(
         // "missing" is terminal: outstanding awaits fire once on recovery.
         await fireAwaits(directory, c.id)
         await notifyOwnerIfNeeded(directory, c.id)
+        void logServerEvent(directory, "command.reconcile.missing", {
+          commandID: c.id,
+          title: c.title,
+          pid: c.pid,
+        }).catch(() => {})
       }
       return { markedMissing }
     },
@@ -1937,10 +1978,19 @@ export function createCommandService(
             }
             return s
           }).catch(() => {})
+          void logServerEvent(directory, "command.dispose.preserved", {
+            commandID: id,
+            title: spec?.title,
+            pid: spec?.pid,
+          }).catch(() => {})
           return
         }
         if (owner) {
           await service.terminate(directory, id, owner, { actor: "control" }).catch(() => {})
+          void logServerEvent(directory, "command.dispose.terminated", {
+            commandID: id,
+            title: spec?.title,
+          }).catch(() => {})
           return
         }
         entry.handle.terminate()

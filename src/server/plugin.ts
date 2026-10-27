@@ -19,7 +19,7 @@ import { goalTools } from "./goal-tools"
 import { ownerTools } from "./owner-tools"
 import { commandTools } from "./command-tools"
 import { approvedCommandTools } from "./approved-command-tools"
-import { describeError, logServerEvent } from "../infrastructure/server-log"
+import { describeError, logServerEvent, summarizeArgs, outputSize } from "../infrastructure/server-log"
 import { addToolCall, removeToolCall } from "../domain/runtime"
 import { readState, mutateState } from "../infrastructure/state-repository"
 import type { GoalToolDefaults } from "./goal-tools"
@@ -177,11 +177,31 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
     },
     tool: { ...goalTools(directory, goalService, undefined, defaults, host), ...ownerTools({ directory, host, goalService }), ...commandTools({ directory, commandService, capabilities: commandHost.capabilities, goalService }), ...approvedCommandTools({ directory, commandService }) },
     "tool.execute.before": async (input, _output) => {
+      // Global flow trace: every agent tool call enters here (v1 + v2).
+      // Args are summarized (keys + sizes), never valued.
+      void logServerEvent(directory, "tool.call.started", {
+        tool: input.tool,
+        sessionID: input.sessionID,
+        callID: input.callID,
+        args: summarizeArgs(_output.args),
+      }).catch(() => {})
       // Enforcement errors must propagate; tracking's best-effort catch is deliberately separate.
       // Main-session proof is host-authoritative; absence stays fail-closed.
-      await beforeWorkspaceTool(directory, input, _output.args, {
-        isMainSession: (sessionID) => host.isMainSession?.(sessionID) ?? Promise.resolve(undefined),
-      })
+      try {
+        await beforeWorkspaceTool(directory, input, _output.args, {
+          isMainSession: (sessionID) => host.isMainSession?.(sessionID) ?? Promise.resolve(undefined),
+        })
+      } catch (error) {
+        // Denials are the hardest bugs to trace: record who was denied, for
+        // what tool, and why — then rethrow so enforcement still wins.
+        void logServerEvent(directory, "tool.call.denied", {
+          tool: input.tool,
+          sessionID: input.sessionID,
+          callID: input.callID,
+          detail: describeError(error),
+        }).catch(() => {})
+        throw error
+      }
       if (host.readExecution || isWorkspaceToolExempt(input.tool)) return
       // Track tool call start for worker sessions only
       const activeWorkers = goalService.getActiveWorkers()
@@ -204,6 +224,13 @@ function createServerHooks(directory: string, host: LoopHost, defaults: GoalTool
     },
     "tool.execute.after": async (input, output) => {
       await afterWorkspaceTool(directory, input.sessionID, input.callID, input.tool)
+      // Global flow trace: completion side of every tool call.
+      void logServerEvent(directory, "tool.call.finished", {
+        tool: input.tool,
+        sessionID: input.sessionID,
+        callID: input.callID,
+        outputBytes: outputSize((output as { output?: unknown })?.output),
+      }).catch(() => {})
       // Lazy start when goal tools are used
       if (input.tool === "loopd_create_goal" || input.tool === "get_goal" || input.tool === "report_goal_progress") {
         ensureStarted()

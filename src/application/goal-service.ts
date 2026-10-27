@@ -1114,6 +1114,13 @@ export function createGoalService(host: LoopHost): GoalService {
       }
     }
 
+    void logServerEvent(directory, "goal.created", {
+      goalID: id,
+      name: goal.name,
+      ownerSessionID: goal.ownerSessionID,
+      workerSessionID: worker.workerSessionID,
+      topology: worker.topology,
+    }).catch(() => {})
     return { goal, worker }
   }
 
