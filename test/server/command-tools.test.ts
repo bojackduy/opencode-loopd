@@ -239,3 +239,58 @@ describe("Command tools (permissions + capabilities)", () => {
     expect(listed.commands).toHaveLength(0)
   })
 })
+
+describe("Command tools (reject-proof start args)", () => {
+  let dir: string
+  let tools: ReturnType<typeof commandTools>
+
+  beforeEach(async () => {
+    dir = tmpDir()
+    await fs.mkdir(dir, { recursive: true })
+    tools = commandTools({ directory: dir, commandService: createCommandService(createFakeCommandHost()) })
+  })
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true })
+  })
+
+  function context(sessionID: string) {
+    return { sessionID, ask: async () => {} } as never
+  }
+
+  it("refuses a full shell string in command with the exact fix", async () => {
+    const r = JSON.parse(
+      (await tools.loopd_command_start.execute(
+        { title: "pull", command: "bash pull2.sh" },
+        context("owner-1"),
+      )).output,
+    )
+    expect(r.ok).toBe(false)
+    expect(r.message).toContain("executable only")
+    expect(r.message).toContain("shell:true")
+  })
+
+  it("accepts workdir as a deprecated alias of cwd", async () => {
+    const { readState } = await import("../../src/infrastructure/state-repository")
+    const r = JSON.parse(
+      (await tools.loopd_command_start.execute(
+        { title: "w", command: "echo", workdir: "/tmp" },
+        context("owner-1"),
+      )).output,
+    )
+    expect(r.ok).toBe(true)
+    const state = await readState(dir)
+    expect(state.commands?.at(-1)?.cwd).toBe("/tmp")
+  })
+
+  it("refuses conflicting cwd and workdir", async () => {
+    const r = JSON.parse(
+      (await tools.loopd_command_start.execute(
+        { title: "w", command: "echo", cwd: "/a", workdir: "/b" },
+        context("owner-1"),
+      )).output,
+    )
+    expect(r.ok).toBe(false)
+    expect(r.message).toContain("Conflicting directories")
+  })
+})

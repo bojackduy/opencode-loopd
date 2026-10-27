@@ -11929,7 +11929,8 @@ function commandTools(options) {
         title: tool3.schema.string().describe("Short human label for the session."),
         command: tool3.schema.string().describe('Executable ONLY (e.g. "bash", "bun", "python3") \u2014 never a full shell string. The script and flags go in `args`, not here. WRONG: {command: "bash pull.sh"}. RIGHT: {command: "bash", args: ["pull.sh"]}. For pipes/redirects/globs use shell:true instead.'),
         args: tool3.schema.array(tool3.schema.string()).optional().describe("Arguments for the command (argv[1:]). One array element per argument."),
-        cwd: tool3.schema.string().optional().describe("Working directory for the child process. Defaults to the project root. This is the ONLY directory field \u2014 there is no `workdir`, `dir`, or `path` parameter; those are rejected."),
+        cwd: tool3.schema.string().optional().describe("Working directory for the child process. Defaults to the project root. `workdir` is accepted as a deprecated alias of this field; if both are set they must match."),
+        workdir: tool3.schema.string().optional().describe("Deprecated alias of `cwd`. Prefer `cwd`."),
         goal_id: tool3.schema.string().optional().describe("Optional goal linkage (display only \u2014 no lifecycle coupling)."),
         notify_on_exit: tool3.schema.boolean().optional().describe("Owner-exit-notification override. Omit to notify on natural exits (including quick success), missing or timeout; manual terminate stays silent. true also notifies on manual terminate; false disables owner exit notifications."),
         cols: tool3.schema.number().optional().describe(`Requested terminal width (${sizeNote}).`),
@@ -11947,12 +11948,20 @@ function commandTools(options) {
         if (!owner)
           return denied();
         try {
+          if (!args.shell && !(args.args ?? []).length && /\s/.test(args.command)) {
+            const exe = args.command.split(/\s+/)[0];
+            throw new Error(`Invalid command "${args.command}": command must be the executable only ("${exe}"), with the script and flags as separate entries in args (one array element per argument, quotes are NOT split). Or pass the whole line unchanged with shell:true.`);
+          }
+          const cwd = args.cwd ?? args.workdir;
+          if (args.cwd !== undefined && args.workdir !== undefined && args.workdir !== args.cwd) {
+            throw new Error(`Conflicting directories: cwd "${args.cwd}" != workdir "${args.workdir}". Pass only cwd.`);
+          }
           const argv = [args.command, ...args.args ?? []];
           await context.ask({
             permission: "bash",
             patterns: [argv.join(" ")],
             always: [args.command],
-            metadata: { command: args.command, args: args.args ?? [], cwd: args.cwd ?? directory }
+            metadata: { command: args.command, args: args.args ?? [], cwd: cwd ?? directory }
           });
           if (args.watch_until_action !== undefined && args.watch_until_action !== "stop" && args.watch_until_action !== "keep") {
             throw new Error(`Invalid watch_until_action '${args.watch_until_action}': must be "stop" or "keep".`);
@@ -11961,7 +11970,7 @@ function commandTools(options) {
             title: args.title,
             command: args.command,
             args: args.args ?? [],
-            cwd: args.cwd,
+            cwd,
             ownerSessionID: owner,
             goalID: args.goal_id,
             notifyOnExit: args.notify_on_exit,
