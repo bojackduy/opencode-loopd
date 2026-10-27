@@ -12272,7 +12272,7 @@ function approvedCommandTools(options) {
 init_server_log();
 init_state_repository();
 // package.json
-var version = "1.14.5";
+var version = "1.14.6";
 
 // src/server/plugin.ts
 init_workspace_execution();
