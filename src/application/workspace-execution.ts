@@ -310,7 +310,7 @@ export async function beforeWorkspaceTool(
       // not block writers, checks, or other read-only goals.
       if (goal.status !== "active" || goal.scopeClosing) throw new Error("Scope denied: read-only worker is not active.")
       const writes = structuredWritePaths(input.tool, args)
-      if (!writes) throw new Error(`Scope denied: uncontrolled tool "${input.tool}" in read-only goal.`)
+      if (!writes) throw new Error(`Scope denied: uncontrolled tool "${input.tool}" in read-only goal (shell can write, so it is never allowed here). Inspect with read/glob/grep/list tools (they work anywhere), write reports with the write/edit tools into this goal's artifact directory only, verify with run_goal_checks, or ask the owner to grant a fixed executable via grant_approved_command.`)
       if (!goal.config.artifactDir) throw new Error("Scope denied: read-only artifact directory is missing.")
       const artifact = path.relative(directory, goal.config.artifactDir).split(path.sep).join("/")
       const paths = await Promise.all(writes.map((file) => canonicalScopePath(directory, file)))
