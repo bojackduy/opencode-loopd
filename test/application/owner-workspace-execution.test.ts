@@ -116,10 +116,10 @@ describe("main/owner session execution under protected goals", () => {
   })
   }
 
-  it("keeps a worker's structured write out while an owner shell reservation is live", async () => {
+  it("keeps a worker's structured write out while a stranger's shell reservation is live", async () => {
     const root = await fixture({ writeScope: ["src/a.ts"] })
     await mutateState(root, "seed", async (state) => {
-      state.workspaceCalls = [{ callID: "owner-shell", sessionID: "main", paths: [], uncontrolled: true, at: new Date().toISOString() }]
+      state.workspaceCalls = [{ callID: "stranger-shell", sessionID: "other", paths: [], uncontrolled: true, at: new Date().toISOString() }]
       return state
     })
 
@@ -128,6 +128,24 @@ describe("main/owner session execution under protected goals", () => {
       { tool: "write", sessionID: "worker-1", callID: "worker-write" },
       { path: "src/a.ts", content: "x" },
     )).rejects.toThrow(/Workspace busy/)
+  })
+
+  it("lets the owner's own shells run beside the owned worker's writes (single-human concurrency)", async () => {
+    const root = await fixture({ writeScope: ["src/a.ts"] })
+    await mutateState(root, "seed", async (state) => {
+      state.workspaceCalls = [{ callID: "owner-shell", sessionID: "main", paths: [], uncontrolled: true, at: new Date().toISOString() }]
+      return state
+    })
+
+    // Same owner on both sides: the worker's write proceeds; the owner
+    // coordinates (and the per-file check below still guards known collisions).
+    await expect(beforeWorkspaceTool(
+      root,
+      { tool: "write", sessionID: "worker-1", callID: "worker-write" },
+      { path: "src/a.ts", content: "x" },
+    )).resolves.toBeUndefined()
+    const calls = (await readState(root)).workspaceCalls ?? []
+    expect(calls.map((call) => call.callID).sort()).toEqual(["owner-shell", "worker-write"])
   })
 
   it("keeps checks and activation out while an owner shell reservation is live", async () => {

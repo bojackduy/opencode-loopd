@@ -144,11 +144,9 @@ describe("release_workspace control command", () => {
         { path: "src/a.ts", content: "x" },
       )
 
-    // A foreign uncontrolled call fences every structured write first.
-    await expect(write()).rejects.toThrow(/uncontrolled tool call own-call/)
-    expect((await release({ ownerSessionID: OWNER, callID: "own-call" })).ok).toBe(true)
-
-    // Then the dead session's path reservation is the remaining blocker.
+    // The owner's own shell no longer fences the owned worker's write
+    // (single-human concurrency), so the dead session's path reservation is
+    // the first blocker — not the owner's uncontrolled call.
     await expect(write()).rejects.toThrow(/being written by session gone-session, call orphan-call/)
     expect((await release({ ownerSessionID: OWNER, callID: "orphan-call" })).ok).toBe(true)
 

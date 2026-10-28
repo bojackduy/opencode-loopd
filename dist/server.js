@@ -1803,7 +1803,8 @@ async function beforeWorkspaceTool(directory, input, args, identity = {}) {
       return state;
     }
     const concurrent = foreignUncontrolledCall(state, input);
-    if (concurrent)
+    const ownConcurrency = goal && concurrent && state.goals.some((g) => g.id === goal.id && g.ownerSessionID === concurrent.sessionID);
+    if (concurrent && !ownConcurrency)
       throw new Error(`Workspace busy: uncontrolled tool call ${concurrent.callID} from session ${concurrent.sessionID} is still executing; wait for its exit event before writing source.`);
     if (state.workspaceOperation)
       throw new Error(`Workspace operation ${state.workspaceOperation.id} is active; source writes are denied until it finishes.`);

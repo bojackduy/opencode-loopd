@@ -371,7 +371,13 @@ export async function beforeWorkspaceTool(
       return state
     }
     const concurrent = foreignUncontrolledCall(state, input)
-    if (concurrent) throw new Error(`Workspace busy: uncontrolled tool call ${concurrent.callID} from session ${concurrent.sessionID} is still executing; wait for its exit event before writing source.`)
+    // Single-human concurrency: the owner's own shells/subagents don't fence
+    // writes made for that owner's goal — one human coordinates both sides,
+    // and the per-file check below still guards known structured collisions.
+    // Any other session's uncontrolled call still fences, and a denied owner
+    // shell (above) still waits out in-flight writes rather than racing them.
+    const ownConcurrency = goal && concurrent && state.goals.some((g) => g.id === goal.id && g.ownerSessionID === concurrent.sessionID)
+    if (concurrent && !ownConcurrency) throw new Error(`Workspace busy: uncontrolled tool call ${concurrent.callID} from session ${concurrent.sessionID} is still executing; wait for its exit event before writing source.`)
     if (state.workspaceOperation) throw new Error(`Workspace operation ${state.workspaceOperation.id} is active; source writes are denied until it finishes.`)
     if (goal && (goal.status !== "active" || goal.scopeClosing)) throw new Error(`Scope denied: worker goal is ${goal.scopeClosing ? "closing" : goal.status}.`)
     // Unknown child sessions fail closed; only explicitly persisted workers, owners
