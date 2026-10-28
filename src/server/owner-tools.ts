@@ -806,5 +806,37 @@ export function ownerTools(options: OwnerToolsOptions) {
         }
       },
     }),
+
+    grant_approved_command: tool({
+      description:
+        "Grant ONE more owner-authorized command to an ACTIVE goal you own, mid-run (same strict rules as loopd_create_goal approvedCommands). For scoped workers that discover they need a command (tar, test runner, builder) the goal was not created with. Finite commands run to completion under the workspace lock; servers stay managed and stop with the goal. Owner-only: workers can never grant themselves authority. The worker picks it up on its next turn — nudge it if it is idle-waiting. Append-only: no revoke, no overwrite; clearing the goal removes everything.",
+      args: {
+        goal_id: tool.schema.string().describe("Active owned goal ID."),
+        name: tool.schema.string().describe("Unique command name (letters, digits, dots, underscores, hyphens). The worker invokes it by this name only."),
+        command: tool.schema.string().describe("Fixed executable (e.g. \"tar\"). Never a shell string."),
+        args: tool.schema.array(tool.schema.string()).describe("Fixed argument vector, one element per argument."),
+        cwd: tool.schema.string().describe("Workspace-relative directory that must already exist (e.g. \".\" for the project root)."),
+        kind: tool.schema.enum(["finite", "server"]).describe("finite runs once under the workspace lock; server stays managed and stops with the goal."),
+        timeoutSeconds: tool.schema.number().positive().finite().optional().describe("Finite-command timeout in seconds (positive integer)."),
+      },
+      execute: async (args, context) => {
+        const ownerID = context?.sessionID
+        if (!ownerID) {
+          return { title: "No session", output: JSON.stringify({ ok: false, message: "No session context available, so ownership cannot be matched." }) }
+        }
+        const result = await goalService.grantApprovedCommand(directory, ownerID, args.goal_id, {
+          name: args.name,
+          command: args.command,
+          args: args.args,
+          cwd: args.cwd,
+          kind: args.kind,
+          ...(args.timeoutSeconds !== undefined ? { timeoutSeconds: args.timeoutSeconds } : {}),
+        })
+        return {
+          title: result.ok ? `Granted ${args.name}` : "Grant refused",
+          output: JSON.stringify(result),
+        }
+      },
+    }),
   }
 }

@@ -170,6 +170,14 @@ export interface GoalService {
    */
   releaseWorkspace(directory: string, ownerSessionID: string, input: { callID?: string; goalID?: string; sessionID?: string }): Promise<WorkspaceReleaseResult>
 
+  /**
+   * Owner-only mid-goal grant: append one named approved command to an active
+   * goal (same strict validation as creation). Workers can never grant
+   * themselves authority. The worker picks it up on its next turn; there is
+   * no revoke — clearing the goal removes everything.
+   */
+  grantApprovedCommand(directory: string, ownerSessionID: string, goalID: string, spec: unknown): Promise<{ ok: boolean; message: string; spec?: import("../domain/goal").ApprovedGoalCommand }>
+
   /** Get the worker session for a goal (for engine to check status). */
   getWorker(goalID: GoalID): WorkerSession | undefined
 
@@ -2158,6 +2166,55 @@ export function createGoalService(host: LoopHost): GoalService {
     return withGoalOperation(goalID, () => nudgeUnlocked(directory, goalID))
   }
 
+  async function grantApprovedCommandUnlocked(
+    directory: string,
+    ownerSessionID: string,
+    goalID: string,
+    spec: unknown,
+  ): Promise<{ ok: boolean; message: string; spec?: import("../domain/goal").ApprovedGoalCommand }> {
+    const pre = await readState(directory)
+    const goal = pre.goals.find((g) => g.id === goalID)
+    if (!goal) return { ok: false, message: "Goal not found." }
+    if (goal.ownerSessionID !== ownerSessionID) {
+      return { ok: false, message: "Only the goal's owner session can grant commands — workers can never authorize themselves." }
+    }
+    if (goal.status !== "active" || goal.scopeClosing || goal.scopeClearPending) {
+      return { ok: false, message: `Goal "${goal.name}" is ${goal.scopeClosing ? "closing" : goal.status}, not active; grant while it is active.` }
+    }
+    let canonical: import("../domain/goal").ApprovedGoalCommand
+    try {
+      const [only] = await canonicalGoalCommands(directory, [spec])
+      canonical = only!
+    } catch (error) {
+      return { ok: false, message: describeError(error) }
+    }
+    if ((goal.config.approvedCommands ?? []).some((c) => c.name === canonical.name)) {
+      return { ok: false, message: `An approved command named "${canonical.name}" already exists for this goal; names are unique and grants are append-only (no revoke, no overwrite).` }
+    }
+    await mutateState(directory, `goal.grant-command:${goalID}:${canonical.name}`, async (s) => {
+      const g = s.goals.find((x) => x.id === goalID)
+      if (!g || g.ownerSessionID !== ownerSessionID) return s
+      g.config.approvedCommands = [...(g.config.approvedCommands ?? []), canonical]
+      g.updatedAt = new Date().toISOString()
+      return s
+    })
+    await logServerEvent(directory, "goal.approved-command-granted", {
+      goalID,
+      name: canonical.name,
+      kind: canonical.kind,
+      ownerSessionID,
+    }).catch(() => {})
+    return {
+      ok: true,
+      spec: canonical,
+      message: `Granted approved ${canonical.kind} command "${canonical.name}" to goal "${goal.name}". The worker picks it up on its next turn (finite: run_approved_command, server: start/read/stop_approved_server). Grants are append-only; clearing the goal removes everything.`,
+    }
+  }
+
+  function grantApprovedCommand(directory: string, ownerSessionID: string, goalID: string, spec: unknown) {
+    return withGoalOperation(goalID as GoalID, () => grantApprovedCommandUnlocked(directory, ownerSessionID, goalID, spec))
+  }
+
   async function abortWorkerUnlocked(directory: string, goalID: GoalID): Promise<{ ok: boolean; message: string }> {
     const preState = await readState(directory)
     const goal = preState.goals.find((g) => g.id === goalID)
@@ -2221,5 +2278,5 @@ export function createGoalService(host: LoopHost): GoalService {
     return releaseWorkspaceUnlocked(directory, ownerSessionID, input)
   }
 
-  return { scopedExecution: host.scopedExecution === true, start, continueTurn, nudge, pause, resume, retry, clear, workspaceReservations, releaseWorkspace, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, observeProviderError, compact }
+  return { scopedExecution: host.scopedExecution === true, start, continueTurn, nudge, pause, resume, retry, clear, workspaceReservations, releaseWorkspace, grantApprovedCommand, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, observeProviderError, compact }
 }

@@ -250,6 +250,10 @@ stop_approved_server({ name: "dev" })
 
 Rules and limitations:
 
+- **Mid-goal grants.** A goal created without the commands it needs is not doomed: the owner calls `grant_approved_command({ goal_id, name, command, args, cwd, kind, timeoutSeconds? })` (same strict validation as creation, owner-only, active goals only). The worker picks it up on its next turn. Append-only: no revoke, no overwrite; clearing the goal removes everything.
+- **Owner workaround.** Owners may run ordinary shell/tools themselves while their worker is idle (no live calls): the fence only blocks *concurrent* sessions. If the worker is stuck waiting on a command, run it in the owner session and tell the worker the result via `send_goal_input`.
+- **Scope too narrow is fixable by the worker.** `write_scope` that omits needed files is not fatal: the worker claims more paths mid-run with `claim_goal_scope` (same turn, no owner needed) instead of blocking.
+
 - **Name-only surface.** `run_approved_command`, `start_approved_server`, `read_approved_server` and `stop_approved_server` accept only `name`. Any `command`, `args`, `cwd`, `env`, `shell`, `kind` or `timeoutSeconds` key is refused with `override_denied`. `run_approved_command` refuses `kind: "server"` specs (and vice versa) with `kind_mismatch`.
 - **Finite commands hold the workspace lock.** `run_approved_command` runs `executable + args` without a shell under the workspace-wide operation lock; concurrent source writes, checks and other approved commands are denied until the actual process exits. Output is bounded; the result carries the real exit code, duration and timeout outcome.
 - **Not a filesystem sandbox.** These are owner-trusted executables. The lock is coordination, not isolation: a command can write anything its OS user can write.

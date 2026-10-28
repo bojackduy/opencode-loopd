@@ -9225,6 +9225,50 @@ function createGoalService(host) {
   function nudge(directory, goalID) {
     return withGoalOperation(goalID, () => nudgeUnlocked(directory, goalID));
   }
+  async function grantApprovedCommandUnlocked(directory, ownerSessionID, goalID, spec) {
+    const pre = await readState(directory);
+    const goal = pre.goals.find((g) => g.id === goalID);
+    if (!goal)
+      return { ok: false, message: "Goal not found." };
+    if (goal.ownerSessionID !== ownerSessionID) {
+      return { ok: false, message: "Only the goal's owner session can grant commands \u2014 workers can never authorize themselves." };
+    }
+    if (goal.status !== "active" || goal.scopeClosing || goal.scopeClearPending) {
+      return { ok: false, message: `Goal "${goal.name}" is ${goal.scopeClosing ? "closing" : goal.status}, not active; grant while it is active.` };
+    }
+    let canonical;
+    try {
+      const [only] = await canonicalGoalCommands(directory, [spec]);
+      canonical = only;
+    } catch (error) {
+      return { ok: false, message: describeError(error) };
+    }
+    if ((goal.config.approvedCommands ?? []).some((c) => c.name === canonical.name)) {
+      return { ok: false, message: `An approved command named "${canonical.name}" already exists for this goal; names are unique and grants are append-only (no revoke, no overwrite).` };
+    }
+    await mutateState(directory, `goal.grant-command:${goalID}:${canonical.name}`, async (s) => {
+      const g = s.goals.find((x) => x.id === goalID);
+      if (!g || g.ownerSessionID !== ownerSessionID)
+        return s;
+      g.config.approvedCommands = [...g.config.approvedCommands ?? [], canonical];
+      g.updatedAt = new Date().toISOString();
+      return s;
+    });
+    await logServerEvent(directory, "goal.approved-command-granted", {
+      goalID,
+      name: canonical.name,
+      kind: canonical.kind,
+      ownerSessionID
+    }).catch(() => {});
+    return {
+      ok: true,
+      spec: canonical,
+      message: `Granted approved ${canonical.kind} command "${canonical.name}" to goal "${goal.name}". The worker picks it up on its next turn (finite: run_approved_command, server: start/read/stop_approved_server). Grants are append-only; clearing the goal removes everything.`
+    };
+  }
+  function grantApprovedCommand(directory, ownerSessionID, goalID, spec) {
+    return withGoalOperation(goalID, () => grantApprovedCommandUnlocked(directory, ownerSessionID, goalID, spec));
+  }
   async function abortWorkerUnlocked(directory, goalID) {
     const preState = await readState(directory);
     const goal = preState.goals.find((g) => g.id === goalID);
@@ -9277,7 +9321,7 @@ function createGoalService(host) {
   function releaseWorkspace(directory, ownerSessionID, input) {
     return releaseWorkspaceUnlocked(directory, ownerSessionID, input);
   }
-  return { scopedExecution: host.scopedExecution === true, start, continueTurn, nudge, pause, resume, retry, clear, workspaceReservations, releaseWorkspace, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, observeProviderError, compact };
+  return { scopedExecution: host.scopedExecution === true, start, continueTurn, nudge, pause, resume, retry, clear, workspaceReservations, releaseWorkspace, grantApprovedCommand, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, observeProviderError, compact };
 }
 
 // src/application/schedule-worker.ts
@@ -11870,6 +11914,36 @@ function ownerTools2(options) {
           output: JSON.stringify({ mode: "release", ...result })
         };
       }
+    }),
+    grant_approved_command: tool2({
+      description: "Grant ONE more owner-authorized command to an ACTIVE goal you own, mid-run (same strict rules as loopd_create_goal approvedCommands). For scoped workers that discover they need a command (tar, test runner, builder) the goal was not created with. Finite commands run to completion under the workspace lock; servers stay managed and stop with the goal. Owner-only: workers can never grant themselves authority. The worker picks it up on its next turn \u2014 nudge it if it is idle-waiting. Append-only: no revoke, no overwrite; clearing the goal removes everything.",
+      args: {
+        goal_id: tool2.schema.string().describe("Active owned goal ID."),
+        name: tool2.schema.string().describe("Unique command name (letters, digits, dots, underscores, hyphens). The worker invokes it by this name only."),
+        command: tool2.schema.string().describe('Fixed executable (e.g. "tar"). Never a shell string.'),
+        args: tool2.schema.array(tool2.schema.string()).describe("Fixed argument vector, one element per argument."),
+        cwd: tool2.schema.string().describe('Workspace-relative directory that must already exist (e.g. "." for the project root).'),
+        kind: tool2.schema.enum(["finite", "server"]).describe("finite runs once under the workspace lock; server stays managed and stops with the goal."),
+        timeoutSeconds: tool2.schema.number().positive().finite().optional().describe("Finite-command timeout in seconds (positive integer).")
+      },
+      execute: async (args, context) => {
+        const ownerID = context?.sessionID;
+        if (!ownerID) {
+          return { title: "No session", output: JSON.stringify({ ok: false, message: "No session context available, so ownership cannot be matched." }) };
+        }
+        const result = await goalService.grantApprovedCommand(directory, ownerID, args.goal_id, {
+          name: args.name,
+          command: args.command,
+          args: args.args,
+          cwd: args.cwd,
+          kind: args.kind,
+          ...args.timeoutSeconds !== undefined ? { timeoutSeconds: args.timeoutSeconds } : {}
+        });
+        return {
+          title: result.ok ? `Granted ${args.name}` : "Grant refused",
+          output: JSON.stringify(result)
+        };
+      }
     })
   };
 }
@@ -11924,7 +11998,7 @@ function commandTools(options) {
   const sizeNote = capabilities.resize ? "applied live to the PTY winsize" : "stored; resize is unsupported by the pipe host";
   return {
     loopd_command_start: tool3({
-      description: "PREFER THIS over the built-in shell/bash tool whenever a command might take a while or never return: installs (npm/pip/brew/cargo...), builds, test suites, downloads, migrations, dev servers, watchers, log tails, REPLs, or anything interactive. The built-in shell BLOCKS your whole turn until the process exits \u2014 a long install freezes you (and can time out); this returns immediately with a command_id and pushes you a message on exit or pattern match, so you stay responsive and can do other work meanwhile. Only use the built-in shell for quick one-shots (ls, git status, a single fast test) that finish in seconds. " + "Start a standalone interactive OS process (arbitrary shell command) in the background \u2014 a dev server, `npm test --watch`, a REPL, a log tail, a build, or a one-off script. This is a raw process, NOT an AI worker: no agent, no checks, no turn loop. For multi-turn autonomous AI work with completion criteria, use loopd_create_goal instead. " + "Returns a command_id for loopd_command_get (read output)/loopd_command_write (send stdin)/loopd_command_interrupt (Ctrl+C)/loopd_command_terminate (kill)/loopd_command_remove (delete). " + "The user can also open it live: /loop or /commands \u2192 Tab/l to the Commands tab \u2192 select it \u2192 `o` opens a fullscreen interactive terminal page (type directly, Ctrl+C interrupts, Ctrl+] detaches without stopping it). " + "Independent from goals: an optional goal_id is display-only metadata and never couples lifecycles \u2014 pausing/clearing a goal never touches the command, and terminating a command never touches the goal. " + "To make a specific goal wake up when this command finishes, call loopd_command_await separately after starting it (linking alone does not wake anything). " + "The OWNER session gets a notification on natural exit (including code 0), missing process, or timeout \u2014 no polling required for completion. Manual terminate stays silent by default. Raw PTY output stays in the log; any short tail included in the notification is sanitized for chat. Set notify_on_exit:false to suppress owner exit notifications." + " HOW TO WAIT \u2014 declare your wake upfront, then go do other work; you will be pushed. Never poll loopd_command_get in a loop and never sleep-then-read: quick one-shot finishing in seconds \u2192 built-in bash, or start here and read once. " + "Minutes-long or never-exiting where only FINISHING matters \u2192 just start it; the automatic exit/timeout notification is your wake. " + "Never-exiting where a LINE appearing matters (dev-server READY, deploy COMPLETED) \u2192 pass watch_until (+ watch_filter to cut noise); stop (default) ends the command with exactly one message, keep lets it run on. " + "A GOAL worker that must block until that happens \u2192 call loopd_command_await (passing goal_id alone never wakes anything). " + "Polling the WORLD inside the command (a shell loop curling an endpoint until it flips) is fine and costs no turns; polling loopd from YOUR side is the forbidden pattern \u2014 one mid-run peek is fine, a timer loop is not. " + "Emit a printed marker line for EVERY outcome (DONE and FAILED), or a silent failure wakes nobody. " + "Watches longer than ~30min are fragile (in-memory only, die on restart) \u2014 prefer a scheduled goal that checks state and completes.",
+      description: "PREFER THIS over the built-in shell/bash tool whenever a command might take a while or never return: installs (npm/pip/brew/cargo...), builds, test suites, downloads, migrations, dev servers, watchers, log tails, REPLs, or anything interactive. The built-in shell BLOCKS your whole turn until the process exits \u2014 a long install freezes you (and can time out); this returns immediately with a command_id and pushes you a message on exit or pattern match, so you stay responsive and can do other work meanwhile. Only use the built-in shell for quick one-shots (ls, git status, a single fast test) that finish in seconds. " + "Start a standalone interactive OS process (arbitrary shell command) in the background \u2014 a dev server, `npm test --watch`, a REPL, a log tail, a build, or a one-off script. This is a raw process, NOT an AI worker: no agent, no checks, no turn loop. For multi-turn autonomous AI work with completion criteria, use loopd_create_goal instead. " + "Returns a command_id for loopd_command_get (read output)/loopd_command_write (send stdin)/loopd_command_interrupt (Ctrl+C)/loopd_command_terminate (kill)/loopd_command_remove (delete). " + "The response also carries host `capabilities`: `terminalEmulation` is always false BY DESIGN (the host captures a byte stream; the fullscreen TUI emulates the screen client-side) \u2014 it does NOT mean spawning is unavailable. `spawn:true` plus `resize:true` is the normal real-PTY case. " + "The user can also open it live: /loop or /commands \u2192 Tab/l to the Commands tab \u2192 select it \u2192 `o` opens a fullscreen interactive terminal page (type directly, Ctrl+C interrupts, Ctrl+] detaches without stopping it). " + "Independent from goals: an optional goal_id is display-only metadata and never couples lifecycles \u2014 pausing/clearing a goal never touches the command, and terminating a command never touches the goal. " + "To make a specific goal wake up when this command finishes, call loopd_command_await separately after starting it (linking alone does not wake anything). " + "The OWNER session gets a notification on natural exit (including code 0), missing process, or timeout \u2014 no polling required for completion. Manual terminate stays silent by default. Raw PTY output stays in the log; any short tail included in the notification is sanitized for chat. Set notify_on_exit:false to suppress owner exit notifications." + " HOW TO WAIT \u2014 declare your wake upfront, then go do other work; you will be pushed. Never poll loopd_command_get in a loop and never sleep-then-read: quick one-shot finishing in seconds \u2192 built-in bash, or start here and read once. " + "Minutes-long or never-exiting where only FINISHING matters \u2192 just start it; the automatic exit/timeout notification is your wake. " + "Never-exiting where a LINE appearing matters (dev-server READY, deploy COMPLETED) \u2192 pass watch_until (+ watch_filter to cut noise); stop (default) ends the command with exactly one message, keep lets it run on. " + "A GOAL worker that must block until that happens \u2192 call loopd_command_await (passing goal_id alone never wakes anything). " + "Polling the WORLD inside the command (a shell loop curling an endpoint until it flips) is fine and costs no turns; polling loopd from YOUR side is the forbidden pattern \u2014 one mid-run peek is fine, a timer loop is not. " + "Emit a printed marker line for EVERY outcome (DONE and FAILED), or a silent failure wakes nobody. " + "Watches longer than ~30min are fragile (in-memory only, die on restart) \u2014 prefer a scheduled goal that checks state and completes.",
       args: {
         title: tool3.schema.string().describe("Short human label for the session."),
         command: tool3.schema.string().describe('Executable ONLY (e.g. "bash", "bun", "python3") \u2014 never a full shell string. The script and flags go in `args`, not here. WRONG: {command: "bash pull.sh"}. RIGHT: {command: "bash", args: ["pull.sh"]}. For pipes/redirects/globs use shell:true instead.'),
