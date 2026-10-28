@@ -378,12 +378,27 @@ export function goalTools(
           const checkResults = await withWorkspaceOperation(dir, goal.id, goal.workerSessionID!, () => runCompletionChecks(goal.config.checks!, cwd))
           if (!checkResults.passed) {
             const failureDetails = checkResults.failures.map((f) => {
-              const stdoutSnippet = f.stdout ? `\nStdout: ${f.stdout.slice(0, 500)}` : ""
-              const stderrSnippet = f.stderr ? `\nStderr: ${f.stderr.slice(0, 500)}` : ""
+              // Show the TAIL (last ~500 chars / ~25 lines) where failures actually appear,
+              // not the head of passing output. Extract failing test name if visible.
+              const tail = (s: string) => {
+                if (!s) return ""
+                const t = s.length > 1200 ? s.slice(-1200) : s
+                // Keep last 25 non-empty lines for context
+                const lines = t.split("\n").filter((l) => l.trim().length > 0)
+                return lines.slice(-25).join("\n")
+              }
+              const extractFail = (s: string) => {
+                const m = s.match(/(FAIL[: ]\s*.+|Error:.*|✕.+|●.+|at .*\.test\..+)/)
+                return m ? `\nFailing test: ${m[1]!.slice(0, 200)}` : ""
+              }
+              const combined = `${f.stderr}\n${f.stdout}`
+              const stdoutSnippet = f.stdout ? `\nStdout tail:\n${tail(f.stdout)}` : ""
+              const stderrSnippet = f.stderr ? `\nStderr tail:\n${tail(f.stderr)}` : ""
+              const failHint = extractFail(combined)
               const status = f.timedOut
                 ? `Timed out after ${Math.round(CHECK_TIMEOUT_MS / 1000)}s (not a test failure)`
                 : `Exit code: ${f.exitCode}`
-              return `Command: ${f.command}\n${status}${stdoutSnippet}${stderrSnippet}`
+              return `Command: ${f.command}\n${status}${failHint}${stdoutSnippet}${stderrSnippet}`
             }).join("\n\n")
             let rejectionCount = 0
             let blocked = false
@@ -846,14 +861,23 @@ export async function runCompletionChecks(checks: string[], cwd?: string, timeou
       // as exitCode 1 made a timeout read as a failed test, so it is surfaced as
       // its own thing and the exit code stays null rather than being invented.
       const timedOut = error?.killed === true || error?.signal === "SIGTERM" || error?.code === "ETIMEDOUT"
+      // Keep the TAIL of output where failures are, not the head of passing logs.
+      const tailSlice = (s: string) => {
+        const str = String(s || "")
+        if (str.length <= 1200) return str
+        // Prefer last 1200 chars, but align to line boundary
+        const t = str.slice(-1200)
+        const nl = t.indexOf("\n")
+        return nl > 0 ? t.slice(nl + 1) : t
+      }
       failures.push({
         command: cmd,
         exitCode: typeof error?.code === "number" ? error.code : null,
         timedOut,
         stderr: timedOut
-          ? `Check exceeded its ${Math.round(timeoutMs / 1000)}s limit and was terminated, so this is not a failure report. Partial output:\n${String(error.stderr || "").slice(0, 1000)}`
-          : String(error.stderr || error.message || "unknown error").slice(0, 1000),
-        stdout: String(error.stdout || "").slice(0, 1000),
+          ? `Check exceeded its ${Math.round(timeoutMs / 1000)}s limit and was terminated, so this is not a failure report. Partial tail:\n${tailSlice(error.stderr || "")}`
+          : tailSlice(error.stderr || error.message || "unknown error"),
+        stdout: tailSlice(error.stdout || ""),
       })
     }
   }

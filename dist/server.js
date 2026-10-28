@@ -10,6 +10,7 @@ var __esm = (fn, res, err) => () => {
     throw err[0];
   return res;
 };
+var __require = import.meta.require;
 
 // src/domain/runtime.ts
 function createRuntimeState(goalID) {
@@ -1790,7 +1791,7 @@ async function beforeWorkspaceTool(directory, input, args, identity = {}) {
     const writes = structuredWritePaths(input.tool, args);
     if (!writes) {
       if (!isOwner)
-        throw new Error(`Scope denied: uncontrolled tool "${input.tool}". Shell, commands, custom tools, batch and subagents are not allowed while protected goals exist. Use structured edits or run_goal_checks.`);
+        throw new Error(`Scope denied: uncontrolled tool "${input.tool}". Shell, commands, custom tools, batch and subagents can never run while protected goals exist (their effects are unverifiable). Instead: claim the files first with claim_goal_scope then use structured edit/write/patch, verify with run_goal_checks, or ask the owner to grant a fixed executable via grant_approved_command.`);
       if (state.workspaceOperation)
         throw new Error(`Workspace busy: completion checks (operation ${state.workspaceOperation.id}) are running; retry after they finish.`);
       const blocking = (state.workspaceCalls ?? []).find((call) => call.sessionID !== input.sessionID);
@@ -2090,9 +2091,30 @@ init_state_repository();
 import { randomUUID as randomUUID6 } from "crypto";
 
 // src/application/goal-policy.ts
-function inferNamedFileWriteScope(objective) {
+function inferNamedFileWriteScope(objective, directory) {
   const matches = objective.matchAll(/(?<![\w./:@-])(?:\.\/)?(?:[\w.-]+\/)*[\w.-]+\.(?:tsx?|jsx?|mjs|cjs|jsonc?|md|py|go|rs|java|kt|c|cc|cpp|h|hpp|cs|sh|ya?ml|toml|css|scss|html|sql|vue|svelte|xml|txt|proto|gradle|lock)\b/g);
-  const paths = [...new Set([...matches].map((match) => match[0].replace(/^\.\//, "")))].sort();
+  let paths = [...new Set([...matches].map((match) => match[0].replace(/^\.\//, "")))].sort();
+  if (directory && paths.some((p) => p.includes("/"))) {
+    try {
+      const fs = __require("fs");
+      const path = __require("path");
+      const externalPrefix = /^(opencode-|fleet|voice|loopd)/i;
+      paths = paths.filter((p) => {
+        if (!p.includes("/"))
+          return true;
+        const top = p.split("/")[0];
+        if (externalPrefix.test(top)) {
+          try {
+            fs.statSync(path.join(directory, top));
+            return true;
+          } catch {
+            return false;
+          }
+        }
+        return true;
+      });
+    } catch {}
+  }
   return paths.length ? paths : undefined;
 }
 function resolveGoalCreationConfig(input) {
@@ -8124,7 +8146,7 @@ function createGoalService(host) {
       input.config = { ...input.config, approvedCommands: await canonicalGoalCommands(directory, input.config.approvedCommands) };
     }
     if (host.scopedExecution && input.config?.workspaceWrite !== false && input.config?.write_scope === undefined) {
-      const inferred = inferNamedFileWriteScope(input.objective);
+      const inferred = inferNamedFileWriteScope(input.objective, directory);
       if (inferred)
         input.config = { ...input.config, write_scope: inferred };
     }
@@ -9156,7 +9178,7 @@ function createGoalService(host) {
           const currentRun = current.runtimes.find((rt) => rt.goalID === goalID);
           if (currentGoal?.status !== "active" || currentRun?.runGeneration !== active.runGeneration || currentRun.activeRunID !== active.activeRunID)
             return rejected(goalID, "blocked", "Goal or turn changed during native enqueue; late acceptance grants no authority.");
-          return { ok: true, outcome: "queued", goalID, promptMessageID: messageID, message: `Queued in the OpenCode inbox for "${goal.name}".` };
+          return { ok: true, outcome: "queued", goalID, promptMessageID: messageID, message: `Queued in inbox for "${goal.name}" \u2014 worker is busy, will deliver on next idle turn. Use nudge_goal to deliver now (forced), or wait.` };
         } catch {
           return rejected(goalID, "blocked", `Native inbox acceptance is unconfirmed for ${messageID}; inspect the session before resending.`);
         }
@@ -9165,7 +9187,7 @@ function createGoalService(host) {
     if (!await appendGoalInbox(directory, goalID, "user", trimmed))
       return rejected(goalID, "not_found", "Goal cleared before words could be queued. List current goals instead of retrying this ID.");
     if (goal.status !== "active") {
-      return { ok: true, outcome: "queued", goalID, message: `Queued for "${goal.name}" (goal is ${goal.status}; delivers on the next active turn).` };
+      return { ok: true, outcome: "queued", goalID, message: `Queued for "${goal.name}" (goal is ${goal.status} \u2014 not running). Will deliver when you resume it to active via resume_goal.` };
     }
     const guard = continuationGuard(preState, goalID);
     if (guard)
@@ -9174,7 +9196,7 @@ function createGoalService(host) {
     if (!(await readState(directory)).goals.some((item) => item.id === goalID))
       return rejected(goalID, "not_found", "Goal cleared during worker status probe; no prompt was sent.");
     if (goal.workerSessionID && status !== "idle") {
-      return { ok: true, outcome: "queued", goalID, message: `Saved in inbox for "${goal.name}"; worker is busy or unconfirmed. Its active turn was left intact.` };
+      return { ok: true, outcome: "queued", goalID, message: `Saved in inbox for "${goal.name}" \u2014 worker is busy (status: ${status}). Left intact; will deliver on next idle. Use nudge_goal to force now.` };
     }
     if (goal.config.write_scope !== undefined) {
       const result = await continueTurnUnlocked(directory, goalID, { bare: true });
@@ -9270,6 +9292,67 @@ function createGoalService(host) {
   function grantApprovedCommand(directory, ownerSessionID, goalID, spec) {
     return withGoalOperation(goalID, () => grantApprovedCommandUnlocked(directory, ownerSessionID, goalID, spec));
   }
+  async function grantWriteScopeUnlocked(directory, ownerSessionID, goalID, paths) {
+    const pre = await readState(directory);
+    const goal = pre.goals.find((g) => g.id === goalID);
+    if (!goal)
+      return { ok: false, message: "Goal not found." };
+    if (goal.ownerSessionID !== ownerSessionID) {
+      return { ok: false, message: "Only the goal's owner session can widen scope \u2014 workers can never authorize themselves." };
+    }
+    if (goal.status !== "active" || goal.scopeClosing || goal.scopeClearPending) {
+      return { ok: false, message: `Goal "${goal.name}" is ${goal.scopeClosing ? "closing" : goal.status}, not active; grant while it is active.` };
+    }
+    if (goal.config.workspaceWrite === false) {
+      return { ok: false, message: `Goal "${goal.name}" is artifact-only (workspaceWrite:false); it has no workspace scope to widen. Recreate with workspaceWrite:true if it needs to edit repo files.` };
+    }
+    if (!Array.isArray(paths) || paths.length === 0) {
+      return { ok: false, message: "Provide at least one file path to grant (exact workspace-relative paths, no globs)." };
+    }
+    let canonical;
+    try {
+      await Promise.resolve().then(() => init_workspace_scope());
+      canonical = await canonicalWriteScope(directory, paths);
+    } catch (error) {
+      return { ok: false, message: describeError(error) };
+    }
+    const existing = goal.config.write_scope ?? [];
+    const toAdd = canonical.filter((p) => !existing.includes(p));
+    if (toAdd.length === 0) {
+      return { ok: false, message: `All ${canonical.length} path(s) already in write_scope. Current scope: [${existing.join(", ")}]` };
+    }
+    await Promise.resolve().then(() => init_workspace_scope());
+    const heldGoals = pre.goals.filter((g) => g.id !== goalID && g.status === "active" && g.config.workspaceWrite !== false);
+    for (const p of toAdd) {
+      const candidate = { ...goal, config: { ...goal.config, write_scope: [p] } };
+      const conflict = findScopeConflict(heldGoals, candidate);
+      if (conflict) {
+        return { ok: false, message: `Cannot grant "${p}": write scope conflict on "${conflict.path}": goal "${conflict.name}" (${conflict.goalID}), owned by session ${conflict.ownerSessionID}.` };
+      }
+    }
+    await mutateState(directory, `goal.grant-scope:${goalID}`, async (s) => {
+      const g = s.goals.find((x) => x.id === goalID);
+      if (!g || g.ownerSessionID !== ownerSessionID)
+        return s;
+      g.config.write_scope = [...g.config.write_scope ?? [], ...toAdd].sort();
+      g.updatedAt = new Date().toISOString();
+      return s;
+    });
+    await logServerEvent(directory, "goal.write-scope-granted", {
+      goalID,
+      paths: toAdd,
+      ownerSessionID
+    }).catch(() => {});
+    const updated = (await readState(directory)).goals.find((g) => g.id === goalID)?.config.write_scope;
+    return {
+      ok: true,
+      write_scope: updated,
+      message: `Granted ${toAdd.length} path(s) to "${goal.name}": [${toAdd.join(", ")}]. Worker picks it up next turn via claim_goal_scope or direct write. Full scope now: [${updated?.join(", ")}]`
+    };
+  }
+  function grantWriteScope(directory, ownerSessionID, goalID, paths) {
+    return withGoalOperation(goalID, () => grantWriteScopeUnlocked(directory, ownerSessionID, goalID, paths));
+  }
   async function abortWorkerUnlocked(directory, goalID) {
     const preState = await readState(directory);
     const goal = preState.goals.find((g) => g.id === goalID);
@@ -9322,7 +9405,7 @@ function createGoalService(host) {
   function releaseWorkspace(directory, ownerSessionID, input) {
     return releaseWorkspaceUnlocked(directory, ownerSessionID, input);
   }
-  return { scopedExecution: host.scopedExecution === true, start, continueTurn, nudge, pause, resume, retry, clear, workspaceReservations, releaseWorkspace, grantApprovedCommand, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, observeProviderError, compact };
+  return { scopedExecution: host.scopedExecution === true, start, continueTurn, nudge, pause, resume, retry, clear, workspaceReservations, releaseWorkspace, grantApprovedCommand, grantWriteScope, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, observeProviderError, compact };
 }
 
 // src/application/schedule-worker.ts
@@ -10727,13 +10810,32 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
           const checkResults = await withWorkspaceOperation(dir, goal.id, goal.workerSessionID, () => runCompletionChecks(goal.config.checks, cwd));
           if (!checkResults.passed) {
             const failureDetails = checkResults.failures.map((f) => {
+              const tail = (s) => {
+                if (!s)
+                  return "";
+                const t = s.length > 1200 ? s.slice(-1200) : s;
+                const lines = t.split(`
+`).filter((l) => l.trim().length > 0);
+                return lines.slice(-25).join(`
+`);
+              };
+              const extractFail = (s) => {
+                const m = s.match(/(FAIL[: ]\s*.+|Error:.*|\u2715.+|\u25CF.+|at .*\.test\..+)/);
+                return m ? `
+Failing test: ${m[1].slice(0, 200)}` : "";
+              };
+              const combined = `${f.stderr}
+${f.stdout}`;
               const stdoutSnippet = f.stdout ? `
-Stdout: ${f.stdout.slice(0, 500)}` : "";
+Stdout tail:
+${tail(f.stdout)}` : "";
               const stderrSnippet = f.stderr ? `
-Stderr: ${f.stderr.slice(0, 500)}` : "";
+Stderr tail:
+${tail(f.stderr)}` : "";
+              const failHint = extractFail(combined);
               const status = f.timedOut ? `Timed out after ${Math.round(CHECK_TIMEOUT_MS / 1000)}s (not a test failure)` : `Exit code: ${f.exitCode}`;
               return `Command: ${f.command}
-${status}${stdoutSnippet}${stderrSnippet}`;
+${status}${failHint}${stdoutSnippet}${stderrSnippet}`;
             }).join(`
 
 `);
@@ -11127,13 +11229,22 @@ async function runCompletionChecks(checks, cwd, timeoutMs = CHECK_TIMEOUT_MS) {
       const { stdout, stderr } = await execAsync(cmd, { timeout: timeoutMs, cwd });
     } catch (error) {
       const timedOut = error?.killed === true || error?.signal === "SIGTERM" || error?.code === "ETIMEDOUT";
+      const tailSlice = (s) => {
+        const str = String(s || "");
+        if (str.length <= 1200)
+          return str;
+        const t = str.slice(-1200);
+        const nl = t.indexOf(`
+`);
+        return nl > 0 ? t.slice(nl + 1) : t;
+      };
       failures.push({
         command: cmd,
         exitCode: typeof error?.code === "number" ? error.code : null,
         timedOut,
-        stderr: timedOut ? `Check exceeded its ${Math.round(timeoutMs / 1000)}s limit and was terminated, so this is not a failure report. Partial output:
-${String(error.stderr || "").slice(0, 1000)}` : String(error.stderr || error.message || "unknown error").slice(0, 1000),
-        stdout: String(error.stdout || "").slice(0, 1000)
+        stderr: timedOut ? `Check exceeded its ${Math.round(timeoutMs / 1000)}s limit and was terminated, so this is not a failure report. Partial tail:
+${tailSlice(error.stderr || "")}` : tailSlice(error.stderr || error.message || "unknown error"),
+        stdout: tailSlice(error.stdout || "")
       });
     }
   }
@@ -11275,8 +11386,10 @@ function ownerTools2(options) {
         try {
           const result = await goalService.switchIdentity(directory, args.goal_id, context.sessionID, args);
           return { title: `Identity switch: ${result.outcome}`, output: JSON.stringify({ ok: result.outcome !== "unsupported", ...result, goalID: args.goal_id, message: "Same goal and worker retained. Deferred requests require the next permitted idle turn; no automatic interactive wake." }) };
-        } catch {
-          return { title: "Identity switch failed", output: JSON.stringify({ ok: false, message: "Switch rejected: verify ownership, identity availability, resume eligibility and host capability with loopd_list_models and inspect_background_goal. Existing goal/session retained. Inspect live session identity before retrying if host rollback failed." }) };
+        } catch (error) {
+          const isHostError = error instanceof Error && /host|unsupported|unavailable/i.test(error.message);
+          const hint = isHostError ? "Host unavailable to switch identity. Retry after host recovers; check loopd-server.log and loopd_list_models." : "Switch rejected: check loopd_list_models and inspect_background_goal for the specific blocker (ownership, model availability, or resume eligibility).";
+          return { title: "Identity switch failed", output: JSON.stringify({ ok: false, message: `${hint} Existing goal/session retained.` }) };
         }
       }
     }),
@@ -11942,6 +12055,24 @@ function ownerTools2(options) {
         });
         return {
           title: result.ok ? `Granted ${args.name}` : "Grant refused",
+          output: JSON.stringify(result)
+        };
+      }
+    }),
+    grant_write_scope: tool2({
+      description: "Widen write_scope of an ACTIVE scoped goal you own, mid-run \u2014 append exact file paths without recreating the goal. Same strict validation as creation (workspace-relative, no globs, no directory escape). Workers can also self-serve via claim_goal_scope, but this is the owner escape hatch when you want to open scope for them. Append-only, no revoke.",
+      args: {
+        goal_id: tool2.schema.string().describe("Active owned goal ID."),
+        paths: tool2.schema.array(tool2.schema.string()).describe('Exact workspace-relative file paths to add (e.g. ["src/a.ts","lib/b.js"]).')
+      },
+      execute: async (args, context) => {
+        const ownerID = context?.sessionID;
+        if (!ownerID) {
+          return { title: "No session", output: JSON.stringify({ ok: false, message: "No session context available, so ownership cannot be matched." }) };
+        }
+        const result = await goalService.grantWriteScope(directory, ownerID, args.goal_id, args.paths);
+        return {
+          title: result.ok ? `Scope widened` : "Grant refused",
           output: JSON.stringify(result)
         };
       }

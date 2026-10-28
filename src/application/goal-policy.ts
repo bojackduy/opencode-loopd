@@ -22,9 +22,30 @@ export type GoalConfigResolution =
  * not a filesystem scope validator: GoalService canonicalizes the result.
  * Unnamed/broad objectives retain legacy exclusive ownership.
  */
-export function inferNamedFileWriteScope(objective: string): string[] | undefined {
+export function inferNamedFileWriteScope(objective: string, directory?: string): string[] | undefined {
   const matches = objective.matchAll(/(?<![\w./:@-])(?:\.\/)?(?:[\w.-]+\/)*[\w.-]+\.(?:tsx?|jsx?|mjs|cjs|jsonc?|md|py|go|rs|java|kt|c|cc|cpp|h|hpp|cs|sh|ya?ml|toml|css|scss|html|sql|vue|svelte|xml|txt|proto|gradle|lock)\b/g)
-  const paths = [...new Set([...matches].map((match) => match[0]!.replace(/^\.\//, "")))].sort()
+  let paths = [...new Set([...matches].map((match) => match[0]!.replace(/^\.\//, "")))].sort()
+  // Filter obvious cross-repo noise: paths like opencode-fleet/src/...
+  // that reference another repo name inside this workspace's objective.
+  // Keep single-segment files and any path whose top-level looks like a
+  // workspace dir (src, lib, test, docs, assets, etc.) or actually exists.
+  // Don't filter on filesystem existence alone — new files in new dirs (e.g.
+  // src/a.ts in a temp test dir) would be wrongly dropped.
+  if (directory && paths.some((p) => p.includes("/"))) {
+    try {
+      const fs = require("node:fs") as typeof import("node:fs")
+      const path = require("node:path") as typeof import("node:path")
+      const externalPrefix = /^(opencode-|fleet|voice|loopd)/i
+      paths = paths.filter((p) => {
+        if (!p.includes("/")) return true
+        const top = p.split("/")[0]!
+        if (externalPrefix.test(top)) {
+          try { fs.statSync(path.join(directory, top)); return true } catch { return false }
+        }
+        return true
+      })
+    } catch { /* fallback: keep all */ }
+  }
   return paths.length ? paths : undefined
 }
 

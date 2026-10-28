@@ -68,8 +68,13 @@ export function ownerTools(options: OwnerToolsOptions) {
         try {
           const result = await goalService.switchIdentity(directory, args.goal_id as GoalID, context.sessionID, args)
           return { title: `Identity switch: ${result.outcome}`, output: JSON.stringify({ ok: result.outcome !== "unsupported", ...result, goalID: args.goal_id, message: "Same goal and worker retained. Deferred requests require the next permitted idle turn; no automatic interactive wake." }) }
-        } catch {
-          return { title: "Identity switch failed", output: JSON.stringify({ ok: false, message: "Switch rejected: verify ownership, identity availability, resume eligibility and host capability with loopd_list_models and inspect_background_goal. Existing goal/session retained. Inspect live session identity before retrying if host rollback failed." }) }
+        } catch (error) {
+          // Don't leak host internals (e.g. SUPER-SECRET) — log details server-side, return single-thing message.
+          const isHostError = error instanceof Error && /host|unsupported|unavailable/i.test(error.message)
+          const hint = isHostError
+            ? "Host unavailable to switch identity. Retry after host recovers; check loopd-server.log and loopd_list_models."
+            : "Switch rejected: check loopd_list_models and inspect_background_goal for the specific blocker (ownership, model availability, or resume eligibility)."
+          return { title: "Identity switch failed", output: JSON.stringify({ ok: false, message: `${hint} Existing goal/session retained.` }) }
         }
       },
     }),
@@ -834,6 +839,26 @@ export function ownerTools(options: OwnerToolsOptions) {
         })
         return {
           title: result.ok ? `Granted ${args.name}` : "Grant refused",
+          output: JSON.stringify(result),
+        }
+      },
+    }),
+
+    grant_write_scope: tool({
+      description:
+        "Widen write_scope of an ACTIVE scoped goal you own, mid-run — append exact file paths without recreating the goal. Same strict validation as creation (workspace-relative, no globs, no directory escape). Workers can also self-serve via claim_goal_scope, but this is the owner escape hatch when you want to open scope for them. Append-only, no revoke.",
+      args: {
+        goal_id: tool.schema.string().describe("Active owned goal ID."),
+        paths: tool.schema.array(tool.schema.string()).describe("Exact workspace-relative file paths to add (e.g. [\"src/a.ts\",\"lib/b.js\"])."),
+      },
+      execute: async (args, context) => {
+        const ownerID = context?.sessionID
+        if (!ownerID) {
+          return { title: "No session", output: JSON.stringify({ ok: false, message: "No session context available, so ownership cannot be matched." }) }
+        }
+        const result = await goalService.grantWriteScope(directory, ownerID, args.goal_id, args.paths)
+        return {
+          title: result.ok ? `Scope widened` : "Grant refused",
           output: JSON.stringify(result),
         }
       },

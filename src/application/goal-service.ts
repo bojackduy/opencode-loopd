@@ -178,6 +178,14 @@ export interface GoalService {
    */
   grantApprovedCommand(directory: string, ownerSessionID: string, goalID: string, spec: unknown): Promise<{ ok: boolean; message: string; spec?: import("../domain/goal").ApprovedGoalCommand }>
 
+  /**
+   * Owner-only mid-goal grant: widen write_scope by appending exact file paths
+   * (same strict validation as creation). Workers can also self-serve via
+   * claim_goal_scope, but this lets the owner open scope without worker action.
+   * Append-only, no revoke.
+   */
+  grantWriteScope(directory: string, ownerSessionID: string, goalID: string, paths: unknown): Promise<{ ok: boolean; message: string; write_scope?: string[] }>
+
   /** Get the worker session for a goal (for engine to check status). */
   getWorker(goalID: GoalID): WorkerSession | undefined
 
@@ -933,7 +941,7 @@ export function createGoalService(host: LoopHost): GoalService {
     // Prefer enforceable, disjoint file ownership when the user explicitly
     // names files. Do not silently enable scopes on the legacy host.
     if (host.scopedExecution && input.config?.workspaceWrite !== false && input.config?.write_scope === undefined) {
-      const inferred = inferNamedFileWriteScope(input.objective)
+      const inferred = inferNamedFileWriteScope(input.objective, directory)
       if (inferred) input.config = { ...input.config, write_scope: inferred }
     }
     // Reject malformed/unavailable alternatives before any worker or goal exists.
@@ -2087,7 +2095,7 @@ export function createGoalService(host: LoopHost): GoalService {
           const currentGoal = current.goals.find((g) => g.id === goalID)
           const currentRun = current.runtimes.find((rt) => rt.goalID === goalID)
           if (currentGoal?.status !== "active" || currentRun?.runGeneration !== active.runGeneration || currentRun.activeRunID !== active.activeRunID) return rejected(goalID, "blocked", "Goal or turn changed during native enqueue; late acceptance grants no authority.")
-          return { ok: true, outcome: "queued", goalID, promptMessageID: messageID, message: `Queued in the OpenCode inbox for "${goal.name}".` }
+          return { ok: true, outcome: "queued", goalID, promptMessageID: messageID, message: `Queued in inbox for "${goal.name}" — worker is busy, will deliver on next idle turn. Use nudge_goal to deliver now (forced), or wait.` }
         } catch {
           // A timeout is ambiguous acceptance, never cancellation or permission
           // to retry blindly. Keep the receipt until host delivery is observed.
@@ -2098,14 +2106,14 @@ export function createGoalService(host: LoopHost): GoalService {
 
     if (!await appendGoalInbox(directory, goalID, "user", trimmed)) return rejected(goalID, "not_found", "Goal cleared before words could be queued. List current goals instead of retrying this ID.")
     if (goal.status !== "active") {
-      return { ok: true, outcome: "queued", goalID, message: `Queued for "${goal.name}" (goal is ${goal.status}; delivers on the next active turn).` }
+      return { ok: true, outcome: "queued", goalID, message: `Queued for "${goal.name}" (goal is ${goal.status} — not running). Will deliver when you resume it to active via resume_goal.` }
     }
     const guard = continuationGuard(preState, goalID)
     if (guard) return { ok: true, outcome: "queued", goalID, message: `Saved in inbox for "${goal.name}". ${guard.message}` }
     const status = goal.workerSessionID ? await host.sessionStatus(goal.workerSessionID) : undefined
     if (!(await readState(directory)).goals.some((item) => item.id === goalID)) return rejected(goalID, "not_found", "Goal cleared during worker status probe; no prompt was sent.")
     if (goal.workerSessionID && status !== "idle") {
-      return { ok: true, outcome: "queued", goalID, message: `Saved in inbox for "${goal.name}"; worker is busy or unconfirmed. Its active turn was left intact.` }
+      return { ok: true, outcome: "queued", goalID, message: `Saved in inbox for "${goal.name}" — worker is busy (status: ${status}). Left intact; will deliver on next idle. Use nudge_goal to force now.` }
     }
     if (goal.config.write_scope !== undefined) {
       const result = await continueTurnUnlocked(directory, goalID, { bare: true })
@@ -2215,6 +2223,73 @@ export function createGoalService(host: LoopHost): GoalService {
     return withGoalOperation(goalID as GoalID, () => grantApprovedCommandUnlocked(directory, ownerSessionID, goalID, spec))
   }
 
+  async function grantWriteScopeUnlocked(
+    directory: string,
+    ownerSessionID: string,
+    goalID: string,
+    paths: unknown,
+  ): Promise<{ ok: boolean; message: string; write_scope?: string[] }> {
+    const pre = await readState(directory)
+    const goal = pre.goals.find((g) => g.id === goalID)
+    if (!goal) return { ok: false, message: "Goal not found." }
+    if (goal.ownerSessionID !== ownerSessionID) {
+      return { ok: false, message: "Only the goal's owner session can widen scope — workers can never authorize themselves." }
+    }
+    if (goal.status !== "active" || goal.scopeClosing || goal.scopeClearPending) {
+      return { ok: false, message: `Goal "${goal.name}" is ${goal.scopeClosing ? "closing" : goal.status}, not active; grant while it is active.` }
+    }
+    if (goal.config.workspaceWrite === false) {
+      return { ok: false, message: `Goal "${goal.name}" is artifact-only (workspaceWrite:false); it has no workspace scope to widen. Recreate with workspaceWrite:true if it needs to edit repo files.` }
+    }
+    if (!Array.isArray(paths) || paths.length === 0) {
+      return { ok: false, message: "Provide at least one file path to grant (exact workspace-relative paths, no globs)." }
+    }
+    let canonical: string[]
+    try {
+      const { canonicalWriteScope } = await import("../infrastructure/workspace-scope")
+      canonical = await canonicalWriteScope(directory, paths as string[])
+    } catch (error) {
+      return { ok: false, message: describeError(error) }
+    }
+    const existing = goal.config.write_scope ?? []
+    const toAdd = canonical.filter((p) => !existing.includes(p))
+    if (toAdd.length === 0) {
+      return { ok: false, message: `All ${canonical.length} path(s) already in write_scope. Current scope: [${existing.join(", ")}]` }
+    }
+    // Check for conflicts with other active goals before granting
+    const { findScopeConflict } = await import("../infrastructure/workspace-scope")
+    const heldGoals = pre.goals.filter((g) => g.id !== goalID && g.status === "active" && g.config.workspaceWrite !== false)
+    for (const p of toAdd) {
+      const candidate = { ...goal, config: { ...goal.config, write_scope: [p] } } as typeof goal
+      const conflict = findScopeConflict(heldGoals as any, candidate as any)
+      if (conflict) {
+        return { ok: false, message: `Cannot grant "${p}": write scope conflict on "${conflict.path}": goal "${conflict.name}" (${conflict.goalID}), owned by session ${conflict.ownerSessionID}.` }
+      }
+    }
+    await mutateState(directory, `goal.grant-scope:${goalID}`, async (s) => {
+      const g = s.goals.find((x) => x.id === goalID)
+      if (!g || g.ownerSessionID !== ownerSessionID) return s
+      g.config.write_scope = [...(g.config.write_scope ?? []), ...toAdd].sort()
+      g.updatedAt = new Date().toISOString()
+      return s
+    })
+    await logServerEvent(directory, "goal.write-scope-granted", {
+      goalID,
+      paths: toAdd,
+      ownerSessionID,
+    }).catch(() => {})
+    const updated = (await readState(directory)).goals.find((g) => g.id === goalID)?.config.write_scope
+    return {
+      ok: true,
+      write_scope: updated,
+      message: `Granted ${toAdd.length} path(s) to "${goal.name}": [${toAdd.join(", ")}]. Worker picks it up next turn via claim_goal_scope or direct write. Full scope now: [${updated?.join(", ")}]`,
+    }
+  }
+
+  function grantWriteScope(directory: string, ownerSessionID: string, goalID: string, paths: unknown) {
+    return withGoalOperation(goalID as GoalID, () => grantWriteScopeUnlocked(directory, ownerSessionID, goalID, paths))
+  }
+
   async function abortWorkerUnlocked(directory: string, goalID: GoalID): Promise<{ ok: boolean; message: string }> {
     const preState = await readState(directory)
     const goal = preState.goals.find((g) => g.id === goalID)
@@ -2278,5 +2353,5 @@ export function createGoalService(host: LoopHost): GoalService {
     return releaseWorkspaceUnlocked(directory, ownerSessionID, input)
   }
 
-  return { scopedExecution: host.scopedExecution === true, start, continueTurn, nudge, pause, resume, retry, clear, workspaceReservations, releaseWorkspace, grantApprovedCommand, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, observeProviderError, compact }
+  return { scopedExecution: host.scopedExecution === true, start, continueTurn, nudge, pause, resume, retry, clear, workspaceReservations, releaseWorkspace, grantApprovedCommand, grantWriteScope, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, observeProviderError, compact }
 }

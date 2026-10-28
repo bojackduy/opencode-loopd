@@ -354,7 +354,7 @@ export async function beforeWorkspaceTool(
     }
     const writes = structuredWritePaths(input.tool, args)
     if (!writes) {
-      if (!isOwner) throw new Error(`Scope denied: uncontrolled tool "${input.tool}". Shell, commands, custom tools, batch and subagents are not allowed while protected goals exist. Use structured edits or run_goal_checks.`)
+      if (!isOwner) throw new Error(`Scope denied: uncontrolled tool "${input.tool}". Shell, commands, custom tools, batch and subagents can never run while protected goals exist (their effects are unverifiable). Instead: claim the files first with claim_goal_scope then use structured edit/write/patch, verify with run_goal_checks, or ask the owner to grant a fixed executable via grant_approved_command.`)
       // Owner diagnostics are coordinated, never silent: they cannot start
       // beside a running verification or another session's live call.
       if (state.workspaceOperation) throw new Error(`Workspace busy: completion checks (operation ${state.workspaceOperation.id}) are running; retry after they finish.`)

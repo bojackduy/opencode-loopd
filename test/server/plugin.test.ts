@@ -154,6 +154,7 @@ describe("Server Plugin V2", () => {
       "clear_goal",
       "loopd_release_workspace",
       "grant_approved_command",
+      "grant_write_scope",
       "loopd_command_start",
       "loopd_command_list",
       "loopd_command_get",
