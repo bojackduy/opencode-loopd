@@ -15,7 +15,7 @@ import type { CommandSession } from "../domain/command-session"
 import type { CommandAwait } from "../domain/command-await"
 import type { ApprovedServerRecord } from "../domain/approved-server"
 
-const CURRENT_VERSION = 9
+const CURRENT_VERSION = 10
 
 export interface StoreState {
   version: number
@@ -35,6 +35,8 @@ export interface StoreState {
   /** Durable reservations: never discard on restart without proof of quiescence. */
   workspaceCalls?: WorkspaceCall[]
   workspaceOperation?: { id: string; goalID: string; sessionID: string }
+  /** Ticket-based write concurrency: per-scope tickets with queued waiters. Replaces global lock. */
+  writeTickets?: WriteTicketState
   /** Session tombstones fence late tools after worker rotation/removal. */
   retiredWorkerSessions?: string[]
   /** Missing handles are not proof of exit; removing logs must not erase fences. */
@@ -45,6 +47,31 @@ export interface StoreState {
    * goal; ordinary command goalID linkage stays display-only.
    */
   approvedServers?: ApprovedServerRecord[]
+}
+
+export interface WriteTicket {
+  ticketID: string
+  goalID: string
+  sessionID: string
+  callID: string
+  files: string[]
+  grantedAt: string
+  generation?: number
+}
+
+export interface WriteWaiter {
+  waiterID: string
+  goalID: string
+  sessionID: string
+  callID: string
+  files: string[]
+  requestedAt: string
+  isOwner: boolean
+}
+
+export interface WriteTicketState {
+  holders: WriteTicket[]
+  queue: WriteWaiter[]
 }
 
 export interface WorkspaceCall {
@@ -344,6 +371,13 @@ function migrate(state: StoreState): StoreState {
       workerTopology: goal.workerTopology ?? undefined,
       nativeParentID: goal.nativeParentID ?? undefined,
     }))
+  }
+
+  if (result.version < 10) {
+    result.version = 10
+    // Ticket-based write concurrency: initialize empty holders/queue.
+    // Existing workspaceCalls are kept for backward compat; new writes use tickets.
+    if (!(result as any).writeTickets) (result as any).writeTickets = { holders: [], queue: [] }
   }
 
   return result
