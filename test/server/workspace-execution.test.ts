@@ -110,7 +110,7 @@ describe("real plugin scope enforcement", () => {
     const { directory, before, after } = await fixture()
     await before("edit", { filePath: "owned.ts" }, "worker", "call")
     expect((await readState(directory)).workspaceCalls).toMatchObject([{ sessionID: "worker", callID: "call", paths: ["owned.ts"] }])
-    await expect(before("write", { filePath: "owned.ts" }, "worker", "other-call")).rejects.toThrow("being written")
+    await expect(before("write", { filePath: "owned.ts" }, "worker", "other-call")).rejects.toThrow(/queued|being written/)
     await after("call")
     expect((await readState(directory)).workspaceCalls).toEqual([])
   })

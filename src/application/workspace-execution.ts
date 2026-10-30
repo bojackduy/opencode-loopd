@@ -31,6 +31,34 @@ const readTools = new Set([
 ])
 const ownerTools = new Set(["loopd_create_goal", "switch_goal_identity", "pause_goal", "resume_goal", "clear_goal", "abort_goal_worker", "nudge_goal", "send_goal_input", "force_block_goal", "force_complete_goal"])
 
+// ─── Ticket-based write concurrency (replaces global lock) ────────────────────
+// Per-scope tickets: disjoint file sets run in parallel. Queued waiters are
+// FIFO with owner priority. Shell is never ticketed — prompt awareness only.
+// Read tools are always pass-through. Holders are reclaimed on crash/completion.
+
+function ticketHolders(state: StoreState): NonNullable<StoreState["writeTickets"]>["holders"] {
+  return state.writeTickets?.holders ?? []
+}
+function ticketQueue(state: StoreState): NonNullable<StoreState["writeTickets"]>["queue"] {
+  return state.writeTickets?.queue ?? []
+}
+function ensureTickets(state: StoreState): NonNullable<StoreState["writeTickets"]> {
+  if (!state.writeTickets) state.writeTickets = { holders: [], queue: [] }
+  return state.writeTickets
+}
+function filesOverlap(a: string[], b: string[]): boolean {
+  if (a.length === 0 || b.length === 0) return true // empty scope = exclusive
+  return a.some((f) => b.includes(f))
+}
+function canGrantTicket(state: StoreState, files: string[]): boolean {
+  return !ticketHolders(state).some((h) => filesOverlap(h.files, files))
+}
+function queuePosition(state: StoreState, callID: string): number {
+  const q = ticketQueue(state)
+  const idx = q.findIndex((w) => w.callID === callID)
+  return idx >= 0 ? idx + 1 : 0
+}
+
 /** These calls never acquire a workspace reservation; tracking must not gate them. */
 export function isWorkspaceToolExempt(tool: string): boolean { return readTools.has(tool) }
 
@@ -332,7 +360,7 @@ export async function beforeWorkspaceTool(
     // fence cannot see — e.g. typing into a shell REPL. Interactive typing
     // must work, so the fence stays at process start/stop, not at keystrokes.
     const isOwner = !goal && (state.goals.some((item) => item.ownerSessionID === input.sessionID) || hostMain)
-    if (protectedGoals.length && input.tool !== "loopd_command_write") assertCommandQuiescence(state)
+    // Commands and goals now coexist (ticket per scope). No global command fence.
     if (!state.workspaceOperation && !protectedGoals.length && (!goal || goal.config.write_scope === undefined)) {
       // No protected goals, no checks running: shells from sibling sessions
       // run concurrently. The reservation below is still recorded BEFORE
@@ -354,37 +382,24 @@ export async function beforeWorkspaceTool(
     }
     const writes = structuredWritePaths(input.tool, args)
     if (!writes) {
-      if (!isOwner) throw new Error(`Scope denied: uncontrolled tool "${input.tool}". Shell, commands, custom tools, batch and subagents can never run while protected goals exist (their effects are unverifiable). Instead: claim the files first with claim_goal_scope then use structured edit/write/patch, verify with run_goal_checks, or ask the owner to grant a fixed executable via grant_approved_command.`)
-      // Owner diagnostics are coordinated, never silent: they cannot start
-      // beside a running verification or another session's live call.
-      if (state.workspaceOperation) throw new Error(`Workspace busy: completion checks (operation ${state.workspaceOperation.id}) are running; retry after they finish.`)
-      // Parking or deleting a goal cannot prove an already admitted tool ended.
-      // Keep its reservation until an after-hook or terminal evidence releases it.
-      const blocking = (state.workspaceCalls ?? []).find((call) => call.sessionID !== input.sessionID)
-      if (blocking) throw new Error(busyMessage(blocking, state))
+      // Shell / arbitrary tools are never ticketed — prompt awareness only.
+      // They run concurrently; the initial worker prompt explains the circumstance
+      // (not injected on every tool call). Still record for observability.
+      // Workers are never allowed to use shell (even if they also own another goal) — prompt awareness only.
+      if (goal) {
+        throw new Error(`Scope denied: uncontrolled tool "${input.tool}" in worker goal (shell can write, so it is never allowed here). Use read tools or ask the owner to grant a fixed executable via grant_approved_command.`)
+      }
+      if (!isOwner) {
+        throw new Error(`Scope denied: unrecognized session/child "${input.sessionID}". Subagent writes are unsupported — make file writes from the worker session (or the owning main session), not from a nested subagent.`)
+      }
       state.workspaceCalls ??= []
       if (!state.workspaceCalls.some((call) => call.callID === input.callID && call.sessionID === input.sessionID)) {
-        // No path claim: the owner's tool body is not parsed, so it fences the
-        // whole workspace through `uncontrolled` rather than guessing safety.
         state.workspaceCalls.push({ callID: input.callID, sessionID: input.sessionID, paths: [], uncontrolled: true, at: new Date().toISOString() })
       }
       return state
     }
-    const concurrent = foreignUncontrolledCall(state, input)
-    // Single-human concurrency: the owner's own shells/subagents don't fence
-    // writes made for that owner's goal — one human coordinates both sides,
-    // and the per-file check below still guards known structured collisions.
-    // Any other session's uncontrolled call still fences, and a denied owner
-    // shell (above) still waits out in-flight writes rather than racing them.
-    const ownConcurrency = goal && concurrent && state.goals.some((g) => g.id === goal.id && g.ownerSessionID === concurrent.sessionID)
-    if (concurrent && !ownConcurrency) throw new Error(`Workspace busy: uncontrolled tool call ${concurrent.callID} from session ${concurrent.sessionID} is still executing; wait for its exit event before writing source.`)
     if (state.workspaceOperation) throw new Error(`Workspace operation ${state.workspaceOperation.id} is active; source writes are denied until it finishes.`)
     if (goal && (goal.status !== "active" || goal.scopeClosing)) throw new Error(`Scope denied: worker goal is ${goal.scopeClosing ? "closing" : goal.status}.`)
-    // Unknown child sessions fail closed; only explicitly persisted workers, owners
-    // and host-proven main sessions may write. Nested subagents run under their
-    // own session IDs, so their file writes land here: route file writes
-    // through the worker (or owning main) session instead — never from inside
-    // a subagent.
     if (!goal && !isOwner) {
       throw new Error(`Scope denied: unrecognized session/child "${input.sessionID}". Subagent writes are unsupported — make file writes from the worker session (or the owning main session), not from a nested subagent.`)
     }
@@ -397,15 +412,51 @@ export async function beforeWorkspaceTool(
       }
       const owner = !inArtifact && held.find((item) => item.id !== goal?.id && item.config.workspaceWrite !== false && (item.config.write_scope === undefined || item.config.write_scope.includes(file)))
       if (owner) throw new Error(scopeConflictMessage({ goalID: owner.id, ownerSessionID: owner.ownerSessionID, name: owner.name, path: file }))
-      const now3 = Date.now()
-      const call = state.workspaceCalls?.find((item) => !isSyncStaleWorkspaceCall(state, item, now3) && item.paths.includes(file) && !(item.callID === input.callID && item.sessionID === input.sessionID))
-      if (call) throw new Error(`Scope denied: "${file}" is being written by session ${call.sessionID}, call ${call.callID}.`)
     }
+    // Ticket-based per-scope write concurrency: disjoint files run in parallel.
+    const tickets = ensureTickets(state)
+    // Reclaim holders whose goal is terminal (fail-tolerance: crash must not hold ticket forever)
+    const holdersToKeep: typeof tickets.holders = []
+    for (const h of tickets.holders) {
+      const g = state.goals.find((x) => x.id === h.goalID || (x as any).id === h.goalID)
+      if (g && isTerminal(g.status)) continue
+      holdersToKeep.push(h)
+    }
+    if (holdersToKeep.length !== tickets.holders.length) tickets.holders = holdersToKeep
+    // If file set overlaps any holder, queue instead of blocking globally.
+    if (!canGrantTicket(state, paths)) {
+      const existing = tickets.queue.find((w) => w.callID === input.callID)
+      if (!existing) {
+        const waiter = {
+          waiterID: randomUUID(),
+          goalID: goal?.id ?? "",
+          sessionID: input.sessionID,
+          callID: input.callID,
+          files: paths,
+          requestedAt: new Date().toISOString(),
+          isOwner,
+        }
+        const idx = isOwner ? tickets.queue.findIndex((w) => !w.isOwner) : -1
+        if (idx === -1) tickets.queue.push(waiter)
+        else tickets.queue.splice(idx, 0, waiter)
+        await logServerEvent(directory, "ticket.queued", { callID: input.callID, sessionID: input.sessionID, files: paths, position: queuePosition(state, input.callID) }).catch(() => {})
+      }
+      const pos = queuePosition(state, input.callID)
+      throw new Error(`Write ticket queued for ${paths.join(", ")} — position ${pos} in queue. Current holder is writing overlapping files. You will be woken when your ticket is granted; do not retry manually. While waiting, use read tools or prepare the next patch.`)
+    }
+    // Grant ticket for this write
+    tickets.holders.push({
+      ticketID: randomUUID(),
+      goalID: goal?.id ?? "",
+      sessionID: input.sessionID,
+      callID: input.callID,
+      files: paths,
+      grantedAt: new Date().toISOString(),
+      generation: stampCallGeneration(state, goal?.id),
+    })
+    await logServerEvent(directory, "ticket.granted", { callID: input.callID, sessionID: input.sessionID, files: paths }).catch(() => {})
     if (!state.workspaceCalls) state.workspaceCalls = []
     if (!state.workspaceCalls.some((call) => call.callID === input.callID && call.sessionID === input.sessionID)) {
-      // Always stamp a generation for goal calls (fallback 0 when the runtime
-      // lookup misses) so generation-fencing covers every reservation.
-      // Owner-session (goal-less) reservations keep generation undefined.
       state.workspaceCalls.push({ callID: input.callID, sessionID: input.sessionID, goalID: goal?.id, generation: stampCallGeneration(state, goal?.id), paths, at: new Date().toISOString() })
     }
     return state
@@ -415,9 +466,36 @@ export async function beforeWorkspaceTool(
 export async function afterWorkspaceTool(directory: string, sessionID: string, callID: string, tool?: string): Promise<void> {
   if (tool && isWorkspaceToolExempt(tool)) return
   const snapshot = await readState(directory)
-  if (!snapshot.workspaceCalls?.some((call) => call.sessionID === sessionID && call.callID === callID)) return
+  const hasCall = snapshot.workspaceCalls?.some((call) => call.sessionID === sessionID && call.callID === callID)
+  const hasTicket = snapshot.writeTickets?.holders.some((h) => h.callID === callID) || snapshot.writeTickets?.queue.some((w) => w.callID === callID)
+  if (!hasCall && !hasTicket) return
   await mutateState(directory, `workspace.after:${callID}`, async (state) => {
     state.workspaceCalls = state.workspaceCalls?.filter((call) => call.sessionID !== sessionID || call.callID !== callID)
+    // Release write ticket holder for this call and try to grant next waiter
+    if (state.writeTickets) {
+      state.writeTickets.holders = state.writeTickets.holders.filter((h) => h.callID !== callID)
+      // Remove from queue as well (if it was queued and never granted)
+      state.writeTickets.queue = state.writeTickets.queue.filter((w) => w.callID !== callID)
+      // Grant next waiters whose files don't overlap with remaining holders (round-robin, owner priority already queued)
+      // Try to grant in queue order, but allow disjoint files to be granted together.
+      const remaining: typeof state.writeTickets.queue = []
+      for (const waiter of state.writeTickets.queue) {
+        if (canGrantTicket(state, waiter.files)) {
+          state.writeTickets.holders.push({
+            ticketID: randomUUID(),
+            goalID: waiter.goalID,
+            sessionID: waiter.sessionID,
+            callID: waiter.callID,
+            files: waiter.files,
+            grantedAt: new Date().toISOString(),
+          })
+          await logServerEvent(directory, "ticket.granted.queued", { callID: waiter.callID, sessionID: waiter.sessionID, files: waiter.files }).catch(() => {})
+        } else {
+          remaining.push(waiter)
+        }
+      }
+      state.writeTickets.queue = remaining
+    }
     const now = Date.now()
     state.goals = state.goals.filter((goal) => {
       const live = (state.workspaceCalls ?? []).some((call) => call.goalID === goal.id && !isSyncStaleWorkspaceCall(state, call, now))
@@ -612,11 +690,11 @@ export async function withWorkspaceOperation<T>(
     // Authority is re-read inside the same transaction that takes the lock, so
     // a concurrent rotation/retirement cannot authorize a later execution.
     opts?.authorize?.(state)
-    assertCommandQuiescence(state)
-    // Every outstanding reservation fences checks until actual completion.
-    const now = Date.now()
-    const live = (state.workspaceCalls ?? []).filter((call) => !isSyncStaleWorkspaceCall(state, call, now))
-    if (state.workspaceOperation || live.length) throw new Error("Workspace is busy with an operation or in-flight writes; verification denied until quiescent.")
+    // Ticket per scope for checks: any in-flight write ticket blocks checks (quiescence).
+    // Also block if any uncontrolled shell/command is live — its writes are unknown.
+    const holders = state.writeTickets?.holders ?? []
+    const hasUncontrolled = (state.workspaceCalls ?? []).some((c) => c.uncontrolled)
+    if (state.workspaceOperation || holders.length > 0 || hasUncontrolled) throw new Error("Workspace is busy with an operation or in-flight writes; verification denied until quiescent.")
     state.workspaceOperation = { id, goalID, sessionID }
     return state
   })

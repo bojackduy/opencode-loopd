@@ -44,21 +44,22 @@ const shell = (root: string, sessionID: string, callID = "call-1", identity?: Pa
   beforeWorkspaceTool(root, { tool: "shell", sessionID, callID }, { command: "python3", args: ["-c", "print('diag')"] }, identity)
 
 describe("main/owner session execution under protected goals", () => {
-  it("fences shell, writes and checks for a command's full lifetime, independent of goal linkage", async () => {
+  it("allows shell and writes while a command runs, but checks wait for write tickets (ticket per scope)", async () => {
     const root = await fixture({ writeScope: ["src/a.ts"] })
     const command = createCommandSession({ id: "live-command" as any, title: "diagnostic", command: "python3", args: [], cwd: root, ownerSessionID: "main", goalID: "display-only" })
     await mutateState(root, "running-command", async (state) => {
       state.commands = [command]
       return state
     })
-    await expect(shell(root, "main")).rejects.toThrow(/Workspace busy.*live-command/)
-    await expect(beforeWorkspaceTool(root, { tool: "write", sessionID: "worker-1", callID: "write" }, { path: "src/a.ts", content: "x" })).rejects.toThrow(/Workspace busy.*live-command/)
-    await expect(withWorkspaceOperation(root, "goal-1", "worker-1", async () => "ran")).rejects.toThrow(/Workspace busy.*live-command/)
+    await expect(shell(root, "main")).resolves.toBeUndefined()
+    await expect(beforeWorkspaceTool(root, { tool: "write", sessionID: "worker-1", callID: "write" }, { path: "src/a.ts", content: "x" })).resolves.toBeUndefined()
+    // Checks are fenced by write tickets (holder for src/a.ts exists), so they wait.
+    await expect(withWorkspaceOperation(root, "goal-1", "worker-1", async () => "ran")).rejects.toThrow(/Workspace is busy/)
     await mutateState(root, "command-exited", async (state) => {
       state.commands![0]!.status = "exited"
       return state
     })
-    await shell(root, "main")
+    await afterWorkspaceTool(root, "worker-1", "write")
     await afterWorkspaceTool(root, "main", "call-1")
     expect(await withWorkspaceOperation(root, "goal-1", "worker-1", async () => "ran")).toBe("ran")
   })
@@ -74,28 +75,24 @@ describe("main/owner session execution under protected goals", () => {
     expect((await readState(root)).workspaceCalls ?? []).toHaveLength(0)
   })
 
-  it("rejects an owner shell with an actionable busy error while another session's call is live", async () => {
+  it("allows owner shell concurrently with another session's shell (ticket per scope, shell not blocked)", async () => {
     const root = await fixture()
     await mutateState(root, "seed", async (state) => {
       state.workspaceCalls = [{ callID: "worker-call", sessionID: "worker-1", goalID: "goal-1", generation: 1, paths: [], uncontrolled: true, at: new Date().toISOString() }]
       return state
     })
-
-    const failure = shell(root, "main", "owner-call")
-    await expect(failure).rejects.toThrow(/Workspace busy/)
-    await expect(failure).rejects.toThrow(/worker-call/)
-    await expect(failure).rejects.not.toThrow(/Scope denied/)
-    expect((await readState(root)).workspaceCalls ?? []).toHaveLength(1)
+    // Shells are prompt-awareness only, not ticketed — both run
+    await expect(shell(root, "main", "owner-call")).resolves.toBeUndefined()
+    expect((await readState(root)).workspaceCalls ?? []).toHaveLength(2)
   })
 
-  it("rejects an owner shell while completion checks own the workspace", async () => {
+  it("allows owner shell even while completion checks own the workspace (shell not ticketed)", async () => {
     const root = await fixture()
     await mutateState(root, "seed", async (state) => {
       state.workspaceOperation = { id: "checks-1", goalID: "goal-1", sessionID: "worker-1" }
       return state
     })
-    await expect(shell(root, "main", "owner-call")).rejects.toThrow(/Workspace busy/)
-    await expect(shell(root, "main", "owner-call")).rejects.toThrow(/checks/)
+    await expect(shell(root, "main", "owner-call")).resolves.toBeUndefined()
   })
 
   for (const status of ["paused", "blocked"] as const) {
@@ -106,17 +103,18 @@ describe("main/owner session execution under protected goals", () => {
       return state
     })
 
-    await expect(shell(root, "main", "owner-call")).rejects.toThrow(/Workspace busy/)
-    expect((await readState(root)).workspaceCalls?.map((call) => call.callID)).toEqual(["leaked-write"])
+    // With ticket per scope, owner's shell no longer fences own worker's ticket — single-human concurrency
+    await expect(shell(root, "main", "owner-call")).resolves.toBeUndefined()
+    expect((await readState(root)).workspaceCalls?.map((call) => call.callID).sort()).toEqual(["leaked-write", "owner-call"].sort())
     await afterWorkspaceTool(root, "worker-1", "leaked-write")
-    await shell(root, "main", "owner-call")
-
-    const calls = (await readState(root)).workspaceCalls ?? []
-    expect(calls.map((call) => call.callID)).toEqual(["owner-call"])
+    // After worker's ticket released, only owner call remains
+    expect((await readState(root)).workspaceCalls?.map((call) => call.callID)).toEqual(["owner-call"])
+    await afterWorkspaceTool(root, "main", "owner-call")
+    expect((await readState(root)).workspaceCalls ?? []).toHaveLength(0)
   })
   }
 
-  it("keeps a worker's structured write out while a stranger's shell reservation is live", async () => {
+  it("allows worker's structured write even while a stranger's shell reservation is live (shell not ticketed)", async () => {
     const root = await fixture({ writeScope: ["src/a.ts"] })
     await mutateState(root, "seed", async (state) => {
       state.workspaceCalls = [{ callID: "stranger-shell", sessionID: "other", paths: [], uncontrolled: true, at: new Date().toISOString() }]
@@ -127,7 +125,7 @@ describe("main/owner session execution under protected goals", () => {
       root,
       { tool: "write", sessionID: "worker-1", callID: "worker-write" },
       { path: "src/a.ts", content: "x" },
-    )).rejects.toThrow(/Workspace busy/)
+    )).resolves.toBeUndefined()
   })
 
   it("lets the owner's own shells run beside the owned worker's writes (single-human concurrency)", async () => {
