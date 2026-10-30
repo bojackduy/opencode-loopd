@@ -8,6 +8,7 @@ import { readState, readEvents } from "../../src/infrastructure/state-repository
 import type { GoalID } from "../../src/domain/goal"
 import { goalTools } from "../../src/server/goal-tools"
 import { runCompletionChecks } from "../../src/server/goal-tools"
+import { tool } from "@opencode-ai/plugin/tool"
 
 function tmpDir(): string {
   return path.join(os.tmpdir(), `loopd-tools-test-${crypto.randomUUID()}`)
@@ -283,6 +284,13 @@ describe("Goal Tools", () => {
   })
 
   describe("goal transitions", () => {
+    it("report_goal_progress accepts summary+next without evidence", async () => {
+      const tools = goalTools(dir, goalService)
+      const schema = tool.schema.object(tools.report_goal_progress.args as any)
+      expect(schema.safeParse({ summary: "did x", next: "do y" }).success).toBe(true)
+      expect(schema.safeParse({ summary: "did x" }).success).toBe(false)
+    })
+
     it("creates goal in queued phase then running", async () => {
       const { goal } = await goalService.start(dir, {
         name: "test",

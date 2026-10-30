@@ -188,7 +188,7 @@ File writes must come from the worker session itself — never from a nested sub
 
 ### report_goal_progress
 
-Call after durable state changes (file writes, verifications). Resets failure and no-progress counters.
+Call after durable state changes (file writes, verifications). Resets failure and no-progress counters. `summary` and `next` are required; `evidence` is optional and may be omitted.
 
 ```
 report_goal_progress({
