@@ -82,7 +82,7 @@ function statusColor(status: GoalStatus, theme: TuiThemeCurrent) {
     case "active": return theme.success
     case "paused": return theme.warning
     case "blocked": return theme.error
-    case "complete": return theme.success
+    case "complete": return theme.info
     case "budget_limited": return theme.accent
     case "usage_limited": return theme.accent
     default: return theme.text
@@ -104,7 +104,7 @@ function borderColorForStatus(status: GoalStatus, theme: TuiThemeCurrent): strin
     case "blocked": return theme.error as unknown as string
     case "budget_limited":
     case "usage_limited": return theme.accent as unknown as string
-    case "complete": return theme.success as unknown as string
+    case "complete": return theme.info as unknown as string
     default: return "gray"
   }
 }
