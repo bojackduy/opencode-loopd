@@ -1650,8 +1650,54 @@ function isStaleWorkspaceCall(state, call, liveness = {}) {
 }
 function sweepStaleWorkspaceState(state, liveness = {}) {
   const now = liveness.now ?? Date.now();
-  const summary = { reapedCalls: [], resetClosing: [], finalizedClears: [], forceCleared: [] };
+  const summary = { reapedCalls: [], resetClosing: [], finalizedClears: [], forceCleared: [], reapedTickets: [] };
   const kept = state.workspaceCalls ?? [];
+  if (state.writeTickets) {
+    const liveHolders = state.writeTickets.holders.filter((h) => {
+      if (!h.goalID)
+        return true;
+      const g = state.goals.find((x) => x.id === h.goalID);
+      if (!g || isTerminal(g.status)) {
+        summary.reapedTickets.push(h.callID);
+        return false;
+      }
+      return true;
+    });
+    if (liveHolders.length !== state.writeTickets.holders.length)
+      state.writeTickets.holders = liveHolders;
+    const liveWaiters = state.writeTickets.queue.filter((w) => {
+      if (!w.goalID)
+        return true;
+      const g = state.goals.find((x) => x.id === w.goalID);
+      if (!g || isTerminal(g.status)) {
+        summary.reapedTickets.push(w.callID);
+        return false;
+      }
+      return true;
+    });
+    if (liveWaiters.length !== state.writeTickets.queue.length)
+      state.writeTickets.queue = liveWaiters;
+    if (state.writeTickets.queue.length) {
+      const remaining = [];
+      for (const waiter of state.writeTickets.queue) {
+        const blockedByHolder = state.writeTickets.holders.some((h) => filesOverlap(h.files, waiter.files));
+        const blockedByLegacy = (state.workspaceCalls ?? []).some((c) => !c.uncontrolled && c.paths && filesOverlap(c.paths, waiter.files));
+        if (!blockedByHolder && !blockedByLegacy) {
+          state.writeTickets.holders.push({
+            ticketID: randomUUID3(),
+            goalID: waiter.goalID,
+            sessionID: waiter.sessionID,
+            callID: waiter.callID,
+            files: waiter.files,
+            grantedAt: new Date(now).toISOString()
+          });
+        } else {
+          remaining.push(waiter);
+        }
+      }
+      state.writeTickets.queue = remaining;
+    }
+  }
   for (const goal of [...state.goals]) {
     const referenced = kept.some((call) => call.goalID === goal.id) || state.workspaceOperation?.goalID === goal.id;
     if (goal.scopeClosing && !referenced && !(liveness.isWorkerLive?.(goal.id, goal.workerSessionID) ?? false)) {
@@ -1761,6 +1807,9 @@ async function beforeWorkspaceTool(directory, input, args, identity = {}) {
       }
     }
   }
+  let queuedPos = 0;
+  let queuedFiles = [];
+  let wasQueued = false;
   await mutateState(directory, `workspace.before:${input.callID}`, async (state) => {
     const goal = state.goals.find((item) => item.workerSessionID === input.sessionID);
     if (state.retiredWorkerSessions?.includes(input.sessionID))
@@ -1839,8 +1888,12 @@ async function beforeWorkspaceTool(directory, input, args, identity = {}) {
     const tickets = ensureTickets(state);
     const holdersToKeep = [];
     for (const h of tickets.holders) {
+      if (!h.goalID) {
+        holdersToKeep.push(h);
+        continue;
+      }
       const g = state.goals.find((x) => x.id === h.goalID || x.id === h.goalID);
-      if (g && isTerminal(g.status))
+      if (!g || isTerminal(g.status))
         continue;
       holdersToKeep.push(h);
     }
@@ -1865,8 +1918,10 @@ async function beforeWorkspaceTool(directory, input, args, identity = {}) {
           tickets.queue.splice(idx, 0, waiter);
         await logServerEvent(directory, "ticket.queued", { callID: input.callID, sessionID: input.sessionID, files: paths, position: queuePosition(state, input.callID) }).catch(() => {});
       }
-      const pos = queuePosition(state, input.callID);
-      throw new Error(`Write ticket queued for ${paths.join(", ")} \u2014 position ${pos} in queue. Current holder is writing overlapping files. You will be woken when your ticket is granted; do not retry manually. While waiting, use read tools or prepare the next patch.`);
+      queuedPos = queuePosition(state, input.callID);
+      queuedFiles = paths;
+      wasQueued = true;
+      return state;
     }
     tickets.holders.push({
       ticketID: randomUUID3(),
@@ -1885,6 +1940,9 @@ async function beforeWorkspaceTool(directory, input, args, identity = {}) {
     }
     return state;
   });
+  if (wasQueued) {
+    throw new Error(`Write ticket queued for ${queuedFiles.join(", ")} \u2014 position ${queuedPos} in queue. Current holder is writing overlapping files. You will be woken when your ticket is granted; do not retry manually. While waiting, use read tools or prepare the next patch.`);
+  }
 }
 async function afterWorkspaceTool(directory, sessionID, callID, tool) {
   if (tool && isWorkspaceToolExempt(tool))
@@ -2077,8 +2135,12 @@ async function withWorkspaceOperation(directory, goalID, sessionID, run, opts) {
     if (state.writeTickets?.holders) {
       const kept = [];
       for (const h of state.writeTickets.holders) {
+        if (!h.goalID) {
+          kept.push(h);
+          continue;
+        }
         const g = state.goals.find((x) => x.id === h.goalID || x.id === h.goalID);
-        if (g && isTerminal(g.status))
+        if (!g || isTerminal(g.status))
           continue;
         kept.push(h);
       }
@@ -6163,11 +6225,11 @@ function createLoopEngine(options) {
     try {
       await reconcileTerminalWorkspaceCalls(directory, host);
       const snapshot = await readState(directory);
-      if (!snapshot.workspaceCalls?.length && !snapshot.goals.some((g) => g.scopeClosing || g.scopeClearPending)) {
+      if (!snapshot.workspaceCalls?.length && !snapshot.writeTickets?.holders.length && !snapshot.writeTickets?.queue.length && !snapshot.goals.some((g) => g.scopeClosing || g.scopeClearPending)) {
         return;
       }
       await Promise.resolve().then(() => init_workspace_execution());
-      let summary = { reapedCalls: [], resetClosing: [], finalizedClears: [], forceCleared: [] };
+      let summary = { reapedCalls: [], resetClosing: [], finalizedClears: [], forceCleared: [], reapedTickets: [] };
       await mutateState(directory, "maintenance.sweep-stale-workspace", async (s) => {
         summary = sweepStaleWorkspaceState(s, {
           isWorkerLive: () => true,
@@ -6175,12 +6237,13 @@ function createLoopEngine(options) {
         });
         return s;
       });
-      if (summary.reapedCalls.length || summary.resetClosing.length || summary.finalizedClears.length || summary.forceCleared.length) {
+      if (summary.reapedCalls.length || summary.resetClosing.length || summary.finalizedClears.length || summary.forceCleared.length || summary.reapedTickets.length) {
         await logServerEvent(directory, "maintenance.sweep-stale-workspace", {
           reapedCalls: summary.reapedCalls,
           resetClosing: summary.resetClosing,
           finalizedClears: summary.finalizedClears,
-          forceCleared: summary.forceCleared
+          forceCleared: summary.forceCleared,
+          reapedTickets: summary.reapedTickets
         });
       }
     } catch {}
@@ -9058,7 +9121,7 @@ function createGoalService(host) {
   async function reconcile(directory) {
     await reconcileTerminalWorkspaceCalls(directory, host);
     try {
-      let summary = { reapedCalls: [], resetClosing: [], finalizedClears: [], forceCleared: [] };
+      let summary = { reapedCalls: [], resetClosing: [], finalizedClears: [], forceCleared: [], reapedTickets: [] };
       const pre = await readState(directory);
       if (pre.workspaceCalls?.length || pre.goals.some((g) => g.scopeClosing || g.scopeClearPending)) {
         await mutateState(directory, "reconcile.sweep-stale-workspace", async (s) => {
@@ -9066,12 +9129,13 @@ function createGoalService(host) {
           return s;
         });
       }
-      if (summary.reapedCalls.length || summary.resetClosing.length || summary.finalizedClears.length || summary.forceCleared.length) {
+      if (summary.reapedCalls.length || summary.resetClosing.length || summary.finalizedClears.length || summary.forceCleared.length || summary.reapedTickets.length) {
         await logServerEvent(directory, "reconcile.sweep-stale-workspace", {
           reapedCalls: summary.reapedCalls,
           resetClosing: summary.resetClosing,
           finalizedClears: summary.finalizedClears,
-          forceCleared: summary.forceCleared
+          forceCleared: summary.forceCleared,
+          reapedTickets: summary.reapedTickets
         }).catch(() => {});
       }
     } catch {}
