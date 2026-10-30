@@ -2020,10 +2020,21 @@ export function createGoalService(host: LoopHost): GoalService {
     if (guard) return guard
     const currentRun = preState.runtimes.find((rt) => rt.goalID === goalID)
     if (host.readExecution && goal.workerSessionID && currentRun?.phase === "running" && currentRun.activePromptAcceptedAt) {
-      const projection = await host.readExecution(goal.workerSessionID)
       const prompt = currentRun.activePromptMessageID
+      const projection = await host.readExecution(goal.workerSessionID)
       if (prompt && !projection?.deliveredMessageIDs?.includes(prompt) && projection?.latestUserMessageID !== prompt) {
-        return rejected(goalID, "blocked", `OpenCode already accepted prompt ${prompt}, but delivery is unconfirmed. No duplicate nudge was sent; inspect the native inbox/session.`)
+        // Dead-prompt escape hatch: an accepted prompt with an expired lease
+        // on a worker the host confirms idle is not in flight anymore —
+        // delivery bookkeeping will never confirm it, so refusing here stalls
+        // the goal forever (same class as foreign-prompt stalls). A manual
+        // nudge is an explicit operator action; the fresh turn gets a new ID.
+        // Lease-valid or non-idle workers keep the fail-closed refusal below.
+        const workerStatus = await host.sessionStatus(goal.workerSessionID).catch(() => "unknown" as const)
+        if (workerStatus === "idle" && !leaseIsValid(currentRun)) {
+          await logServerEvent(directory, "goal.nudge.dead-prompt-override", { goalID, runID: currentRun.activeRunID }).catch(() => {})
+        } else {
+          return rejected(goalID, "blocked", `OpenCode already accepted prompt ${prompt}, but delivery is unconfirmed. No duplicate nudge was sent; inspect the native inbox/session.`)
+        }
       }
       if (currentRun.nativeInboxMessageIDs?.some((id) => !projection?.deliveredMessageIDs?.includes(id))) {
         return rejected(goalID, "blocked", "Native inbox messages are still awaiting delivery. No duplicate nudge was sent.")
