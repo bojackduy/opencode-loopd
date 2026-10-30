@@ -422,11 +422,12 @@ export async function beforeWorkspaceTool(
     }
     // Ticket-based per-scope write concurrency: disjoint files run in parallel.
     const tickets = ensureTickets(state)
-    // Reclaim holders whose goal is terminal (fail-tolerance: crash must not hold ticket forever)
+    // Reclaim holders whose goal is terminal or gone (fail-tolerance: crash must not hold ticket forever)
     const holdersToKeep: typeof tickets.holders = []
     for (const h of tickets.holders) {
+      if (!h.goalID) { holdersToKeep.push(h); continue }
       const g = state.goals.find((x) => x.id === h.goalID || (x as any).id === h.goalID)
-      if (g && isTerminal(g.status)) continue
+      if (!g || isTerminal(g.status)) continue
       holdersToKeep.push(h)
     }
     if (holdersToKeep.length !== tickets.holders.length) tickets.holders = holdersToKeep
@@ -702,12 +703,13 @@ export async function withWorkspaceOperation<T>(
     // Authority is re-read inside the same transaction that takes the lock, so
     // a concurrent rotation/retirement cannot authorize a later execution.
     opts?.authorize?.(state)
-    // Fail-tolerance: reclaim holders whose goal already terminal (crash must not hold lock)
+    // Fail-tolerance: reclaim holders whose goal already terminal or gone (crash must not hold lock)
     if (state.writeTickets?.holders) {
       const kept: typeof state.writeTickets.holders = []
       for (const h of state.writeTickets.holders) {
+        if (!h.goalID) { kept.push(h); continue }
         const g = state.goals.find((x) => x.id === h.goalID || (x as any).id === h.goalID)
-        if (g && isTerminal(g.status)) continue
+        if (!g || isTerminal(g.status)) continue
         kept.push(h)
       }
       state.writeTickets.holders = kept
