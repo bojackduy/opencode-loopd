@@ -85,3 +85,15 @@ cat /tmp/loopd-server.log | tail -30
 
 ## Definition of Done
 - 990 tests pass, typecheck pass, build pass, dist rebuilt, push done, service restarted, shelf-test log shows ticket.granted for disjoint parallel writes + queued + granted after release + checks quiescence.
+
+## Known issue (found while recording the TUI demo, 2026-10-30)
+- Loop Dashboard dialog paints once with pre-refresh state ("0 open / 0 done")
+  and never picks up the async refresh, even though the same data path
+  (`createDashboardRefresh` + `getState`) returns the 2 complete goals headless.
+  Footer placeholder (host-rendered) updates, dialog body does not.
+- Suspect: host TUI renderer does not re-render plugin dialog content after
+  mount, or a Solid signal/propagation break in the dialog tree.
+- Demo works around it: dashboard shown empty BEFORE the work (honest),
+  agent work + file results carry the story. Repro: open `/loop` with
+  completed goals in store -> still shows 0 done. Debug line was added and
+  reverted (`dbg store goals=`).
