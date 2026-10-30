@@ -9280,10 +9280,15 @@ function createGoalService(host) {
       return guard;
     const currentRun = preState.runtimes.find((rt) => rt.goalID === goalID);
     if (host.readExecution && goal.workerSessionID && currentRun?.phase === "running" && currentRun.activePromptAcceptedAt) {
-      const projection = await host.readExecution(goal.workerSessionID);
       const prompt = currentRun.activePromptMessageID;
+      const projection = await host.readExecution(goal.workerSessionID);
       if (prompt && !projection?.deliveredMessageIDs?.includes(prompt) && projection?.latestUserMessageID !== prompt) {
-        return rejected(goalID, "blocked", `OpenCode already accepted prompt ${prompt}, but delivery is unconfirmed. No duplicate nudge was sent; inspect the native inbox/session.`);
+        const workerStatus = await host.sessionStatus(goal.workerSessionID).catch(() => "unknown");
+        if (workerStatus === "idle" && !leaseIsValid(currentRun)) {
+          await logServerEvent(directory, "goal.nudge.dead-prompt-override", { goalID, runID: currentRun.activeRunID }).catch(() => {});
+        } else {
+          return rejected(goalID, "blocked", `OpenCode already accepted prompt ${prompt}, but delivery is unconfirmed. No duplicate nudge was sent; inspect the native inbox/session.`);
+        }
       }
       if (currentRun.nativeInboxMessageIDs?.some((id) => !projection?.deliveredMessageIDs?.includes(id))) {
         return rejected(goalID, "blocked", "Native inbox messages are still awaiting delivery. No duplicate nudge was sent.");
