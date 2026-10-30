@@ -1028,7 +1028,7 @@ function statusColor(status, theme) {
     case "blocked":
       return theme.error;
     case "complete":
-      return theme.success;
+      return theme.info;
     case "budget_limited":
       return theme.accent;
     case "usage_limited":
@@ -1063,7 +1063,7 @@ function borderColorForStatus(status, theme) {
     case "usage_limited":
       return theme.accent;
     case "complete":
-      return theme.success;
+      return theme.info;
     default:
       return "gray";
   }
