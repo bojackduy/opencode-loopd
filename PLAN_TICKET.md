@@ -33,15 +33,15 @@ Redesign Opencode Loopd plugin concurrency from global workspace lock to ticket-
 - Test fixes: `test/infrastructure/state-store.test.ts` expect 10 + writeTickets; `test/application/owner-workspace-execution.test.ts` shell concurrency + checks fence; `test/server/workspace-execution.test.ts` queued vs being written, unrecognized vs uncontrolled split; `test/application/control-worker-release.test.ts` queued regex; `test/server/v2-orchestration.test.ts` queued regex; `src/application/workspace-execution.ts` canGrant + withWorkspaceOperation legacy fences.
 - Result: `bun test` 990 pass 0 fail, `tsc --noEmit` pass.
 
-### Active (next)
-1. Commit remaining edits (workspace-execution canGrant + withWorkspaceOperation sweep + test expectation regexes).
-2. `bun run build` (emit `dist/server.js` + `dist/tui.js`).
-3. `opencode service restart` (host loads new dist).
-4. Shelf-test via shell/opencode only: two goals writing disjoint files in parallel + `tick` streaming in dashboard, verify both holders granted concurrently, third overlapping file queues, after hook releases grants next, checks blocked while holders exist.
-5. Optional engine periodic sweep: add ticket reclaim to `sweepStaleWorkspaceState` / loop-engine reconcile (currently on-demand reclaim in before/with; periodic is extra safety).
+### Done (e579231 live)
+- Committed `25fd49b` persist queued ticket (throw outside mutate) + `e579231` reclaim deleted/terminal holders.
+- Verified `bun run typecheck` pass, `bun test` 990 pass 0 fail, `bun run build` dist/server.js 555K, pushed to master.
+- Shelf-test via shell (no loopd tools) PASS: disjoint holders 2 parallel, c3 queued position 1, promotion on release, shell allowed, checks fenced, terminal/deleted reclaim works.
+- `opencode service restart` done; `/tmp/loopd-server.log` shows post-restart `tool.call.started/finished` for opencode-loopd.
+- Remaining optional: periodic engine sweep for dead holders (on-demand reclaim already in before/with); skills doc touch-up if needed.
 
 ### Blocked
-- None. Dist not yet rebuilt/pushed for this batch; host still on previous build until restart.
+- None.
 
 ## Next Moves (ordered, verify per step)
 1. `git status --short; git diff --stat` → stage `src/application/workspace-execution.ts` + 2 test files.
