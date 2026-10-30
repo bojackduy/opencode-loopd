@@ -76,6 +76,9 @@ export interface GoalRuntimeState {
   /** Active run ID already reported by the stuck-running watchdog (notify once per run). */
   stuckNotifiedRunID?: string
 
+  /** Active run ID already reported by the foreign-prompt watchdog (notify once per run). */
+  foreignPromptNotifiedRunID?: string
+
   /** When the worker run was manually aborted (TUI abort key); cleared on next lease. */
   workerAbortedAt?: string
 

@@ -1243,6 +1243,52 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       if (host.readExecution) {
         if (runtime.phase === "running") await reconcileNativeExecution(goal, undefined, true)
         else if (!manual && runtime.phase === "idle" && goal.workerSessionID && (await host.readExecution(goal.workerSessionID))?.status === "idle") await continueGoal(goal.id)
+        // Foreign-prompt watchdog: the native reconcile's verdict can be terminal
+        // for this turn (the worker session's latest message is not our prompt —
+        // e.g. a mid-turn model switch) while every legacy watchdog below is
+        // bypassed by the `continue`. Without this, the goal stalls silently
+        // forever: the lease expires, nobody re-prompts, nobody is told.
+        // Notify-only, mirroring run.stuck: a nudge re-prompts with a fresh ID.
+        if (runtime.phase === "running" && runtime.activeRunID) {
+          const fresh = await readState(directory)
+          const rt = fresh.runtimes.find((r) => r.goalID === goal.id)
+          if (rt && rt.phase === "running" && rt.activeRunID === runtime.activeRunID
+            && rt.nativeReconcileBlocked?.reason === "foreign-prompt"
+            && rt.foreignPromptNotifiedRunID !== rt.activeRunID) {
+            const leaseExpired = !rt.leaseExpiresAt || Date.now() >= Date.parse(rt.leaseExpiresAt)
+            const lastActive = rt.lastActivityAt ? Date.parse(rt.lastActivityAt) : 0
+            if (leaseExpired && Date.now() - lastActive > stuckRunningMs) {
+              const stuckSeconds = Math.floor((Date.now() - lastActive) / 1000)
+              const marked = await mutateState(directory, `maintenance.foreign-prompt:${goal.id}`, async (s) => {
+                const r = s.runtimes.find((x) => x.goalID === goal.id)
+                if (!r || r.activeRunID !== runtime.activeRunID) return s
+                r.foreignPromptNotifiedRunID = r.activeRunID
+                r.updatedAt = new Date().toISOString()
+                return s
+              })
+              await appendEvent(directory, {
+                version: 1,
+                eventID: randomUUID(),
+                goalID: goal.id,
+                type: "run.stuck",
+                runID: runtime.activeRunID,
+                stuckSeconds,
+                timestamp: new Date().toISOString(),
+                revision: marked.revision,
+              } satisfies LoopEvent)
+              await logServerEvent(directory, "maintenance.foreign-prompt-stuck", {
+                goalID: goal.id,
+                runID: runtime.activeRunID,
+                stuckSeconds,
+              })
+              await host.notifyOwner(
+                goal.ownerSessionID,
+                `Loop goal "${goal.name}" is stalled: its worker session's latest message is not this turn's prompt (e.g. a mid-turn model switch superseded it), so the engine will not re-prompt on its own. Use inspect_background_goal to look, nudge_goal to re-prompt with a fresh turn, or pause_goal to stop it.`,
+                (goal as any).parentAgent,
+              )
+            }
+          }
+        }
         continue
       }
 
