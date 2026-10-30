@@ -3,24 +3,27 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>opencode-loopd — Autonomous Background Agents for OpenCode | Codex Loop Engine</title>
-    <meta name="description" content="OpenCode plugin for autonomous background agents with scheduled intervals, background command sessions, and mid-run model switching. Run long tasks as child subagents with engine-driven loop, scheduled requeue, and TUI dashboard — like Claude Code loop & Codex goals for OpenCode." />
-    <meta name="keywords" content="opencode, opencode plugin, opencode tui, background agent, autonomous agent, subagent, loop engine, goal, worker, schedule, interval, codex, claude code, terminal, cli, automation, model switch, quota fallback, dev server, fullscreen terminal" />
+    <title>opencode-loopd — Background goals that loop, for OpenCode</title>
+    <meta name="description" content="OpenCode plugin for autonomous background agents: engine-driven loop, child worker sessions, scheduled intervals, verified completion checks, and a fullscreen terminal. Codex-style goals for OpenCode." />
+    <meta name="keywords" content="opencode, opencode plugin, background agent, autonomous agent, subagent, goal, loop engine, scheduled, terminal, tui, codex, claude code, developer tools" />
     <meta name="author" content="Duy Trinh" />
     <link rel="canonical" href="https://bojackduy.github.io/opencode-loopd/" />
     <meta name="robots" content="index, follow" />
-    <meta property="og:title" content="opencode-loopd — Autonomous Background Agents for OpenCode" />
-    <meta property="og:description" content="Background goals that loop. Engine-driven, child worker sessions, parent wake-up injection. The Codex-style loop for OpenCode." />
+    <meta property="og:title" content="opencode-loopd — Background goals that loop" />
+    <meta property="og:description" content="Run long tasks as autonomous child sessions while the main chat stays interactive. Verified completion, scheduling, fullscreen terminal, modal TUI." />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://bojackduy.github.io/opencode-loopd/" />
     <meta property="og:image" content="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/demo.png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="675" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="opencode-loopd — Background Goals for OpenCode" />
-    <meta name="twitter:description" content="Run long tasks as autonomous child sessions while the main chat stays interactive." />
+    <meta name="twitter:title" content="opencode-loopd — Background goals that loop" />
+    <meta name="twitter:description" content="Autonomous child sessions for OpenCode. Verified completion, scheduling, fullscreen terminal." />
     <meta name="twitter:image" content="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/demo.png" />
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⬢</text></svg>">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90' fill='%23f5a623'>⬢</text></svg>">
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <script type="application/ld+json">
     {
       "@context": "https://schema.org",
@@ -38,168 +41,197 @@
     <style>
       :root {
         color-scheme: dark;
-        --bg: #070a12;
-        --bg2: #0f1422;
-        --panel: #111a2e;
-        --panel2: #1a2442;
-        --text: #eef2ff;
-        --muted: #9aa8cc;
-        --muted2: #7a89b5;
-        --accent: #7dd3fc;
-        --accent-2: #c084fc;
-        --accent-3: #5ee9b5;
-        --border: #1e2d4d;
-        --border2: #2a3a5e;
-        --success: #7ee787;
-        --warning: #f0c674;
-        --radius: 1.25rem;
-        --radius-sm: .9rem;
+        --bg: #0b0a08;
+        --bg-2: #13110e;
+        --panel: #1a1714;
+        --panel-2: #221e1a;
+        --text: #f0ebe0;
+        --muted: #a89f8e;
+        --muted-2: #6b6358;
+        --accent: #f5a623;
+        --accent-2: #ff6b35;
+        --accent-3: #7ee787;
+        --border: #2a241c;
+        --border-2: #3a3328;
+        --danger: #ff6b6b;
+        --radius: 0;
+        --radius-sm: 0;
       }
       * { box-sizing: border-box; }
       html { scroll-behavior: smooth; }
       body {
         margin: 0;
+        font-family: "Space Grotesk", system-ui, -apple-system, sans-serif;
         background: var(--bg);
         color: var(--text);
-        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        line-height: 1.6;
+        line-height: 1.55;
         -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
       }
-      body::before {
-        content:"";
-        position: fixed; inset: 0; pointer-events: none; z-index: -1;
-        background:
-          radial-gradient(800px 400px at 20% 0%, rgba(125,211,252,.14), transparent 70%),
-          radial-gradient(700px 400px at 90% 10%, rgba(192,132,252,.12), transparent 70%),
-          radial-gradient(600px 600px at 50% 100%, rgba(94,233,181,.07), transparent 70%);
-      }
+      ::selection { background: var(--accent); color: #0b0a08; }
       a { color: var(--accent); text-decoration: none; }
-      a:hover { text-decoration: underline; }
-      nav {
-        position: sticky; top:0; z-index:20;
-        backdrop-filter: blur(12px);
-        background: rgba(7,10,18,.7);
-        border-bottom: 1px solid var(--border);
+      a:hover { text-decoration: underline; text-underline-offset: 3px; }
+      code, pre, .mono { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+      .wrap { width: min(74rem, calc(100% - 2.5rem)); margin: 0 auto; }
+      nav { position: sticky; top: 0; z-index: 10; backdrop-filter: blur(8px); background: rgba(11,10,8,.85); border-bottom: 1px solid var(--border); }
+      nav .inner { width: min(74rem, calc(100% - 2.5rem)); margin: 0 auto; display: flex; align-items: center; justify-content: space-between; padding: .9rem 0; }
+      .logo { font-family: "JetBrains Mono", monospace; font-weight: 800; letter-spacing: -.04em; color: var(--text); text-decoration: none; display: flex; align-items: center; gap: .5rem; font-size: 1.05rem; }
+      .logo .glyph { color: var(--accent); }
+      .navlinks { display: flex; gap: 1.4rem; font-size: .88rem; font-family: "JetBrains Mono", monospace; }
+      .navlinks a { color: var(--muted); text-decoration: none; }
+      .navlinks a:hover { color: var(--text); }
+
+      main { padding: 0 0 5rem; }
+      .rule { border: 0; border-top: 1px solid var(--border); margin: 0; }
+
+      /* Hero */
+      .hero { padding: 4rem 0 2rem; display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(20rem, .75fr); gap: 3rem; align-items: start; }
+      .hero h1 { margin: 0 0 1.2rem; font-family: "JetBrains Mono", monospace; font-size: clamp(2.6rem, 6.5vw, 4.6rem); line-height: .95; letter-spacing: -.05em; font-weight: 800; }
+      .hero h1 .accent { color: var(--accent); }
+      .hero .lede { color: var(--muted); font-size: 1.1rem; max-width: 34rem; }
+      .hero .lede strong { color: var(--text); font-weight: 600; }
+      .hero .meta { display: flex; flex-wrap: wrap; gap: .5rem 1.2rem; margin-top: 1.6rem; font-family: "JetBrains Mono", monospace; font-size: .78rem; color: var(--muted-2); }
+      .hero .meta span::before { content: "·"; color: var(--accent); margin-right: .5rem; }
+      .hero .meta span:first-child::before { content: ""; margin-right: 0; }
+      .actions { display: flex; flex-wrap: wrap; gap: .7rem; margin-top: 1.8rem; }
+      .btn { display: inline-flex; align-items: center; gap: .5rem; font-family: "JetBrains Mono", monospace; font-weight: 700; font-size: .9rem; padding: .75rem 1.1rem; border: 1px solid var(--border-2); color: var(--text); text-decoration: none; background: transparent; cursor: pointer; transition: border-color .15s, color .15s; }
+      .btn:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
+      .btn.primary { background: var(--accent); color: #0b0a08; border-color: var(--accent); }
+      .btn.primary:hover { background: var(--accent-2); border-color: var(--accent-2); color: #0b0a08; }
+      .install { background: var(--panel); border: 1px solid var(--border); padding: 1.4rem; }
+      .install h2 { margin: 0 0 .8rem; font-family: "JetBrains Mono", monospace; font-size: .95rem; letter-spacing: .02em; color: var(--accent); text-transform: uppercase; }
+      .install p { margin: .5rem 0; font-size: .9rem; color: var(--muted); }
+      .install pre { margin: .6rem 0; padding: .85rem 1rem; background: var(--bg-2); border: 1px solid var(--border); font-size: .78rem; overflow-x: auto; color: #e8dfc8; }
+      .install .note { font-size: .8rem; color: var(--muted-2); margin-top: .8rem; }
+
+      /* Demo window */
+      .demo { margin: 3rem 0 0; border: 1px solid var(--border-2); background: var(--bg-2); }
+      .demo-bar { display: flex; align-items: center; gap: .5rem; padding: .6rem .9rem; border-bottom: 1px solid var(--border); background: var(--panel); font-family: "JetBrains Mono", monospace; font-size: .75rem; color: var(--muted-2); }
+      .demo-bar .dot { width: .6rem; height: .6rem; background: var(--muted-2); }
+      .demo img { display: block; width: 100%; height: auto; }
+      .demo .caption { padding: .7rem .9rem; font-size: .82rem; color: var(--muted); border-top: 1px solid var(--border); }
+
+      /* Section headers */
+      section { padding: 3.5rem 0; border-top: 1px solid var(--border); }
+      section:first-of-type { border-top: 0; }
+      .section-label { font-family: "JetBrains Mono", monospace; font-size: .75rem; color: var(--accent); letter-spacing: .12em; text-transform: uppercase; margin-bottom: .6rem; }
+      h2 { margin: 0 0 1rem; font-size: clamp(1.6rem, 3vw, 2.2rem); font-weight: 700; letter-spacing: -.03em; line-height: 1.1; }
+      h2 .accent { color: var(--accent); }
+      .lead { color: var(--muted); font-size: 1.05rem; max-width: 42rem; }
+
+      /* Features — editorial list, not card grid */
+      .features { margin-top: 2rem; }
+      .feature { display: grid; grid-template-columns: 3rem 1fr; gap: 1.2rem; padding: 1.4rem 0; border-top: 1px solid var(--border); }
+      .feature:first-child { border-top: 0; padding-top: 0; }
+      .feature .num { font-family: "JetBrains Mono", monospace; font-size: .85rem; color: var(--accent); padding-top: .2rem; }
+      .feature h3 { margin: 0 0 .3rem; font-size: 1.05rem; font-weight: 700; }
+      .feature p { margin: 0; color: var(--muted); font-size: .95rem; max-width: 44rem; }
+
+      /* Architecture */
+      .arch pre { background: var(--bg-2); border: 1px solid var(--border); padding: 1.4rem; font-size: .72rem; line-height: 1.35; color: #e8dfc8; overflow-x: auto; margin-top: 1.4rem; }
+
+      /* Quick start */
+      .quickstart pre { background: var(--bg-2); border: 1px solid var(--border); padding: 1.2rem 1.4rem; font-size: .82rem; line-height: 1.5; color: #e8dfc8; overflow-x: auto; margin: 1rem 0; }
+
+      /* FAQ */
+      .faq { display: grid; gap: .6rem; margin-top: 1.4rem; }
+      .faq details { background: var(--panel); border: 1px solid var(--border); padding: 1rem 1.2rem; }
+      .faq summary { cursor: pointer; font-weight: 600; color: var(--text); font-size: .95rem; }
+      .faq p { margin: .6rem 0 0; color: var(--muted); font-size: .92rem; }
+
+      /* Links */
+      .links { display: flex; flex-wrap: wrap; gap: .6rem 1.4rem; margin-top: 1.6rem; font-family: "JetBrains Mono", monospace; font-size: .85rem; }
+      .links a { color: var(--muted); }
+      .links a:hover { color: var(--accent); }
+
+      footer { margin-top: 3rem; padding: 2rem 0; border-top: 1px solid var(--border); color: var(--muted-2); font-size: .8rem; font-family: "JetBrains Mono", monospace; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 1rem; }
+
+      @media (max-width: 780px) {
+        .hero { grid-template-columns: 1fr; gap: 2rem; padding: 2.5rem 0 1rem; }
+        h1 { font-size: 2.4rem; }
+        .feature { grid-template-columns: 2.2rem 1fr; }
       }
-      nav .inner { width:min(72rem, calc(100% - 2rem)); margin:0 auto; display:flex; align-items:center; justify-content:space-between; padding:.8rem 0; }
-      .logo { font-weight:800; letter-spacing:-.03em; display:flex; align-items:center; gap:.5rem; color:var(--text); text-decoration:none; }
-      .logo span { color: var(--accent); }
-      .navlinks { display:flex; gap:1.2rem; font-size:.92rem; }
-      .navlinks a { color: var(--muted); } .navlinks a:hover { color: var(--text); }
-      main { width:min(72rem, calc(100% - 2rem)); margin:0 auto; padding: 2rem 0 4rem; }
-      .hero { display:grid; grid-template-columns: minmax(0, 1.15fr) minmax(16rem, .85fr); gap:2.2rem; align-items:center; padding: 2.5rem 0 1rem; }
-      .eyebrow { color: var(--accent-3); font-weight:700; letter-spacing:.14em; text-transform:uppercase; font-size:.78rem; display:flex; align-items:center; gap:.6rem; }
-      .eyebrow::before { content:"⬢"; color: var(--accent); }
-      h1 { margin:.6rem 0 1rem; font-size: clamp(2.8rem, 7vw, 4.8rem); line-height:.9; letter-spacing:-.06em; font-weight:800; }
-      h1 em { font-style:normal; background: linear-gradient(135deg, var(--accent), var(--accent-2)); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
-      .lead { color: var(--muted); font-size:1.15rem; max-width: 36rem; }
-      .lead strong { color: var(--text); font-weight:700; }
-      .actions { display:flex; flex-wrap:wrap; gap:.75rem; margin-top:1.6rem; }
-      .button { border:1px solid var(--border2); border-radius:999px; color:var(--text); display:inline-flex; align-items:center; gap:.5rem; font-weight:700; padding:.85rem 1.15rem; text-decoration:none; font-size:.95rem; transition: all .15s; }
-      .button.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color:#0a1220; border-color: transparent; box-shadow: 0 8px 24px rgba(125,211,252,.25); }
-      .button.primary:hover { transform: translateY(-1px); box-shadow: 0 12px 32px rgba(125,211,252,.35); }
-      .button:hover { border-color: var(--accent); text-decoration:none; }
-      .meta { display:flex; gap:1rem; margin-top:1.2rem; flex-wrap:wrap; color:var(--muted2); font-size:.85rem; }
-      .meta span { display:inline-flex; align-items:center; gap:.35rem; }
-      .card, pre { background: linear-gradient(180deg, rgba(17,26,46,.9), rgba(17,23,34,.92)); border:1px solid var(--border); border-radius: var(--radius); box-shadow: 0 1.5rem 4rem rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.05); }
-      .card { padding:1.35rem; }
-      .install-card h2 { margin:0 0 .6rem; font-size:1.1rem; letter-spacing:-.02em; }
-      .install-card p { margin:.4rem 0; font-size:.92rem; }
-      .install-card pre { margin:.6rem 0; padding:.85rem 1rem; font-size:.85rem; border-radius:.75rem; }
-      .demo-wrap { margin-top:2rem; }
-      .window { background: #0b1020; border:1px solid var(--border2); border-radius: var(--radius); overflow:hidden; box-shadow: 0 2rem 5rem rgba(0,0,0,.5), 0 0 0 1px rgba(125,211,252,.08); }
-      .window-bar { display:flex; align-items:center; gap:.4rem; padding:.7rem .9rem; background: linear-gradient(180deg, #111a2e, #0f1730); border-bottom:1px solid var(--border); }
-      .dot { width:.7rem; height:.7rem; border-radius:50%; display:inline-block; }
-      .dot.r { background:#ff5f57; } .dot.y { background:#ffbd2e; } .dot.g { background:#28c840; }
-      .window-title { margin-left:.6rem; color:var(--muted2); font-size:.8rem; font-family: ui-monospace, monospace; }
-      .window img { display:block; width:100%; height:auto; }
-      .caption { color:var(--muted); font-size:.88rem; margin:.9rem 0 .2rem; text-align:center; }
-      .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(16rem,1fr)); gap:1rem; margin-top:2rem; }
-      .feature { position:relative; overflow:hidden; }
-      .feature::before { content:""; position:absolute; top:0; left:0; right:0; height:1px; background: linear-gradient(90deg, transparent, var(--accent), transparent); opacity:.6; }
-      .feature h3 { margin:0 0 .4rem; font-size:1.05rem; display:flex; align-items:center; gap:.5rem; }
-      .feature p { margin:0; font-size:.95rem; }
-      .icon { width:1.9rem; height:1.9rem; border-radius:.5rem; display:inline-grid; place-items:center; font-size:1rem; background: rgba(125,211,252,.12); border:1px solid rgba(125,211,252,.2); }
-      pre { color:#d9e7ff; overflow-x:auto; }
-      code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:.88em; }
-      .ascii { font-size:.78rem; line-height:1.35; color:#cfe2ff; overflow-x:auto; background: #0c1226; }
-      .faq { display:grid; gap:1rem; margin-top:1.5rem; }
-      .faq details { background: var(--panel); border:1px solid var(--border); border-radius: var(--radius-sm); padding:1rem 1.2rem; }
-      .faq summary { cursor:pointer; font-weight:700; color:var(--text); }
-      .faq p { margin:.6rem 0 0; }
-      .links { display:flex; flex-wrap:wrap; gap:1rem; margin-top:2rem; }
-      .badge { display:inline-flex; align-items:center; gap:.4rem; border:1px solid var(--border); border-radius:999px; padding:.25rem .7rem; font-size:.82rem; color:var(--muted); }
-      footer { margin-top:3rem; padding-top:1.5rem; border-top:1px solid var(--border); color:var(--muted2); font-size:.85rem; display:flex; justify-content:space-between; flex-wrap:wrap; gap:1rem; }
-      @media (max-width:760px){ .hero{grid-template-columns:1fr; padding-top:1rem} .grid{grid-template-columns:1fr} h1{font-size:2.6rem} }
+
+      /* one orchestrated reveal */
+      @keyframes rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+      .hero > * { animation: rise .7s cubic-bezier(.2,.7,.2,1) both; }
+      .hero > *:nth-child(2) { animation-delay: .12s; }
+      @media (prefers-reduced-motion: reduce) { .hero > * { animation: none; } }
     </style>
   </head>
   <body>
     <nav>
       <div class="inner">
-        <a class="logo" href="#">⬢ opencode-loopd</a>
+        <a class="logo" href="#"><span class="glyph">⬢</span> opencode-loopd</a>
         <div class="navlinks">
           <a href="https://github.com/bojackduy/opencode-loopd">GitHub</a>
           <a href="https://www.npmjs.com/package/@bojackduy/opencode-loopd">npm</a>
-          <a href="https://github.com/bojackduy/opencode-loopd/issues">Report bug</a>
+          <a href="https://github.com/bojackduy/opencode-loopd/issues">Issues</a>
         </div>
       </div>
     </nav>
-    <main>
+    <main class="wrap">
       <section class="hero">
         <div>
-          <div class="eyebrow">OpenCode plugin • Server + TUI</div>
-          <h1>Background <em>goals</em> that loop.</h1>
-           <p class="lead">
-             <strong>opencode-loopd</strong> is a <strong>Codex-inspired</strong> goal engine for <strong>OpenCode</strong>.
-             Create a goal with <code>/goal</code>, watch an <strong>autonomous child session</strong> loop in the background,
-             <strong>schedule it</strong> to requeue on an interval without manual re-prompt, and monitor everything from a modal <strong>TUI dashboard</strong> — without blocking the parent chat.
-           </p>
+          <div class="section-label">OpenCode plugin · server + TUI</div>
+          <h1>Background <span class="accent">goals</span><br/>that loop.</h1>
+          <p class="lede">
+            <strong>opencode-loopd</strong> spawns an autonomous child session per goal and
+            drives it with accumulated context. The parent chat stays free. Completion
+            is <strong>host-verified</strong> — checks must pass, not just be claimed.
+          </p>
           <div class="actions">
-            <a class="button primary" href="https://www.npmjs.com/package/@bojackduy/opencode-loopd">Install on npm →</a>
-            <a class="button" href="https://github.com/bojackduy/opencode-loopd">View on GitHub</a>
+            <a class="btn primary" href="https://www.npmjs.com/package/@bojackduy/opencode-loopd">npm install →</a>
+            <a class="btn" href="https://github.com/bojackduy/opencode-loopd">Read the code</a>
           </div>
           <div class="meta">
-            <span>⬢ AGPL-3.0</span>
-            <span>⚡ bun ≥1.1.0</span>
-            <span>◈ opencode ≥1.4</span>
-            <span>☆ like Claude Code loop</span>
+            <span>AGPL-3.0</span>
+            <span>bun ≥1.1.0</span>
+            <span>opencode ≥1.4</span>
+            <span>like Claude Code loop</span>
           </div>
         </div>
-        <div class="card install-card">
-          <h2>Install in 30s</h2>
+        <div class="install">
+          <h2>install in 30s</h2>
           <p>Add to both configs, restart OpenCode:</p>
           <pre><code>// ~/.config/opencode/opencode.jsonc
 { "plugin": ["@bojackduy/opencode-loopd"] }
 
 // ~/.config/opencode/tui.json
 { "plugin": ["@bojackduy/opencode-loopd"] }</code></pre>
-          <p>Or one-line installer (adds <code>/goal</code> + skill):</p>
+          <p>One-line installer:</p>
           <pre><code>npx -y @bojackduy/opencode-loopd@latest</code></pre>
-          <p>Dashboard: <code>/loop</code> or <code>&lt;leader&gt;o</code> • <code>Shift+B</code> bug report</p>
+          <p class="note">Dashboard: <code>/loop</code> or <code>&lt;leader&gt;o</code> · bug report: <code>Shift+B</code></p>
         </div>
       </section>
 
-      <section class="demo-wrap">
-        <div class="window">
-          <div class="window-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="window-title">opencode — Loop Dashboard • NORMAL • 0 goals • ○ 0 RUNNING • 7 done</span></div>
-          <img src="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/demo.png" alt="Loop Dashboard modal TUI inside OpenCode terminal — showing NORMAL mode, goal list, and vivid status colors" width="1200" height="675" loading="eager" fetchpriority="high" />
+      <div class="demo">
+        <div class="demo-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span style="margin-left:.6rem">opencode — Loop Dashboard • NORMAL • 0 goals • ○ 0 RUNNING • 7 done</span></div>
+        <img src="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/demo.png" alt="Loop Dashboard modal TUI inside OpenCode terminal" width="1200" height="675" loading="eager" fetchpriority="high" />
+        <div class="caption">Modal dashboard (<code>/loop</code> / <code>&lt;leader&gt;o</code>): vivid per-status coloring, running spinner, NORMAL vs INSERT — keys trapped, no chat leak.</div>
+      </div>
+
+      <section>
+        <div class="section-label">features</div>
+        <h2>What it actually does.</h2>
+        <p class="lead">Seven things, none of them a feature list.</p>
+        <div class="features">
+          <div class="feature"><div class="num">01</div><div><h3>Engine-driven loop</h3><p>Idle + lease + 30s polling re-prompts the child with accumulated steering (progress + transcript tail + inbox). Not a parent re-prompt machine.</p></div></div>
+          <div class="feature"><div class="num">02</div><div><h3>Scheduled intervals</h3><p><code>scheduleEveryMs</code> auto-requeues the same goal on an interval — 5s poll, skip-if-running, workspaceWrite gate, inbox <code>Scheduled tick N/M</code>.</p></div></div>
+          <div class="feature"><div class="num">03</div><div><h3>Parent ↔ child</h3><p>Owner tools inspect/steer; inbox injects into next turn. Wake-up on complete/block without polling.</p></div></div>
+          <div class="feature"><div class="num">04</div><div><h3>Verified completion</h3><p>Per-goal artifact isolation <code>.opencode/loopd/goals/&lt;id&gt;/</code>, maxTurns force-finish → semantic summary → parent notification.</p></div></div>
+          <div class="feature"><div class="num">05</div><div><h3>Command sessions</h3><p>Installs, builds, dev servers and REPLs as background processes with a fullscreen terminal — owner exit notifications, filter/until watches, timeouts. Never block the turn in bash.</p></div></div>
+          <div class="feature"><div class="num">06</div><div><h3>Switch models mid-run</h3><p>Provider hits quota? <code>switch_goal_identity</code> moves the goal to another model on the same worker — same transcript, progress, checks. Or configure ordered <code>fallbackModels</code> for automatic 429 failover.</p></div></div>
+          <div class="feature"><div class="num">07</div><div><h3>Manual mode</h3><p><code>interactive: true</code> stops the engine from starting turns — every turn comes from your <code>:send</code>. For workers that wait for input.</p></div></div>
         </div>
-        <p class="caption">Modal dashboard (<code>/loop</code> / <code>&lt;leader&gt;o</code>): vivid per-status coloring, running spinner, <code>NORMAL</code> vs <code>INSERT</code> — keys trapped, no chat leak.</p>
       </section>
 
-       <section class="grid" aria-label="Features">
-         <div class="card feature"><h3><span class="icon">⚡</span> Engine-driven</h3><p>Idle + lease + 30s polling re-prompts the child with <em>accumulated steering</em> (progress + transcript tail + inbox). Not a parent re-prompt machine.</p></div>
-         <div class="card feature"><h3><span class="icon">⏱️</span> Scheduled</h3><p><code>scheduleEveryMs</code> auto-requeues the same goal on an interval (1.7) — <code>5s</code> poll, <code>skip-if-running</code>, <code>workspaceWrite</code> gate, inbox <code>Scheduled tick N/M</code>.</p></div>
-         <div class="card feature"><h3><span class="icon">👁️</span> Parent ↔ child</h3><p>Owner tools <code>inspect</code>/<code>steer</code>; inbox injects into next turn. Wake-up on <code>complete</code>/<code>block</code> without polling.</p></div>
-          <div class="card feature"><h3><span class="icon">🛡️</span> Safe</h3><p>Per-goal artifact isolation <code>.opencode/loopd/goals/&lt;id&gt;/</code>, <code>maxTurns</code> force-finish → semantic summary → parent.</p></div>
-          <div class="card feature"><h3><span class="icon">🖥️</span> Command sessions</h3><p>Installs, builds, dev servers &amp; REPLs as background processes with a fullscreen terminal — owner exit notifications, <code>filter</code>/<code>until</code> watches, timeouts. Never block the turn in <code>bash</code>.</p></div>
-          <div class="card feature"><h3><span class="icon">🧠</span> Switch models mid-run</h3><p>Provider hits quota? <code>switch_goal_model</code> moves the goal to another model on the <em>same</em> worker — or configure ordered <code>fallbackModels</code> for automatic 429 failover.</p></div>
-          <div class="card feature"><h3><span class="icon">✋</span> Manual mode</h3><p><code>interactive: true</code> stops the engine from starting turns — every turn comes from your <code>:send</code>. For workers that wait for input.</p></div>
-       </section>
-
-      <section style="margin-top:2.2rem">
-        <h2>Architecture — how the loop runs</h2>
-        <pre class="ascii"><code>                        ┌─────────────────────────┐
+      <section>
+        <div class="section-label">architecture</div>
+        <h2>How the loop runs.</h2>
+        <p class="lead">OpenCode owns execution, queued delivery, session lifecycle. Loopd owns objectives, checks, budgets, scheduling, cross-goal coordination.</p>
+        <pre class="arch"><code>                        ┌─────────────────────────┐
                         │  Main session (parent)  │
                         │  owner tools            │
                         │  inspect / steer / pause│
@@ -224,16 +256,17 @@
                  │                         .opencode/loopd/goals/&lt;id&gt;/
                  │                           progress.md / artifacts
                  └─────────────────────────────────┘</code></pre>
-         <p>Each goal is a <code>GoalID</code> — the loop identity. The dashboard is a modal dialog that pushes <code>loopd.dashboard</code> onto the keymap so the chat prompt never sees your keys. Artifacts are namespaced per-goal; if your objective says <code>save to ./reports/</code>, that wins. <strong>1.7</strong> adds a <code>5s</code> schedule worker that requeues <code>complete</code> scheduled goals on interval with <code>skip-if-running</code>.</p>
+        <p>Each goal is a <code>GoalID</code>. The dashboard is a modal dialog that pushes <code>loopd.dashboard</code> onto the keymap so the chat prompt never sees your keys. Artifacts are namespaced per-goal. <strong>1.7</strong> adds a 5s schedule worker that requeues <code>complete</code> scheduled goals on interval with <code>skip-if-running</code>.</p>
       </section>
 
-       <section style="margin-top:2rem">
-         <h2>Quick start — background goals in OpenCode</h2>
-         <pre><code>/goal fetch the latest AI news and save 10 items to ai-news.md
+      <section>
+        <div class="section-label">quick start</div>
+        <h2>First goal in 30 seconds.</h2>
+        <div class="quickstart">
+          <pre><code>/goal fetch the latest AI news and save 10 items to ai-news.md
 # agent clarifies → loopd_create_goal → child loops every ~30s
 /loop                          # or &lt;leader&gt;o
 j/k  move   o open child   :send hello   :force done   ? help   q close
-Shift+B  → prefilled GitHub bug report (like lazyjira / lazyconfluence)
 
 # Scheduled — one goal, auto-requeues on interval (1.7)
 loopd_create_goal({
@@ -242,29 +275,32 @@ loopd_create_goal({
   scheduleEveryMs: 3600000, // 1h
   scheduleMaxRuns: 24
 })</code></pre>
-         <p>The dashboard keybinding is <code>&lt;leader&gt;o</code> (also registered in the command palette as "Loop Dashboard" / <code>/loop</code>). Scheduled goals show <code>scheduleRunCount/nextRunAt</code> in <code>inspect</code>.</p>
-       </section>
-
-      <section style="margin-top:2rem">
-        <h2>Why loopd vs. plain loop?</h2>
-        <p>Plain <code>/loop</code> injects prompts into the <em>main</em> session — it pollutes the transcript. Codex goals keep history per-thread and steer via internal context. Loopd does the same for OpenCode: one child session per goal, continuation steering with progress history + transcript tail, and an explicit artifact namespace. The parent stays clean.</p>
-        <div class="grid">
-           <div class="card"><h3>opencode-loopd</h3><p>Child session per goal, no transcript pollution, artifact isolation, scheduled requeue, parent wake-up injection.</p></div>
-           <div class="card"><h3>Plain /loop</h3><p>Single session, prompt injected into main chat, manual polling to see progress, no interval.</p></div>
-           <div class="card"><h3>Codex / Claude Code</h3><p>Inspiration: Codex goals keep per-thread history and steer via internal context — loopd adds scheduled intervals for repetitive dialogues.</p></div>
+          <p>The dashboard keybinding is <code>&lt;leader&gt;o</code> (also registered in the command palette as "Loop Dashboard" / <code>/loop</code>).</p>
         </div>
       </section>
 
-      <section style="margin-top:2rem">
-        <h2>FAQ — SEO for OpenCode loop &amp; background agents</h2>
+      <section>
+        <div class="section-label">compare</div>
+        <h2>Why loopd vs. plain loop?</h2>
+        <p class="lead">Plain <code>/loop</code> injects prompts into the <em>main</em> session — it pollutes the transcript. Codex goals keep history per-thread and steer via internal context. Loopd does the same for OpenCode.</p>
+        <div class="features" style="margin-top:1.4rem">
+          <div class="feature"><div class="num">A</div><div><h3>opencode-loopd</h3><p>Child session per goal, no transcript pollution, artifact isolation, scheduled requeue, parent wake-up injection.</p></div></div>
+          <div class="feature"><div class="num">B</div><div><h3>Plain /loop</h3><p>Single session, prompt injected into main chat, manual polling to see progress, no interval.</p></div></div>
+          <div class="feature"><div class="num">C</div><div><h3>Codex / Claude Code</h3><p>Inspiration: Codex goals keep per-thread history and steer via internal context — loopd adds scheduled intervals for repetitive dialogues.</p></div></div>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-label">faq</div>
+        <h2>Questions.</h2>
         <div class="faq">
           <details><summary>How to run background agents in OpenCode?</summary><p>Install <code>@bojackduy/opencode-loopd</code> as a plugin (both <code>opencode.jsonc</code> and <code>tui.json</code>), restart, then <code>/goal</code> in any session. The engine spawns a child worker that loops autonomously; you monitor with <code>/loop</code>.</p></details>
           <details><summary>Is this like Claude Code's loop or Codex goals?</summary><p>Yes — same mental model: engine-driven idle → continuation steering with accumulated context → child calls <code>complete_goal</code>/<code>block_goal</code> → parent wake-up. Like Codex, but native to OpenCode's session model.</p></details>
-           <details><summary>Where do loop outputs go?</summary><p>Per-goal: <code>.opencode/loopd/goals/&lt;id&gt;/</code> (e.g. <code>progress.md</code>). If your objective names <code>./reports/</code>, that wins.</p></details>
-           <details><summary>How to schedule repetitive tasks?</summary><p>Use <code>scheduleEveryMs</code> (1.7) — e.g. <code>scheduleEveryMs: 60000</code> for 1m interval, <code>scheduleMaxRuns: 10</code> for 10 total. The <code>5s</code> schedule worker resurrects <code>complete → active</code> with <code>Scheduled tick N/M</code> inbox; `workspaceWrite:true` defers if another writer is active.</p></details>
-           <details><summary>How to report a bug?</summary><p>In the dashboard press <code>Shift+B</code> or <code>:bug</code> — opens <code>github.com/bojackduy/opencode-loopd/issues/new</code> prefilled with environment (version, OS, goal context).</p></details>
-            <details><summary>What if my provider hits quota mid-run?</summary><p>Run <code>loopd_list_models</code> to see what's connected, then <code>switch_goal_model</code> to move the goal to another model — same worker, transcript and progress kept. Or set <code>fallbackModels</code> at creation for automatic ordered failover on 429s. Dashboard: <code>:model</code> / <code>:models</code>.</p></details>
-            <details><summary>Can I run dev servers and long installs without blocking?</summary><p>Yes — use command sessions (<code>loopd_command_start</code>) instead of the blocking shell: installs, builds, dev servers and REPLs run in the background with a fullscreen terminal, owner exit notifications, and <code>until</code> pattern watches that wake you when output appears.</p></details>
+          <details><summary>Where do loop outputs go?</summary><p>Per-goal: <code>.opencode/loopd/goals/&lt;id&gt;/</code> (e.g. <code>progress.md</code>). If your objective names <code>./reports/</code>, that wins.</p></details>
+          <details><summary>How to schedule repetitive tasks?</summary><p>Use <code>scheduleEveryMs</code> — e.g. <code>scheduleEveryMs: 60000</code> for 1m interval, <code>scheduleMaxRuns: 10</code> for 10 total. The 5s schedule worker resurrects <code>complete → active</code> with <code>Scheduled tick N/M</code> inbox; <code>workspaceWrite:true</code> defers if another writer is active.</p></details>
+          <details><summary>How to report a bug?</summary><p>In the dashboard press <code>Shift+B</code> or <code>:bug</code> — opens <code>github.com/bojackduy/opencode-loopd/issues/new</code> prefilled with environment (version, OS, goal context).</p></details>
+          <details><summary>What if my provider hits quota mid-run?</summary><p>Run <code>loopd_list_models</code> to see what's connected, then <code>switch_goal_identity</code> to move the goal to another model — same worker, transcript and progress kept. Or set <code>fallbackModels</code> at creation for automatic ordered failover on 429s. Dashboard: <code>:model</code> / <code>:models</code>.</p></details>
+          <details><summary>Can I run dev servers and long installs without blocking?</summary><p>Yes — use command sessions (<code>loopd_command_start</code>) instead of the blocking shell: installs, builds, dev servers and REPLs run in the background with a fullscreen terminal, owner exit notifications, and <code>until</code> pattern watches that wake you when output appears.</p></details>
         </div>
       </section>
 
@@ -272,10 +308,7 @@ loopd_create_goal({
         <a href="https://github.com/bojackduy/opencode-loopd">GitHub</a>
         <a href="https://www.npmjs.com/package/@bojackduy/opencode-loopd">npm</a>
         <a href="https://github.com/bojackduy/opencode-loopd#readme">README</a>
-        <a href="https://github.com/bojackduy/opencode-loopd/issues">Issues — report a bug</a>
-        <a href="https://github.com/bojackduy/opencode-telescope">Telescope</a>
-        <a href="https://github.com/bojackduy/lazyjira">lazyjira</a>
-        <a href="https://github.com/bojackduy/lazyconfluence">lazyconfluence</a>
+        <a href="https://github.com/bojackduy/opencode-loopd/issues">Issues</a>
       </nav>
 
       <footer>
