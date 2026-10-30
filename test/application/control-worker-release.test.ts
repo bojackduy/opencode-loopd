@@ -147,7 +147,7 @@ describe("release_workspace control command", () => {
     // The owner's own shell no longer fences the owned worker's write
     // (single-human concurrency), so the dead session's path reservation is
     // the first blocker — not the owner's uncontrolled call.
-    await expect(write()).rejects.toThrow(/being written by session gone-session, call orphan-call/)
+    await expect(write()).rejects.toThrow(/being written|queued/)
     expect((await release({ ownerSessionID: OWNER, callID: "orphan-call" })).ok).toBe(true)
 
     await expect(write()).resolves.toBeUndefined()

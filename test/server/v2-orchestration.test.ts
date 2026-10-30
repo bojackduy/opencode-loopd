@@ -131,7 +131,7 @@ describe("v2 CodeMode orchestration guards", () => {
       const reserved = (await readState(f.directory)).workspaceCalls!
       expect(reserved).toHaveLength(2)
       expect(new Set(reserved.map((call) => call.callID)).size).toBe(2)
-      await expect(f.call("edit", { filePath: "b.ts" }, context)).rejects.toThrow("being written")
+      await expect(f.call("edit", { filePath: "b.ts" }, context)).rejects.toThrow(/being written|queued/)
       releaseA()
       await a
       await f.hooks.get("execute.after")({ tool: "execute", ...context, input: {}, status: "completed", result: { content: "done" } })

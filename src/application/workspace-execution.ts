@@ -51,7 +51,11 @@ function filesOverlap(a: string[], b: string[]): boolean {
   return a.some((f) => b.includes(f))
 }
 function canGrantTicket(state: StoreState, files: string[]): boolean {
-  return !ticketHolders(state).some((h) => filesOverlap(h.files, files))
+  if (ticketHolders(state).some((h) => filesOverlap(h.files, files))) return false
+  // Legacy fence: workspaceCalls predating tickets still block overlapping files
+  // until their after-hook clears them. Treat them as pseudo-holders.
+  if ((state.workspaceCalls ?? []).some((c) => !c.uncontrolled && c.paths && filesOverlap(c.paths, files))) return false
+  return true
 }
 function queuePosition(state: StoreState, callID: string): number {
   const q = ticketQueue(state)
@@ -690,11 +694,23 @@ export async function withWorkspaceOperation<T>(
     // Authority is re-read inside the same transaction that takes the lock, so
     // a concurrent rotation/retirement cannot authorize a later execution.
     opts?.authorize?.(state)
+    // Fail-tolerance: reclaim holders whose goal already terminal (crash must not hold lock)
+    if (state.writeTickets?.holders) {
+      const kept: typeof state.writeTickets.holders = []
+      for (const h of state.writeTickets.holders) {
+        const g = state.goals.find((x) => x.id === h.goalID || (x as any).id === h.goalID)
+        if (g && isTerminal(g.status)) continue
+        kept.push(h)
+      }
+      state.writeTickets.holders = kept
+    }
     // Ticket per scope for checks: any in-flight write ticket blocks checks (quiescence).
     // Also block if any uncontrolled shell/command is live — its writes are unknown.
+    // Legacy workspaceCalls with structured paths also fence checks until cleared.
     const holders = state.writeTickets?.holders ?? []
     const hasUncontrolled = (state.workspaceCalls ?? []).some((c) => c.uncontrolled)
-    if (state.workspaceOperation || holders.length > 0 || hasUncontrolled) throw new Error("Workspace is busy with an operation or in-flight writes; verification denied until quiescent.")
+    const hasLegacyWrite = (state.workspaceCalls ?? []).some((c) => (c.paths?.length ?? 0) > 0)
+    if (state.workspaceOperation || holders.length > 0 || hasUncontrolled || hasLegacyWrite) throw new Error("Workspace is busy with an operation or in-flight writes; verification denied until quiescent.")
     state.workspaceOperation = { id, goalID, sessionID }
     return state
   })

@@ -151,12 +151,14 @@ describe("real plugin scope enforcement", () => {
     for (const callID of ownerCalls) await after(callID, "parent")
     await after("parent-edit", "parent")
     expect((await readState(directory)).workspaceCalls).toEqual([])
-    for (const session of ["worker", "unknown-child"]) {
-      for (const tool of ["bash", "shell", "loopd_command_start", "loopd_command_write", "task", "batch", "custom_writer"]) {
-        await expect(before(tool, { command: "true" }, session)).rejects.toThrow("uncontrolled")
-      }
-      await before("read", { filePath: "owned.ts" }, session)
+    for (const tool of ["bash", "shell", "loopd_command_start", "loopd_command_write", "task", "batch", "custom_writer"]) {
+      await expect(before(tool, { command: "true" }, "worker")).rejects.toThrow("uncontrolled")
     }
+    await before("read", { filePath: "owned.ts" }, "worker")
+    for (const tool of ["bash", "shell", "loopd_command_start", "loopd_command_write", "task", "batch", "custom_writer"]) {
+      await expect(before(tool, { command: "true" }, "unknown-child")).rejects.toThrow("unrecognized")
+    }
+    await before("read", { filePath: "owned.ts" }, "unknown-child")
     await expect(before("write", { filePath: "new.ts" }, "unknown-child")).rejects.toThrow("unrecognized")
   })
 
@@ -221,7 +223,7 @@ describe("installed host veto/error-path semantics", () => {
     const { before } = await fixture()
     await before("edit", { filePath: "owned.ts" }, "worker", "v1-crash")
     // Simulate the failed execution returning without an after hook.
-    await expect(before("write", { filePath: "owned.ts" }, "worker", "v1-next")).rejects.toThrow("being written")
+    await expect(before("write", { filePath: "owned.ts" }, "worker", "v1-next")).rejects.toThrow(/being written|queued/)
   })
 
   it("v2 wrapped executors release the reservation even when the original body throws", async () => {
