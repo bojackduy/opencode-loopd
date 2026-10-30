@@ -333,6 +333,9 @@ export async function beforeWorkspaceTool(
       try { hostMain = (await identity.isMainSession(input.sessionID)) === true } catch { hostMain = false }
     }
   }
+  let queuedPos = 0
+  let queuedFiles: string[] = []
+  let wasQueued = false
   await mutateState(directory, `workspace.before:${input.callID}`, async (state) => {
     const goal = state.goals.find((item) => item.workerSessionID === input.sessionID)
     if (state.retiredWorkerSessions?.includes(input.sessionID)) throw new Error("Scope denied: retired worker session; goal cleared or worker rotated. Stop work; late executions are fenced.")
@@ -445,8 +448,10 @@ export async function beforeWorkspaceTool(
         else tickets.queue.splice(idx, 0, waiter)
         await logServerEvent(directory, "ticket.queued", { callID: input.callID, sessionID: input.sessionID, files: paths, position: queuePosition(state, input.callID) }).catch(() => {})
       }
-      const pos = queuePosition(state, input.callID)
-      throw new Error(`Write ticket queued for ${paths.join(", ")} — position ${pos} in queue. Current holder is writing overlapping files. You will be woken when your ticket is granted; do not retry manually. While waiting, use read tools or prepare the next patch.`)
+      queuedPos = queuePosition(state, input.callID)
+      queuedFiles = paths
+      wasQueued = true
+      return state
     }
     // Grant ticket for this write
     tickets.holders.push({
@@ -465,6 +470,9 @@ export async function beforeWorkspaceTool(
     }
     return state
   })
+  if (wasQueued) {
+    throw new Error(`Write ticket queued for ${queuedFiles.join(", ")} — position ${queuedPos} in queue. Current holder is writing overlapping files. You will be woken when your ticket is granted; do not retry manually. While waiting, use read tools or prepare the next patch.`)
+  }
 }
 
 export async function afterWorkspaceTool(directory: string, sessionID: string, callID: string, tool?: string): Promise<void> {

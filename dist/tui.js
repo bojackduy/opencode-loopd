@@ -77,7 +77,7 @@ async function readEventTail(target, limit) {
 }
 
 // src/infrastructure/state-repository.ts
-var CURRENT_VERSION = 9;
+var CURRENT_VERSION = 10;
 function emptyState() {
   return { version: CURRENT_VERSION, revision: 0, goals: [], runtimes: [], commandLedger: [], commands: [] };
 }
@@ -221,6 +221,11 @@ function migrate(state) {
       workerTopology: goal.workerTopology ?? undefined,
       nativeParentID: goal.nativeParentID ?? undefined
     }));
+  }
+  if (result.version < 10) {
+    result.version = 10;
+    if (!result.writeTickets)
+      result.writeTickets = { holders: [], queue: [] };
   }
   return result;
 }

@@ -408,6 +408,11 @@ function migrate(state) {
       nativeParentID: goal.nativeParentID ?? undefined
     }));
   }
+  if (result.version < 10) {
+    result.version = 10;
+    if (!result.writeTickets)
+      result.writeTickets = { holders: [], queue: [] };
+  }
   return result;
 }
 async function writeAtomic(target, contents) {
@@ -673,7 +678,7 @@ async function removeCommandLog(directory, commandID) {
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-var CURRENT_VERSION = 9, LOCK_TIMEOUT_MS = 30000, LOCK_STALE_MS = 1e4;
+var CURRENT_VERSION = 10, LOCK_TIMEOUT_MS = 30000, LOCK_STALE_MS = 1e4;
 var init_state_repository = __esm(() => {
   init_event_tail();
 });
@@ -1565,6 +1570,34 @@ var init_workspace_scope = () => {};
 // src/application/workspace-execution.ts
 import { randomUUID as randomUUID3 } from "crypto";
 import path3 from "path";
+function ticketHolders(state) {
+  return state.writeTickets?.holders ?? [];
+}
+function ticketQueue(state) {
+  return state.writeTickets?.queue ?? [];
+}
+function ensureTickets(state) {
+  if (!state.writeTickets)
+    state.writeTickets = { holders: [], queue: [] };
+  return state.writeTickets;
+}
+function filesOverlap(a, b) {
+  if (a.length === 0 || b.length === 0)
+    return true;
+  return a.some((f) => b.includes(f));
+}
+function canGrantTicket(state, files) {
+  if (ticketHolders(state).some((h) => filesOverlap(h.files, files)))
+    return false;
+  if ((state.workspaceCalls ?? []).some((c) => !c.uncontrolled && c.paths && filesOverlap(c.paths, files)))
+    return false;
+  return true;
+}
+function queuePosition(state, callID) {
+  const q = ticketQueue(state);
+  const idx = q.findIndex((w) => w.callID === callID);
+  return idx >= 0 ? idx + 1 : 0;
+}
 function isWorkspaceToolExempt(tool) {
   return readTools.has(tool);
 }
@@ -1713,21 +1746,6 @@ function retireWorker(state, goal) {
     return;
   state.retiredWorkerSessions = [...new Set([...state.retiredWorkerSessions || [], goal.workerSessionID])];
 }
-function foreignUncontrolledCall(state, input) {
-  return (state.workspaceCalls ?? []).find((call) => call.uncontrolled && call.sessionID !== input.sessionID && !(call.callID === input.callID && call.sessionID === input.sessionID));
-}
-function busyMessage(call, state) {
-  const holder = call.goalID ? state.goals.find((goal) => goal.id === call.goalID) : undefined;
-  return `Workspace busy: session ${call.sessionID} is executing tool call ${call.callID}${holder ? ` for goal "${holder.name}"` : ""}. Wait for that call's exit event, then retry. If the owning session is gone but the fence persists, use loopd_release_workspace to release it (your own calls, goals you own, or orphaned ones) \u2014 pausing or clearing a goal does not release another session's live reservation.`;
-}
-function assertCommandQuiescence(state) {
-  const command = state.commands?.find((item) => item.status === "running" || item.status === "missing" && orphanBlocks({ pid: item.pid, command: item.command }));
-  if (command)
-    throw new Error(`Workspace busy: command ${command.id} has not proved exit. Stop it or wait for its exit event before source writes, shell or checks.`);
-  const orphan = state.orphanedCommandProcesses?.find((item) => orphanBlocks(item));
-  if (orphan)
-    throw new Error(`Workspace busy: command ${orphan.commandID} has not proved exit. Verify process exit before retrying.`);
-}
 async function beforeWorkspaceTool(directory, input, args, identity = {}) {
   if (readTools.has(input.tool))
     return;
@@ -1768,8 +1786,6 @@ async function beforeWorkspaceTool(directory, input, args, identity = {}) {
     if (!goal && ownerTools.has(input.tool) && (!protectedGoals.length || state.goals.some((item) => item.ownerSessionID === input.sessionID)))
       return state;
     const isOwner = !goal && (state.goals.some((item) => item.ownerSessionID === input.sessionID) || hostMain);
-    if (protectedGoals.length && input.tool !== "loopd_command_write")
-      assertCommandQuiescence(state);
     if (!state.workspaceOperation && !protectedGoals.length && (!goal || goal.config.write_scope === undefined)) {
       let paths = [];
       let uncontrolled = false;
@@ -1790,23 +1806,18 @@ async function beforeWorkspaceTool(directory, input, args, identity = {}) {
     }
     const writes = structuredWritePaths(input.tool, args);
     if (!writes) {
-      if (!isOwner)
-        throw new Error(`Scope denied: uncontrolled tool "${input.tool}". Shell, commands, custom tools, batch and subagents can never run while protected goals exist (their effects are unverifiable). Instead: claim the files first with claim_goal_scope then use structured edit/write/patch, verify with run_goal_checks, or ask the owner to grant a fixed executable via grant_approved_command.`);
-      if (state.workspaceOperation)
-        throw new Error(`Workspace busy: completion checks (operation ${state.workspaceOperation.id}) are running; retry after they finish.`);
-      const blocking = (state.workspaceCalls ?? []).find((call) => call.sessionID !== input.sessionID);
-      if (blocking)
-        throw new Error(busyMessage(blocking, state));
+      if (goal) {
+        throw new Error(`Scope denied: uncontrolled tool "${input.tool}" in worker goal (shell can write, so it is never allowed here). Use read tools or ask the owner to grant a fixed executable via grant_approved_command.`);
+      }
+      if (!isOwner) {
+        throw new Error(`Scope denied: unrecognized session/child "${input.sessionID}". Subagent writes are unsupported \u2014 make file writes from the worker session (or the owning main session), not from a nested subagent.`);
+      }
       state.workspaceCalls ??= [];
       if (!state.workspaceCalls.some((call) => call.callID === input.callID && call.sessionID === input.sessionID)) {
         state.workspaceCalls.push({ callID: input.callID, sessionID: input.sessionID, paths: [], uncontrolled: true, at: new Date().toISOString() });
       }
       return state;
     }
-    const concurrent = foreignUncontrolledCall(state, input);
-    const ownConcurrency = goal && concurrent && state.goals.some((g) => g.id === goal.id && g.ownerSessionID === concurrent.sessionID);
-    if (concurrent && !ownConcurrency)
-      throw new Error(`Workspace busy: uncontrolled tool call ${concurrent.callID} from session ${concurrent.sessionID} is still executing; wait for its exit event before writing source.`);
     if (state.workspaceOperation)
       throw new Error(`Workspace operation ${state.workspaceOperation.id} is active; source writes are denied until it finishes.`);
     if (goal && (goal.status !== "active" || goal.scopeClosing))
@@ -1824,11 +1835,49 @@ async function beforeWorkspaceTool(directory, input, args, identity = {}) {
       const owner = !inArtifact && held.find((item) => item.id !== goal?.id && item.config.workspaceWrite !== false && (item.config.write_scope === undefined || item.config.write_scope.includes(file)));
       if (owner)
         throw new Error(scopeConflictMessage({ goalID: owner.id, ownerSessionID: owner.ownerSessionID, name: owner.name, path: file }));
-      const now3 = Date.now();
-      const call = state.workspaceCalls?.find((item) => !isSyncStaleWorkspaceCall(state, item, now3) && item.paths.includes(file) && !(item.callID === input.callID && item.sessionID === input.sessionID));
-      if (call)
-        throw new Error(`Scope denied: "${file}" is being written by session ${call.sessionID}, call ${call.callID}.`);
     }
+    const tickets = ensureTickets(state);
+    const holdersToKeep = [];
+    for (const h of tickets.holders) {
+      const g = state.goals.find((x) => x.id === h.goalID || x.id === h.goalID);
+      if (g && isTerminal(g.status))
+        continue;
+      holdersToKeep.push(h);
+    }
+    if (holdersToKeep.length !== tickets.holders.length)
+      tickets.holders = holdersToKeep;
+    if (!canGrantTicket(state, paths)) {
+      const existing = tickets.queue.find((w) => w.callID === input.callID);
+      if (!existing) {
+        const waiter = {
+          waiterID: randomUUID3(),
+          goalID: goal?.id ?? "",
+          sessionID: input.sessionID,
+          callID: input.callID,
+          files: paths,
+          requestedAt: new Date().toISOString(),
+          isOwner
+        };
+        const idx = isOwner ? tickets.queue.findIndex((w) => !w.isOwner) : -1;
+        if (idx === -1)
+          tickets.queue.push(waiter);
+        else
+          tickets.queue.splice(idx, 0, waiter);
+        await logServerEvent(directory, "ticket.queued", { callID: input.callID, sessionID: input.sessionID, files: paths, position: queuePosition(state, input.callID) }).catch(() => {});
+      }
+      const pos = queuePosition(state, input.callID);
+      throw new Error(`Write ticket queued for ${paths.join(", ")} \u2014 position ${pos} in queue. Current holder is writing overlapping files. You will be woken when your ticket is granted; do not retry manually. While waiting, use read tools or prepare the next patch.`);
+    }
+    tickets.holders.push({
+      ticketID: randomUUID3(),
+      goalID: goal?.id ?? "",
+      sessionID: input.sessionID,
+      callID: input.callID,
+      files: paths,
+      grantedAt: new Date().toISOString(),
+      generation: stampCallGeneration(state, goal?.id)
+    });
+    await logServerEvent(directory, "ticket.granted", { callID: input.callID, sessionID: input.sessionID, files: paths }).catch(() => {});
     if (!state.workspaceCalls)
       state.workspaceCalls = [];
     if (!state.workspaceCalls.some((call) => call.callID === input.callID && call.sessionID === input.sessionID)) {
@@ -1841,10 +1890,33 @@ async function afterWorkspaceTool(directory, sessionID, callID, tool) {
   if (tool && isWorkspaceToolExempt(tool))
     return;
   const snapshot = await readState(directory);
-  if (!snapshot.workspaceCalls?.some((call) => call.sessionID === sessionID && call.callID === callID))
+  const hasCall = snapshot.workspaceCalls?.some((call) => call.sessionID === sessionID && call.callID === callID);
+  const hasTicket = snapshot.writeTickets?.holders.some((h) => h.callID === callID) || snapshot.writeTickets?.queue.some((w) => w.callID === callID);
+  if (!hasCall && !hasTicket)
     return;
   await mutateState(directory, `workspace.after:${callID}`, async (state) => {
     state.workspaceCalls = state.workspaceCalls?.filter((call) => call.sessionID !== sessionID || call.callID !== callID);
+    if (state.writeTickets) {
+      state.writeTickets.holders = state.writeTickets.holders.filter((h) => h.callID !== callID);
+      state.writeTickets.queue = state.writeTickets.queue.filter((w) => w.callID !== callID);
+      const remaining = [];
+      for (const waiter of state.writeTickets.queue) {
+        if (canGrantTicket(state, waiter.files)) {
+          state.writeTickets.holders.push({
+            ticketID: randomUUID3(),
+            goalID: waiter.goalID,
+            sessionID: waiter.sessionID,
+            callID: waiter.callID,
+            files: waiter.files,
+            grantedAt: new Date().toISOString()
+          });
+          await logServerEvent(directory, "ticket.granted.queued", { callID: waiter.callID, sessionID: waiter.sessionID, files: waiter.files }).catch(() => {});
+        } else {
+          remaining.push(waiter);
+        }
+      }
+      state.writeTickets.queue = remaining;
+    }
     const now = Date.now();
     state.goals = state.goals.filter((goal) => {
       const live = (state.workspaceCalls ?? []).some((call) => call.goalID === goal.id && !isSyncStaleWorkspaceCall(state, call, now));
@@ -2002,10 +2074,20 @@ async function withWorkspaceOperation(directory, goalID, sessionID, run, opts) {
   const id = randomUUID3();
   await mutateState(directory, `workspace.operation:${id}`, async (state) => {
     opts?.authorize?.(state);
-    assertCommandQuiescence(state);
-    const now = Date.now();
-    const live = (state.workspaceCalls ?? []).filter((call) => !isSyncStaleWorkspaceCall(state, call, now));
-    if (state.workspaceOperation || live.length)
+    if (state.writeTickets?.holders) {
+      const kept = [];
+      for (const h of state.writeTickets.holders) {
+        const g = state.goals.find((x) => x.id === h.goalID || x.id === h.goalID);
+        if (g && isTerminal(g.status))
+          continue;
+        kept.push(h);
+      }
+      state.writeTickets.holders = kept;
+    }
+    const holders = state.writeTickets?.holders ?? [];
+    const hasUncontrolled = (state.workspaceCalls ?? []).some((c) => c.uncontrolled);
+    const hasLegacyWrite = (state.workspaceCalls ?? []).some((c) => (c.paths?.length ?? 0) > 0);
+    if (state.workspaceOperation || holders.length > 0 || hasUncontrolled || hasLegacyWrite)
       throw new Error("Workspace is busy with an operation or in-flight writes; verification denied until quiescent.");
     state.workspaceOperation = { id, goalID, sessionID };
     return state;
