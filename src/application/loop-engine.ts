@@ -1138,6 +1138,8 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       // bumps revision even with no changes).
       if (
         !(snapshot.workspaceCalls?.length) &&
+        !(snapshot.writeTickets?.holders.length) &&
+        !(snapshot.writeTickets?.queue.length) &&
         !snapshot.goals.some((g) => g.scopeClosing || g.scopeClearPending)
       ) {
         return
@@ -1145,7 +1147,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       // Status probes cannot establish tool completion; keep closing flags
       // conservative until exact reservations drain.
       const { sweepStaleWorkspaceState } = await import("./workspace-execution")
-      let summary: WorkspaceSweepSummary = { reapedCalls: [], resetClosing: [], finalizedClears: [], forceCleared: [] }
+      let summary: WorkspaceSweepSummary = { reapedCalls: [], resetClosing: [], finalizedClears: [], forceCleared: [], reapedTickets: [] }
       await mutateState(directory, "maintenance.sweep-stale-workspace", async (s) => {
         summary = sweepStaleWorkspaceState(s, {
           isWorkerLive: () => true,
@@ -1153,12 +1155,13 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
         })
         return s
       })
-      if (summary.reapedCalls.length || summary.resetClosing.length || summary.finalizedClears.length || summary.forceCleared.length) {
+      if (summary.reapedCalls.length || summary.resetClosing.length || summary.finalizedClears.length || summary.forceCleared.length || summary.reapedTickets.length) {
         await logServerEvent(directory, "maintenance.sweep-stale-workspace", {
           reapedCalls: summary.reapedCalls,
           resetClosing: summary.resetClosing,
           finalizedClears: summary.finalizedClears,
           forceCleared: summary.forceCleared,
+          reapedTickets: summary.reapedTickets,
         })
       }
     } catch {}

@@ -126,6 +126,7 @@ export interface WorkspaceSweepSummary {
   resetClosing: string[]
   finalizedClears: string[]
   forceCleared: string[]
+  reapedTickets: string[]
 }
 
 /** Generation metadata is an authority fence, never proof that a tool exited. */
@@ -178,8 +179,59 @@ export function sweepStaleWorkspaceState(
   liveness: SweepLiveness = {},
 ): WorkspaceSweepSummary {
   const now = liveness.now ?? Date.now()
-  const summary: WorkspaceSweepSummary = { reapedCalls: [], resetClosing: [], finalizedClears: [], forceCleared: [] }
+  const summary: WorkspaceSweepSummary = { reapedCalls: [], resetClosing: [], finalizedClears: [], forceCleared: [], reapedTickets: [] }
   const kept = state.workspaceCalls ?? []
+  // Periodic fail-tolerance for write tickets (engine runs this on reconcile):
+  // holders whose goal is terminal or gone can never be released by an
+  // after-hook, so reclaim them here instead of fencing overlap forever.
+  // Waiters bound to a terminal/gone goal are dropped too (owner waiters with
+  // no goalID are kept — they are still grantable).
+  if (state.writeTickets) {
+    const liveHolders = state.writeTickets.holders.filter((h) => {
+      if (!h.goalID) return true
+      const g = state.goals.find((x) => x.id === h.goalID)
+      if (!g || isTerminal(g.status)) {
+        summary.reapedTickets.push(h.callID)
+        return false
+      }
+      return true
+    })
+    if (liveHolders.length !== state.writeTickets.holders.length) state.writeTickets.holders = liveHolders
+    const liveWaiters = state.writeTickets.queue.filter((w) => {
+      if (!w.goalID) return true
+      const g = state.goals.find((x) => x.id === w.goalID)
+      if (!g || isTerminal(g.status)) {
+        summary.reapedTickets.push(w.callID)
+        return false
+      }
+      return true
+    })
+    if (liveWaiters.length !== state.writeTickets.queue.length) state.writeTickets.queue = liveWaiters
+    // Promote queued waiters grantable after the reclaim (mirrors the
+    // after-hook grant pass, minus logging — the sweep summary reports it).
+    // A waiter still overlapping a live holder OR a legacy workspaceCall fence
+    // stays queued; fail-closed reservations are never overridden here.
+    if (state.writeTickets.queue.length) {
+      const remaining: typeof state.writeTickets.queue = []
+      for (const waiter of state.writeTickets.queue) {
+        const blockedByHolder = state.writeTickets.holders.some((h) => filesOverlap(h.files, waiter.files))
+        const blockedByLegacy = (state.workspaceCalls ?? []).some((c) => !c.uncontrolled && c.paths && filesOverlap(c.paths, waiter.files))
+        if (!blockedByHolder && !blockedByLegacy) {
+          state.writeTickets.holders.push({
+            ticketID: randomUUID(),
+            goalID: waiter.goalID,
+            sessionID: waiter.sessionID,
+            callID: waiter.callID,
+            files: waiter.files,
+            grantedAt: new Date(now).toISOString(),
+          })
+        } else {
+          remaining.push(waiter)
+        }
+      }
+      state.writeTickets.queue = remaining
+    }
+  }
   for (const goal of [...state.goals]) {
     const referenced = kept.some((call) => call.goalID === goal.id) || state.workspaceOperation?.goalID === goal.id
     if (goal.scopeClosing && !referenced && !(liveness.isWorkerLive?.(goal.id, goal.workerSessionID) ?? false)) {

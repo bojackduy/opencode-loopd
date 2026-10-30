@@ -1893,7 +1893,7 @@ export function createGoalService(host: LoopHost): GoalService {
     // Restart, elapsed time and changed generations are not tool-exit proof.
     // Makes a restart self-healing instead of reconstructing the limbo.
     try {
-      let summary = { reapedCalls: [], resetClosing: [], finalizedClears: [], forceCleared: [] } as import("./workspace-execution").WorkspaceSweepSummary
+      let summary = { reapedCalls: [], resetClosing: [], finalizedClears: [], forceCleared: [], reapedTickets: [] } as import("./workspace-execution").WorkspaceSweepSummary
       const pre = await readState(directory)
       if ((pre.workspaceCalls?.length) || pre.goals.some((g) => g.scopeClosing || g.scopeClearPending)) {
         await mutateState(directory, "reconcile.sweep-stale-workspace", async (s) => {
@@ -1901,12 +1901,13 @@ export function createGoalService(host: LoopHost): GoalService {
           return s
         })
       }
-      if (summary.reapedCalls.length || summary.resetClosing.length || summary.finalizedClears.length || summary.forceCleared.length) {
+      if (summary.reapedCalls.length || summary.resetClosing.length || summary.finalizedClears.length || summary.forceCleared.length || summary.reapedTickets.length) {
         await logServerEvent(directory, "reconcile.sweep-stale-workspace", {
           reapedCalls: summary.reapedCalls,
           resetClosing: summary.resetClosing,
           finalizedClears: summary.finalizedClears,
           forceCleared: summary.forceCleared,
+          reapedTickets: summary.reapedTickets,
         }).catch(() => {})
       }
     } catch {}
