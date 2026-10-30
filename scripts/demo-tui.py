@@ -7,14 +7,16 @@ import os, pty, time, json, select, signal
 
 WORKDIR = "/tmp/loopd-tui"
 OUT = "/Users/duytrinh/Code/opencode-loopd/assets/loopd-tui.cast"
-COLS, ROWS = 120, 32
+COLS, ROWS = 165, 45
 
 PROMPT = ("You have loopd tools: loopd_create_goal, list_background_goals. "
   "Create TWO goals in parallel: 'tui-a' (append exactly one line TUI-A to src/a.txt "
   "with your own write tool, no subagents; checks ['grep -q TUI-A src/a.txt'], "
   "write_scope ['src/a.txt']) and 'tui-b' (same for TUI-B in src/b.txt; checks "
   "['grep -q TUI-B src/b.txt'], write_scope ['src/b.txt']). "
-  "Poll list_background_goals till both complete, then show both files. Only this dir.")
+  "Then poll list_background_goals patiently until both complete: check at most "
+  "8 times with a long pause between checks. Never pause, clear, abort or nudge "
+  "any goal; the workers finish on their own. When both are complete, show both files. Only this dir.")
 
 def main():
     pid, fd = pty.fork()

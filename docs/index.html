@@ -226,6 +226,14 @@
         <div class="caption">Recorded session: <code>/commands</code> → select → <code>o</code> fullscreen terminal → <code>Shift+PgUp/PgDn</code> scroll 1000-line history → type → <code>Ctrl+C</code> interrupt → <code>Ctrl+]</code> detach (process keeps running).</div>
       </div>
 
+      <div class="demo" style="margin-top:2rem">
+        <div class="demo-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span style="margin-left:.6rem">opencode — agent drives two parallel loopd goals • live</span></div>
+        <div style="display:flex; justify-content:center; background:var(--code-bg); padding:1rem">
+          <video src="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/loopd-tui.mp4" style="width:100%; max-width:100%; display:block" controls preload="metadata" playsinline aria-label="Recorded opencode TUI session — agent creates two parallel loopd goals that write through write tickets to completion"></video>
+        </div>
+        <div class="caption">Recorded live session: empty Loop Dashboard (<code>ctrl+x o</code>) → agent creates <code>tui-a</code> + <code>tui-b</code> with disjoint scopes → workers write through per-file tickets → polls to completion. Free model, real run. Cast: <code>assets/loopd-tui.cast</code> (<code>asciinema play</code>).</div>
+      </div>
+
       <section>
         <div class="section-label">features</div>
         <h2>Seven things. None of them a feature list.</h2>
