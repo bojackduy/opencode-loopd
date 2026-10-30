@@ -1023,7 +1023,7 @@ function statusColor(status, theme) {
     case "blocked":
       return theme.error;
     case "complete":
-      return theme.info;
+      return theme.success;
     case "budget_limited":
       return theme.accent;
     case "usage_limited":
@@ -1057,6 +1057,8 @@ function borderColorForStatus(status, theme) {
     case "budget_limited":
     case "usage_limited":
       return theme.accent;
+    case "complete":
+      return theme.success;
     default:
       return "gray";
   }
@@ -3944,7 +3946,7 @@ Write scope: `);
     });
     _$effect((_p$) => {
       var _v$9 = theme().border, _v$0 = {
-        fg: theme().primary,
+        fg: theme().info,
         bold: true
       }, _v$1 = {
         fg: theme().textMuted
@@ -3972,19 +3974,19 @@ Write scope: `);
       }, _v$18 = {
         fg: theme().textMuted
       }, _v$19 = {
-        fg: theme().info,
+        fg: theme().success,
         bold: true
       }, _v$20 = {
         fg: theme().textMuted
       }, _v$21 = {
         fg: theme().textMuted
       }, _v$22 = {
-        fg: tab() === "goals" ? theme().primary : theme().textMuted,
+        fg: tab() === "goals" ? theme().info : theme().textMuted,
         bold: tab() === "goals"
       }, _v$23 = {
         fg: theme().textMuted
       }, _v$24 = {
-        fg: tab() === "commands" ? theme().primary : theme().textMuted,
+        fg: tab() === "commands" ? theme().info : theme().textMuted,
         bold: tab() === "commands"
       }, _v$25 = {
         fg: theme().textMuted

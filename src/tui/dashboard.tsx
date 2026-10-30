@@ -82,7 +82,7 @@ function statusColor(status: GoalStatus, theme: TuiThemeCurrent) {
     case "active": return theme.success
     case "paused": return theme.warning
     case "blocked": return theme.error
-    case "complete": return theme.info
+    case "complete": return theme.success
     case "budget_limited": return theme.accent
     case "usage_limited": return theme.accent
     default: return theme.text
@@ -104,6 +104,7 @@ function borderColorForStatus(status: GoalStatus, theme: TuiThemeCurrent): strin
     case "blocked": return theme.error as unknown as string
     case "budget_limited":
     case "usage_limited": return theme.accent as unknown as string
+    case "complete": return theme.success as unknown as string
     default: return "gray"
   }
 }
@@ -832,7 +833,7 @@ export function LoopDashboard(props: Props) {
         {/* Header — always visible, vivid */}
         <box flexDirection="row" justifyContent="space-between" alignItems="center" padding={0} flexShrink={0} gap={1}>
           <text>
-            <span style={{ fg: theme().primary, bold: true }}>⬢ Loop Dashboard</span>
+            <span style={{ fg: theme().info, bold: true }}>⬢ Loop Dashboard</span>
             <span style={{ fg: theme().textMuted }}> │ </span>
             <span style={{ fg: mode() === "normal" ? theme().success : theme().warning, bold: true, bg: mode() === "insert" ? (theme().backgroundElement as unknown as string) : undefined }}> {mode().toUpperCase()} </span>
             <span style={{ fg: theme().textMuted }}> │ </span>
@@ -843,12 +844,12 @@ export function LoopDashboard(props: Props) {
             <span style={{ fg: theme().textMuted }}> │ </span>
             <span style={{ fg: fenceCount() > 0 ? theme().warning : theme().textMuted, bold: fenceCount() > 0 }}>{fenceCount()} fence{fenceCount() === 1 ? "" : "s"}</span>
             <span style={{ fg: theme().textMuted }}> │ </span>
-            <span style={{ fg: theme().info, bold: true }}>{state()?.goals.filter((g) => g.status === "complete").length || 0}</span>
+            <span style={{ fg: theme().success, bold: true }}>{state()?.goals.filter((g) => g.status === "complete").length || 0}</span>
             <span style={{ fg: theme().textMuted }}> done</span>
             <span style={{ fg: theme().textMuted }}> │ </span>
-            <span style={{ fg: tab() === "goals" ? theme().primary : theme().textMuted, bold: tab() === "goals" }}>[Goals]</span>
+            <span style={{ fg: tab() === "goals" ? theme().info : theme().textMuted, bold: tab() === "goals" }}>[Goals]</span>
             <span style={{ fg: theme().textMuted }}> </span>
-            <span style={{ fg: tab() === "commands" ? theme().primary : theme().textMuted, bold: tab() === "commands" }}>[Commands]</span>
+            <span style={{ fg: tab() === "commands" ? theme().info : theme().textMuted, bold: tab() === "commands" }}>[Commands]</span>
             <span style={{ fg: theme().textMuted }}> (Tab)</span>
           </text>
           <box
