@@ -10925,11 +10925,11 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
       }
     }),
     report_goal_progress: tool({
-      description: "Report meaningful progress (resets consecutiveFailures/noProgressCount). Call after durable state changes (file writes, verifications) \u2014 not after thinking. The engine uses this to avoid force-finish.",
+      description: "Report meaningful progress (resets consecutiveFailures/noProgressCount). Call after durable state changes (file writes, verifications) \u2014 not after thinking. REQUIRED args: summary (what was accomplished) and next (the next concrete step); evidence is optional and may be omitted. The engine uses this to avoid force-finish.",
       args: {
-        summary: tool.schema.string().describe("What was accomplished."),
-        next: tool.schema.string().describe("The next concrete step."),
-        evidence: tool.schema.string().describe("Optional concrete evidence.")
+        summary: tool.schema.string().describe("What was accomplished. Required."),
+        next: tool.schema.string().describe("The next concrete step. Required."),
+        evidence: tool.schema.string().optional().describe("Optional concrete evidence (test output, file paths). May be omitted.")
       },
       execute: async (args, context) => {
         const state = await readState(dir);
