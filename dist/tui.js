@@ -7522,9 +7522,11 @@ var tui = async (api) => {
 function adaptThemeV2(theme) {
   const t = theme ?? {};
   const text = t.text ?? {};
-  const fb = text.feedback ?? {};
+  const fb = t.feedback ?? text.feedback ?? {};
   const bg = t.background ?? {};
-  const raised = bg.raised ?? bg.surface ?? {};
+  const raised = bg.raised ?? bg.surface ?? bg.elevated ?? {};
+  const borderTokens = t.border ?? {};
+  const hue = t.hue ?? {};
   const diff = t.diff ?? {};
   const diffText = diff.text ?? {};
   const diffBg = diff.background ?? {};
@@ -7533,29 +7535,29 @@ function adaptThemeV2(theme) {
   const syntax = t.syntax ?? {};
   const md = t.markdown ?? {};
   const pick = (...values) => values.find((value) => value !== undefined && value !== null);
-  const base = pick(text.base, text.default, "#ffffff");
-  const muted = pick(text.muted, text.subdued, "#888888");
-  const primary = pick(t.hue?.interactive?.[200], text.formfield?.focused, text.action?.primary?.selected, base);
-  const accent = pick(t.hue?.accent?.[200], text.action?.primary?.focused, primary);
-  const background = pick(bg.base, bg.default, "#000000");
+  const base = pick(text.base, text.default, text.primary, t.foreground, "#e8e8f0");
+  const muted = pick(text.muted, text.subdued, text.secondary, "#9a9ab0");
+  const primary = pick(hue.interactive?.[200], hue.interactive?.[300], hue.primary?.[200], hue.violet?.[300], text.formfield?.focused, text.action?.primary?.selected, text.link, "#a78bfa");
+  const accent = pick(hue.accent?.[200], hue.pink?.[300], hue.violet?.[400], text.action?.primary?.focused, text.accent, primary, "#f472b6");
+  const background = pick(bg.base, bg.default, bg.canvas, "#13131a");
   return {
     text: base,
     textMuted: muted,
     primary,
-    secondary: pick(t.hue?.accent?.[300], accent),
+    secondary: pick(hue.accent?.[300], hue.violet?.[300], accent, "#c4b5fd"),
     accent,
-    success: pick(fb.success?.base, fb.success?.default, "#22c55e"),
-    warning: pick(fb.warning?.base, fb.warning?.default, "#eab308"),
-    error: pick(fb.error?.base, fb.error?.default, "#ef4444"),
-    info: pick(fb.info?.base, fb.info?.default, accent),
-    selectedListItemText: pick(text.action?.primary?.focused, base),
+    success: pick(fb.success?.base, fb.success?.default, fb.success, hue.green?.[300], "#34d399"),
+    warning: pick(fb.warning?.base, fb.warning?.default, fb.warning, hue.yellow?.[300], "#fbbf24"),
+    error: pick(fb.error?.base, fb.error?.default, fb.error, hue.red?.[300], "#f87171"),
+    info: pick(fb.info?.base, fb.info?.default, fb.info, hue.blue?.[300], accent, "#60a5fa"),
+    selectedListItemText: pick(text.action?.primary?.focused, text.selected, base),
     background,
-    backgroundPanel: pick(raised.base, raised.overlay, background),
-    backgroundElement: pick(raised.high, raised.offset, background),
-    backgroundMenu: pick(raised.max, raised.high, background),
-    border: pick(t.border?.base, muted),
-    borderActive: pick(t.scrollbar?.base, primary),
-    borderSubtle: pick(t.border?.base, muted),
+    backgroundPanel: pick(raised.base, raised.overlay, raised.surface, bg.panel, "#1e1e2a"),
+    backgroundElement: pick(raised.high, raised.offset, raised.elevated, bg.element, "#252535"),
+    backgroundMenu: pick(raised.max, raised.high, bg.menu, "#2a2a3a"),
+    border: pick(borderTokens.base, borderTokens.default, t.borderColor, muted, "#3a3a4a"),
+    borderActive: pick(t.scrollbar?.base, hue.interactive?.[200], primary, "#a78bfa"),
+    borderSubtle: pick(borderTokens.subtle, borderTokens.muted, "rgba(154,154,176,0.18)"),
     diffAdded: pick(diffText.added, base),
     diffRemoved: pick(diffText.removed, base),
     diffContext: pick(diffText.context, muted),

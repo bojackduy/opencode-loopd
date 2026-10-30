@@ -78,9 +78,12 @@ describe("TUI Plugin", () => {
     const mapped = adaptThemeV2({ text: { base: "#ddd", muted: "#777" } } as any) as any
 
     expect(mapped.text).toBe("#ddd")
-    expect(mapped.primary).toBe("#ddd")
-    expect(mapped.success).toBe("#22c55e")
-    expect(mapped.background).toBe("#000000")
+    // Loopd keeps its signature palette even on minimal host themes so the
+    // dashboard stays fancy — primary/success/background fall back to vibrant
+    // defaults, not washed base/black.
+    expect(mapped.primary).toBe("#a78bfa")
+    expect(mapped.success).toBe("#34d399")
+    expect(mapped.background).toBe("#13131a")
   })
 
   it("v1 registers the stable terminal route", async () => {
