@@ -33,12 +33,13 @@ Redesign Opencode Loopd plugin concurrency from global workspace lock to ticket-
 - Test fixes: `test/infrastructure/state-store.test.ts` expect 10 + writeTickets; `test/application/owner-workspace-execution.test.ts` shell concurrency + checks fence; `test/server/workspace-execution.test.ts` queued vs being written, unrecognized vs uncontrolled split; `test/application/control-worker-release.test.ts` queued regex; `test/server/v2-orchestration.test.ts` queued regex; `src/application/workspace-execution.ts` canGrant + withWorkspaceOperation legacy fences.
 - Result: `bun test` 990 pass 0 fail, `tsc --noEmit` pass.
 
-### Done (e579231 live)
-- Committed `25fd49b` persist queued ticket (throw outside mutate) + `e579231` reclaim deleted/terminal holders.
-- Verified `bun run typecheck` pass, `bun test` 990 pass 0 fail, `bun run build` dist/server.js 555K, pushed to master.
-- Shelf-test via shell (no loopd tools) PASS: disjoint holders 2 parallel, c3 queued position 1, promotion on release, shell allowed, checks fenced, terminal/deleted reclaim works.
-- `opencode service restart` done; `/tmp/loopd-server.log` shows post-restart `tool.call.started/finished` for opencode-loopd.
-- Remaining optional: periodic engine sweep for dead holders (on-demand reclaim already in before/with); skills doc touch-up if needed.
+### Done (c0bc5c4 live)
+- Committed `25fd49b` persist queued ticket (throw outside mutate) + `e579231` reclaim deleted/terminal holders + `c0bc5c4` periodic sweep (reaps dead holders/waiters, promotes grantable waiters; engine maintenance + goal reconcile log `reapedTickets`).
+- Verified `bun run typecheck` pass, `bun test` 990 pass 0 fail, `bun run build` dist/server.js 557K, pushed to master.
+- Real-terminal shelf test via shell (real `bun run` OS process, no loopd tools): `Promise.all` disjoint writes both fulfilled holders=2, overlap queued position 1, sweep reaped `["dead","dead-wait"]` promoted `live-wait` to holder, owner write correctly queued behind live holder.
+- Real opencode check: `opencode --version` v2.2.3, `opencode service status` live, `opencode plugin list` shows `opencode-loopd.server 1.14.6 file:/Users/duytrinh/Code/opencode-loopd`.
+- `opencode service restart` done; `/tmp/loopd-server.log` shows post-restart `tool.call.started` for opencode-loopd.
+- Skill doc touched up: WorkspaceWrite bullet, new "Write tickets (per-scope concurrency)" section, owner coordination + command fence bullets fixed to ticket model.
 
 ### Blocked
 - None.
