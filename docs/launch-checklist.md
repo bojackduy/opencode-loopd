@@ -31,7 +31,7 @@ Prepared 2026-10-30. Status markers: [x] done · [ ] todo · [~] partial.
 ## Landing page (docs/index.html)
 - [x] Hero, features, install, FAQ, footer, meta, OG, Twitter, JSON-LD
 - [x] robots.txt + sitemap.xml (lastmod updated 2026-10-30)
-- [ ] Mobile QA screenshots
+- [x] Desktop + mobile screenshots captured (assets/screenshot-desktop.png, screenshot-mobile.png)
 - [ ] Lighthouse run (perf/a11y/SEO)
 - [ ] Add demo GIF to hero
 
