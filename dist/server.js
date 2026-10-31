@@ -2109,7 +2109,7 @@ function guardV2ToolEditor(directory, editor, lifecycle) {
     editor.update(entry.id, (definition) => {
       const execute = definition.execute;
       definition.execute = async (args, context) => {
-        const input = { tool: entry.id, sessionID: context.sessionID, callID: `${context.id}:${randomUUID3()}` };
+        const input = { tool: entry.name ?? entry.id, sessionID: context.sessionID, callID: `${context.id}:${randomUUID3()}` };
         const values = args;
         if (lifecycle)
           await lifecycle.before(input, values);
@@ -7453,12 +7453,12 @@ function buildContinuationSteering(goal, runtime, context) {
     `Explore with reads/search \u2192 claim_goal_scope({ paths, runGeneration from get_goal }) \u2192 structured edit/write/apply_patch \u2192 run_goal_checks \u2192 report progress or complete_goal.`,
     `Claim only the minimum files needed. Request expansion BEFORE editing new paths; rename requires both endpoints. No globs.`,
     `Conflicts identify owning goal/session/path. Initial and expansion conflicts fail immediately with no partial claim and no automatic queue. Coordinate with the owner, then retry once; never sleep, poll claims, or repeatedly prompt waiting workers.`,
-    `Arbitrary shell, loopd_command_start/write, custom tools, batch, and subagent writes are denied. Configured checks are trusted commands under a workspace-wide operation lock, not an OS sandbox.`,
+    `Arbitrary shell is allowed but prompt-awareness only: shell calls are recorded as uncontrolled, never fenced, and checks wait for quiescence. loopd_command_start/write, custom tools, batch, and subagent writes are denied. Configured checks are trusted commands under a workspace-wide operation lock, not an OS sandbox.`,
     `Output-location exceptions do not grant extra source files. Only this goal's artifact directory is writable without source claims.`
   ] : goal.config.workspaceWrite === false ? [
     ``,
     `## READ-ONLY OWNERSHIP`,
-    `Shared source writes and arbitrary shell/custom/subagent tools are denied. Write artifacts only under this goal's artifact directory. Use run_goal_checks for trusted configured verification.`
+    `Shared source writes and arbitrary custom/subagent tools are denied. Shell is allowed but prompt-awareness only: recorded as uncontrolled, never fenced, and checks wait for quiescence. Write artifacts only under this goal's artifact directory. Use run_goal_checks for trusted configured verification.`
   ] : [];
   const approvedInstructions = goal.config.approvedCommands?.length ? [
     ``,
