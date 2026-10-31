@@ -1,359 +1,81 @@
 # opencode-loopd
 
-**Durable goal supervision for OpenCode — verified objectives, bounded retries, scheduling, and a goal dashboard. OpenCode runs the sessions; loopd supervises the goals.**
+**Give your OpenCode agent a background brain.**
 
-> Run long-running tasks as **autonomous child sessions** (subagents) while the main chat stays interactive. Create a goal with `/goal`, watch it loop in the background, and monitor everything from a keyboard-driven TUI — without blocking the parent conversation.
+Run long tasks as **autonomous background goals** while you keep chatting. Your agent plans, works, checks its own work, and reports back — no blocked chat, no manual polling.
 
 [![npm version](https://img.shields.io/npm/v/@bojackduy/opencode-loopd?style=flat-square&color=blue)](https://www.npmjs.com/package/@bojackduy/opencode-loopd)
 [![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue?style=flat-square)](LICENSE)
 [![opencode plugin](https://img.shields.io/badge/opencode-plugin-9cf?style=flat-square)](https://opencode.ai)
-[![TUI](https://img.shields.io/badge/TUI-OpenTUI-purple?style=flat-square)](https://github.com/anomalyco/opentui)
 
 ![Loop Dashboard — modal TUI with goals, running indicator, and insert mode](assets/demo.png)
 
-*Modal dashboard (`/loop` / `<leader>o`): zero chat pollution — keys are trapped inside the dialog, NORMAL vs INSERT modes, vivid per-status coloring.*
+*The dashboard (`/loop` or `<leader>o`): goals, status, and a fullscreen terminal. Keys stay inside the dialog — your chat never sees them.*
 
-## Why opencode-loopd
+## What it does
 
-- **Background agents, not blocked chats** — an OpenCode plugin that spawns a dedicated **worker (child) session** per goal. The parent stays free to keep chatting.
-- **Goal-driven continuation** — native v2 execution outcomes advance goal policy with accumulated context. Transcript-based idle recovery remains a legacy compatibility path.
-- **Parent ↔ child visibility** — `list/inspect/read_transcript/send_input` give the parent full observability. Bidirectional inbox lets you steer mid-run.
-- **Safe by default** — per-goal artifact isolation (`.opencode/loopd/goals/<id>/`), `maxTurns`/`maxFailures`/`maxNoProgress`, force-finish → semantic `complete_goal` summary → parent notification via wake-up injection.
-- **Scheduled intervals** — `scheduleEveryMs`/`scheduleMaxRuns` auto-requeues the same goal every N ms (e.g., `10s` monitor, `1h` report) without manual `/goal` spam — `5s` poll, `skip-if-running`, `workspaceWrite` serialization, inbox `Scheduled tick N/M`.
-- **Modal TUI dashboard** — `<leader>o` or `/loop` opens a focused dialog (no leak to chat prompt). Vim-style navigation, live running indicator, per-status borders.
-- **Command sessions, not blocked shells** — run installs, builds, dev servers, and REPLs as background OS processes with a fullscreen terminal, owner exit notifications, line-level `filter`/`until` watches, and timeouts — instead of freezing the agent turn in `bash`.
-- **Switch identity mid-run** — `loopd_list_models` discovers models and agents; `switch_goal_identity` changes a goal's model, agent, or both on the *same* worker/session. Combined changes persist atomically and roll back on partial failure. Optional ordered `fallbackModels` switch automatically on 429s. Dashboard: `:model`/`:agent` and `:models`/`:agents`.
-- **Manual mode for interactive work** — `interactive: true` (or `:interactive`) stops the engine from starting turns on its own; every turn comes from your `:send`/nudge. For tasks where the worker waits for input.
+- **Background goals** — say `/goal …` and your agent gets a dedicated worker that keeps going while you do other things.
+- **Verified results** — a goal is not "done" until its checks pass. No false "finished" claims.
+- **Scheduling** — repeat a goal every hour, every day, or until a condition is met.
+- **Safe teamwork** — multiple goals can edit code at the same time when they touch different files.
+- **One manager, many projects** — steer goals across several repos from one session.
+- **A real dashboard** — vim-style navigation, live status, fullscreen terminal for long commands.
 
-Keywords: `opencode` `opencode-plugin` `background-agent` `autonomous` `subagent` `loop` `goal` `tui` `codex` `claude-code` `worker`
+## Install in 60 seconds
 
-## What it is
+### Option A — plugin only
 
-On supported v2 hosts, OpenCode owns execution, queued message delivery and
-session lifecycle. Loopd owns objectives, acceptance checks, budgets,
-scheduling and cross-goal coordination. See [v2-first supervision](docs/v2-supervisor.md)
-for the audited contracts, restart reconciliation and legacy boundaries.
-
-Exact-file editing contracts and their execution boundaries are documented in
-[File-scope ownership](docs/file-scope-ownership.md). Use `write_scope: []` to
-explore before claiming files; omitted scope keeps legacy exclusivity.
-
-Every promise loopd makes about a running goal — checked completion, one owner
-notification, queued steering, durable pause, final clear — is listed in the
-[Lifecycle contract](docs/lifecycle-contract.md) and asserted against a real
-`opencode serve` process before each release. That gate is what
-`bun run smoke:v2-lifecycle` runs; it is not a mocked unit test.
-
-opencode-loopd is an **OpenCode plugin** (server + TUI) that adds **background goals** to OpenCode. Each goal owns a **worker (child) subagent** that loops autonomously; the **loop engine** drives continuations; the **schedule worker** requeues the same goal on an interval (`scheduleEveryMs`); the **dashboard** and **owner tools** keep the parent in control. Think *Codex goals* or *Claude Code loop*, but native to OpenCode's session model — with scheduled intervals for repetitive dialogues.
-
-## Install
-
-### Plugin — simple (no installer, just the plugin)
-
-Add the package to **both** configs.
-
-**`~/.config/opencode/opencode.jsonc`** — server engine:
+Add to both configs, then restart OpenCode:
 
 ```jsonc
-{
-  "plugin": ["@bojackduy/opencode-loopd"]
-}
+// ~/.config/opencode/opencode.jsonc
+{ "plugin": ["@bojackduy/opencode-loopd"] }
+
+// ~/.config/opencode/tui.json
+{ "plugin": ["@bojackduy/opencode-loopd"] }
 ```
 
-**`~/.config/opencode/tui.json`** — dashboard (modal TUI):
-
-```jsonc
-{
-  "plugin": ["@bojackduy/opencode-loopd"]
-}
-```
-
-Then restart OpenCode. Verify with `/loop` (palette → Loop Dashboard) or `<leader>o`.
-
-For a local checkout:
-
-```jsonc
-// opencode.jsonc
-{ "plugin": ["./path/to/opencode-loopd"] }
-// tui.json
-{ "plugin": ["./path/to/opencode-loopd"] }
-```
-
-### Installer — also installs `/goal` + skill
+### Option B — installer (recommended)
 
 ```bash
 npx -y @bojackduy/opencode-loopd@latest
 ```
 
-Registers the plugin, installs the `/goal` slash command and the `loopd` skill into `~/.config/opencode/`. Run again to update. Then **restart OpenCode**.
+This registers the plugin and installs the `/goal` command. Restart OpenCode when it finishes.
 
-Uninstall:
+## Your first goal
 
-```bash
-npx -y @bojackduy/opencode-loopd@latest --uninstall
-```
+In any OpenCode session:
 
-Or via global npm:
-
-```bash
-npm install -g @bojackduy/opencode-loopd@latest
-opencode-loopd            # install
-opencode-loopd --uninstall # remove
-```
-
-Then restart OpenCode.
-
-### Manual (local dev)
-
-Add to `~/.config/opencode/opencode.jsonc`:
-
-```json
-{
-  "plugin": ["@bojackduy/opencode-loopd"]
-}
-```
-
-Or for local checkout:
-
-```json
-{
-  "plugin": ["/Users/you/Code/opencode-loopd"]
-}
-```
-
-For safe code-editing defaults, configure the server plugin with an agent and
-verification commands:
-
-```json
-{
-  "plugin": [[
-    "@bojackduy/opencode-loopd",
-    {
-      "defaultAgent": "smart-agent",
-      "defaultChecks": ["bun test", "bun run typecheck"]
-    }
-  ]]
-}
-```
-
-`opencode-loopd` exposes:
-- `opencode-loopd/server` → engine plugin
-- `opencode-loopd/tui` → dashboard plugin
-
-## Usage
-
-### 1. Create a goal — `/goal`
-
-From any session, tell the agent:
-
-```
+```text
 /goal fetch the latest AI news and save 10 items to ai-news.md
 ```
 
-Or be explicit:
+Your agent will clarify the details, start a worker, and keep you posted. Open the dashboard anytime with `/loop` or `<leader>o`.
 
-```
-Create a background goal to find all .ts files in src/, count lines, and write the summary to line-counts.md — verify with grep -c.
-```
+## How it works
 
-The agent will clarify (what/where/how to verify) and then call `loopd_create_goal`. The worker starts immediately in a hidden child session.
-
-### 2. Monitor with dashboard — `/loop`
-
-Press **`<leader>o`** or open the command palette → **"Loop Dashboard"** (also `/loop`).
-
-Dashboard (NORMAL / INSERT `:`) — shared Goals/Commands tabs:
-
-- `Tab` — toggle Goals / Commands · `h` Goals · `l` Commands (`/commands` opens on Commands)
-- `j/k` — move selection · `g/G` — top / bottom (active tab only)
-- `o` — goals: open child session (native OpenCode view) · commands: close
-  popup, open fullscreen terminal page (route `opencode.loopd.terminal`)
-- `p/r/R/x` — pause / resume / retry / clear selected goal (Goals tab only)
-- `c` — toggle finished on both tabs (completed goals · exited/terminated/missing commands)
-- `:interactive` — toggle manual mode (engine never starts turns) · `:model <provider/model>` — switch goal's model · `:models` — provider/model inventory
-- Commands tab: `X` force-kill · `R` restart · `x` remove finished · `:new <command> [args...]` launch · `:interrupt` ·
-  `:terminate` · `:remove` · bare text + Enter writes stdin (owner-scoped)
-- `:` — insert mode → `:send <message>` to steer, `:force` / `:block` to finish manually
-- `?` — toggle help — help stays open while you type
-- `Ctrl+N` — back to NORMAL
-- `q` — close
-
-> The dashboard traps all keys — even when open via the palette, the chat input cursor won't blink underneath.
-
-Fullscreen terminal page: raw typing goes straight to the PTY, `Ctrl+C`
-interrupts (never closes OpenCode), `Ctrl+]` detaches back to your session
-(the command keeps running — termination is explicit-only), paste is instant.
-
-### 3. Inspect from the main agent (owner tools)
-
-The parent never needs the dashboard — it can ask:
-
-```
-list_background_goals()          — status snapshot
-inspect_background_goal()        — full detail: objective, progress, blocker, runtime
-read_goal_transcript()           — last N worker messages (what it's doing)
-send_goal_input(goalID, msg)     — steer: "skip appendix PDFs"
-pause_goal(goalID) / resume / clear
-loopd_list_models()              — providers/models, quota status (unknown where hosts can't report it)
-switch_goal_identity({goal_id, model?, agent?}) — same goal, new identity (same worker/session; at least one field required)
-loopd_command_start(...)         — installs/builds/servers as background processes (never block the turn in bash)
+```mermaid
+flowchart LR
+  You --> Goal["/goal"]
+  Goal --> Worker["Autonomous worker"]
+  Worker --> Files["Writes files"]
+  Worker --> Checks["Runs checks"]
+  Checks --> Done["Verified summary"]
+  Done --> You
 ```
 
-### 4. Worker tools (child session)
+The parent chat stays free. The worker does the work, runs the checks, and wakes you up with a summary when it is done.
 
-The child sees:
+## Need the details?
 
-- `get_goal` — read objective, contract, progress, failures
-- `report_goal_progress` — after durable writes
-- `complete_goal` — only when checks pass, with evidence
-- `block_goal` — real blocker needing user
-- `question` (OpenCode builtin) — clarification → TUI blocker tab
-
-Completion is semantic: the child writes the summary; the plugin forwards it to the parent via wake-up injection. If limits are hit, the engine first force-asks the child to `complete_goal`; only if ignored does it auto-block with a generic message.
-
-## Architecture
-
-```
-                        ┌─────────────────────────┐
-                        │  Main session (parent)  │
-                        │  owner tools            │
-                        │  inspect / steer / pause│
-                        └────────────┬────────────┘
-                                     │  inbox → child
-                                     │  wake-up ← engine
-             ┌───────────────────────┼───────────────────────┐
-             ▼                       ▼                       ▼
-        ┌─────────┐           ┌──────────┐            ┌─────────┐
-        │  Goal A │           │  Goal B  │            │  Goal C │
-        │ active  │           │ blocked  │            │  paused │
-        └────┬────┘           └────┬─────┘            └────┬────┘
-             │                     │                       │
-             └─────────────────────┼───────────────────────┘
-                                   │
-                     ┌─────────────┴─────────────┐
-                     ▼                           ▼
-              Loopd engine  ──────────►   Child worker (subagent)
-              (plugin server)  steering   get_goal / report / complete
-                 │  lease / retry / polling       │  block / question
-                 │  force-finish / notify         ▼
-                 │                         .opencode/loopd/goals/<id>/
-                 │                           progress.md / artifacts
-                 └─────────────────────────────────┘
-```
-
-- **Engine-driven loop** (like Codex): `session.idle` → lease + retry + polling → re-prompt child. Not a parent-driven re-prompt machine.
-- **Scheduled requeue** (1.7): `createScheduleWorker` `5s` scans `complete` goals with `scheduleEveryMs`/`maxRuns`; `complete→active` resurrect with `Scheduled tick N/M` inbox, `skip-if-running` and `workspaceWrite` gate.
-- **Accumulated context**: each continuation includes progress history, transcript tail, inbox messages, and artifact dir (unless objective names another dir).
-- **Parent wake-up**: when the child calls `complete_goal`/`block_goal`, `tool.execute.after` injects the child's semantic summary into the owner's session — you see "Loop goal … completed: …" without polling.
-
-## Artifacts
-
-Every goal writes under its own directory (`.opencode/loopd/goals/<goal-id>/`); `progressFile` defaults there. The dashboard and transcript never pollute the project root. If your objective says `save to ./reports/`, that wins.
-
-## Example — multi-turn with force-finish
-
-```
-# Parent: /goal
-goal: "Generate 5 files file1..5.md under artifacts/, 2 lines each — verify with glob."
-maxTurns: 1
-
-# Turn 1: child writes file1..3, reports progress
-# → engine hits maxTurns, injects FINAL REPORT REQUIRED
-# Turn 2 (forced): child wraps up, calls complete_goal(summary="created 5 files…", evidence="glob confirmed…")
-# → engine forwards to parent: "Loop goal … completed: created 5 files…"
-# → Artifacts: .opencode/loopd/goals/<id>/file*.md
-```
-
-See `assets/demo.png` above for the dashboard at rest (0 active, 7 done) with vivid status colors, running spinner, and `INSERT` badge.
-
-## Configuration
-
-Goals accept:
-
-| Option | Default | Description |
-|---|---|---|
-| `maxTurns` | `50` | Max continuation turns before force-finish |
-| `maxFailures` | `3` | Consecutive failures before block |
-| `maxNoProgress` | `3` | Turns without progress before force-finish |
-| `timeoutMs` | `300000` | Per-turn lease (5 min) |
-| `compactEvery` | — | Compact child every N turns |
-| `scheduleEveryMs` | — | Interval in ms to auto-requeue the same goal after each completion. Minimum 1000. Enables repetitive dialogue reduction without manual re-prompt |
-| `scheduleMaxRuns` | — | Maximum total runs including the initial run. Undefined = unlimited. Requires `scheduleEveryMs` |
-| `checks` | `[]` | Shell commands that must pass for `complete_goal` |
-| `checkCwd` | artifact directory | Directory where completion checks run; workspace writes default to project root |
-| `workspaceWrite` | `true` | Marks shared-workspace mutation; only one active workspace writer is allowed. Set `false` explicitly for artifact-only/read-only work |
-| `agent` | `defaultAgent` | Worker agent; goal creation fails if neither is configured nor supplied |
-| `interactive` | `false` | Manual mode: engine never starts turns (`:send`/nudge only). For workers that wait for input |
-| `fallbackModels` | `[]` | Ordered `provider/model` alternatives tried on quota/rate-limit errors only. Empty = no automatic switch |
-| `progressFile` | `<artifactDir>/progress.md` | Transaction state file |
-| `artifactDir` | `goals/<id>/` | Auto — override only if objective names another dir |
-
-Artifacts, logs, and state live under `.opencode/loopd/` (project-local). Locks live in `/tmp/loopd-locks/<project-hash>/` to avoid snapshot noise.
-
-Workspace-writing goals must have deterministic checks and are serialized to
-prevent concurrent agents or `git stash` operations from overwriting each
-other. Artifact-only research goals may run concurrently by setting
-`workspaceWrite: false` explicitly.
-
-## Scheduled goals — repetitive dialogues without manual re-prompt
-
-One `/goal` can now loop on an interval — the engine requeues the **same goal** after each `complete`:
-
-```
-loopd_create_goal({
-  name: "hourly-report",
-  objective: "Append date -u to tick.txt each run",
-  agent: "smart-agent",
-  checks: ["test -f tick.txt"],
-  scheduleEveryMs: 3600000, // 1h, min 1000
-  scheduleMaxRuns: 24,      // total incl initial, omit for unlimited
-  workspaceWrite: false
-})
-```
-
-- **Poll:** `5s` `createScheduleWorker` scans `complete` scheduled goals; `skip-if-running` (lease/`phase`/`workspaceWrite` gate).
-- **Resurrect:** `complete → active` `phase=idle`, injects inbox `Scheduled tick N/M — re-execute objective`, then `continueTurn`.
-- **State:** `scheduleRunCount`/`nextRunAt`/`lastScheduleAt` (`v6` `state.json`), `schedule.tick` events, `schedule.resurrected` server log.
-- **Live proof:** `sched-live-verify` `09cb837c` `10s` `maxRuns 3` → `tick.txt` `3` lines `02:00:56` `02:03:43` `02:05:47` with `runCount 3`.
-
-Without schedule you’d send `/goal` 3× manually; with schedule one creation covers `monitor deploy`, `periodic tests`, `keep going until done`.
-
-## Switch models without losing the worker
-
-When a provider hits quota or rate limits mid-run:
-
-```
-loopd_list_models()                                   — what's connected, quota status (or honestly unknown)
-switch_goal_identity({goal_id, model:"other-provider/good-model"}) — same goal, same worker/session, transcript kept
-```
-
-- Busy workers defer the switch to the next turn (`→ pending … applies next turn`); idle ones switch immediately. On v1 the new model takes effect from the next prompt (no mid-stream session switch API); v2 switches the live session where supported, else reports `unsupported` without touching anything.
-- `fallbackModels: ["b/model", "c/model"]` at creation tries alternatives automatically — quota/429 errors only, each once, never looping. Interactive goals record the fallback but never auto-wake; you steer the next turn.
-- Dashboard: `:model <provider/model>` and `:models` do the same for humans.
-
-## Dashboard tips
-
-- Press `:` then type bare text → sent as `send_goal_input` to the selected goal.
-- Bare `:force my summary --evidence "glob ok"` bypasses verification when the child is stuck.
-- `o` jumps to the native OpenCode child session — full transcript, diffs, tool calls.
-
-## Verify a change
-
-```bash
-bun run typecheck && bun test          # unit + integration
-bun run build:server && bun run smoke:v2-lifecycle   # real OpenCode v2 host
-```
-
-`smoke:v2-lifecycle` boots a throwaway `opencode serve` with private
-`XDG_*`/database state and a local fixture model, then asserts the lifecycle
-guarantees end to end. CI runs it before `npm publish`, and uploads its private
-artifacts on failure. See [Lifecycle contract](docs/lifecycle-contract.md) for
-what it covers and what it deliberately does not.
-
-## Related / SEO
-
-OpenCode plugin for **background agents**, **autonomous subagents**, **loop**, **goal**, **TUI dashboard**, **Codex**-style continuation, **Claude Code** loop alternative, **opencode-tui**, **worker sessions**. Pairs well with `opencode-telescope` (search) and `lazyjira`/`lazyconfluence` (ATUI) from the same author.
+- **Landing page:** https://bojackduy.github.io/opencode-loopd/
+- **Technical reference:** [docs/v2-supervisor.md](docs/v2-supervisor.md), [docs/file-scope-ownership.md](docs/file-scope-ownership.md), [docs/management-mode.md](docs/management-mode.md)
+- **Lifecycle contract:** [docs/lifecycle-contract.md](docs/lifecycle-contract.md)
+- **Issues:** https://github.com/bojackduy/opencode-loopd/issues
 
 ## License
 
 AGPL-3.0-or-later — see [LICENSE](./LICENSE).
+
+<!-- SEO: opencode, opencode plugin, background agent, autonomous agent, subagent, goal, loop engine, scheduler, tui, codex, claude code, developer tools, write tickets, concurrency, management mode -->

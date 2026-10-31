@@ -3,14 +3,14 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>opencode-loopd — Background goals that loop, for OpenCode</title>
-    <meta name="description" content="OpenCode plugin for autonomous background agents: engine-driven loop, child worker sessions, scheduled intervals, verified completion checks, and a fullscreen terminal. Codex-style goals for OpenCode." />
-    <meta name="keywords" content="opencode, opencode plugin, background agent, autonomous agent, subagent, goal, loop engine, scheduled, terminal, tui, codex, claude code, developer tools" />
+    <title>opencode-loopd — Background goals that loop for OpenCode (autonomous agents, scheduling, TUI)</title>
+    <meta name="description" content="opencode-loopd is an OpenCode plugin for autonomous background goals: child worker sessions, exact-file write tickets, OS-like concurrency, scheduled intervals, verified completion, management mode across projects, and a modal TUI dashboard." />
+    <meta name="keywords" content="opencode, opencode plugin, background agent, autonomous agent, subagent, goal, loop engine, scheduled, terminal, tui, codex, claude code, developer tools, write tickets, concurrency, management mode, queue, wakeup" />
     <meta name="author" content="Duy Trinh" />
     <link rel="canonical" href="https://bojackduy.github.io/opencode-loopd/" />
     <meta name="robots" content="index, follow" />
-    <meta property="og:title" content="opencode-loopd — Background goals that loop" />
-    <meta property="og:description" content="Run long tasks as autonomous child sessions while the main chat stays interactive. Verified completion, scheduling, fullscreen terminal, modal TUI." />
+    <meta property="og:title" content="opencode-loopd — Background goals that loop for OpenCode" />
+    <meta property="og:description" content="Run long tasks as autonomous child sessions while the main chat stays interactive. Exact-file write tickets, OS-like concurrency, scheduling, management mode, verified completion, modal TUI." />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://bojackduy.github.io/opencode-loopd/" />
     <meta property="og:image" content="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/demo.png" />
@@ -18,7 +18,7 @@
     <meta property="og:image:height" content="675" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="opencode-loopd — Background goals that loop" />
-    <meta name="twitter:description" content="Autonomous child sessions for OpenCode. Verified completion, scheduling, fullscreen terminal." />
+    <meta name="twitter:description" content="Autonomous child sessions for OpenCode. Exact-file write tickets, concurrency, scheduling, management mode, verified completion." />
     <meta name="twitter:image" content="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/demo.png" />
     <link rel="icon" type="image/svg+xml" href="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/favicon.svg" />
     <link rel="icon" type="image/png" sizes="32x32" href="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/favicon.png" />
@@ -31,7 +31,7 @@
       "@context": "https://schema.org",
       "@type": "SoftwareApplication",
       "name": "opencode-loopd",
-      "description": "Codex-inspired background goal engine for OpenCode — autonomous child sessions, engine-driven loop, scheduled intervals, and modal TUI dashboard.",
+      "description": "Codex-inspired background goal engine for OpenCode — autonomous child sessions, exact-file write tickets, OS-like concurrency, scheduled intervals, management mode across projects, and modal TUI dashboard.",
       "applicationCategory": "DeveloperApplication",
       "operatingSystem": "macOS, Linux, Windows",
       "author": {"@type": "Person", "name": "Duy Trinh"},
@@ -57,8 +57,20 @@
         --code-bg: #1a1714;
         --code-fg: #f0ebe0;
         --radius: 0;
+      --dot-r: #ff5f57;
+      --dot-y: #ffbd2e;
+      --dot-g: #28c840;
+      --code-border: #2a241c;
+      --code-dim: #13110e;
+      --code-muted: #8a847a;
+      --code-text: #d8d0c0;
+      --accent-hover: #c91540;
+      --on-accent: #ffffff;
       }
       * { box-sizing: border-box; }
+      html, body { overflow-x: clip; }
+      h1, h2 { overflow-wrap: break-word; min-width: 0; }
+      a:focus-visible, .btn:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
       html { scroll-behavior: smooth; }
       body {
         margin: 0;
@@ -69,7 +81,7 @@
         -webkit-font-smoothing: antialiased;
         text-rendering: optimizeLegibility;
       }
-      ::selection { background: var(--accent); color: #fff; }
+      ::selection { background: var(--accent); color: var(--on-accent); }
       a { color: var(--text); text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 3px; text-decoration-thickness: 1.5px; }
       a:hover { text-decoration-color: var(--text); }
       code, pre, .mono { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -97,8 +109,8 @@
       .hero .cta-row { display: flex; flex-wrap: wrap; gap: .8rem; margin-top: 2rem; align-items: center; }
       .btn { display: inline-flex; align-items: center; gap: .5rem; font-family: "Manrope", sans-serif; font-weight: 600; font-size: .95rem; padding: .85rem 1.3rem; border: 1px solid var(--border-2); color: var(--text); text-decoration: none; background: transparent; cursor: pointer; transition: background .15s, color .15s, border-color .15s; }
       .btn:hover { background: var(--text); color: var(--bg); border-color: var(--text); text-decoration: none; }
-      .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
-      .btn.primary:hover { background: #c91540; border-color: #c91540; color: #fff; }
+      .btn.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+      .btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--on-accent); }
       .hero .meta { margin-top: 2rem; font-family: "JetBrains Mono", monospace; font-size: .75rem; color: var(--muted-2); display: flex; flex-wrap: wrap; gap: .4rem 1.4rem; }
       .hero .meta span { display: inline-flex; align-items: center; gap: .4rem; }
       .hero .meta span::before { content: "→"; color: var(--accent); }
@@ -106,18 +118,18 @@
       /* Install card */
       .install { background: var(--code-bg); color: var(--code-fg); padding: 1.6rem; border: 1px solid var(--border-2); }
       .install h2 { font-family: "JetBrains Mono", monospace; font-size: .85rem; color: var(--accent-2, var(--accent)); letter-spacing: .05em; text-transform: uppercase; margin: 0 0 1rem; font-weight: 500; }
-      .install pre { margin: 0 0 1rem; padding: 0; background: transparent; border: 0; font-size: .78rem; line-height: 1.6; color: #d8d0c0; overflow-x: auto; }
+      .install pre { margin: 0 0 1rem; padding: 0; background: transparent; border: 0; font-size: .78rem; line-height: 1.6; color: var(--code-text); overflow-x: auto; }
       .install pre:last-child { margin-bottom: 0; }
-      .install .note { font-size: .75rem; color: #8a847a; margin-top: 1rem; font-family: "JetBrains Mono", monospace; }
+      .install .note { font-size: .75rem; color: var(--code-muted); margin-top: 1rem; font-family: "JetBrains Mono", monospace; }
       .install .note strong { color: var(--accent); }
 
       /* Demo */
       .demo { margin: 4rem 0 0; border: 1px solid var(--border-2); background: var(--code-bg); }
-      .demo-bar { display: flex; align-items: center; gap: .5rem; padding: .7rem 1rem; border-bottom: 1px solid #2a241c; background: #13110e; font-family: "JetBrains Mono", monospace; font-size: .75rem; color: #8a847a; }
+      .demo-bar { display: flex; align-items: center; gap: .5rem; padding: .7rem 1rem; border-bottom: 1px solid var(--code-border); background: var(--code-dim); font-family: "JetBrains Mono", monospace; font-size: .75rem; color: var(--code-muted); }
       .demo-bar .dot { width: .6rem; height: .6rem; border-radius: 50%; }
-      .demo-bar .dot.r { background: #ff5f57; } .demo-bar .dot.y { background: #ffbd2e; } .demo-bar .dot.g { background: #28c840; }
+      .demo-bar .dot.r { background: var(--dot-r); } .demo-bar .dot.y { background: var(--dot-y); } .demo-bar .dot.g { background: var(--dot-g); }
       .demo img { display: block; width: 100%; height: auto; }
-      .demo .caption { padding: .8rem 1rem; font-size: .82rem; color: var(--muted); border-top: 1px solid #2a241c; background: #13110e; }
+      .demo .caption { padding: .8rem 1rem; font-size: .82rem; color: var(--muted); border-top: 1px solid var(--code-border); background: var(--code-dim); }
 
       /* Section */
       section { padding: 5rem 0; }
@@ -188,6 +200,8 @@
             <strong>opencode-loopd</strong> spawns an autonomous child session per goal and
             drives it with accumulated context. The parent chat stays free. Completion
             is <strong>host-verified</strong> — checks must pass, not just be claimed.
+            Concurrency is <strong>ticketed like an OS</strong>: files are claimed, writers
+            wait and wake, and one manager can steer goals across many projects.
           </p>
           <div class="cta-row">
             <a class="btn primary" href="https://www.npmjs.com/package/@bojackduy/opencode-loopd">npm install</a>
@@ -236,8 +250,8 @@
 
       <section>
         <div class="section-label">features</div>
-        <h2>Seven things. None of them a feature list.</h2>
-        <p class="lead">Each one is a mechanism, not a bullet.</p>
+        <h2>Mechanisms, not a feature list.</h2>
+        <p class="lead">Eleven. Each one is an OS-like primitive, not a bullet.</p>
         <div class="features">
           <div class="feature"><div class="num">01</div><div><h3>Engine-driven loop</h3><p>Idle + lease + 30s polling re-prompts the child with accumulated steering (progress + transcript tail + inbox). Not a parent re-prompt machine.</p></div></div>
           <div class="feature"><div class="num">02</div><div><h3>Scheduled intervals</h3><p><code>scheduleEveryMs</code> auto-requeues the same goal on an interval — 5s poll, skip-if-running, workspaceWrite gate, inbox <code>Scheduled tick N/M</code>.</p></div></div>
@@ -246,6 +260,10 @@
           <div class="feature"><div class="num">05</div><div><h3>Command sessions</h3><p>Installs, builds, dev servers and REPLs as background processes with a fullscreen terminal — owner exit notifications, filter/until watches, timeouts. Never block the turn in bash.</p></div></div>
           <div class="feature"><div class="num">06</div><div><h3>Switch models mid-run</h3><p>Provider hits quota? <code>switch_goal_identity</code> moves the goal to another model on the same worker — same transcript, progress, checks. Or configure ordered <code>fallbackModels</code> for automatic 429 failover.</p></div></div>
           <div class="feature"><div class="num">07</div><div><h3>Manual mode</h3><p><code>interactive: true</code> stops the engine from starting turns — every turn comes from your <code>:send</code>. For workers that wait for input.</p></div></div>
+          <div class="feature"><div class="num">08</div><div><h3>Exact-file write tickets</h3><p>Workers claim files before editing (<code>claim_goal_scope</code>). Disjoint tickets run in parallel; unclaimed writes are denied; no whole-workspace lock unless the objective names no files.</p></div></div>
+          <div class="feature"><div class="num">09</div><div><h3>Wait queues &amp; wakeup</h3><p>Shells and writes that arrive while a ticket is held park instead of failing or spinning. Release paths wake parked work with inbox evidence; idle goals wake on complete/block.</p></div></div>
+          <div class="feature"><div class="num">10</div><div><h3>Management mode</h3><p>One manager session, many projects. <code>directory</code> param on <code>loopd_create_goal</code> runs a goal in another project; <code>loopd_status_all</code> aggregates across registered dirs; <code>:projects</code> in the TUI. Cross-dir goals default interactive. Fences are per-dir — no cross-talk.</p></div></div>
+          <div class="feature"><div class="num">11</div><div><h3>Fence honesty</h3><p>Denials name the exact holder (session, goal, files, age) instead of a generic busy message. <code>await_quiescence</code> parks the worker until clear; release paths fire parked awaits with inbox evidence. Owner shells never fence their own workers' writes.</p></div></div>
         </div>
       </section>
 
@@ -313,6 +331,53 @@ loopd_create_goal({
       </section>
 
       <section>
+        <div class="section-label">concurrency</div>
+        <h2>Like an OS scheduler, not a lock.</h2>
+        <p class="lead">Write tickets, wait queues, wakeup. Goals do not spam retries; they park and get woken when the holder releases.</p>
+        <div class="quickstart">
+          <pre><code>// 1. Claim the smallest useful file set before editing
+claim_goal_scope({ paths: ["src/a.ts", "src/b.ts"], runGeneration })
+
+// 2. Park when a ticket is held (no spin, no sleep)
+await_quiescence()   // returns with inbox evidence when clear
+
+// 3. Release paths fire parked awaits
+// afterWorkspaceTool / operation end -> inbox "workspace released"
+
+// 4. Exact conflicts fail fast with owner/path/age diagnostics
+// kind: initial | expansion  -> coordinate_then_retry</code></pre>
+          <p>Exact files, not globs or directories. Disjoint owners run in parallel; read-only goals never contend. Fences are per-directory stores, so management mode has no cross-talk. Parked work wakes with evidence instead of burning turns into evaluator rejections.</p>
+        </div>
+      </section>
+
+  <section>
+        <div class="section-label">management mode</div>
+        <h2>One manager. Many projects.</h2>
+        <p class="lead">Run goals in other repos from one session. Standing goals per project keep developing; the manager watches and steers.</p>
+        <div class="quickstart">
+          <pre><code>// Register target projects (absolute paths)
+// ~/.opencode/loopd/managed.json  or  LOOPD_MANAGED_DIRS=/a:/b
+
+// Create a goal in another project
+loopd_create_goal({
+  name: "fix-auth",
+  objective: "fix the auth bug",
+  directory: "/Users/you/Code/other-project",
+  checks: ["npm test"]
+})
+
+// Aggregate view across all managed projects
+loopd_status_all({})
+// → per-dir totals + blocked items, each with its directory
+
+// Steer a foreign goal (engines route by global session ID)
+send_goal_input({ goal_id: "...", message: "use approach B" })
+nudge_goal({ goal_id: "..." })</code></pre>
+          <p>Cross-dir goals default <code>interactive:true</code> (manager-steered). Checks run from the target root. Fences are per-dir stores — no cross-talk. Goal IDs are UUIDs; always show the directory alongside.</p>
+        </div>
+      </section>
+
+  <section>
         <div class="section-label">faq</div>
         <h2>Questions.</h2>
         <div class="faq">
@@ -323,6 +388,8 @@ loopd_create_goal({
           <details><summary>How to report a bug?</summary><p>In the dashboard press <code>Shift+B</code> or <code>:bug</code> — opens <code>github.com/bojackduy/opencode-loopd/issues/new</code> prefilled with environment (version, OS, goal context).</p></details>
           <details><summary>What if my provider hits quota mid-run?</summary><p>Run <code>loopd_list_models</code> to see what's connected, then <code>switch_goal_identity</code> to move the goal to another model — same worker, transcript and progress kept. Or set <code>fallbackModels</code> at creation for automatic ordered failover on 429s. Dashboard: <code>:model</code> / <code>:models</code>.</p></details>
           <details><summary>Can I run dev servers and long installs without blocking?</summary><p>Yes — use command sessions (<code>loopd_command_start</code>) instead of the blocking shell: installs, builds, dev servers and REPLs run in the background with a fullscreen terminal, owner exit notifications, and <code>until</code> pattern watches that wake you when output appears.</p></details>
+          <details><summary>How do multiple goals edit code without clobbering each other?</summary><p>They claim exact files first (<code>claim_goal_scope</code>). Disjoint tickets run in parallel; overlapping claims fail fast with the owner, path, and age. Read-only goals set <code>workspaceWrite: false</code> and never contend. If a ticket is held, callers park with <code>await_quiescence</code> and wake with inbox evidence instead of spinning.</p></details>
+          <details><summary>Can one session manage goals in other projects?</summary><p>Yes — management mode. Register target directories, create goals with <code>directory</code>, and aggregate with <code>loopd_status_all</code>. Fences are per-directory, checks run from the target root, and cross-dir goals default to interactive so the manager steers each turn.</p></details>
         </div>
       </section>
 
