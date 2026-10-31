@@ -146,7 +146,8 @@
       .feature p { margin: 0; color: var(--muted); font-size: .95rem; max-width: 46rem; line-height: 1.55; }
 
       /* Architecture */
-      .arch pre { background: var(--code-bg); color: var(--code-fg); border: 1px solid var(--border-2); padding: 1.6rem; font-size: .72rem; line-height: 1.4; overflow-x: auto; margin-top: 1.6rem; }
+      .arch-diagram { margin-top: 1.6rem; border: 1px solid var(--border-2); background: var(--panel); padding: 1.2rem; overflow-x: auto; }
+      .arch-diagram .mermaid { min-width: 32rem; }
 
       /* Quick start */
       .quickstart pre { background: var(--code-bg); color: var(--code-fg); border: 1px solid var(--border-2); padding: 1.4rem; font-size: .8rem; line-height: 1.55; overflow-x: auto; margin: 1.2rem 0; }
@@ -271,31 +272,30 @@
         <div class="section-label">architecture</div>
         <h2>How the loop runs.</h2>
         <p class="lead">OpenCode owns execution, queued delivery, session lifecycle. Loopd owns objectives, checks, budgets, scheduling, cross-goal coordination.</p>
-        <pre class="arch"><code>                        ┌─────────────────────────┐
-                        │  Main session (parent)  │
-                        │  owner tools            │
-                        │  inspect / steer / pause│
-                        └────────────┬────────────┘
-                                     │  inbox → child
-                                     │  wake-up ← engine
-             ┌───────────────────────┼───────────────────────┐
-             ▼                       ▼                       ▼
-        ┌─────────┐           ┌──────────┐            ┌─────────┐
-        │  Goal A │           │  Goal B  │            │  Goal C │
-        │ active  │           │ blocked  │            │  paused │
-        └────┬────┘           └────┬─────┘            └────┬────┘
-             │                     │                       │
-             └─────────────────────┼───────────────────────┘
-                                   │
-                     ┌─────────────┴─────────────┐
-                     ▼                           ▼
-              Loopd engine  ──────────►   Child worker (subagent)
-              (plugin server)  steering   get_goal / report / complete
-                 │  lease / retry / polling       │  block / question
-                 │  force-finish / notify         ▼
-                 │                         .opencode/loopd/goals/&lt;id&gt;/
-                 │                           progress.md / artifacts
-                 └─────────────────────────────────┘</code></pre>
+        <div class="arch-diagram">
+          <div class="mermaid">
+flowchart LR
+  P["Main session / owner"] -->|create| G["Goal + worker session"]
+  G --> T["Worker turn"]
+  T --> I{"session idle?"}
+  I -->|confirm 2s quiet| L["Release lease"]
+  L --> E{"enforce limits"}
+  E -->|continue| C["continueGoal: next prompt"]
+  C --> T
+  E -->|force finish| F["Force-finish prompt"]
+  F --> T
+  E -->|budget / blocked| X["blocked / budget_limited"]
+  T -->|complete_goal / block_goal| Done["Terminal event"]
+  Done --> N{"shouldNotifyParent?"}
+  N -->|yes| Wake["host.notifyOwner wake-up"]
+  Wake --> P
+  S["Schedule worker 5s"] --> R["complete -> active, tick N/M"]
+  R --> T
+  M["Maintenance 30s"] --> Stuck["stuck / provider retry recovery"]
+  Stuck --> T
+          </div>
+        </div>
+        <p class="lead" style="margin-top:1.2rem">Host execution stays owned by OpenCode. Loopd owns objectives, checks, budgets, scheduling, and wake-ups; the dashboard and owner tools keep the parent in control.</p>
         <p>Each goal is a <code>GoalID</code>. The dashboard is a modal dialog that pushes <code>loopd.dashboard</code> onto the keymap so the chat prompt never sees your keys. Artifacts are namespaced per-goal. <strong>1.7</strong> adds a 5s schedule worker that requeues <code>complete</code> scheduled goals on interval with <code>skip-if-running</code>.</p>
       </section>
 
@@ -405,5 +405,9 @@ nudge_goal({ goal_id: "..." })</code></pre>
         <span><a href="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/demo.png">demo.png</a> • <a href="https://github.com/bojackduy/opencode-loopd/blob/master/docs/index.html">view source</a></span>
       </footer>
     </main>
-  </body>
+    <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, theme: "neutral", flowchart: { curve: "basis" } });
+  </script>
+</body>
 </html>

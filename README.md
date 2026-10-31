@@ -59,10 +59,16 @@ Your agent will clarify the details, start a worker, and keep you posted. Open t
 flowchart LR
   You --> Goal["/goal"]
   Goal --> Worker["Autonomous worker"]
-  Worker --> Files["Writes files"]
-  Worker --> Checks["Runs checks"]
-  Checks --> Done["Verified summary"]
-  Done --> You
+  Worker --> Turn["Worker turn"]
+  Turn --> Idle{"session idle?"}
+  Idle -->|confirm quiet| Policy{"checks / limits"}
+  Policy -->|continue| Turn
+  Policy -->|force finish| Turn
+  Policy -->|blocked / budget| Stop["blocked / budget_limited"]
+  Turn -->|complete_goal / block_goal| Done["Terminal event"]
+  Done --> Wake["Wake-up to parent"]
+  Wake --> You
+  Schedule["Schedule worker 5s"] --> Turn
 ```
 
 The parent chat stays free. The worker does the work, runs the checks, and wakes you up with a summary when it is done.
