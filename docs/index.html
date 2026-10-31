@@ -151,6 +151,14 @@
       .scene.is-active { opacity:1; transform:none; pointer-events:auto; }
       .scene-title { margin-bottom:1.3rem; color:var(--night-muted); font-size:.72rem; font-weight:800; }
       .scene-caption { width:min(100%,25rem); margin-top:1.2rem; color:var(--night-muted); font-size:.73rem; text-align:center; }
+      .story-orbit { position:absolute; z-index:2; inset:17% 6% 14%; pointer-events:none; animation:story-orbit 28s linear infinite; }
+      .story-orbit-object { position:absolute; display:block; width:.9rem; aspect-ratio:1; background:var(--green); animation:story-orbit-counter 28s linear infinite; }
+      .story-orbit-object:nth-child(1) { top:0; left:calc(50% - .45rem); }
+      .story-orbit-object:nth-child(2) { top:calc(50% - .45rem); right:0; border-radius:50%; background:var(--blue); }
+      .story-orbit-object:nth-child(3) { bottom:0; left:calc(50% - .45rem); background:var(--gold); clip-path:polygon(50% 0,100% 100%,0 100%); }
+      .story-orbit-object:nth-child(4) { top:calc(50% - .45rem); left:0; width:.65rem; border-radius:50%; }
+      @keyframes story-orbit { to { transform:rotate(1turn); } }
+      @keyframes story-orbit-counter { to { transform:rotate(-1turn); } }
       .orbit-system { position:relative; width:min(100%,25rem); aspect-ratio:1.12; display:grid; place-items:center; }
       .orbit-ring { position:absolute; width:78%; aspect-ratio:1; border:1px dashed var(--ui-ring); border-radius:50%; transform:rotate(calc(var(--progress,0) * 1turn)); transition:transform .1s linear; }
       .orbit-ring.inner { width:50%; border-style:solid; border-color:var(--ui-inner-ring); }
@@ -398,6 +406,7 @@
                   <p class="scene-caption">Inspect and steer goals across registered projects from one manager session.</p>
                 </div>
               </div>
+              <div class="story-orbit" aria-hidden="true"><span class="story-orbit-object"></span><span class="story-orbit-object"></span><span class="story-orbit-object"></span><span class="story-orbit-object"></span></div>
               <div class="story-progress" aria-hidden="true"><span id="storyProgress"></span></div>
             </div>
           </div>
