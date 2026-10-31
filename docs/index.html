@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="en">
   <head>
+    <script>document.documentElement.classList.add("js");</script>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>opencode-loopd — Background goals that loop for OpenCode (autonomous agents, scheduling, TUI)</title>
@@ -179,6 +180,20 @@
       .hero > * { animation: rise .8s cubic-bezier(.16,.84,.24,1) both; }
       .hero > *:nth-child(2) { animation-delay: .15s; }
       @media (prefers-reduced-motion: reduce) { .hero > * { animation: none; } }
+
+      /* Scroll reveals (JS-enhanced; visible by default without JS) */
+      .reveal { opacity: 1; transform: none; }
+      html.js .reveal { opacity: 0; transform: translateY(28px); transition: opacity .75s cubic-bezier(.16,.84,.24,1), transform .75s cubic-bezier(.16,.84,.24,1); will-change: opacity, transform; }
+      html.js .reveal.in-view { opacity: 1; transform: none; }
+      html.js .reveal .feature { opacity: 0; transform: translateY(18px); transition: opacity .6s cubic-bezier(.16,.84,.24,1), transform .6s cubic-bezier(.16,.84,.24,1); }
+      html.js .reveal.in-view .feature { opacity: 1; transform: none; }
+      html.js .reveal .feature:nth-child(2) { transition-delay: .08s; }
+      html.js .reveal .feature:nth-child(3) { transition-delay: .16s; }
+      html.js .reveal .feature:nth-child(4) { transition-delay: .24s; }
+      html.js .reveal .feature:nth-child(5) { transition-delay: .32s; }
+      @media (prefers-reduced-motion: reduce) {
+        html.js .reveal, html.js .reveal .feature { opacity: 1; transform: none; transition: none; }
+      }
     </style>
   </head>
   <body>
@@ -227,7 +242,7 @@
         </div>
       </section>
 
-      <div class="demo">
+      <div class="demo reveal">
         <div class="demo-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span style="margin-left:.6rem">opencode — Loop Dashboard • NORMAL • 0 goals • ○ 0 RUNNING • 7 done</span></div>
         <img src="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/demo.png" alt="Loop Dashboard modal TUI inside OpenCode terminal" width="1200" height="675" loading="eager" fetchpriority="high" />
         <div class="caption">Static screenshot — modal dashboard (<code>/loop</code> / <code>&lt;leader&gt;o</code>): vivid per-status coloring, running spinner, NORMAL vs INSERT.</div>
@@ -249,7 +264,7 @@
         <div class="caption">Recorded live session: empty Loop Dashboard (<code>ctrl+x o</code>) → agent creates <code>tui-a</code> + <code>tui-b</code> with disjoint scopes → workers write through per-file tickets → polls to completion. Free model, real run. Cast: <code>assets/loopd-tui.cast</code> (<code>asciinema play</code>).</div>
       </div>
 
-      <section>
+      <section class="reveal">
         <div class="section-label">features</div>
         <h2>Mechanisms, not a feature list.</h2>
         <p class="lead">Eleven. Each one is an OS-like primitive, not a bullet.</p>
@@ -268,7 +283,7 @@
         </div>
       </section>
 
-      <section>
+      <section class="reveal">
         <div class="section-label">architecture</div>
         <h2>How the loop runs.</h2>
         <p class="lead">OpenCode owns execution, queued delivery, session lifecycle. Loopd owns objectives, checks, budgets, scheduling, cross-goal coordination.</p>
@@ -299,7 +314,7 @@ flowchart LR
         <p>Each goal is a <code>GoalID</code>. The dashboard is a modal dialog that pushes <code>loopd.dashboard</code> onto the keymap so the chat prompt never sees your keys. Artifacts are namespaced per-goal. <strong>1.7</strong> adds a 5s schedule worker that requeues <code>complete</code> scheduled goals on interval with <code>skip-if-running</code>.</p>
       </section>
 
-      <section>
+      <section class="reveal">
         <div class="section-label">quick start</div>
         <h2>First goal in 30 seconds.</h2>
         <div class="quickstart">
@@ -319,7 +334,7 @@ loopd_create_goal({
         </div>
       </section>
 
-      <section>
+      <section class="reveal">
         <div class="section-label">compare</div>
         <h2>Why loopd vs. plain loop?</h2>
         <p class="lead">Plain <code>/loop</code> injects prompts into the <em>main</em> session — it pollutes the transcript. Codex goals keep history per-thread and steer via internal context. Loopd does the same for OpenCode.</p>
@@ -330,7 +345,7 @@ loopd_create_goal({
         </div>
       </section>
 
-      <section>
+      <section class="reveal">
         <div class="section-label">concurrency</div>
         <h2>Like an OS scheduler, not a lock.</h2>
         <p class="lead">Write tickets, wait queues, wakeup. Goals do not spam retries; they park and get woken when the holder releases.</p>
@@ -350,7 +365,7 @@ await_quiescence()   // returns with inbox evidence when clear
         </div>
       </section>
 
-  <section>
+  <section class="reveal">
         <div class="section-label">management mode</div>
         <h2>One manager. Many projects.</h2>
         <p class="lead">Run goals in other repos from one session. Standing goals per project keep developing; the manager watches and steers.</p>
@@ -377,7 +392,7 @@ nudge_goal({ goal_id: "..." })</code></pre>
         </div>
       </section>
 
-  <section>
+  <section class="reveal">
         <div class="section-label">faq</div>
         <h2>Questions.</h2>
         <div class="faq">
@@ -408,6 +423,23 @@ nudge_goal({ goal_id: "..." })</code></pre>
     <script type="module">
     import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
     mermaid.initialize({ startOnLoad: true, theme: "neutral", flowchart: { curve: "basis" } });
+  </script>
+
+  <script>
+    (function () {
+      if (!("IntersectionObserver" in window)) return;
+      const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      if (reduce) return;
+      const io = new IntersectionObserver((entries) => {
+        entries.forEach((e) => {
+          if (e.isIntersecting) {
+            e.target.classList.add("in-view");
+            io.unobserve(e.target);
+          }
+        });
+      }, { threshold: 0.12, rootMargin: "0px 0px -10% 0px" });
+      document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
+    })();
   </script>
 </body>
 </html>
