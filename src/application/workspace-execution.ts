@@ -454,9 +454,15 @@ export async function beforeWorkspaceTool(
       // the initial worker prompt explains the circumstance (not injected on
       // every tool call). Still recorded for observability, and checks wait
       // for quiescence while any uncontrolled call is live.
-      if (!goal && !isOwner) {
-        throw new Error(`Scope denied: unrecognized session/child "${input.sessionID}". Subagent writes are unsupported — make file writes from the worker session (or the owning main session), not from a nested subagent.`)
-      }
+      //
+      // Strangers (sessions with no goal record that the host also does not
+      // prove as main) are recorded the same way, NOT denied: shell writes
+      // already bypass scope for everyone (accepted hole — denying the shell
+      // blocks only reads, never writes), and a denial here bricks every
+      // fresh session whenever any scoped goal lingers. Stranger reservations
+      // are excluded from check-quiescence gating (see withWorkspaceOperation)
+      // so an unknown party can neither wedge verification with a live tail
+      // nor veto it; structured writes from strangers stay denied below.
       state.workspaceCalls ??= []
       if (!state.workspaceCalls.some((call) => call.callID === input.callID && call.sessionID === input.sessionID)) {
         state.workspaceCalls.push({ callID: input.callID, sessionID: input.sessionID, paths: [], uncontrolled: true, at: new Date().toISOString() })
@@ -782,9 +788,20 @@ export async function withWorkspaceOperation<T>(
     // Ticket per scope for checks: any in-flight write ticket blocks checks (quiescence).
     // Also block if any uncontrolled shell/command is live — its writes are unknown.
     // Legacy workspaceCalls with structured paths also fence checks until cleared.
+    // Stranger sessions (no owner/worker record for any goal) are excluded from
+    // the uncontrolled gate: they were admitted above without coordination, so
+    // their liveness must neither wedge verification (never-exiting tail) nor
+    // veto it. Structured writes from strangers are denied outright elsewhere,
+    // so only their uncontrolled entries exist — and shell writes already
+    // bypass scope for every session, coordinated or not.
     const holders = state.writeTickets?.holders ?? []
     const calls = state.workspaceCalls ?? []
-    const hasUncontrolled = calls.some((c) => c.uncontrolled)
+    const knownSessions = new Set<string>()
+    for (const g of state.goals) {
+      if (g.ownerSessionID) knownSessions.add(g.ownerSessionID)
+      if (g.workerSessionID) knownSessions.add(g.workerSessionID)
+    }
+    const hasUncontrolled = calls.some((c) => c.uncontrolled && knownSessions.has(c.sessionID))
     const hasLegacyWrite = calls.some((c) => (c.paths?.length ?? 0) > 0)
     if (state.workspaceOperation || holders.length > 0 || hasUncontrolled || hasLegacyWrite) {
       // Fence honesty: name exactly what holds the lock so the denied caller
