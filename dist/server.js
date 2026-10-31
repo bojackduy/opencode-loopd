@@ -1930,9 +1930,6 @@ async function beforeWorkspaceTool(directory, input, args, identity = {}) {
     }
     const writes = structuredWritePaths(input.tool, args);
     if (!writes) {
-      if (!goal && !isOwner) {
-        throw new Error(`Scope denied: unrecognized session/child "${input.sessionID}". Subagent writes are unsupported \u2014 make file writes from the worker session (or the owning main session), not from a nested subagent.`);
-      }
       state.workspaceCalls ??= [];
       if (!state.workspaceCalls.some((call) => call.callID === input.callID && call.sessionID === input.sessionID)) {
         state.workspaceCalls.push({ callID: input.callID, sessionID: input.sessionID, paths: [], uncontrolled: true, at: new Date().toISOString() });
@@ -2221,7 +2218,14 @@ async function withWorkspaceOperation(directory, goalID, sessionID, run, opts) {
     }
     const holders = state.writeTickets?.holders ?? [];
     const calls = state.workspaceCalls ?? [];
-    const hasUncontrolled = calls.some((c) => c.uncontrolled);
+    const knownSessions = new Set;
+    for (const g of state.goals) {
+      if (g.ownerSessionID)
+        knownSessions.add(g.ownerSessionID);
+      if (g.workerSessionID)
+        knownSessions.add(g.workerSessionID);
+    }
+    const hasUncontrolled = calls.some((c) => c.uncontrolled && knownSessions.has(c.sessionID));
     const hasLegacyWrite = calls.some((c) => (c.paths?.length ?? 0) > 0);
     if (state.workspaceOperation || holders.length > 0 || hasUncontrolled || hasLegacyWrite) {
       const ageOf = (at) => {
