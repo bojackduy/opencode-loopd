@@ -194,6 +194,64 @@
       @media (prefers-reduced-motion: reduce) {
         html.js .reveal, html.js .reveal .feature { opacity: 1; transform: none; transition: none; }
       }
+
+      /* Scrollytelling: sticky frame, moving steps */
+      .story { display: grid; grid-template-columns: minmax(0, .46fr) minmax(0, .54fr); gap: 3rem; align-items: start; }
+      .story-sticky { position: sticky; top: 5rem; height: calc(100vh - 7rem); }
+      .story-frame { height: 100%; border: 1px solid var(--border-2); background: var(--code-bg); color: var(--code-fg); display: grid; grid-template-rows: auto 1fr auto; overflow: hidden; }
+      .story-frame .frame-top { display: flex; align-items: center; gap: .5rem; padding: .7rem 1rem; border-bottom: 1px solid var(--code-border); background: var(--code-dim); font-family: "JetBrains Mono", monospace; font-size: .75rem; color: var(--code-muted); }
+      .story-frame .frame-body { position: relative; padding: 1.6rem; }
+      .story-frame .frame-layer { position: absolute; inset: 1.6rem; opacity: 0; transform: translateY(18px) scale(.98); transition: opacity .45s cubic-bezier(.16,.84,.24,1), transform .45s cubic-bezier(.16,.84,.24,1); pointer-events: none; }
+      .story-frame .frame-layer.is-active { opacity: 1; transform: none; pointer-events: auto; }
+      .story-frame .frame-kicker { font-family: "JetBrains Mono", monospace; font-size: .72rem; color: var(--accent-2, var(--accent)); letter-spacing: .16em; text-transform: uppercase; margin-bottom: .6rem; }
+      .story-frame .frame-title { font-family: "Bricolage Grotesque", sans-serif; font-size: 1.6rem; font-weight: 700; letter-spacing: -.03em; margin-bottom: .6rem; }
+      .story-frame .frame-line { color: var(--code-muted); font-family: "JetBrains Mono", monospace; font-size: .82rem; margin-bottom: 1.2rem; }
+      .story-frame .frame-bar { height: .35rem; background: var(--code-border); }
+      .story-frame .frame-bar span { display: block; height: 100%; background: var(--accent); transition: width .45s cubic-bezier(.16,.84,.24,1); }
+      .story-frame .frame-progress { height: .25rem; background: var(--code-border); }
+      .story-frame .frame-progress span { display: block; height: 100%; width: 20%; background: var(--accent); transition: width .45s cubic-bezier(.16,.84,.24,1); }
+      .story-steps { display: grid; gap: 0; }
+      .story-step { min-height: 52vh; padding: 2.2rem 0; border-bottom: 1px solid var(--border); opacity: .42; transition: opacity .35s ease, transform .35s ease; transform: translateY(8px); }
+      .story-step:last-child { border-bottom: 0; }
+      .story-step.is-active { opacity: 1; transform: none; }
+      .story-step .step-num { font-family: "JetBrains Mono", monospace; font-size: .8rem; color: var(--accent); font-weight: 700; }
+      .story-step h3 { margin: .4rem 0 .6rem; font-family: "Bricolage Grotesque", sans-serif; font-size: 1.35rem; letter-spacing: -.02em; }
+      .story-step p { margin: 0; color: var(--muted); max-width: 30rem; line-height: 1.55; }
+      @media (max-width: 820px) {
+        .story { grid-template-columns: 1fr; }
+        .story-sticky { position: relative; top: auto; height: auto; margin-bottom: 2rem; }
+        .story-frame { height: 18rem; }
+        .story-step { min-height: auto; opacity: 1; transform: none; }
+      }
+
+      /* Scrollytelling: sticky frame, moving steps */
+      .story { display: grid; grid-template-columns: minmax(0, .46fr) minmax(0, .54fr); gap: 3rem; align-items: start; }
+      .story-sticky { position: sticky; top: 5rem; height: calc(100vh - 7rem); }
+      .story-frame { height: 100%; border: 1px solid var(--border-2); background: var(--code-bg); color: var(--code-fg); display: grid; grid-template-rows: auto 1fr auto; overflow: hidden; }
+      .story-frame .frame-top { display: flex; align-items: center; gap: .5rem; padding: .7rem 1rem; border-bottom: 1px solid var(--code-border); background: var(--code-dim); font-family: "JetBrains Mono", monospace; font-size: .75rem; color: var(--code-muted); }
+      .story-frame .frame-body { position: relative; padding: 1.6rem; }
+      .story-frame .frame-layer { position: absolute; inset: 1.6rem; opacity: 0; transform: translateY(18px) scale(.98); transition: opacity .45s cubic-bezier(.16,.84,.24,1), transform .45s cubic-bezier(.16,.84,.24,1); pointer-events: none; }
+      .story-frame .frame-layer.is-active { opacity: 1; transform: none; pointer-events: auto; }
+      .story-frame .frame-kicker { font-family: "JetBrains Mono", monospace; font-size: .72rem; color: var(--accent-2, var(--accent)); letter-spacing: .16em; text-transform: uppercase; margin-bottom: .6rem; }
+      .story-frame .frame-title { font-family: "Bricolage Grotesque", sans-serif; font-size: 1.6rem; font-weight: 700; letter-spacing: -.03em; margin-bottom: .6rem; }
+      .story-frame .frame-line { color: var(--code-muted); font-family: "JetBrains Mono", monospace; font-size: .82rem; margin-bottom: 1.2rem; }
+      .story-frame .frame-bar { height: .35rem; background: var(--code-border); }
+      .story-frame .frame-bar span { display: block; height: 100%; background: var(--accent); transition: width .45s cubic-bezier(.16,.84,.24,1); }
+      .story-frame .frame-progress { height: .25rem; background: var(--code-border); }
+      .story-frame .frame-progress span { display: block; height: 100%; width: 20%; background: var(--accent); transition: width .45s cubic-bezier(.16,.84,.24,1); }
+      .story-steps { display: grid; gap: 0; }
+      .story-step { min-height: 52vh; padding: 2.2rem 0; border-bottom: 1px solid var(--border); opacity: .42; transition: opacity .35s ease, transform .35s ease; transform: translateY(8px); }
+      .story-step:last-child { border-bottom: 0; }
+      .story-step.is-active { opacity: 1; transform: none; }
+      .story-step .step-num { font-family: "JetBrains Mono", monospace; font-size: .8rem; color: var(--accent); font-weight: 700; }
+      .story-step h3 { margin: .4rem 0 .6rem; font-family: "Bricolage Grotesque", sans-serif; font-size: 1.35rem; letter-spacing: -.02em; }
+      .story-step p { margin: 0; color: var(--muted); max-width: 30rem; line-height: 1.55; }
+      @media (max-width: 820px) {
+        .story { grid-template-columns: 1fr; }
+        .story-sticky { position: relative; top: auto; height: auto; margin-bottom: 2rem; }
+        .story-frame { height: 18rem; }
+        .story-step { min-height: auto; opacity: 1; transform: none; }
+      }
     </style>
   </head>
   <body>
@@ -264,7 +322,149 @@
         <div class="caption">Recorded live session: empty Loop Dashboard (<code>ctrl+x o</code>) → agent creates <code>tui-a</code> + <code>tui-b</code> with disjoint scopes → workers write through per-file tickets → polls to completion. Free model, real run. Cast: <code>assets/loopd-tui.cast</code> (<code>asciinema play</code>).</div>
       </div>
 
-      <section class="reveal">
+      <section class="story reveal" id="story">
+    <div class="story-sticky">
+      <div class="story-frame" id="storyFrame" data-active="0">
+        <div class="frame-top">
+          <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+          <span style="margin-left:.6rem">opencode — loop in motion</span>
+        </div>
+        <div class="frame-body">
+          <div class="frame-layer is-active" data-step="0">
+            <div class="frame-kicker">turn 1</div>
+            <div class="frame-title">Worker starts</div>
+            <div class="frame-line">get_goal · report_progress · writes files</div>
+            <div class="frame-bar"><span style="width:28%"></span></div>
+          </div>
+          <div class="frame-layer" data-step="1">
+            <div class="frame-kicker">idle confirmed</div>
+            <div class="frame-title">Lease released</div>
+            <div class="frame-line">2s quiet · no active tool calls</div>
+            <div class="frame-bar"><span style="width:52%"></span></div>
+          </div>
+          <div class="frame-layer" data-step="2">
+            <div class="frame-kicker">policy</div>
+            <div class="frame-title">Continue or finish</div>
+            <div class="frame-line">enforce limits · compact · continueGoal</div>
+            <div class="frame-bar"><span style="width:74%"></span></div>
+          </div>
+          <div class="frame-layer" data-step="3">
+            <div class="frame-kicker">terminal</div>
+            <div class="frame-title">Wake-up</div>
+            <div class="frame-line">complete_goal / block_goal → parent notified</div>
+            <div class="frame-bar"><span style="width:100%"></span></div>
+          </div>
+          <div class="frame-layer" data-step="4">
+            <div class="frame-kicker">schedule</div>
+            <div class="frame-title">Tick N / M</div>
+            <div class="frame-line">5s worker · complete → active · requeue</div>
+            <div class="frame-bar"><span style="width:38%"></span></div>
+          </div>
+        </div>
+        <div class="frame-progress"><span id="storyProgress"></span></div>
+      </div>
+    </div>
+    <div class="story-steps">
+      <article class="story-step is-active" data-step="0">
+        <span class="step-num">01</span>
+        <h3>The worker takes a turn</h3>
+        <p>It reads its contract, edits files, reports progress. The parent chat stays free while the child session runs.</p>
+      </article>
+      <article class="story-step" data-step="1">
+        <span class="step-num">02</span>
+        <h3>Idle is confirmed, not guessed</h3>
+        <p>Two idle signals, 2s apart, with no activity after completion. Then the lease is released and the turn is recorded.</p>
+      </article>
+      <article class="story-step" data-step="2">
+        <span class="step-num">03</span>
+        <h3>Policy decides the next move</h3>
+        <p>Checks, budgets, compaction, force-finish. If limits are clean, <code>continueGoal</code> sends the next prompt.</p>
+      </article>
+      <article class="story-step" data-step="3">
+        <span class="step-num">04</span>
+        <h3>Completion wakes the parent</h3>
+        <p><code>complete_goal</code> or <code>block_goal</code> becomes a terminal event. If policy allows, the owner is notified without polling.</p>
+      </article>
+      <article class="story-step" data-step="4">
+        <span class="step-num">05</span>
+        <h3>Scheduled goals requeue themselves</h3>
+        <p>The 5s schedule worker resurrects completed goals with <code>Scheduled tick N/M</code>, skip-if-running and workspace gates intact.</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="story reveal" id="story">
+    <div class="story-sticky">
+      <div class="story-frame" id="storyFrame" data-active="0">
+        <div class="frame-top">
+          <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+          <span style="margin-left:.6rem">opencode — loop in motion</span>
+        </div>
+        <div class="frame-body">
+          <div class="frame-layer is-active" data-step="0">
+            <div class="frame-kicker">turn 1</div>
+            <div class="frame-title">Worker starts</div>
+            <div class="frame-line">get_goal · report_progress · writes files</div>
+            <div class="frame-bar"><span style="width:28%"></span></div>
+          </div>
+          <div class="frame-layer" data-step="1">
+            <div class="frame-kicker">idle confirmed</div>
+            <div class="frame-title">Lease released</div>
+            <div class="frame-line">2s quiet · no active tool calls</div>
+            <div class="frame-bar"><span style="width:52%"></span></div>
+          </div>
+          <div class="frame-layer" data-step="2">
+            <div class="frame-kicker">policy</div>
+            <div class="frame-title">Continue or finish</div>
+            <div class="frame-line">enforce limits · compact · continueGoal</div>
+            <div class="frame-bar"><span style="width:74%"></span></div>
+          </div>
+          <div class="frame-layer" data-step="3">
+            <div class="frame-kicker">terminal</div>
+            <div class="frame-title">Wake-up</div>
+            <div class="frame-line">complete_goal / block_goal → parent notified</div>
+            <div class="frame-bar"><span style="width:100%"></span></div>
+          </div>
+          <div class="frame-layer" data-step="4">
+            <div class="frame-kicker">schedule</div>
+            <div class="frame-title">Tick N / M</div>
+            <div class="frame-line">5s worker · complete → active · requeue</div>
+            <div class="frame-bar"><span style="width:38%"></span></div>
+          </div>
+        </div>
+        <div class="frame-progress"><span id="storyProgress"></span></div>
+      </div>
+    </div>
+    <div class="story-steps">
+      <article class="story-step is-active" data-step="0">
+        <span class="step-num">01</span>
+        <h3>The worker takes a turn</h3>
+        <p>It reads its contract, edits files, reports progress. The parent chat stays free while the child session runs.</p>
+      </article>
+      <article class="story-step" data-step="1">
+        <span class="step-num">02</span>
+        <h3>Idle is confirmed, not guessed</h3>
+        <p>Two idle signals, 2s apart, with no activity after completion. Then the lease is released and the turn is recorded.</p>
+      </article>
+      <article class="story-step" data-step="2">
+        <span class="step-num">03</span>
+        <h3>Policy decides the next move</h3>
+        <p>Checks, budgets, compaction, force-finish. If limits are clean, <code>continueGoal</code> sends the next prompt.</p>
+      </article>
+      <article class="story-step" data-step="3">
+        <span class="step-num">04</span>
+        <h3>Completion wakes the parent</h3>
+        <p><code>complete_goal</code> or <code>block_goal</code> becomes a terminal event. If policy allows, the owner is notified without polling.</p>
+      </article>
+      <article class="story-step" data-step="4">
+        <span class="step-num">05</span>
+        <h3>Scheduled goals requeue themselves</h3>
+        <p>The 5s schedule worker resurrects completed goals with <code>Scheduled tick N/M</code>, skip-if-running and workspace gates intact.</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="reveal">
         <div class="section-label">features</div>
         <h2>Mechanisms, not a feature list.</h2>
         <p class="lead">Eleven. Each one is an OS-like primitive, not a bullet.</p>
@@ -439,6 +639,64 @@ nudge_goal({ goal_id: "..." })</code></pre>
         });
       }, { threshold: 0.12, rootMargin: "0px 0px -10% 0px" });
       document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
+    })();
+  </script>
+
+  <script>
+    (function () {
+      const frame = document.getElementById("storyFrame");
+      const steps = Array.from(document.querySelectorAll(".story-step"));
+      const progress = document.getElementById("storyProgress");
+      if (!frame || !steps.length) return;
+      const layers = Array.from(frame.querySelectorAll(".frame-layer"));
+      function activate(index) {
+        steps.forEach((step, i) => step.classList.toggle("is-active", i === index));
+        layers.forEach((layer, i) => layer.classList.toggle("is-active", i === index));
+        frame.dataset.active = String(index);
+        if (progress) progress.style.width = ((index + 1) / steps.length * 100) + "%";
+      }
+      if (!("IntersectionObserver" in window)) { activate(0); return; }
+      const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      if (reduce) { steps.forEach((s) => s.classList.add("is-active")); return; }
+      const io = new IntersectionObserver((entries) => {
+        entries.forEach((e) => {
+          if (e.isIntersecting) {
+            const idx = steps.indexOf(e.target);
+            if (idx >= 0) activate(idx);
+          }
+        });
+      }, { rootMargin: "-42% 0px -42% 0px", threshold: 0 });
+      steps.forEach((step) => io.observe(step));
+      activate(0);
+    })();
+  </script>
+
+  <script>
+    (function () {
+      const frame = document.getElementById("storyFrame");
+      const steps = Array.from(document.querySelectorAll(".story-step"));
+      const progress = document.getElementById("storyProgress");
+      if (!frame || !steps.length) return;
+      const layers = Array.from(frame.querySelectorAll(".frame-layer"));
+      function activate(index) {
+        steps.forEach((step, i) => step.classList.toggle("is-active", i === index));
+        layers.forEach((layer, i) => layer.classList.toggle("is-active", i === index));
+        frame.dataset.active = String(index);
+        if (progress) progress.style.width = ((index + 1) / steps.length * 100) + "%";
+      }
+      if (!("IntersectionObserver" in window)) { activate(0); return; }
+      const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      if (reduce) { steps.forEach((s) => s.classList.add("is-active")); return; }
+      const io = new IntersectionObserver((entries) => {
+        entries.forEach((e) => {
+          if (e.isIntersecting) {
+            const idx = steps.indexOf(e.target);
+            if (idx >= 0) activate(idx);
+          }
+        });
+      }, { rootMargin: "-42% 0px -42% 0px", threshold: 0 });
+      steps.forEach((step) => io.observe(step));
+      activate(0);
     })();
   </script>
 </body>
