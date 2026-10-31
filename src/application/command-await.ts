@@ -547,3 +547,144 @@ export async function wakeGoalForAwait(
   const result = await continuation.nudge(directory, goalID as GoalID)
   return { woke: result.ok && result.outcome === "sent", message: result.message }
 }
+
+// ─── Fence awaits: park until the workspace is quiescent ────────────────────
+// Mirrors command awaits (opt-in, exactly-once, evidence-led) for the
+// withWorkspaceOperation gate: a worker denied by an in-flight holder parks
+// instead of burning evaluator rejections, and release paths wake it.
+//
+// Persistence note: fence awaits live at `state.fenceAwaits`, accessed
+// through a cast because StoreState (state-repository.ts, owned by a sibling
+// goal) has no such field yet. The store is plain JSON and migrate() spreads
+// unknown keys, so the array survives restarts and upgrades. If StoreState
+// ever gains a real `fenceAwaits` field, drop the casts here.
+
+export interface FenceAwait {
+  goalID: string
+  ownerSessionID: string
+  createdAt: string
+}
+
+export interface FenceAwaitResult {
+  ok: boolean
+  /** True when the workspace was already quiescent — no parking needed. */
+  fired?: boolean
+  /** True when the await was persisted and the worker should park. */
+  parked?: boolean
+  message: string
+}
+
+type FenceState = { fenceAwaits?: FenceAwait[] }
+
+function readFenceAwaits(s: FenceState): FenceAwait[] {
+  return Array.isArray(s.fenceAwaits) ? s.fenceAwaits : []
+}
+
+/** Same gate as withWorkspaceOperation: operation, holders, uncontrolled, legacy. */
+export function isFenceQuiescent(s: {
+  workspaceOperation?: unknown
+  writeTickets?: { holders?: unknown[] }
+  workspaceCalls?: Array<{ uncontrolled?: boolean; paths?: string[] }>
+}): boolean {
+  if (s.workspaceOperation) return false
+  if ((s.writeTickets?.holders ?? []).length > 0) return false
+  const calls = s.workspaceCalls ?? []
+  if (calls.some((c) => c.uncontrolled)) return false
+  if (calls.some((c) => (c.paths?.length ?? 0) > 0)) return false
+  return true
+}
+
+/**
+ * Park a goal until quiescence. Fail-closed on ownership; idempotent while
+ * parked. Fires immediately (no persist) when already quiescent.
+ */
+export async function requestFenceAwait(
+  directory: string,
+  input: { goalID: string; ownerSessionID: string },
+): Promise<FenceAwaitResult> {
+  const snapshot = await readState(directory)
+  const goal = snapshot.goals.find((g) => g.id === input.goalID)
+  if (!goal) return { ok: false, message: "Goal not found." }
+  if (input.ownerSessionID !== goal.ownerSessionID) {
+    return { ok: false, message: "Owner mismatch: only the owning session may park this goal." }
+  }
+  if (isFenceQuiescent(snapshot)) {
+    return { ok: true, fired: true, message: "Workspace already quiescent — proceed, no parking needed." }
+  }
+  const parked = readFenceAwaits(snapshot as unknown as FenceState).some((a) => a.goalID === input.goalID)
+  if (parked) {
+    return { ok: true, parked: true, message: "Already parked on fence quiescence — wait for the wake, do not spin." }
+  }
+  await mutateState(directory, `fence.await-request:${input.goalID}`, async (s) => {
+    const arr = readFenceAwaits(s as unknown as FenceState)
+    if (!arr.some((a) => a.goalID === input.goalID)) {
+      arr.push({ goalID: input.goalID, ownerSessionID: input.ownerSessionID, createdAt: new Date().toISOString() })
+    }
+    ;(s as unknown as FenceState).fenceAwaits = arr
+    return s
+  })
+  // Re-check after persisting: the fence may have cleared between the read
+  // and the write — never leave a parked await on a quiescent workspace.
+  await fireFenceAwaits(directory)
+  return { ok: true, parked: true, message: "Parked until the workspace is quiescent — report progress and end the turn; the wake carries retry evidence. Do not spin." }
+}
+
+/**
+ * Fire parked awaits when quiescent. Atomic consume-inside-one-transaction:
+ * exactly one caller observes + consumes. Non-active goals are consumed with
+ * evidence but no wake (same rule as command awaits). Without a continuation
+ * the evidence still lands in the inbox and the engine's normal idle
+ * continuation picks the parked worker up on cadence — no spin either way.
+ */
+export async function fireFenceAwaits(
+  directory: string,
+  continuation?: AwaitContinuation,
+): Promise<FiredAwait[]> {
+  let consumed: FenceAwait[] = []
+  await mutateState(directory, `fence.await-fire`, async (s) => {
+    if (!isFenceQuiescent(s)) return s
+    consumed = readFenceAwaits(s as unknown as FenceState)
+    if (consumed.length === 0) return s
+    ;(s as unknown as FenceState).fenceAwaits = []
+    return s
+  })
+  const fired: FiredAwait[] = []
+  for (const a of consumed) {
+    await appendGoalInbox(directory, a.goalID, "worker", "Workspace quiescent — fence holders drained. Retry the fenced step now.").catch(() => {})
+    await appendEvent(directory, ledgerEvent({
+      goalID: a.goalID,
+      type: "fence.await-fired",
+    })).catch(() => {})
+    if (continuation) {
+      const w = await wakeGoalForAwait(directory, continuation, a.goalID).catch(() => ({ woke: false, message: "wake failed" }))
+      fired.push({ goalID: a.goalID, commandID: "fence:quiescence", active: w.woke })
+    } else {
+      const fresh = await readState(directory).catch(() => null)
+      const goal = fresh?.goals.find((g) => g.id === a.goalID)
+      fired.push({ goalID: a.goalID, commandID: "fence:quiescence", active: goal?.status === "active" })
+    }
+  }
+  return fired
+}
+
+/** Self-cleaning: non-active goals are consumed without wake on next fire. */
+export async function cancelFenceAwaitsForGoal(
+  directory: string,
+  goalID: string,
+  reason: string,
+): Promise<number> {
+  const snapshot = await readState(directory)
+  const doomed = readFenceAwaits(snapshot as unknown as FenceState).filter((a) => a.goalID === goalID)
+  if (doomed.length === 0) return 0
+  await mutateState(directory, `fence.await-cancel-goal:${goalID}`, async (s) => {
+    ;(s as unknown as FenceState).fenceAwaits = readFenceAwaits(s as unknown as FenceState).filter((a) => a.goalID !== goalID)
+    return s
+  })
+  await appendEvent(directory, ledgerEvent({
+    goalID,
+    type: "fence.await-cancelled",
+    reason,
+    count: doomed.length,
+  })).catch(() => {})
+  return doomed.length
+}

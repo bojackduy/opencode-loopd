@@ -165,10 +165,10 @@ export const INTERACTIONS: InteractionDef[] = [
   // Worker-only (not owner/TUI)
   {
     command: "—",
-    agentTools: ["get_goal", "claim_goal_scope", "run_goal_checks", "report_goal_progress", "complete_goal", "block_goal"],
+    agentTools: ["get_goal", "claim_goal_scope", "run_goal_checks", "await_quiescence", "report_goal_progress", "complete_goal", "block_goal"],
     tuiKeys: [],
     label: "Worker tools",
-    description: "Worker session tools (report progress, propose completion)",
+    description: "Worker session tools (report progress, propose completion, park on fences)",
     needsGoal: false,
     transport: "worker",
   },

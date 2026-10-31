@@ -26,6 +26,7 @@ import {
 import { SERVER_LOG_FILE } from "../infrastructure/server-log"
 import { claimGoalScope, GoalScopeConflictError } from "../application/goal-scope"
 import { withWorkspaceOperation } from "../application/workspace-execution"
+import { requestFenceAwait } from "../application/command-await"
 
 const execAsync = promisify(execChild)
 
@@ -83,8 +84,8 @@ export function goalTools(
         timeoutMs: tool.schema.number().optional().describe("Per-turn timeout in ms."),
         scheduleEveryMs: tool.schema.number().optional().describe("Interval in ms to auto-requeue the same goal after each completion. Minimum 1000. Enables repetitive dialogue reduction."),
         scheduleMaxRuns: tool.schema.number().optional().describe("Maximum total runs including the initial run. Undefined = unlimited. Requires scheduleEveryMs."),
-        interactive: tool.schema.boolean().optional().describe("Manual mode: the engine never starts turns on its own (no idle recovery, no retries). Every turn comes from explicit steering (:send, nudge, resume, retry). Use for interactive tasks where the worker stops and waits for the next input — the tick forcing a turn there wastes tokens and breaks the wait. Toggleable later via the dashboard :interactive command."),
-        directory: tool.schema.string().optional().describe("Project directory this goal lives in (absolute path, must exist). Defaults to the current project. Cross-directory goals keep state, artifacts, checks, and their worker session in the target project; the target project's plugin instance drives them once they exist there."),
+        interactive: tool.schema.boolean().optional().describe("Manual mode: the engine never starts turns on its own (no idle recovery, no retries). Every turn comes from explicit steering (:send, nudge, resume, retry). Use for interactive tasks where the worker stops and waits for the next input — the tick forcing a turn there wastes tokens and breaks the wait. Toggleable later via the dashboard :interactive command. Cross-directory goals default to true unless you pass false explicitly: a manager's standing loop must never self-complete into blocked on a foreign store."),
+        directory: tool.schema.string().optional().describe("Project directory this goal lives in (absolute path, must exist). Defaults to the current project. Cross-directory goals keep state, artifacts, checks, and their worker session in the target project; the target project's plugin instance drives them once they exist there. Cross-directory creation also defaults interactive:true (pass interactive:false to opt out)."),
       },
       execute: async (args, context) => {
         const sessionID = context?.sessionID || hostSessionID
@@ -210,6 +211,7 @@ export function goalTools(
 
         try {
           const parentDefaults = await withParentIdentity(defaults, host, sessionID)
+          const isForeignDir = args.directory !== undefined
           const { goal, worker } = await goalService.start(goalDir, {
             name: args.name,
             objective: args.objective,
@@ -218,7 +220,11 @@ export function goalTools(
             costBudget,
             parentAgent: parentDefaults.parentAgent,
             parentModel: parentDefaults.parentModel,
-            ...(args.interactive === true ? { interactive: true as const } : {}),
+            // Managed staff never self-complete into blocked on a foreign
+            // store: cross-dir goals are manual unless the caller passes
+            // interactive:false explicitly. Standing loops then combine this
+            // with scheduleEveryMs without maxRuns.
+            ...((args.interactive === true || (isForeignDir && args.interactive !== false)) ? { interactive: true as const } : {}),
           })
           return {
             title: "Goal created",
@@ -272,7 +278,7 @@ export function goalTools(
 
     get_goal: tool({
       description:
-        "Get the current goal contract and state. Call at the start of every turn to retrieve the objective, checks, limits, and recent failures (including HOST VERDICT if the last completion was rejected). Returns structured JSON with config and runtime (phase, runGeneration, rejectionCount).",
+        "Get the current goal contract and state. Call at the start of every turn to retrieve the objective, checks, limits, and recent failures (including HOST VERDICT if the last completion was rejected). Returns structured JSON with config and runtime (phase, runGeneration, rejectionCount). Owner-only tools (force_complete_goal, force_block_goal, loopd_release_workspace, nudge_goal, send_goal_input, pause/resume/clear and the other loopd_* owner verbs) are denied to worker sessions — ownership checks fail them closed. Workers act through worker tools only: get_goal, claim_goal_scope, run_goal_checks, await_quiescence, report_goal_progress, complete_goal, block_goal.",
       args: {},
       execute: async (_args, context) => {
         const state = await readState(dir)
@@ -338,6 +344,20 @@ export function goalTools(
         } catch (error) {
           return { title: "Verification denied", output: JSON.stringify({ ok: false, message: error instanceof Error ? error.message : String(error) }) }
         }
+      },
+    }),
+
+    await_quiescence: tool({
+      description: "Park until the workspace is quiescent (no operation, ticket, uncontrolled or legacy-write holder). Call when run_goal_checks or complete_goal is denied by a named fence holder instead of retrying: parking never burns evaluator rejections or no-progress turns. Report progress and end the turn after parking; the wake (inbox evidence + engine idle continuation) tells you to retry. Fires immediately when already quiescent.",
+      args: {},
+      execute: async (_args, context) => {
+        const workerID = context?.sessionID || hostSessionID
+        const goal = findGoalByWorkerSession(await readState(dir), workerID)
+        if (!goal || !workerID || goal.status !== "active") return { title: "Park denied", output: JSON.stringify({ ok: false, message: "An active exact worker session is required." }) }
+        // Identity is proven by the worker-session match above; the owner ID
+        // is filled server-side so ownership checks pass without trusting input.
+        const result = await requestFenceAwait(dir, { goalID: goal.id, ownerSessionID: goal.ownerSessionID })
+        return { title: result.fired ? "Already quiescent" : result.parked ? "Parked" : "Park refused", output: JSON.stringify({ ...result, goalID: goal.id }) }
       },
     }),
 

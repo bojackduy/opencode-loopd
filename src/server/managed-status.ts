@@ -1,10 +1,15 @@
 // ─── Server: Managed Status ──────────────────────────────────────────────────
-// CLI-first multi-project view helper. Single-dir default stays intact:
-// resolveManagedDirs(current) === [current] unless extra dirs are given
-// (env LOOPD_MANAGED_DIRS or explicit args).
+// CLI-first multi-project view helper. Thin wrapper over the single resolver
+// in ../infrastructure/managed-dirs (registry file + env + explicit).
+// Single-dir default stays intact: with no registry/env/extra the result is
+// just [currentDir].
 
 import path from "path"
 import { readState } from "../infrastructure/state-repository"
+import {
+  parseManagedDirsEnv as parseEnv,
+  resolveManagedDirs as resolveInfra,
+} from "../infrastructure/managed-dirs"
 
 export interface ManagedBlockedItem {
   goalID: string
@@ -29,25 +34,20 @@ export function managedStorePath(directory: string): string {
   return path.join(directory, ".opencode", "loopd")
 }
 
-/** Dedupe preserving order. Empty strings dropped. */
-export function resolveManagedDirs(currentDir: string, extra?: string[]): string[] {
-  const seen = new Set<string>()
-  const out: string[] = []
-  for (const dir of [currentDir, ...(extra ?? [])]) {
-    if (!dir) continue
-    const normalized = path.resolve(dir)
-    if (seen.has(normalized)) continue
-    seen.add(normalized)
-    out.push(dir)
-  }
-  return out
-}
-
 /** Parse LOOPD_MANAGED_DIRS (colon-separated, like PATH). Empty → []. */
 export function parseManagedDirsEnv(envValue?: string): string[] {
-  if (!envValue) return []
-  const sep = path.delimiter
-  return envValue.split(sep).map((s) => s.trim()).filter(Boolean)
+  return parseEnv(envValue)
+}
+
+/**
+ * Resolve managed dirs for a dashboard instance: instance dir first, then
+ * registry (.opencode/loopd/managed.json), env, explicit extras.
+ */
+export async function resolveManagedDirs(
+  currentDir: string,
+  extra?: string[],
+): Promise<string[]> {
+  return resolveInfra(currentDir, { extra })
 }
 
 export async function statusForDirectory(directory: string): Promise<ManagedDirStatus> {
@@ -88,9 +88,8 @@ export async function statusForDirectory(directory: string): Promise<ManagedDirS
 
 /** Read state per dir. Never throws: per-dir failures land on `error`. */
 export async function statusAll(managedDirs: string[]): Promise<ManagedDirStatus[]> {
-  const dirs = resolveManagedDirs(managedDirs[0] ?? ".", managedDirs.slice(1))
   const out: ManagedDirStatus[] = []
-  for (const dir of dirs) {
+  for (const dir of managedDirs.length > 0 ? managedDirs : ["."]) {
     out.push(await statusForDirectory(dir))
   }
   return out

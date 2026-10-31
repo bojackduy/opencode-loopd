@@ -7,7 +7,7 @@ import { batch, createSignal, For, Show, onCleanup, onMount, createEffect, type 
 import { useKeyboard } from "@opentui/solid"
 import type { TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import type { InputRenderable, ParsedKey, ScrollBoxRenderable, TextRenderable } from "@opentui/core"
-import { readEvents } from "../infrastructure/state-repository"
+import { readEvents, readState } from "../infrastructure/state-repository"
 import { createControlClient } from "../infrastructure/control-client"
 import type { StoreState } from "../infrastructure/state-repository"
 import type { Goal, GoalStatus } from "../domain/goal"
@@ -30,7 +30,7 @@ import { TERMINAL_ROUTE_NAME, currentRouteSessionID, terminalRoutePayload } from
 import type { CommandSession } from "../domain/command-session"
 import { randomUUID } from "crypto"
 import { createDashboardRefresh } from "./dashboard-refresh"
-import { managedStorePath, parseManagedDirsEnv, resolveManagedDirs, statusAll, type ManagedDirStatus } from "../server/managed-status"
+import { managedStorePath, resolveManagedDirs, statusAll, type ManagedDirStatus } from "../server/managed-status"
 
 function prevent(evt: ParsedKey) {
   const e = evt as ParsedKey & { preventDefault?: () => void; stopPropagation?: () => void }
@@ -309,14 +309,28 @@ export function LoopDashboard(props: Props) {
   const [showCompleted, setShowCompleted] = createSignal(false)
   const [clock, setClock] = createSignal(Date.now())
   const [agentIndex, setAgentIndex] = createSignal<Record<string, AgentMeta>>({})
-  // P4 multi-project view (CLI-first, single-dir default intact).
-  const managedDirs = () => resolveManagedDirs(props.directory, parseManagedDirsEnv((process as any)?.env?.LOOPD_MANAGED_DIRS))
+  // Multi-project view over the single managed-dirs resolver (registry file
+  // + env + explicit). Single-dir default: [props.directory] until loaded.
+  const [managedDirList, setManagedDirList] = createSignal<string[]>([props.directory])
+  const managedDirs = () => managedDirList()
   const storePath = () => managedStorePath(props.directory)
   const [projectStatuses, setProjectStatuses] = createSignal<ManagedDirStatus[] | null>(null)
   const [showProjects, setShowProjects] = createSignal(false)
+  // Per-directory states for the aggregate Goals tab (own dir stays on the
+  // live control-bus state; foreign dirs are read directly, display-only).
+  const [managedStates, setManagedStates] = createSignal<Record<string, StoreState>>({})
   async function refreshProjects() {
     try {
+      setManagedDirList(await resolveManagedDirs(props.directory))
       setProjectStatuses(await statusAll(managedDirs()))
+      const states: Record<string, StoreState> = {}
+      for (const dir of managedDirs()) {
+        if (dir === props.directory) continue
+        try {
+          states[dir] = await readState(dir)
+        } catch { /* per-dir failure shows in :projects; Goals tab keeps own goals */ }
+      }
+      if (!disposed) setManagedStates(states)
     } catch (e) {
       setStatusText(`Error: ${e instanceof Error ? e.message : String(e)}`)
     }
@@ -353,6 +367,7 @@ export function LoopDashboard(props: Props) {
     } catch { /* agent colors are decorative — dashboard works without them */ }
   }
   refreshAgents()
+  refreshProjects()
   const unsubs = [
     props.api.event.on("session.idle", () => refresh()),
     props.api.event.on("session.status", () => refresh()),
@@ -442,7 +457,7 @@ export function LoopDashboard(props: Props) {
       })
       return
     }
-    const currentGoals = state()?.goals.filter((goal) => showCompleted() || goal.status !== "complete") || []
+    const currentGoals = activeGoals()
     const currentCommands = ownerCommands()
     // Tab toggles the Goals/Commands tabs; h selects Goals and l selects
     // Commands directionally. j/k/g/G select within the active tab only
@@ -634,6 +649,7 @@ export function LoopDashboard(props: Props) {
     const sel = selectedCommand()
     if (!sel) { setStatusText("No command selected."); return }
     await executeCommandRaw("cmd_restart", { commandID: sel.id }, sel.id)
+    return
   }
 
   function removeFinishedSelected() {
@@ -713,6 +729,15 @@ export function LoopDashboard(props: Props) {
     // command — goal actions never run here.
     if (tab() === "commands" && !["q", "close"].includes(parsed.command)) {
       await executeCommandTabCommand(parsed.command, parsed.positional, parsed.raw)
+      returnToNormalMode()
+      return
+    }
+    // Foreign goals are display-only here: this tab's control bus reaches
+    // only the instance directory. Steer them from their own dashboard or
+    // via agent tools (nudge_goal / send_goal_input).
+    const foreignMutating = ["send", "force", "block", "pause", "resume", "retry", "clear", "abort", "nudge", "interactive", "agent", "model", "release"]
+    if (parsed.command && foreignMutating.includes(parsed.command) && selectedGoal() && goalDir(selectedGoal()!.id) !== props.directory) {
+      setStatusText(`Foreign goal — open the ${goalDir(selectedGoal()!.id)} dashboard or steer via agent tools.`)
       returnToNormalMode()
       return
     }
@@ -823,9 +848,13 @@ export function LoopDashboard(props: Props) {
         default: {
           // Bare text in insert mode → treat as send to selected goal
           if (parsed.command && selectedGoal()) {
-            const message = parsed.raw
-            const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "send", goalID: selectedGoal()!.id, args: { message } })
-            setStatusText(r.ok ? `sent: ${message.slice(0, 80)}` : `Error: ${r.message}`); if (r.ok) await refresh()
+            if (goalDir(selectedGoal()!.id) !== props.directory) {
+              setStatusText(`Foreign goal — open the ${goalDir(selectedGoal()!.id)} dashboard or steer via agent tools.`)
+            } else {
+              const message = parsed.raw
+              const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "send", goalID: selectedGoal()!.id, args: { message } })
+              setStatusText(r.ok ? `sent: ${message.slice(0, 80)}` : `Error: ${r.message}`); if (r.ok) await refresh()
+            }
           } else setStatusText(`Unknown: ${parsed.command}. ? for help`)
         }
       }
@@ -833,7 +862,36 @@ export function LoopDashboard(props: Props) {
     returnToNormalMode()
   }
 
-  const activeGoals = () => state()?.goals.filter((g) => showCompleted() || g.status !== "complete") || []
+  /** Aggregate Goals tab: own goals plus other managed dirs, tagged by
+   * directory. Single-dir default intact — one dir means own goals only. */
+  const activeGoals = () => {
+    const own = state()?.goals.filter((g) => showCompleted() || g.status !== "complete") || []
+    if (managedDirs().length <= 1) return own
+    const seen = new Set(own.map((g) => g.id))
+    const out = [...own]
+    for (const [dir, st] of Object.entries(managedStates())) {
+      if (dir === props.directory) continue
+      for (const g of st.goals ?? []) {
+        if ((showCompleted() || g.status !== "complete") && !seen.has(g.id)) {
+          seen.add(g.id)
+          out.push(g)
+        }
+      }
+    }
+    return out
+  }
+  /** Which project a listed goal belongs to (own dir unless found elsewhere). */
+  const goalDir = (goalID: string): string => {
+    if ((state()?.goals ?? []).some((g) => g.id === goalID)) return props.directory
+    for (const [dir, st] of Object.entries(managedStates())) {
+      if ((st.goals ?? []).some((g) => g.id === goalID)) return dir
+    }
+    return props.directory
+  }
+  /** Runtime for a listed goal, from its own project's state. */
+  const runtimeFor = (goalID: string): GoalRuntimeState | undefined =>
+    state()?.runtimes.find((r) => r.goalID === goalID)
+    ?? Object.values(managedStates()).map((st) => (st.runtimes ?? []).find((r) => r.goalID === goalID)).find(Boolean)
   const runningCount = () => state()?.runtimes.filter((runtime) => workerActivityLabel(runtime, clock()).acting).length || 0
   const fenceCount = () => state()?.workspaceCalls?.length || 0
   const runningFrame = () => ["|", "/", "-", "\\"][Math.floor(clock() / 500) % 4]
@@ -898,7 +956,6 @@ export function LoopDashboard(props: Props) {
             backgroundColor={theme().error as unknown as string}
             paddingLeft={1}
             paddingRight={1}
-            flexShrink={0}
             {...({ onMouseDown: handleBugReport } as any)}
           >
             <text><span style={{ fg: "white", bold: true }}>Bug Report</span></text>
@@ -980,12 +1037,12 @@ export function LoopDashboard(props: Props) {
             </box>
           </Show>
 
-          {/* Projects panel — :projects lists managed dirs (single-dir default). */}
+          {/* Projects panel — :projects lists managed dirs (registry file + env). */}
           <Show when={showProjects()}>
             <box flexDirection="column" padding={1} border={true} borderColor={theme().border} flexShrink={0} maxHeight={12}>
               <text>
                 <span style={{ fg: theme().accent, bold: true }}>⬣ Projects ({managedDirs().length})</span>
-                <span style={{ fg: theme().textMuted }}> — :projects to hide · LOOPD_MANAGED_DIRS adds dirs</span>
+                <span style={{ fg: theme().textMuted }}> — :projects to hide · registry .opencode/loopd/managed.json (+ LOOPD_MANAGED_DIRS)</span>
                 <For each={projectStatuses() ?? managedDirs().map((d) => ({ directory: d, storePath: managedStorePath(d), total: 0, active: 0, blocked: 0, paused: 0, complete: 0, blockedItems: [] as ManagedDirStatus["blockedItems"] }))}>{(p) => (
                   <>
                     {"\n"}
@@ -1019,10 +1076,11 @@ export function LoopDashboard(props: Props) {
             <DashboardList count={activeGoals().length} selectedID={activeGoals()[selected()] ? rowIdFor(activeGoals()[selected()]!.id) : undefined}>
               <For each={activeGoals()}>
                 {(goal, i) => {
-                  const runtime = () => state()?.runtimes.find((r) => r.goalID === goal.id)
+                  const runtime = () => runtimeFor(goal.id)
                   const activity = () => runtime() ? workerActivityLabel(runtime()!, clock()) : undefined
                   const isActive = () => i() === selected()
                   const maxTurns = (goal.config as any)?.maxTurns as number | undefined
+                  const dirName = () => goalDir(goal.id).split("/").pop() ?? goalDir(goal.id)
                   const turnColor = () => {
                     if (!runtime() || !maxTurns) return phaseColor(runtime()?.phase || "idle", theme())
                     const ratio = runtime()!.budgetTurnCount / maxTurns
@@ -1039,6 +1097,7 @@ export function LoopDashboard(props: Props) {
                         <span style={{ fg: theme().textMuted }}> │ </span>
                         <span style={{ fg: theme().textMuted }}>Goal </span>
                         <span style={{ fg: statusColor(goal.status, theme()), bold: true }}>{goalStatusLabel(goal.status).short.toUpperCase()}</span>
+                        {managedDirs().length > 1 && <><span style={{ fg: theme().textMuted }}> │ </span><span style={{ fg: theme().accent }}>⬣ {dirName()}</span></>}
                         {runtime() && <>
                           <span style={{ fg: theme().textMuted }}> │ Worker </span>
                           <span style={{ fg: activity()?.acting ? turnColor() : theme().textMuted, bold: activity()?.acting }}>{activity()?.acting ? runningFrame() : runtime()!.phase === "running" ? "◷" : phaseIcon(runtime()!.phase)} {activity()!.short.toUpperCase()}</span>
@@ -1066,7 +1125,7 @@ export function LoopDashboard(props: Props) {
           {/* Goal detail — fixed, bounded, border matches status */}
           <Show when={selectedGoal()}>
             {(goal) => {
-              const rt = () => state()?.runtimes.find((r) => r.goalID === goal().id)
+              const rt = () => runtimeFor(goal().id)
               const activity = () => rt() ? workerActivityLabel(rt()!, clock()) : undefined
               const lp = () => goal().lastProgress
               const blk = () => goal().blocker
@@ -1116,6 +1175,7 @@ export function LoopDashboard(props: Props) {
                     {lp() && <><span style={{ fg: theme().success }}>{"\n"}✔ </span><span style={{ fg: theme().success, bold: true }}>Progress: </span><span style={{ fg: theme().text }}>{lp()!.summary.slice(0, 100)}</span><span style={{ fg: theme().textMuted }}> → {lp()!.next?.slice(0, 60) || ""}</span></>}
                     {blk() && <><span style={{ fg: theme().error, bold: true }}>{"\n"}✖ Blocked: </span><span style={{ fg: theme().error }}>{blk()!.reason.slice(0, 140)}</span><span style={{ fg: theme().textMuted }}> — {blk()!.needed.slice(0, 60)}</span></>}
                     {goal().config.artifactDir && <><span style={{ fg: theme().accent }}>{"\n"}📁 </span><span style={{ fg: theme().accent, bold: true }}>Artifacts: </span><span style={{ fg: theme().textMuted }}>{String(goal().config.artifactDir).replace(String(props.directory), ".")}</span></>}
+                    {managedDirs().length > 1 && <><span style={{ fg: theme().accent }}>{"\n"}⬣ </span><span style={{ fg: theme().accent, bold: true }}>Project: </span><span style={{ fg: theme().textMuted }}>{goalDir(goal().id)}</span></>}
                     {goal().workerTopology && <><span style={{ fg: theme().textMuted }}>{"\n"}🌿 Worker: </span><span style={{ fg: theme().text }}>{goal().workerTopology === "v2-native-child" ? "native child" : goal().workerTopology === "v2-root-fallback" ? "root fallback" : "v1 child"}</span>{goal().nativeParentID ? <span style={{ fg: theme().textMuted }}> of {(goal().nativeParentID as string).slice(0, 12)}…</span> : null}</>}
                     {goal().interactive === true && <><span style={{ fg: theme().accent, bold: true }}>{"\n"}✋ Manual: </span><span style={{ fg: theme().textMuted }}>engine never starts turns — steer with :send/nudge (:interactive to re-enable auto)</span></>}
                     {goal().config.model && <><span style={{ fg: theme().info, bold: true }}>{"\n"}🧠 Model: </span><span style={{ fg: theme().text }}>{goal().config.model}</span>{goal().modelSwitch?.pending ? <span style={{ fg: theme().warning }}> → pending {goal().modelSwitch?.pending?.model} (applies next turn)</span> : null}</>}

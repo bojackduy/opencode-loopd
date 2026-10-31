@@ -94,6 +94,21 @@ watches and steers across projects.
   header managed count + Store path, `:projects` panel per-dir counts
   and blocked items. Single-dir default intact.
 - [x] P5: management-mode conventions doc (`docs/management-mode.md`).
+- [x] M2: cross-dir create defaults interactive:true unless interactive:false
+  explicit (`goal-tools.ts` + arg docs). Managed staff park instead of
+  self-completing into blocked.
+- [x] M3: `directory` override on all 10 owner tools + `loopd_status_all` on
+  unified `resolveManagedDirs` (registry+env, agrees with TUI `:projects`).
+  Registry names-only, untouched. `switch_goal_identity`/`list_models` left
+  single-dir (out of list).
+- [x] M4: fence denial names holder session/call age/paths + release guidance;
+  fence-await queue (`request/fire/cancel` in `command-await.ts`, exactly-once,
+  StoreState untouched) wired into `afterWorkspaceTool` + operation-end;
+  `await_quiescence` worker tool + get_goal steering bans owner-only tools;
+  registry worker row updated; denial points at parking. Dogfood: voice dir
+  verified quiescent (no calls/op/holders/queue), tour goal 641dec63 ready
+  for owner `resume_goal` + `directory` retry — worker cannot resume it
+  (ownership fail-closed by design).
 
 ### P1 live-verification runbook (owner: run with real sessions)
 1. Terminal A: `cd /tmp/proj-a && opencode` (opencode-loopd plugin loaded).

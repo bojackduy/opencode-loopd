@@ -1458,6 +1458,76 @@ async function wakeGoalForAwait(directory, continuation, goalID) {
   const result = await continuation.nudge(directory, goalID);
   return { woke: result.ok && result.outcome === "sent", message: result.message };
 }
+function readFenceAwaits(s) {
+  return Array.isArray(s.fenceAwaits) ? s.fenceAwaits : [];
+}
+function isFenceQuiescent(s) {
+  if (s.workspaceOperation)
+    return false;
+  if ((s.writeTickets?.holders ?? []).length > 0)
+    return false;
+  const calls = s.workspaceCalls ?? [];
+  if (calls.some((c) => c.uncontrolled))
+    return false;
+  if (calls.some((c) => (c.paths?.length ?? 0) > 0))
+    return false;
+  return true;
+}
+async function requestFenceAwait(directory, input) {
+  const snapshot = await readState(directory);
+  const goal = snapshot.goals.find((g) => g.id === input.goalID);
+  if (!goal)
+    return { ok: false, message: "Goal not found." };
+  if (input.ownerSessionID !== goal.ownerSessionID) {
+    return { ok: false, message: "Owner mismatch: only the owning session may park this goal." };
+  }
+  if (isFenceQuiescent(snapshot)) {
+    return { ok: true, fired: true, message: "Workspace already quiescent \u2014 proceed, no parking needed." };
+  }
+  const parked = readFenceAwaits(snapshot).some((a) => a.goalID === input.goalID);
+  if (parked) {
+    return { ok: true, parked: true, message: "Already parked on fence quiescence \u2014 wait for the wake, do not spin." };
+  }
+  await mutateState(directory, `fence.await-request:${input.goalID}`, async (s) => {
+    const arr = readFenceAwaits(s);
+    if (!arr.some((a) => a.goalID === input.goalID)) {
+      arr.push({ goalID: input.goalID, ownerSessionID: input.ownerSessionID, createdAt: new Date().toISOString() });
+    }
+    s.fenceAwaits = arr;
+    return s;
+  });
+  await fireFenceAwaits(directory);
+  return { ok: true, parked: true, message: "Parked until the workspace is quiescent \u2014 report progress and end the turn; the wake carries retry evidence. Do not spin." };
+}
+async function fireFenceAwaits(directory, continuation) {
+  let consumed = [];
+  await mutateState(directory, `fence.await-fire`, async (s) => {
+    if (!isFenceQuiescent(s))
+      return s;
+    consumed = readFenceAwaits(s);
+    if (consumed.length === 0)
+      return s;
+    s.fenceAwaits = [];
+    return s;
+  });
+  const fired = [];
+  for (const a of consumed) {
+    await appendGoalInbox(directory, a.goalID, "worker", "Workspace quiescent \u2014 fence holders drained. Retry the fenced step now.").catch(() => {});
+    await appendEvent(directory, ledgerEvent({
+      goalID: a.goalID,
+      type: "fence.await-fired"
+    })).catch(() => {});
+    if (continuation) {
+      const w = await wakeGoalForAwait(directory, continuation, a.goalID).catch(() => ({ woke: false, message: "wake failed" }));
+      fired.push({ goalID: a.goalID, commandID: "fence:quiescence", active: w.woke });
+    } else {
+      const fresh = await readState(directory).catch(() => null);
+      const goal = fresh?.goals.find((g) => g.id === a.goalID);
+      fired.push({ goalID: a.goalID, commandID: "fence:quiescence", active: goal?.status === "active" });
+    }
+  }
+  return fired;
+}
 var init_command_await2 = __esm(() => {
   init_command_await();
   init_command_watch();
@@ -1989,6 +2059,7 @@ async function afterWorkspaceTool(directory, sessionID, callID, tool) {
     });
     return state;
   });
+  await fireFenceAwaits(directory).catch(() => {});
 }
 function provesSameCall(reservationID, evidenceCallID) {
   if (reservationID === evidenceCallID)
@@ -2149,10 +2220,36 @@ async function withWorkspaceOperation(directory, goalID, sessionID, run, opts) {
       state.writeTickets.holders = kept;
     }
     const holders = state.writeTickets?.holders ?? [];
-    const hasUncontrolled = (state.workspaceCalls ?? []).some((c) => c.uncontrolled);
-    const hasLegacyWrite = (state.workspaceCalls ?? []).some((c) => (c.paths?.length ?? 0) > 0);
-    if (state.workspaceOperation || holders.length > 0 || hasUncontrolled || hasLegacyWrite)
-      throw new Error("Workspace is busy with an operation or in-flight writes; verification denied until quiescent.");
+    const calls = state.workspaceCalls ?? [];
+    const hasUncontrolled = calls.some((c) => c.uncontrolled);
+    const hasLegacyWrite = calls.some((c) => (c.paths?.length ?? 0) > 0);
+    if (state.workspaceOperation || holders.length > 0 || hasUncontrolled || hasLegacyWrite) {
+      const ageOf = (at) => {
+        if (!at)
+          return "age unknown";
+        const ms = Date.now() - Date.parse(at);
+        if (!Number.isFinite(ms) || ms < 0)
+          return "age unknown";
+        return `age ${Math.floor(ms / 1000)}s`;
+      };
+      const parts = [];
+      if (state.workspaceOperation) {
+        const op = state.workspaceOperation;
+        const holder = op.goalID ? state.goals.find((g) => g.id === op.goalID) : undefined;
+        parts.push(`operation ${op.id} by session ${op.sessionID}${holder ? ` for goal "${holder.name}"` : ""}`);
+      }
+      for (const h of holders) {
+        const holder = h.goalID ? state.goals.find((g) => g.id === h.goalID) : undefined;
+        parts.push(`ticket ${h.ticketID ?? h.callID} by session ${h.sessionID}${holder ? ` for goal "${holder.name}"` : ""} on ${(h.files ?? []).join(", ") || "(no files)"}`);
+      }
+      for (const c of calls.filter((c) => c.uncontrolled)) {
+        parts.push(`uncontrolled call ${c.callID} by session ${c.sessionID} (${ageOf(c.at)}; wait for its exit event)`);
+      }
+      for (const c of calls.filter((c) => (c.paths?.length ?? 0) > 0)) {
+        parts.push(`legacy write call ${c.callID} by session ${c.sessionID} on ${c.paths.join(", ")} (${ageOf(c.at)})`);
+      }
+      throw new Error(`Workspace is busy \u2014 held by: ${parts.join("; ")}. Verification denied until quiescent; do not poll or retry checks (each attempt burns evaluator budget). Park with await_quiescence, report progress, and end the turn \u2014 the wake carries retry evidence. Or wait for the holder's exit event, or release it with loopd_release_workspace if it is yours, orphaned, or its goal is gone.`);
+    }
     state.workspaceOperation = { id, goalID, sessionID };
     return state;
   });
@@ -2174,6 +2271,7 @@ async function withWorkspaceOperation(directory, goalID, sessionID, run, opts) {
       });
       return state;
     });
+    await fireFenceAwaits(directory).catch(() => {});
   }
 }
 var readTools, ownerTools, STALE_WORKSPACE_CALL_TTL_MS, CLEAR_PENDING_FORCE_TTL_MS, OWNER_CALL_TTL_MS;
@@ -2182,6 +2280,7 @@ var init_workspace_execution = __esm(() => {
   init_state_repository();
   init_server_log();
   init_workspace_scope();
+  init_command_await2();
   readTools = new Set([
     "read",
     "glob",
@@ -10703,6 +10802,7 @@ async function claimGoalScope(directory, goalID, workerSessionID, generation, pa
 
 // src/server/goal-tools.ts
 init_workspace_execution();
+init_command_await2();
 var execAsync = promisify(execChild);
 function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
   return {
@@ -10735,8 +10835,8 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         timeoutMs: tool.schema.number().optional().describe("Per-turn timeout in ms."),
         scheduleEveryMs: tool.schema.number().optional().describe("Interval in ms to auto-requeue the same goal after each completion. Minimum 1000. Enables repetitive dialogue reduction."),
         scheduleMaxRuns: tool.schema.number().optional().describe("Maximum total runs including the initial run. Undefined = unlimited. Requires scheduleEveryMs."),
-        interactive: tool.schema.boolean().optional().describe("Manual mode: the engine never starts turns on its own (no idle recovery, no retries). Every turn comes from explicit steering (:send, nudge, resume, retry). Use for interactive tasks where the worker stops and waits for the next input \u2014 the tick forcing a turn there wastes tokens and breaks the wait. Toggleable later via the dashboard :interactive command."),
-        directory: tool.schema.string().optional().describe("Project directory this goal lives in (absolute path, must exist). Defaults to the current project. Cross-directory goals keep state, artifacts, checks, and their worker session in the target project; the target project's plugin instance drives them once they exist there.")
+        interactive: tool.schema.boolean().optional().describe("Manual mode: the engine never starts turns on its own (no idle recovery, no retries). Every turn comes from explicit steering (:send, nudge, resume, retry). Use for interactive tasks where the worker stops and waits for the next input \u2014 the tick forcing a turn there wastes tokens and breaks the wait. Toggleable later via the dashboard :interactive command. Cross-directory goals default to true unless you pass false explicitly: a manager's standing loop must never self-complete into blocked on a foreign store."),
+        directory: tool.schema.string().optional().describe("Project directory this goal lives in (absolute path, must exist). Defaults to the current project. Cross-directory goals keep state, artifacts, checks, and their worker session in the target project; the target project's plugin instance drives them once they exist there. Cross-directory creation also defaults interactive:true (pass interactive:false to opt out).")
       },
       execute: async (args, context) => {
         const sessionID = context?.sessionID || hostSessionID;
@@ -10868,6 +10968,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         }
         try {
           const parentDefaults = await withParentIdentity(defaults, host, sessionID);
+          const isForeignDir = args.directory !== undefined;
           const { goal, worker } = await goalService.start(goalDir, {
             name: args.name,
             objective: args.objective,
@@ -10876,7 +10977,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
             costBudget,
             parentAgent: parentDefaults.parentAgent,
             parentModel: parentDefaults.parentModel,
-            ...args.interactive === true ? { interactive: true } : {}
+            ...args.interactive === true || isForeignDir && args.interactive !== false ? { interactive: true } : {}
           });
           return {
             title: "Goal created",
@@ -10925,7 +11026,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
       }
     }),
     get_goal: tool({
-      description: "Get the current goal contract and state. Call at the start of every turn to retrieve the objective, checks, limits, and recent failures (including HOST VERDICT if the last completion was rejected). Returns structured JSON with config and runtime (phase, runGeneration, rejectionCount).",
+      description: "Get the current goal contract and state. Call at the start of every turn to retrieve the objective, checks, limits, and recent failures (including HOST VERDICT if the last completion was rejected). Returns structured JSON with config and runtime (phase, runGeneration, rejectionCount). Owner-only tools (force_complete_goal, force_block_goal, loopd_release_workspace, nudge_goal, send_goal_input, pause/resume/clear and the other loopd_* owner verbs) are denied to worker sessions \u2014 ownership checks fail them closed. Workers act through worker tools only: get_goal, claim_goal_scope, run_goal_checks, await_quiescence, report_goal_progress, complete_goal, block_goal.",
       args: {},
       execute: async (_args, context) => {
         const state = await readState(dir);
@@ -10989,6 +11090,18 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         } catch (error) {
           return { title: "Verification denied", output: JSON.stringify({ ok: false, message: error instanceof Error ? error.message : String(error) }) };
         }
+      }
+    }),
+    await_quiescence: tool({
+      description: "Park until the workspace is quiescent (no operation, ticket, uncontrolled or legacy-write holder). Call when run_goal_checks or complete_goal is denied by a named fence holder instead of retrying: parking never burns evaluator rejections or no-progress turns. Report progress and end the turn after parking; the wake (inbox evidence + engine idle continuation) tells you to retry. Fires immediately when already quiescent.",
+      args: {},
+      execute: async (_args, context) => {
+        const workerID = context?.sessionID || hostSessionID;
+        const goal = findGoalByWorkerSession(await readState(dir), workerID);
+        if (!goal || !workerID || goal.status !== "active")
+          return { title: "Park denied", output: JSON.stringify({ ok: false, message: "An active exact worker session is required." }) };
+        const result = await requestFenceAwait(dir, { goalID: goal.id, ownerSessionID: goal.ownerSessionID });
+        return { title: result.fired ? "Already quiescent" : result.parked ? "Parked" : "Park refused", output: JSON.stringify({ ...result, goalID: goal.id }) };
       }
     }),
     report_goal_progress: tool({
@@ -11609,18 +11722,34 @@ async function readRegistry(instanceDir) {
     throw error;
   }
 }
-async function listManagedDirs(instanceDir) {
+function parseManagedDirsEnv(envValue) {
+  const raw = envValue !== undefined ? envValue : process?.env?.LOOPD_MANAGED_DIRS;
+  if (typeof raw !== "string" || !raw)
+    return [];
+  const sep = path10.delimiter;
+  return raw.split(sep).map((s) => s.trim()).filter(Boolean);
+}
+async function resolveManagedDirs(instanceDir, opts = {}) {
   const root = normalizeDir(path10.resolve(instanceDir));
-  const registry = await readRegistry(instanceDir);
   const seen = new Set([root]);
   const result = [root];
-  for (const entry of registry.dirs) {
-    const resolved = resolveEntry(root, entry.trim());
+  const push = (entry) => {
+    const trimmed = entry.trim();
+    if (!trimmed)
+      return;
+    const resolved = resolveEntry(root, trimmed);
     if (!seen.has(resolved)) {
       seen.add(resolved);
       result.push(resolved);
     }
-  }
+  };
+  const registry = await readRegistry(instanceDir);
+  for (const entry of registry.dirs)
+    push(entry);
+  for (const entry of parseManagedDirsEnv(opts.env))
+    push(entry);
+  for (const entry of opts.extra ?? [])
+    push(entry);
   return result;
 }
 
@@ -11770,7 +11899,7 @@ function ownerTools2(options) {
       }
     }),
     loopd_status_all: tool2({
-      description: "List owned active goals across all managed directories (.opencode/loopd/managed.json plus instance directory). Each entry includes its directory.",
+      description: "List owned active goals across all managed directories (instance directory + registry .opencode/loopd/managed.json + LOOPD_MANAGED_DIRS env \u2014 same unified resolver as the TUI :projects view). Each entry includes its directory.",
       args: {},
       execute: async (_args, context) => {
         const ownerID = context?.sessionID;
@@ -11780,7 +11909,7 @@ function ownerTools2(options) {
             output: JSON.stringify({ ok: false, message: "No session context available." })
           };
         }
-        const dirs = await listManagedDirs(directory).catch(() => [directory]);
+        const dirs = await resolveManagedDirs(directory).catch(() => [directory]);
         const goals = [];
         for (const dir of dirs) {
           let state;
@@ -11963,10 +12092,12 @@ function ownerTools2(options) {
       description: "Read the last N messages from the worker transcript (role, content, messageID). Shows HOST VERDICT, steering, and whether the worker\u2019s last prompt was correlated. Use to debug why a completion was rejected or why a worker is stuck.",
       args: {
         goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to read the first active goal."),
-        limit: tool2.schema.number().optional().describe("Max messages to return (default: 20).")
+        limit: tool2.schema.number().optional().describe("Max messages to return (default: 20)."),
+        directory: tool2.schema.string().optional().describe("Project directory override. Omit to use the instance directory.")
       },
       execute: async (args, context) => {
-        const state = await readState(directory);
+        const target = resolveTargetDir(directory, args.directory);
+        const state = await readState(target);
         const ownerID = context?.sessionID;
         const goal = args.goal_id ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID) : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete");
         if (!goal) {
@@ -11987,6 +12118,7 @@ function ownerTools2(options) {
             title: `Transcript: ${goal.name}`,
             output: JSON.stringify({
               ok: true,
+              directory: target,
               goalID: goal.id,
               workerSessionID: goal.workerSessionID,
               messages: messages.map((m) => ({
@@ -12012,10 +12144,12 @@ function ownerTools2(options) {
       description: "Send bare words to the worker as their own turn (no steering wrapper). Delivers immediately if the goal is active, otherwise queues for the next active turn. Use to answer `question`, redirect, or nudge with a short message.",
       args: {
         goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to target the first active goal."),
-        message: tool2.schema.string().describe("Message to send to the worker.")
+        message: tool2.schema.string().describe("Message to send to the worker."),
+        directory: tool2.schema.string().optional().describe("Project directory override. Omit to use the instance directory.")
       },
       execute: async (args, context) => {
-        const state = await readState(directory);
+        const target = resolveTargetDir(directory, args.directory);
+        const state = await readState(target);
         const ownerID = context?.sessionID;
         const goal = args.goal_id ? state.goals.find((g) => g.id === args.goal_id) : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete");
         if (!goal) {
@@ -12027,11 +12161,12 @@ function ownerTools2(options) {
         if (goal.ownerSessionID !== ownerID) {
           return { title: "Not authorized", output: JSON.stringify({ ok: false, outcome: "unauthorized", message: "This session cannot control that goal." }) };
         }
-        const result = await goalService.sendUserMessage(directory, goal.id, args.message);
+        const result = await goalService.sendUserMessage(target, goal.id, args.message);
         return {
           title: result.ok ? result.outcome === "queued" ? "Message queued" : "Message submitted" : "Send failed",
           output: JSON.stringify({
             ...result,
+            directory: target,
             goalID: goal.id,
             goalName: goal.name,
             message: result.message
@@ -12042,10 +12177,12 @@ function ownerTools2(options) {
     pause_goal: tool2({
       description: "Pause an active goal under its operation mutex. Protected writes are fenced before abort; ownership remains held until in-flight tools drain. Use to investigate or release file claims after quiescence.",
       args: {
-        goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to pause the first active goal.")
+        goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to pause the first active goal."),
+        directory: tool2.schema.string().optional().describe("Project directory override. Omit to use the instance directory.")
       },
       execute: async (args, context) => {
-        const state = await readState(directory);
+        const target = resolveTargetDir(directory, args.directory);
+        const state = await readState(target);
         const ownerID = context?.sessionID;
         const goal = args.goal_id ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID) : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete");
         if (!goal) {
@@ -12061,11 +12198,12 @@ function ownerTools2(options) {
           };
         }
         try {
-          await goalService.pause(directory, goal.id);
+          await goalService.pause(target, goal.id);
           return {
             title: "Goal paused",
             output: JSON.stringify({
               ok: true,
+              directory: target,
               goalID: goal.id,
               goalName: goal.name,
               message: `Goal "${goal.name}" paused. Resume with resume_goal.`
@@ -12086,10 +12224,12 @@ function ownerTools2(options) {
     resume_goal: tool2({
       description: "Resume a paused or retry a blocked goal. Atomically reacquires scope; overlapping ownership/in-flight writes deny activation. Explicit scoped workers rotate sessions to fence late tools; legacy workers retain their session. Per-goal mutex.",
       args: {
-        goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to resume the first paused/blocked goal.")
+        goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to resume the first paused/blocked goal."),
+        directory: tool2.schema.string().optional().describe("Project directory override. Omit to use the instance directory.")
       },
       execute: async (args, context) => {
-        const state = await readState(directory);
+        const target = resolveTargetDir(directory, args.directory);
+        const state = await readState(target);
         const ownerID = context?.sessionID;
         const goal = args.goal_id ? state.goals.find((g) => g.id === args.goal_id) : state.goals.find((g) => g.ownerSessionID === ownerID && (g.status === "paused" || g.status === "blocked"));
         if (!goal) {
@@ -12112,11 +12252,12 @@ function ownerTools2(options) {
           };
         }
         try {
-          const result = goal.status === "blocked" ? await goalService.retry(directory, goal.id) : await goalService.resume(directory, goal.id);
+          const result = goal.status === "blocked" ? await goalService.retry(target, goal.id) : await goalService.resume(target, goal.id);
           return {
             title: result.ok ? "Resume submitted" : "Resume not delivered",
             output: JSON.stringify({
               ...result,
+              directory: target,
               goalID: goal.id,
               goalName: goal.name
             })
@@ -12136,10 +12277,12 @@ function ownerTools2(options) {
     nudge_goal: tool2({
       description: "Request a recovery turn for an active goal after confirmed worker idle. Returns the actual delivery outcome or actionable blocker (in-flight writes, workspace operation, busy/unknown worker, pending identity, quota). Never interrupts a live worker or duplicates an unconfirmed prompt. Per-goal mutex.",
       args: {
-        goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to nudge the first active goal.")
+        goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to nudge the first active goal."),
+        directory: tool2.schema.string().optional().describe("Project directory override. Omit to use the instance directory.")
       },
       execute: async (args, context) => {
-        const state = await readState(directory);
+        const target = resolveTargetDir(directory, args.directory);
+        const state = await readState(target);
         const ownerID = context?.sessionID;
         const goal = args.goal_id ? state.goals.find((g) => g.id === args.goal_id) : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete");
         if (!goal) {
@@ -12152,10 +12295,10 @@ function ownerTools2(options) {
           return { title: "Not authorized", output: JSON.stringify({ ok: false, outcome: "unauthorized", message: "This session cannot control that goal." }) };
         }
         try {
-          const result = await goalService.nudge(directory, goal.id);
+          const result = await goalService.nudge(target, goal.id);
           return {
             title: result.ok ? "Goal nudged" : "Nudge failed",
-            output: JSON.stringify({ ...result, goalID: goal.id, goalName: goal.name })
+            output: JSON.stringify({ ...result, directory: target, goalID: goal.id, goalName: goal.name })
           };
         } catch (error) {
           return {
@@ -12172,10 +12315,12 @@ function ownerTools2(options) {
     abort_goal_worker: tool2({
       description: "Abort the worker session only (N / :abort in TUI). Keeps goal+transcript+session browsable, clears the run lease. Use for compaction-spin or stuck runs. Status unchanged; active goals resume next turn in the same session.",
       args: {
-        goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to abort the first active goal.")
+        goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to abort the first active goal."),
+        directory: tool2.schema.string().optional().describe("Project directory override. Omit to use the instance directory.")
       },
       execute: async (args, context) => {
-        const state = await readState(directory);
+        const target = resolveTargetDir(directory, args.directory);
+        const state = await readState(target);
         const ownerID = context?.sessionID;
         const goal = args.goal_id ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID) : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete");
         if (!goal) {
@@ -12185,10 +12330,10 @@ function ownerTools2(options) {
           };
         }
         try {
-          const result = await goalService.abortWorker(directory, goal.id);
+          const result = await goalService.abortWorker(target, goal.id);
           return {
             title: result.ok ? "Worker aborted" : "Abort failed",
-            output: JSON.stringify({ ...result, goalID: goal.id, goalName: goal.name })
+            output: JSON.stringify({ ...result, directory: target, goalID: goal.id, goalName: goal.name })
           };
         } catch (error) {
           return {
@@ -12207,10 +12352,12 @@ function ownerTools2(options) {
       args: {
         goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to target the first non-complete goal."),
         summary: tool2.schema.string().describe("What was completed."),
-        evidence: tool2.schema.string().describe("Concrete evidence of completion.")
+        evidence: tool2.schema.string().describe("Concrete evidence of completion."),
+        directory: tool2.schema.string().optional().describe("Project directory override. Omit to use the instance directory.")
       },
       execute: async (args, context) => {
-        const state = await readState(directory);
+        const target = resolveTargetDir(directory, args.directory);
+        const state = await readState(target);
         const ownerID = context?.sessionID;
         const goal = args.goal_id ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID) : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete");
         if (!goal) {
@@ -12222,7 +12369,7 @@ function ownerTools2(options) {
         await Promise.resolve().then(() => init_state_repository());
         await Promise.resolve();
         const { randomUUID } = await import("crypto");
-        const st = await readState(directory);
+        const st = await readState(target);
         const g = st.goals.find((x) => x.id === goal.id);
         if (!g)
           return { title: "No goal", output: JSON.stringify({ ok: false, message: "Goal not found." }) };
@@ -12239,8 +12386,8 @@ function ownerTools2(options) {
           rt.lastError = undefined;
           rt.updatedAt = new Date().toISOString();
         }
-        await writeState(directory, st);
-        await appendEvent(directory, {
+        await writeState(target, st);
+        await appendEvent(target, {
           version: 1,
           eventID: randomUUID(),
           goalID: goal.id,
@@ -12250,7 +12397,7 @@ function ownerTools2(options) {
           timestamp: new Date().toISOString(),
           revision: st.revision
         });
-        return { title: "Goal force-completed", output: JSON.stringify({ ok: true, goalID: goal.id, goalName: g.name }) };
+        return { title: "Goal force-completed", output: JSON.stringify({ ok: true, directory: target, goalID: goal.id, goalName: g.name }) };
       }
     }),
     force_block_goal: tool2({
@@ -12258,10 +12405,12 @@ function ownerTools2(options) {
       args: {
         goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to target the first non-complete goal."),
         reason: tool2.schema.string().describe("Why the goal is blocked."),
-        needed: tool2.schema.string().describe("What is needed to unblock.")
+        needed: tool2.schema.string().describe("What is needed to unblock."),
+        directory: tool2.schema.string().optional().describe("Project directory override. Omit to use the instance directory.")
       },
       execute: async (args, context) => {
-        const state = await readState(directory);
+        const target = resolveTargetDir(directory, args.directory);
+        const state = await readState(target);
         const ownerID = context?.sessionID;
         const goal = args.goal_id ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID) : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete");
         if (!goal) {
@@ -12273,7 +12422,7 @@ function ownerTools2(options) {
         await Promise.resolve().then(() => init_state_repository());
         await Promise.resolve();
         const { randomUUID } = await import("crypto");
-        const st = await readState(directory);
+        const st = await readState(target);
         const g = st.goals.find((x) => x.id === goal.id);
         if (!g)
           return { title: "No goal", output: JSON.stringify({ ok: false, message: "Goal not found." }) };
@@ -12290,8 +12439,8 @@ function ownerTools2(options) {
           rt.lastError = undefined;
           rt.updatedAt = new Date().toISOString();
         }
-        await writeState(directory, st);
-        await appendEvent(directory, {
+        await writeState(target, st);
+        await appendEvent(target, {
           version: 1,
           eventID: randomUUID(),
           goalID: goal.id,
@@ -12301,16 +12450,18 @@ function ownerTools2(options) {
           timestamp: new Date().toISOString(),
           revision: st.revision
         });
-        return { title: "Goal blocked", output: JSON.stringify({ ok: true, goalID: goal.id, goalName: g.name }) };
+        return { title: "Goal blocked", output: JSON.stringify({ ok: true, directory: target, goalID: goal.id, goalName: g.name }) };
       }
     }),
     clear_goal: tool2({
       description: "Clear a goal: aborts worker and removes goal+runtime+ledger (cannot be undone). Use when the goal is no longer needed or to free a stuck writer slot after inspection.",
       args: {
-        goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to clear the first active goal.")
+        goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to clear the first active goal."),
+        directory: tool2.schema.string().optional().describe("Project directory override. Omit to use the instance directory.")
       },
       execute: async (args, context) => {
-        const state = await readState(directory);
+        const target = resolveTargetDir(directory, args.directory);
+        const state = await readState(target);
         const ownerID = context?.sessionID;
         const goal = args.goal_id ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID) : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete");
         if (!goal) {
@@ -12320,11 +12471,12 @@ function ownerTools2(options) {
           };
         }
         try {
-          await goalService.clear(directory, goal.id);
+          await goalService.clear(target, goal.id);
           return {
             title: "Goal cleared",
             output: JSON.stringify({
               ok: true,
+              directory: target,
               goalID: goal.id,
               goalName: goal.name,
               message: `Goal "${goal.name}" cleared and removed.`
@@ -12347,7 +12499,8 @@ function ownerTools2(options) {
       args: {
         call_id: tool2.schema.string().optional().describe("Exact reservation to release, from the no-argument listing."),
         goal_id: tool2.schema.string().optional().describe("Release every reservation owned by this goal (only if you own it, or the goal no longer exists)."),
-        session_id: tool2.schema.string().optional().describe("Release reservations held by this execution session (only when releasable).")
+        session_id: tool2.schema.string().optional().describe("Release reservations held by this execution session (only when releasable)."),
+        directory: tool2.schema.string().optional().describe("Project directory override. Omit to use the instance directory.")
       },
       execute: async (args, context) => {
         const ownerID = context?.sessionID;
@@ -12357,20 +12510,22 @@ function ownerTools2(options) {
             output: JSON.stringify({ ok: false, message: "No session context available, so reservation ownership cannot be matched." })
           };
         }
+        const target = resolveTargetDir(directory, args.directory);
         const selecting = Boolean(args.call_id || args.goal_id || args.session_id);
         if (!selecting) {
-          const report = await goalService.workspaceReservations(directory, ownerID);
+          const report = await goalService.workspaceReservations(target, ownerID);
           return {
             title: `${report.reservations.length} reservation(s)`,
             output: JSON.stringify({
               ok: true,
               mode: "inspect",
+              directory: target,
               message: report.reservations.length ? "Re-call with call_id (or goal_id/session_id) to release a releasable entry." : "No live workspace reservations \u2014 nothing is fencing this project.",
               ...report
             })
           };
         }
-        const result = await goalService.releaseWorkspace(directory, ownerID, {
+        const result = await goalService.releaseWorkspace(target, ownerID, {
           callID: args.call_id,
           goalID: args.goal_id,
           sessionID: args.session_id

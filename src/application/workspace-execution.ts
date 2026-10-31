@@ -8,6 +8,7 @@ import type { LoopHost } from "../server/host-adapter"
 import type { TerminalToolExecution } from "../domain/tool-execution"
 import { logServerEvent } from "../infrastructure/server-log"
 import { canonicalScopePath, findScopeConflict, scopeConflictMessage } from "../infrastructure/workspace-scope"
+import { fireFenceAwaits } from "./command-await"
 
 const readTools = new Set([
   "read", "glob", "grep", "list", "webfetch", "websearch", "todowrite", "skill",
@@ -577,6 +578,9 @@ export async function afterWorkspaceTool(directory: string, sessionID: string, c
     })
     return state
   })
+  // A released call/ticket may have been the last fence holder: wake parked
+  // fence awaits (evidence-led, engine cadence picks workers up — no spin).
+  await fireFenceAwaits(directory).catch(() => {})
 }
 
 /**
@@ -779,9 +783,38 @@ export async function withWorkspaceOperation<T>(
     // Also block if any uncontrolled shell/command is live — its writes are unknown.
     // Legacy workspaceCalls with structured paths also fence checks until cleared.
     const holders = state.writeTickets?.holders ?? []
-    const hasUncontrolled = (state.workspaceCalls ?? []).some((c) => c.uncontrolled)
-    const hasLegacyWrite = (state.workspaceCalls ?? []).some((c) => (c.paths?.length ?? 0) > 0)
-    if (state.workspaceOperation || holders.length > 0 || hasUncontrolled || hasLegacyWrite) throw new Error("Workspace is busy with an operation or in-flight writes; verification denied until quiescent.")
+    const calls = state.workspaceCalls ?? []
+    const hasUncontrolled = calls.some((c) => c.uncontrolled)
+    const hasLegacyWrite = calls.some((c) => (c.paths?.length ?? 0) > 0)
+    if (state.workspaceOperation || holders.length > 0 || hasUncontrolled || hasLegacyWrite) {
+      // Fence honesty: name exactly what holds the lock so the denied caller
+      // (or its owner) can wait on, steer, or release the right thing instead
+      // of guessing. Ages derive from reservation timestamps; entries without
+      // one predate timestamping and report age unknown.
+      const ageOf = (at?: string) => {
+        if (!at) return "age unknown"
+        const ms = Date.now() - Date.parse(at)
+        if (!Number.isFinite(ms) || ms < 0) return "age unknown"
+        return `age ${Math.floor(ms / 1000)}s`
+      }
+      const parts: string[] = []
+      if (state.workspaceOperation) {
+        const op = state.workspaceOperation
+        const holder = op.goalID ? state.goals.find((g) => g.id === op.goalID) : undefined
+        parts.push(`operation ${op.id} by session ${op.sessionID}${holder ? ` for goal "${holder.name}"` : ""}`)
+      }
+      for (const h of holders) {
+        const holder = h.goalID ? state.goals.find((g) => g.id === h.goalID) : undefined
+        parts.push(`ticket ${h.ticketID ?? h.callID} by session ${h.sessionID}${holder ? ` for goal "${holder.name}"` : ""} on ${(h.files ?? []).join(", ") || "(no files)"}`)
+      }
+      for (const c of calls.filter((c) => c.uncontrolled)) {
+        parts.push(`uncontrolled call ${c.callID} by session ${c.sessionID} (${ageOf(c.at)}; wait for its exit event)`)
+      }
+      for (const c of calls.filter((c) => (c.paths?.length ?? 0) > 0)) {
+        parts.push(`legacy write call ${c.callID} by session ${c.sessionID} on ${c.paths.join(", ")} (${ageOf(c.at)})`)
+      }
+      throw new Error(`Workspace is busy — held by: ${parts.join("; ")}. Verification denied until quiescent; do not poll or retry checks (each attempt burns evaluator budget). Park with await_quiescence, report progress, and end the turn — the wake carries retry evidence. Or wait for the holder's exit event, or release it with loopd_release_workspace if it is yours, orphaned, or its goal is gone.`)
+    }
     state.workspaceOperation = { id, goalID, sessionID }
     return state
   })
@@ -799,5 +832,7 @@ export async function withWorkspaceOperation<T>(
       })
       return state
     })
+    // Operation end may have drained the last holder: wake parked fence awaits.
+    await fireFenceAwaits(directory).catch(() => {})
   }
 }

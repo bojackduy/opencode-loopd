@@ -22,6 +22,19 @@ Run loopd goals in OTHER projects from one manager session. Standing goals per p
 - Goal IDs are UUIDs — always display directory alongside goal.
 - Target dir needs its own `opencode.jsonc` (model, permissions). Manager cannot grant what target denies.
 - Standing goals: `scheduleEveryMs` without `scheduleMaxRuns` = infinite dev loop; `interactive:true` where human-gated.
+- Managed staff never self-complete into blocked on a foreign store: cross-dir
+  creation defaults `interactive:true` unless you pass `interactive:false`
+  explicitly. Every turn then comes from manager steering, so a transient
+  fence (foreign shell running, quiescence gate) parks instead of burning
+  turns into evaluator rejections and `blocked`.
+- Fenced workers park, never spin: a `Workspace is busy — held by: …` denial
+  names the exact holder (operation, ticket, uncontrolled call, legacy write
+  with session, goal, files, age). Call `await_quiescence`, report progress,
+  end the turn. Release paths (`afterWorkspaceTool`, operation end) fire
+  parked awaits with inbox evidence; the engine's idle continuation picks the
+  worker up. Owner-only tools (`force_*`, `loopd_release_workspace`, nudge,
+  send, pause/resume/clear) fail closed for worker sessions — never call them
+  from inside a goal.
 
 ## Why no manager engine trio
 

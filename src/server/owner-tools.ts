@@ -10,7 +10,7 @@ import type { GoalService } from "../application/goal-service"
 import { goalStatusLabel, phaseLabel, describeGoalState } from "../domain/status-labels"
 import { promises as fs } from "fs"
 import path from "path"
-import { listManagedDirs } from "../infrastructure/managed-dirs"
+import { resolveManagedDirs } from "../infrastructure/managed-dirs"
 
 export interface OwnerToolsOptions {
   directory: string
@@ -166,7 +166,7 @@ export function ownerTools(options: OwnerToolsOptions) {
 
     loopd_status_all: tool({
       description:
-        "List owned active goals across all managed directories (.opencode/loopd/managed.json plus instance directory). Each entry includes its directory.",
+        "List owned active goals across all managed directories (instance directory + registry .opencode/loopd/managed.json + LOOPD_MANAGED_DIRS env — same unified resolver as the TUI :projects view). Each entry includes its directory.",
       args: {},
       execute: async (_args, context) => {
         const ownerID = context?.sessionID
@@ -176,7 +176,7 @@ export function ownerTools(options: OwnerToolsOptions) {
             output: JSON.stringify({ ok: false, message: "No session context available." }),
           }
         }
-        const dirs = await listManagedDirs(directory).catch(() => [directory])
+        const dirs = await resolveManagedDirs(directory).catch(() => [directory])
         const goals: Array<Record<string, unknown>> = []
         for (const dir of dirs) {
           let state
@@ -384,9 +384,11 @@ export function ownerTools(options: OwnerToolsOptions) {
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to read the first active goal."),
         limit: tool.schema.number().optional().describe("Max messages to return (default: 20)."),
+        directory: tool.schema.string().optional().describe("Project directory override. Omit to use the instance directory."),
       },
       execute: async (args, context) => {
-        const state = await readState(directory)
+        const target = resolveTargetDir(directory, args.directory)
+        const state = await readState(target)
         const ownerID = context?.sessionID
         const goal = args.goal_id
           ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID)
@@ -411,6 +413,7 @@ export function ownerTools(options: OwnerToolsOptions) {
             title: `Transcript: ${goal.name}`,
             output: JSON.stringify({
               ok: true,
+              directory: target,
               goalID: goal.id,
               workerSessionID: goal.workerSessionID,
               messages: messages.map((m) => ({
@@ -439,9 +442,11 @@ export function ownerTools(options: OwnerToolsOptions) {
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to target the first active goal."),
         message: tool.schema.string().describe("Message to send to the worker."),
+        directory: tool.schema.string().optional().describe("Project directory override. Omit to use the instance directory."),
       },
       execute: async (args, context) => {
-        const state = await readState(directory)
+        const target = resolveTargetDir(directory, args.directory)
+        const state = await readState(target)
         const ownerID = context?.sessionID
         const goal = args.goal_id
           ? state.goals.find((g) => g.id === args.goal_id)
@@ -457,12 +462,13 @@ export function ownerTools(options: OwnerToolsOptions) {
         if (goal.ownerSessionID !== ownerID) {
           return { title: "Not authorized", output: JSON.stringify({ ok: false, outcome: "unauthorized", message: "This session cannot control that goal." }) }
         }
-        const result = await goalService.sendUserMessage(directory, goal.id, args.message)
+        const result = await goalService.sendUserMessage(target, goal.id, args.message)
 
         return {
           title: result.ok ? result.outcome === "queued" ? "Message queued" : "Message submitted" : "Send failed",
           output: JSON.stringify({
             ...result,
+            directory: target,
             goalID: goal.id,
             goalName: goal.name,
             message: result.message,
@@ -476,9 +482,11 @@ export function ownerTools(options: OwnerToolsOptions) {
         "Pause an active goal under its operation mutex. Protected writes are fenced before abort; ownership remains held until in-flight tools drain. Use to investigate or release file claims after quiescence.",
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to pause the first active goal."),
+        directory: tool.schema.string().optional().describe("Project directory override. Omit to use the instance directory."),
       },
       execute: async (args, context) => {
-        const state = await readState(directory)
+        const target = resolveTargetDir(directory, args.directory)
+        const state = await readState(target)
         const ownerID = context?.sessionID
         const goal = args.goal_id
           ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID)
@@ -499,11 +507,12 @@ export function ownerTools(options: OwnerToolsOptions) {
         }
 
         try {
-          await goalService.pause(directory, goal.id)
+          await goalService.pause(target, goal.id)
           return {
             title: "Goal paused",
             output: JSON.stringify({
               ok: true,
+              directory: target,
               goalID: goal.id,
               goalName: goal.name,
               message: `Goal "${goal.name}" paused. Resume with resume_goal.`,
@@ -527,9 +536,11 @@ export function ownerTools(options: OwnerToolsOptions) {
         "Resume a paused or retry a blocked goal. Atomically reacquires scope; overlapping ownership/in-flight writes deny activation. Explicit scoped workers rotate sessions to fence late tools; legacy workers retain their session. Per-goal mutex.",
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to resume the first paused/blocked goal."),
+        directory: tool.schema.string().optional().describe("Project directory override. Omit to use the instance directory."),
       },
       execute: async (args, context) => {
-        const state = await readState(directory)
+        const target = resolveTargetDir(directory, args.directory)
+        const state = await readState(target)
         const ownerID = context?.sessionID
         const goal = args.goal_id
           ? state.goals.find((g) => g.id === args.goal_id)
@@ -563,12 +574,13 @@ export function ownerTools(options: OwnerToolsOptions) {
 
         try {
           const result = goal.status === "blocked"
-            ? await goalService.retry(directory, goal.id)
-            : await goalService.resume(directory, goal.id)
+            ? await goalService.retry(target, goal.id)
+            : await goalService.resume(target, goal.id)
           return {
             title: result.ok ? "Resume submitted" : "Resume not delivered",
             output: JSON.stringify({
               ...result,
+              directory: target,
               goalID: goal.id,
               goalName: goal.name,
             }),
@@ -591,9 +603,11 @@ export function ownerTools(options: OwnerToolsOptions) {
         "Request a recovery turn for an active goal after confirmed worker idle. Returns the actual delivery outcome or actionable blocker (in-flight writes, workspace operation, busy/unknown worker, pending identity, quota). Never interrupts a live worker or duplicates an unconfirmed prompt. Per-goal mutex.",
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to nudge the first active goal."),
+        directory: tool.schema.string().optional().describe("Project directory override. Omit to use the instance directory."),
       },
       execute: async (args, context) => {
-        const state = await readState(directory)
+        const target = resolveTargetDir(directory, args.directory)
+        const state = await readState(target)
         const ownerID = context?.sessionID
         const goal = args.goal_id
           ? state.goals.find((g) => g.id === args.goal_id)
@@ -610,10 +624,10 @@ export function ownerTools(options: OwnerToolsOptions) {
           return { title: "Not authorized", output: JSON.stringify({ ok: false, outcome: "unauthorized", message: "This session cannot control that goal." }) }
         }
         try {
-          const result = await goalService.nudge(directory, goal.id)
+          const result = await goalService.nudge(target, goal.id)
           return {
             title: result.ok ? "Goal nudged" : "Nudge failed",
-            output: JSON.stringify({ ...result, goalID: goal.id, goalName: goal.name }),
+            output: JSON.stringify({ ...result, directory: target, goalID: goal.id, goalName: goal.name }),
           }
         } catch (error) {
           return {
@@ -633,9 +647,11 @@ export function ownerTools(options: OwnerToolsOptions) {
         "Abort the worker session only (N / :abort in TUI). Keeps goal+transcript+session browsable, clears the run lease. Use for compaction-spin or stuck runs. Status unchanged; active goals resume next turn in the same session.",
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to abort the first active goal."),
+        directory: tool.schema.string().optional().describe("Project directory override. Omit to use the instance directory."),
       },
       execute: async (args, context) => {
-        const state = await readState(directory)
+        const target = resolveTargetDir(directory, args.directory)
+        const state = await readState(target)
         const ownerID = context?.sessionID
         const goal = args.goal_id
           ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID)
@@ -649,10 +665,10 @@ export function ownerTools(options: OwnerToolsOptions) {
         }
 
         try {
-          const result = await goalService.abortWorker(directory, goal.id)
+          const result = await goalService.abortWorker(target, goal.id)
           return {
             title: result.ok ? "Worker aborted" : "Abort failed",
-            output: JSON.stringify({ ...result, goalID: goal.id, goalName: goal.name }),
+            output: JSON.stringify({ ...result, directory: target, goalID: goal.id, goalName: goal.name }),
           }
         } catch (error) {
           return {
@@ -674,9 +690,11 @@ export function ownerTools(options: OwnerToolsOptions) {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to target the first non-complete goal."),
         summary: tool.schema.string().describe("What was completed."),
         evidence: tool.schema.string().describe("Concrete evidence of completion."),
+        directory: tool.schema.string().optional().describe("Project directory override. Omit to use the instance directory."),
       },
       execute: async (args, context) => {
-        const state = await readState(directory)
+        const target = resolveTargetDir(directory, args.directory)
+        const state = await readState(target)
         const ownerID = context?.sessionID
         const goal = args.goal_id
           ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID)
@@ -694,7 +712,7 @@ export function ownerTools(options: OwnerToolsOptions) {
         const { readState: rs, writeState: ws, appendEvent: ae } = await import("../infrastructure/state-repository")
         const { releaseLease } = await import("../domain/runtime")
         const { randomUUID } = await import("crypto")
-        const st = await rs(directory)
+        const st = await rs(target)
         const g = st.goals.find((x) => x.id === goal.id)
         if (!g) return { title: "No goal", output: JSON.stringify({ ok: false, message: "Goal not found." }) }
         if (g.status === "complete") {
@@ -710,8 +728,8 @@ export function ownerTools(options: OwnerToolsOptions) {
           rt.lastError = undefined
           rt.updatedAt = new Date().toISOString()
         }
-        await ws(directory, st)
-        await ae(directory, {
+        await ws(target, st)
+        await ae(target, {
           version: 1,
           eventID: randomUUID(),
           goalID: goal.id as any,
@@ -721,7 +739,7 @@ export function ownerTools(options: OwnerToolsOptions) {
           timestamp: new Date().toISOString(),
           revision: st.revision,
         })
-        return { title: "Goal force-completed", output: JSON.stringify({ ok: true, goalID: goal.id, goalName: g.name }) }
+        return { title: "Goal force-completed", output: JSON.stringify({ ok: true, directory: target, goalID: goal.id, goalName: g.name }) }
       },
     }),
 
@@ -732,9 +750,11 @@ export function ownerTools(options: OwnerToolsOptions) {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to target the first non-complete goal."),
         reason: tool.schema.string().describe("Why the goal is blocked."),
         needed: tool.schema.string().describe("What is needed to unblock."),
+        directory: tool.schema.string().optional().describe("Project directory override. Omit to use the instance directory."),
       },
       execute: async (args, context) => {
-        const state = await readState(directory)
+        const target = resolveTargetDir(directory, args.directory)
+        const state = await readState(target)
         const ownerID = context?.sessionID
         const goal = args.goal_id
           ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID)
@@ -750,7 +770,7 @@ export function ownerTools(options: OwnerToolsOptions) {
         const { readState: rs, writeState: ws, appendEvent: ae } = await import("../infrastructure/state-repository")
         const { releaseLease } = await import("../domain/runtime")
         const { randomUUID } = await import("crypto")
-        const st = await rs(directory)
+        const st = await rs(target)
         const g = st.goals.find((x) => x.id === goal.id)
         if (!g) return { title: "No goal", output: JSON.stringify({ ok: false, message: "Goal not found." }) }
         if (g.status === "blocked") {
@@ -766,8 +786,8 @@ export function ownerTools(options: OwnerToolsOptions) {
           rt.lastError = undefined
           rt.updatedAt = new Date().toISOString()
         }
-        await ws(directory, st)
-        await ae(directory, {
+        await ws(target, st)
+        await ae(target, {
           version: 1,
           eventID: randomUUID(),
           goalID: goal.id as any,
@@ -777,7 +797,7 @@ export function ownerTools(options: OwnerToolsOptions) {
           timestamp: new Date().toISOString(),
           revision: st.revision,
         })
-        return { title: "Goal blocked", output: JSON.stringify({ ok: true, goalID: goal.id, goalName: g.name }) }
+        return { title: "Goal blocked", output: JSON.stringify({ ok: true, directory: target, goalID: goal.id, goalName: g.name }) }
       },
     }),
 
@@ -786,9 +806,11 @@ export function ownerTools(options: OwnerToolsOptions) {
         "Clear a goal: aborts worker and removes goal+runtime+ledger (cannot be undone). Use when the goal is no longer needed or to free a stuck writer slot after inspection.",
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to clear the first active goal."),
+        directory: tool.schema.string().optional().describe("Project directory override. Omit to use the instance directory."),
       },
       execute: async (args, context) => {
-        const state = await readState(directory)
+        const target = resolveTargetDir(directory, args.directory)
+        const state = await readState(target)
         const ownerID = context?.sessionID
         const goal = args.goal_id
           ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID)
@@ -802,11 +824,12 @@ export function ownerTools(options: OwnerToolsOptions) {
         }
 
         try {
-          await goalService.clear(directory, goal.id)
+          await goalService.clear(target, goal.id)
           return {
             title: "Goal cleared",
             output: JSON.stringify({
               ok: true,
+              directory: target,
               goalID: goal.id,
               goalName: goal.name,
               message: `Goal "${goal.name}" cleared and removed.`,
@@ -832,6 +855,7 @@ export function ownerTools(options: OwnerToolsOptions) {
         call_id: tool.schema.string().optional().describe("Exact reservation to release, from the no-argument listing."),
         goal_id: tool.schema.string().optional().describe("Release every reservation owned by this goal (only if you own it, or the goal no longer exists)."),
         session_id: tool.schema.string().optional().describe("Release reservations held by this execution session (only when releasable)."),
+        directory: tool.schema.string().optional().describe("Project directory override. Omit to use the instance directory."),
       },
       execute: async (args, context) => {
         const ownerID = context?.sessionID
@@ -841,14 +865,16 @@ export function ownerTools(options: OwnerToolsOptions) {
             output: JSON.stringify({ ok: false, message: "No session context available, so reservation ownership cannot be matched." }),
           }
         }
+        const target = resolveTargetDir(directory, args.directory)
         const selecting = Boolean(args.call_id || args.goal_id || args.session_id)
         if (!selecting) {
-          const report = await goalService.workspaceReservations(directory, ownerID)
+          const report = await goalService.workspaceReservations(target, ownerID)
           return {
             title: `${report.reservations.length} reservation(s)`,
             output: JSON.stringify({
               ok: true,
               mode: "inspect",
+              directory: target,
               message: report.reservations.length
                 ? "Re-call with call_id (or goal_id/session_id) to release a releasable entry."
                 : "No live workspace reservations — nothing is fencing this project.",
@@ -856,7 +882,7 @@ export function ownerTools(options: OwnerToolsOptions) {
             }),
           }
         }
-        const result = await goalService.releaseWorkspace(directory, ownerID, {
+        const result = await goalService.releaseWorkspace(target, ownerID, {
           callID: args.call_id,
           goalID: args.goal_id,
           sessionID: args.session_id,
