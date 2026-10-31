@@ -339,3 +339,51 @@ it("nudge still refuses an unconfirmed prompt while the lease is valid", async (
   expect(result.message).toContain("delivery is unconfirmed")
   expect(host.promptCalls).toHaveLength(1)
 })
+
+it("nudge overrides a stale undelivered inbox on an idle worker with an expired lease", async () => {
+  const goal = await start()
+  const quietAgo = new Date(Date.now() - 20 * 60_000).toISOString()
+  // Stale inbox receipt, expired lease, idle worker: delivery bookkeeping
+  // will never confirm it. The fresh turn carries the pending inbox, which
+  // is how delivery happens — refusing would stall the goal forever.
+  await mutateState(dir, "stale-inbox", async (s) => {
+    const rt = s.runtimes[0]
+    rt.lastActivityAt = quietAgo
+    rt.activePromptAcceptedAt = quietAgo
+    rt.leaseExpiresAt = new Date(Date.now() - 60_000).toISOString()
+    rt.nativeInboxMessageIDs = ["msg_pending"]
+    return s
+  })
+  const original = (await readState(dir)).runtimes[0].activePromptMessageID!
+  // The accepted prompt itself is delivered; only the inbox item is stale.
+  snapshot = { status: "idle", idleAt: new Date().toISOString(), latestUserMessageID: original, deliveredMessageIDs: [original] }
+  host.sessionStatus = async () => "idle"
+  const result = await goals.nudge(dir, goal.id)
+  expect(result.ok).toBe(true)
+  // A fresh turn went out instead of a refusal.
+  expect(host.promptCalls).toHaveLength(2)
+  const rt = (await readState(dir)).runtimes[0]
+  expect(rt.activePromptMessageID).toBeDefined()
+  expect(rt.activePromptMessageID).not.toBe(original)
+})
+
+it("nudge still refuses a stale undelivered inbox while the lease is valid", async () => {
+  const goal = await start()
+  const quietAgo = new Date(Date.now() - 20 * 60_000).toISOString()
+  await mutateState(dir, "fresh-lease-inbox", async (s) => {
+    const rt = s.runtimes[0]
+    rt.lastActivityAt = quietAgo
+    rt.activePromptAcceptedAt = quietAgo
+    rt.leaseExpiresAt = new Date(Date.now() + 60_000).toISOString()
+    rt.nativeInboxMessageIDs = ["msg_pending"]
+    return s
+  })
+  const original = (await readState(dir)).runtimes[0].activePromptMessageID!
+  snapshot = { status: "idle", idleAt: new Date().toISOString(), latestUserMessageID: original, deliveredMessageIDs: [original] }
+  host.sessionStatus = async () => "idle"
+  const result = await goals.nudge(dir, goal.id)
+  expect(result).toMatchObject({ ok: false, outcome: "blocked" })
+  expect(result.message).toContain("awaiting delivery")
+  expect(host.promptCalls).toHaveLength(1)
+  expect((await readState(dir)).runtimes[0].nativeInboxMessageIDs).toEqual(["msg_pending"])
+})
