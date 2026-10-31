@@ -884,7 +884,7 @@ export function createGoalService(host: LoopHost): GoalService {
       return session
     }
 
-    session = await workers.createWorker(goal)
+    session = await workers.createWorker(goal, directory)
     let linked = false
     let failure: GoalActionResult | undefined
     await mutateState(directory, `goal.set-worker:${goal.id}`, async (s) => {
@@ -1024,7 +1024,7 @@ export function createGoalService(host: LoopHost): GoalService {
     // Create worker session (external I/O — not under lock)
     let worker: WorkerSession
     try {
-      worker = await workers.createWorker(goal)
+      worker = await workers.createWorker(goal, directory)
     } catch (error) {
       const detail = describeError(error)
       // Persist blocked state atomically
@@ -1936,7 +1936,7 @@ export function createGoalService(host: LoopHost): GoalService {
       if (!goal.workerSessionID) {
         let worker: WorkerSession | undefined
         try {
-          worker = await workers.createWorker(goal)
+          worker = await workers.createWorker(goal, directory)
           sessions.set(goal.id, worker)
         } catch (error) {
           const detail = describeError(error)

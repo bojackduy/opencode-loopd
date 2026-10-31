@@ -118,8 +118,12 @@ export interface LoopHost {
    * Create a worker session. Returns the session ID (v1 + legacy callers) or
    * a WorkerCreation carrying the ID plus v2 topology metadata. v1 and fake
    * hosts return the bare string; only the v2 host returns the object form.
+   * `directory` pins the project the worker session lives in. Omit it to keep
+   * the parent's project (fork semantics). Cross-directory creation must skip
+   * the native fork (a fork cannot leave the parent's project) and use a
+   * root session in the target directory instead.
    */
-  createWorker(input: { parentID: string; title: string; agent?: string; model?: ModelRef; goalID?: string }): Promise<string | WorkerCreation>
+  createWorker(input: { parentID: string; title: string; agent?: string; model?: ModelRef; goalID?: string; directory?: string }): Promise<string | WorkerCreation>
   promptWorker(input: {
     sessionID: string
     prompt: string
@@ -206,7 +210,7 @@ export function createRealHost(client: any, directory: string): LoopHost {
       // takes effect via promptAsync's supported explicit model argument.
       return "next-prompt"
     },
-    async createWorker({ parentID, title, agent, model }) {
+    async createWorker({ parentID, title, agent, model, directory: targetDirectory }) {
       try {
         const body: any = { parentID, title }
         if (agent) body.agent = agent
@@ -215,8 +219,11 @@ export function createRealHost(client: any, directory: string): LoopHost {
         // (probed live on 1.18.29), so map it. Per-prompt model below stays
         // in prompt_async shape.
         if (model) body.model = { id: model.modelID, providerID: model.providerID }
+        // Cross-directory workers live in the target project, not the
+        // parent's. Omit query when unset so legacy calls are byte-identical.
+        const query = targetDirectory ? { directory: targetDirectory } : undefined
         const result = await withTimeout<any>(
-          client.session.create({ body }),
+          client.session.create({ body, ...(query ? { query } : {}) }),
           10_000,
           "OpenCode session.create",
         )
@@ -601,12 +608,17 @@ export function createV2Host(
       await withTimeout(context.session.switchModel({ sessionID, model: { id: model.modelID, providerID: model.providerID } }), 10_000, "OpenCode v2 session.switchModel")
       return "applied"
     },
-    async createWorker({ parentID, title, agent, model, goalID }) {
+    async createWorker({ parentID, title, agent, model, goalID, directory: requestedDirectory }) {
       // Native path: ask exactly one attached TUI to fork a real child of
       // the parent session. Unclaimed / pre-creation-failed requests fall
       // through to the flagged root fallback below. Claimed-timeout and
       // post-creation failures propagate (fail startup, never duplicate).
-      if (options.native) {
+      // A fork cannot leave the parent's project, so a cross-directory
+      // request skips the native bridge and goes straight to a root session
+      // in the target directory.
+      const crossDirectory = requestedDirectory !== undefined && requestedDirectory !== directory
+      const targetDirectory = requestedDirectory ?? directory
+      if (options.native && !crossDirectory) {
         let outcome: BridgeOutcome
         try {
           outcome = await options.native.requestWorker({
@@ -675,6 +687,14 @@ export function createV2Host(
           reason: outcome.kind === "fallback-safe" ? outcome.reason : "unclaimed",
         })
       }
+      if (crossDirectory) {
+        await logServerEvent(directory, "worker.create.native-skipped", {
+          parentID,
+          title,
+          targetDirectory,
+          reason: "native fork cannot leave the parent project; using a root session in the target directory",
+        })
+      }
       // LIVE PROBE 2026-09-25 (host 0.0.0-beta-19271): session.create
       // rejects explicit undefined for agent ("Expected string | null").
       // Omit unset optionals instead of passing them through.
@@ -683,7 +703,7 @@ export function createV2Host(
         title,
         ...(agent !== undefined ? { agent } : {}),
         ...(model !== undefined ? { model: { id: model.modelID, providerID: model.providerID } } : {}),
-        location: { directory },
+        location: { directory: targetDirectory },
         metadata: { "loopd.parentID": parentID },
       }), 10_000, "OpenCode v2 session.create")
       statuses.set(session.id, "idle")
@@ -888,6 +908,8 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
   messages: Map<string, SessionMessage[]>
   prompts: string[]
   promptCalls: Array<{ sessionID: string; agent?: string; model?: ModelRef }>
+  /** Every createWorker call in order, with the requested project directory (if any). */
+  workerCreations: Array<{ sessionID: string; parentID: string; directory?: string }>
 } {
   const sessions = new Map<string, string[]>()
   const messages = new Map<string, SessionMessage[]>()
@@ -898,6 +920,7 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
   const everCreated = new Set<string>()
   const prompts: string[] = []
   const promptCalls: Array<{ sessionID: string; agent?: string; model?: ModelRef }> = []
+  const workerCreations: Array<{ sessionID: string; parentID: string; directory?: string }> = []
   const recentNotifies = new Map<string, number>()
 
   return {
@@ -906,12 +929,14 @@ export function createFakeHost(options: FakeHostOptions = {}): LoopHost & {
     messages,
     prompts,
     promptCalls,
-    async createWorker({ parentID, title, agent }) {
+    workerCreations,
+    async createWorker({ parentID, title, agent, directory }) {
       const id = `worker-${crypto.randomUUID().slice(0, 8)}`
       sessions.set(id, [])
       messages.set(id, [])
       everCreated.add(id)
       if (agent) (sessions as any).agents = { ...((sessions as any).agents || {}), [id]: agent }
+      workerCreations.push({ sessionID: id, parentID, ...(directory !== undefined ? { directory } : {}) })
       return id
     },
     async readSession(_sessionID) {

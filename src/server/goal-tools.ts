@@ -14,6 +14,8 @@ import type { VerificationAttempt } from "../domain/verification"
 import { appendVerificationAttempt } from "../domain/verification"
 import { exec as execChild } from "child_process"
 import { promisify } from "util"
+import { promises as fs } from "fs"
+import path from "path"
 import type { GoalService } from "../application/goal-service"
 import { GoalStartError } from "../application/goal-service"
 import type { LoopHost } from "./host-adapter"
@@ -52,7 +54,8 @@ export function goalTools(
         (goalService.scopedExecution
           ? "CURRENT HOST: enforced file scopes supported. Prefer exact disjoint write_scope files for parallel editing; named files are inferred when write_scope is omitted. Use [] to explore then claim_goal_scope. Scoped workers use structured edits and run_goal_checks, not arbitrary shell. "
           : "CURRENT HOST: enforced file scopes UNSUPPORTED. Do not supply write_scope, including []; ordinary exclusive goals still work. Do not tell legacy workers to call claim_goal_scope. If enforced parallelism was explicitly required, explain the limitation rather than silently downgrade. ") +
-        "Monitor with the /loop dashboard's Goals tab (Tab/h to switch there if Commands is focused).",
+        "Monitor with the /loop dashboard's Goals tab (Tab/h to switch there if Commands is focused). " +
+        "Pass directory (absolute path of an existing project) to create the goal in another project: state, artifacts, checks, and the worker session live there, driven by that project's plugin instance once it exists.",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
@@ -81,6 +84,7 @@ export function goalTools(
         scheduleEveryMs: tool.schema.number().optional().describe("Interval in ms to auto-requeue the same goal after each completion. Minimum 1000. Enables repetitive dialogue reduction."),
         scheduleMaxRuns: tool.schema.number().optional().describe("Maximum total runs including the initial run. Undefined = unlimited. Requires scheduleEveryMs."),
         interactive: tool.schema.boolean().optional().describe("Manual mode: the engine never starts turns on its own (no idle recovery, no retries). Every turn comes from explicit steering (:send, nudge, resume, retry). Use for interactive tasks where the worker stops and waits for the next input — the tick forcing a turn there wastes tokens and breaks the wait. Toggleable later via the dashboard :interactive command."),
+        directory: tool.schema.string().optional().describe("Project directory this goal lives in (absolute path, must exist). Defaults to the current project. Cross-directory goals keep state, artifacts, checks, and their worker session in the target project; the target project's plugin instance drives them once they exist there."),
       },
       execute: async (args, context) => {
         const sessionID = context?.sessionID || hostSessionID
@@ -144,8 +148,51 @@ export function goalTools(
           costBudget = args.costBudget
         }
 
+        // Resolve the project this goal lives in. Defaults to the calling
+        // session's project. A foreign directory must be absolute, exist, and
+        // be a directory; it is canonicalized so state, artifacts, and the
+        // worker session all agree on one spelling.
+        let goalDir = dir
+        if (args.directory !== undefined) {
+          if (typeof args.directory !== "string" || !path.isAbsolute(args.directory)) {
+            return {
+              title: "Goal not created",
+              output: JSON.stringify({
+                ok: false,
+                message: `directory must be an absolute project path, got ${JSON.stringify(args.directory)}. Omit it to create the goal in the current project.`,
+                errorCode: "invalid_directory",
+              }),
+            }
+          }
+          try {
+            const stat = await fs.stat(args.directory)
+            if (!stat.isDirectory()) {
+              return {
+                title: "Goal not created",
+                output: JSON.stringify({
+                  ok: false,
+                  message: `directory is not a directory: ${args.directory}. Pass the absolute path of an existing project directory.`,
+                  errorCode: "invalid_directory",
+                }),
+              }
+            }
+            goalDir = await fs.realpath(args.directory)
+          } catch (error) {
+            // A directory that vanishes between stat and realpath is gone.
+            if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error
+            return {
+              title: "Goal not created",
+              output: JSON.stringify({
+                ok: false,
+                message: `directory does not exist: ${args.directory}. Pass the absolute path of an existing project directory.`,
+                errorCode: "invalid_directory",
+              }),
+            }
+          }
+        }
+
         const resolution = resolveGoalCreationConfig({
-          directory: dir,
+          directory: goalDir,
           objective: args.objective,
           config,
           defaults: await withParentIdentity(defaults, host, sessionID),
@@ -163,7 +210,7 @@ export function goalTools(
 
         try {
           const parentDefaults = await withParentIdentity(defaults, host, sessionID)
-          const { goal, worker } = await goalService.start(dir, {
+          const { goal, worker } = await goalService.start(goalDir, {
             name: args.name,
             objective: args.objective,
             ownerSessionID: sessionID,
@@ -193,6 +240,7 @@ export function goalTools(
               enforcedScopedExecution: goalService.scopedExecution,
               defaultsApplied: resolution.defaultsApplied,
               name: args.name,
+              directory: goalDir,
               message: `Goal "${args.name}" created and started in the background. Artifacts: ${goal.config.artifactDir}. Monitor with /loop (<leader>o).`,
             }),
           }
@@ -207,6 +255,7 @@ export function goalTools(
               ok: false,
               name: args.name,
               message: error instanceof Error ? error.message : String(error),
+              directory: goalDir,
               ...(startFailure ? {
                 goalID: startFailure.goalID,
                 status: "blocked",

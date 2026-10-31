@@ -63,8 +63,32 @@ watches and steers across projects.
 
 ## Status
 - [x] Investigation (this file)
-- [ ] P1: cross-dir create path + live two-directory test
+- [x] P1: cross-dir create path + tests (worker session pinned via
+      `session.create query.directory` (v1) / root fallback `location`
+      (v2, native fork skipped — a fork cannot leave the parent's project).
+      Tool arg `directory` validated (absolute, exists, is-dir,
+      realpath-canonicalized); state/artifacts/checks/scope keyed off it.
+      Engine needs no changes: per-directory plugin instances drive their
+      own goals once they exist; turn 1 is prompted directly by start().
+      Verified: typecheck + goal-tools/workspace-execution suites green.
+      LIVE two-server run (owner in A, worker lands in B, writes + checks
+      pass) still needs a host with two projects — owner runbook below.)
 - [ ] P2: engine-per-managed-dir
 - [ ] P3: multi-dir owner tools + aggregated list
 - [ ] P4: multi-project TUI view
 - [ ] P5: management-mode conventions doc
+
+### P1 live-verification runbook (owner: run with real sessions)
+1. Terminal A: `cd /tmp/proj-a && opencode` (opencode-loopd plugin loaded).
+2. Terminal B: `cd /tmp/proj-b && opencode` (loads plugin instance for B;
+   create `src/` subdir if you want scope inference to pick files).
+3. In A, run tool: `loopd_create_goal({ name: "xdir-probe",
+   objective: "write the single line XDIR-OK into probe.txt",
+   write_scope: ["probe.txt"], checks: ["grep -q XDIR-OK probe.txt"],
+   directory: "/tmp/proj-b" })`.
+4. Expect: ok:true, `directory` echoes B; worker session directory == B
+   (`loopd_command_get` or session info shows B as cwd).
+5. Worker writes `/tmp/proj-b/probe.txt`, checks pass from B's root,
+   `complete_goal` accepted. No `invalid_directory`, no scope-denied.
+6. Negative probes: `directory: "relative/path"`, a missing path, and a
+   file path → each rejected with `invalid_directory`, nothing persisted.

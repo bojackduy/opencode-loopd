@@ -395,6 +395,113 @@ describe("Goal Tools", () => {
       expect(state.goals[0].workerSessionID).toBeTruthy()
     })
   })
+
+  describe("cross-directory goal creation", () => {
+    async function otherProject(): Promise<{ dir: string; target: string }> {
+      const dir = tmpDir()
+      await fs.mkdir(dir, { recursive: true })
+      // Canonicalize (/tmp -> /private/tmp on macOS) to match the tool.
+      return { dir, target: await fs.realpath(dir) }
+    }
+
+    it("rejects a relative directory", async () => {
+      const tools = goalTools(dir, goalService, "owner-1")
+      const created = JSON.parse((await tools.loopd_create_goal.execute({ name: "x", objective: "test", workspaceWrite: false, directory: "relative/path" }, { sessionID: "owner-1" })).output)
+      expect(created.ok).toBe(false)
+      expect(created.errorCode).toBe("invalid_directory")
+      expect((await readState(dir)).goals).toHaveLength(0)
+    })
+
+    it("rejects a nonexistent directory", async () => {
+      const tools = goalTools(dir, goalService, "owner-1")
+      const missing = path.join(dir, "does-not-exist")
+      const created = JSON.parse((await tools.loopd_create_goal.execute({ name: "x", objective: "test", workspaceWrite: false, directory: missing }, { sessionID: "owner-1" })).output)
+      expect(created.ok).toBe(false)
+      expect(created.errorCode).toBe("invalid_directory")
+      expect((await readState(dir)).goals).toHaveLength(0)
+    })
+
+    it("rejects a file that is not a directory", async () => {
+      const file = path.join(dir, "note.txt")
+      await fs.writeFile(file, "x")
+      const tools = goalTools(dir, goalService, "owner-1")
+      const created = JSON.parse((await tools.loopd_create_goal.execute({ name: "x", objective: "test", workspaceWrite: false, directory: path.join(dir, "note.txt") }, { sessionID: "owner-1" })).output)
+      expect(created.ok).toBe(false)
+      expect(created.errorCode).toBe("invalid_directory")
+      expect((await readState(dir)).goals).toHaveLength(0)
+    })
+
+    it("creates state, artifacts, and the worker in the target project, not the caller's", async () => {
+      const other = await otherProject()
+      try {
+        const tools = goalTools(dir, goalService, "owner-1")
+        const created = JSON.parse((await tools.loopd_create_goal.execute({
+          name: "scoped",
+          objective: "test",
+          write_scope: ["src/a.ts"],
+          checks: ["true"],
+          directory: other.dir,
+        }, { sessionID: "owner-1" })).output)
+        expect(created.ok).toBe(true)
+        expect(created.directory).toBe(other.target)
+        // Caller's own store is untouched.
+        expect((await readState(dir)).goals).toHaveLength(0)
+        // Target store owns goal, runtime, and artifacts.
+        const state = await readState(other.target)
+        expect(state.goals).toHaveLength(1)
+        expect(state.goals[0].name).toBe("scoped")
+        expect(state.goals[0].workerSessionID).toBeTruthy()
+        expect(state.goals[0].config.artifactDir!.startsWith(other.target)).toBe(true)
+        // Worker creation carried the target project.
+        expect(host.workerCreations).toHaveLength(1)
+        expect(host.workerCreations[0].directory).toBe(other.target)
+        expect(state.goals[0].ownerSessionID).toBe("owner-1")
+        // Artifact dir exists on disk in the target project.
+        const stat = await fs.stat(state.goals[0].config.artifactDir!)
+        expect(stat.isDirectory()).toBe(true)
+      } finally {
+        await fs.rm(other.dir, { recursive: true, force: true })
+      }
+    })
+
+    it("runs interactive goals in the target project without forcing completion", async () => {
+      const other = await otherProject()
+      try {
+        const tools = goalTools(dir, goalService, "owner-1")
+        const created = JSON.parse((await tools.loopd_create_goal.execute({
+          name: "manual",
+          objective: "wait for steering",
+          workspaceWrite: false,
+          interactive: true,
+          directory: other.dir,
+        }, { sessionID: "owner-1" })).output)
+        expect(created.ok).toBe(true)
+        expect(created.interactive).toBe(true)
+        const state = await readState(other.target)
+        expect(state.goals[0].interactive).toBe(true)
+        expect(state.goals[0].workerSessionID).toBeTruthy()
+        // No auto-completion or forced finish at creation; the worker waits.
+        expect(state.goals[0].status).toBe("active")
+        expect(state.runtimes[0].phase).not.toBe("idle")
+        expect(host.workerCreations).toHaveLength(1)
+        expect(host.workerCreations[0].directory).toBe(other.target)
+      } finally {
+        await fs.rm(other.dir, { recursive: true, force: true })
+      }
+    })
+
+    it("passes query.directory to v1 session.create, omitting it for same-project workers", async () => {
+      const { createRealHost } = await import("../../src/server/host-adapter")
+      const calls: unknown[] = []
+      const host = createRealHost({ session: { create: async (input: unknown) => { calls.push(input); return { data: { id: "worker-9" } }; } } }, "/tmp/proj-a")
+      await host.createWorker({ parentID: "owner-1", title: "loopd: cross", directory: "/tmp/proj-b" })
+      expect(calls).toHaveLength(1)
+      expect((calls[0] as any).query).toEqual({ directory: "/tmp/proj-b" })
+      await host.createWorker({ parentID: "owner-1", title: "loopd: home" })
+      expect(calls).toHaveLength(2)
+      expect((calls[1] as any).query).toBeUndefined()
+    })
+  })
 })
 
 describe("runCompletionChecks", () => {
