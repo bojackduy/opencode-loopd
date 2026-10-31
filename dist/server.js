@@ -1818,8 +1818,13 @@ async function beforeWorkspaceTool(directory, input, args, identity = {}) {
       if (goal.status !== "active" || goal.scopeClosing)
         throw new Error("Scope denied: read-only worker is not active.");
       const writes = structuredWritePaths(input.tool, args);
-      if (!writes)
-        throw new Error(`Scope denied: uncontrolled tool "${input.tool}" in read-only goal (shell can write, so it is never allowed here). Inspect with read/glob/grep/list tools (they work anywhere), write reports with the write/edit tools into this goal's artifact directory only, verify with run_goal_checks, or ask the owner to grant a fixed executable via grant_approved_command.`);
+      if (!writes) {
+        state.workspaceCalls ??= [];
+        if (!state.workspaceCalls.some((call) => call.callID === input.callID && call.sessionID === input.sessionID)) {
+          state.workspaceCalls.push({ callID: input.callID, sessionID: input.sessionID, goalID: goal?.id, generation: stampCallGeneration(state, goal?.id), paths: [], uncontrolled: true, at: new Date().toISOString() });
+        }
+        return state;
+      }
       if (!goal.config.artifactDir)
         throw new Error("Scope denied: read-only artifact directory is missing.");
       const artifact = path3.relative(directory, goal.config.artifactDir).split(path3.sep).join("/");
@@ -1855,10 +1860,7 @@ async function beforeWorkspaceTool(directory, input, args, identity = {}) {
     }
     const writes = structuredWritePaths(input.tool, args);
     if (!writes) {
-      if (goal) {
-        throw new Error(`Scope denied: uncontrolled tool "${input.tool}" in worker goal (shell can write, so it is never allowed here). Use read tools or ask the owner to grant a fixed executable via grant_approved_command.`);
-      }
-      if (!isOwner) {
+      if (!goal && !isOwner) {
         throw new Error(`Scope denied: unrecognized session/child "${input.sessionID}". Subagent writes are unsupported \u2014 make file writes from the worker session (or the owning main session), not from a nested subagent.`);
       }
       state.workspaceCalls ??= [];
@@ -6827,14 +6829,15 @@ function createRealHost(client, directory) {
     async switchSessionModel() {
       return "next-prompt";
     },
-    async createWorker({ parentID, title, agent, model }) {
+    async createWorker({ parentID, title, agent, model, directory: targetDirectory }) {
       try {
         const body = { parentID, title };
         if (agent)
           body.agent = agent;
         if (model)
           body.model = { id: model.modelID, providerID: model.providerID };
-        const result = await withTimeout(client.session.create({ body }), 1e4, "OpenCode session.create");
+        const query = targetDirectory ? { directory: targetDirectory } : undefined;
+        const result = await withTimeout(client.session.create({ body, ...query ? { query } : {} }), 1e4, "OpenCode session.create");
         const data = result?.data;
         if (result?.error || !data?.id) {
           const detail = describeError(result?.error || "response contained no session ID");
@@ -7129,8 +7132,10 @@ function createV2Host(context, statuses, options = {}) {
       await withTimeout(context.session.switchModel({ sessionID, model: { id: model.modelID, providerID: model.providerID } }), 1e4, "OpenCode v2 session.switchModel");
       return "applied";
     },
-    async createWorker({ parentID, title, agent, model, goalID }) {
-      if (options.native) {
+    async createWorker({ parentID, title, agent, model, goalID, directory: requestedDirectory }) {
+      const crossDirectory = requestedDirectory !== undefined && requestedDirectory !== directory;
+      const targetDirectory = requestedDirectory ?? directory;
+      if (options.native && !crossDirectory) {
         let outcome;
         try {
           outcome = await options.native.requestWorker({
@@ -7185,11 +7190,19 @@ function createV2Host(context, statuses, options = {}) {
           reason: outcome.kind === "fallback-safe" ? outcome.reason : "unclaimed"
         });
       }
+      if (crossDirectory) {
+        await logServerEvent(directory, "worker.create.native-skipped", {
+          parentID,
+          title,
+          targetDirectory,
+          reason: "native fork cannot leave the parent project; using a root session in the target directory"
+        });
+      }
       const session = await withTimeout(context.session.create({
         title,
         ...agent !== undefined ? { agent } : {},
         ...model !== undefined ? { model: { id: model.modelID, providerID: model.providerID } } : {},
-        location: { directory },
+        location: { directory: targetDirectory },
         metadata: { "loopd.parentID": parentID }
       }), 1e4, "OpenCode v2 session.create");
       statuses.set(session.id, "idle");
@@ -7382,13 +7395,14 @@ function observeProviderLimit(error, source, model) {
 // src/server/worker-session.ts
 function createWorkerManager(host) {
   return {
-    async createWorker(goal) {
+    async createWorker(goal, directory) {
       const created = toWorkerCreation(await host.createWorker({
         parentID: goal.ownerSessionID,
         title: `loopd: ${goal.name}`,
         agent: goal.config.agent,
         model: parseModelRef(goal.config.model),
-        goalID: goal.id
+        goalID: goal.id,
+        directory
       }));
       return {
         goalID: goal.id,
@@ -8288,7 +8302,7 @@ function createGoalService(host) {
       sessions.set(goal.id, session);
       return session;
     }
-    session = await workers.createWorker(goal);
+    session = await workers.createWorker(goal, directory);
     let linked = false;
     let failure;
     await mutateState(directory, `goal.set-worker:${goal.id}`, async (s) => {
@@ -8409,7 +8423,7 @@ function createGoalService(host) {
     let runtime = state1.runtimes.find((r) => r.goalID === id);
     let worker;
     try {
-      worker = await workers.createWorker(goal);
+      worker = await workers.createWorker(goal, directory);
     } catch (error) {
       const detail = describeError(error);
       const blockedState = await mutateState(directory, `goal.blocked:${id}`, async (state) => {
@@ -9199,7 +9213,7 @@ function createGoalService(host) {
       if (!goal.workerSessionID) {
         let worker;
         try {
-          worker = await workers.createWorker(goal);
+          worker = await workers.createWorker(goal, directory);
           sessions.set(goal.id, worker);
         } catch (error) {
           const detail = describeError(error);
@@ -10630,6 +10644,8 @@ function appendVerificationAttempt(recent, attempt) {
 // src/server/goal-tools.ts
 import { exec as execChild } from "child_process";
 import { promisify } from "util";
+import { promises as fs8 } from "fs";
+import path9 from "path";
 init_server_log();
 
 // src/application/goal-scope.ts
@@ -10681,7 +10697,7 @@ var execAsync = promisify(execChild);
 function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
   return {
     loopd_create_goal: tool({
-      description: "Create a new background loop GOAL: an autonomous AI worker that loops turn-by-turn on a multi-step objective until deterministic checks pass or it needs you (contract: objective + checks + agent/model + workspaceWrite). " + "The engine spawns a dedicated worker session that does the work autonomously \u2014 it never runs in this chat. " + "Use this for AI reasoning work spanning multiple turns (implement a feature, fix a failing suite, research and write a report) \u2014 NOT for running a single process you just want to start, watch, and type into. " + "For that (dev servers, `npm test --watch`, REPLs, log tails, one-off scripts, interactive shells with a fullscreen terminal UI), use loopd_command_start instead: it is lighter-weight, has no agent/checks/turn loop, and is a raw OS process, not an AI worker. " + "Call this after clarifying the contract with the user. " + "Worker identity is free-form: agent is any OpenCode agent name (built-in, ~/.config/opencode/agents/*.md, or opencode.jsonc agent.* \u2014 discover with `opencode agent list`), " + 'model is any "providerID/modelID" (discover with `opencode models [provider]`). Omit both by default \u2014 when omitted, both inherit the CALLING session\'s live agent/model (read at creation), then plugin defaultAgent/defaultModel. ' + "Only pass agent/model when the caller explicitly requests a different identity or the task needs it; explicit values freeze identity and break session upgrades. " + "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " + "Workspace-writing goals require checks. On enforcing hosts, explicitly named objective files default to narrow enforced write_scope; use claim_goal_scope for additional files. [] explicitly opts into scoped exploration. " + (goalService.scopedExecution ? "CURRENT HOST: enforced file scopes supported. Prefer exact disjoint write_scope files for parallel editing; named files are inferred when write_scope is omitted. Use [] to explore then claim_goal_scope. Scoped workers use structured edits and run_goal_checks, not arbitrary shell. " : "CURRENT HOST: enforced file scopes UNSUPPORTED. Do not supply write_scope, including []; ordinary exclusive goals still work. Do not tell legacy workers to call claim_goal_scope. If enforced parallelism was explicitly required, explain the limitation rather than silently downgrade. ") + "Monitor with the /loop dashboard's Goals tab (Tab/h to switch there if Commands is focused).",
+      description: "Create a new background loop GOAL: an autonomous AI worker that loops turn-by-turn on a multi-step objective until deterministic checks pass or it needs you (contract: objective + checks + agent/model + workspaceWrite). " + "The engine spawns a dedicated worker session that does the work autonomously \u2014 it never runs in this chat. " + "Use this for AI reasoning work spanning multiple turns (implement a feature, fix a failing suite, research and write a report) \u2014 NOT for running a single process you just want to start, watch, and type into. " + "For that (dev servers, `npm test --watch`, REPLs, log tails, one-off scripts, interactive shells with a fullscreen terminal UI), use loopd_command_start instead: it is lighter-weight, has no agent/checks/turn loop, and is a raw OS process, not an AI worker. " + "Call this after clarifying the contract with the user. " + "Worker identity is free-form: agent is any OpenCode agent name (built-in, ~/.config/opencode/agents/*.md, or opencode.jsonc agent.* \u2014 discover with `opencode agent list`), " + 'model is any "providerID/modelID" (discover with `opencode models [provider]`). Omit both by default \u2014 when omitted, both inherit the CALLING session\'s live agent/model (read at creation), then plugin defaultAgent/defaultModel. ' + "Only pass agent/model when the caller explicitly requests a different identity or the task needs it; explicit values freeze identity and break session upgrades. " + "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " + "Workspace-writing goals require checks. On enforcing hosts, explicitly named objective files default to narrow enforced write_scope; use claim_goal_scope for additional files. [] explicitly opts into scoped exploration. " + (goalService.scopedExecution ? "CURRENT HOST: enforced file scopes supported. Prefer exact disjoint write_scope files for parallel editing; named files are inferred when write_scope is omitted. Use [] to explore then claim_goal_scope. Scoped workers use structured edits and run_goal_checks, not arbitrary shell. " : "CURRENT HOST: enforced file scopes UNSUPPORTED. Do not supply write_scope, including []; ordinary exclusive goals still work. Do not tell legacy workers to call claim_goal_scope. If enforced parallelism was explicitly required, explain the limitation rather than silently downgrade. ") + "Monitor with the /loop dashboard's Goals tab (Tab/h to switch there if Commands is focused). " + "Pass directory (absolute path of an existing project) to create the goal in another project: state, artifacts, checks, and the worker session live there, driven by that project's plugin instance once it exists.",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
@@ -10709,7 +10725,8 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         timeoutMs: tool.schema.number().optional().describe("Per-turn timeout in ms."),
         scheduleEveryMs: tool.schema.number().optional().describe("Interval in ms to auto-requeue the same goal after each completion. Minimum 1000. Enables repetitive dialogue reduction."),
         scheduleMaxRuns: tool.schema.number().optional().describe("Maximum total runs including the initial run. Undefined = unlimited. Requires scheduleEveryMs."),
-        interactive: tool.schema.boolean().optional().describe("Manual mode: the engine never starts turns on its own (no idle recovery, no retries). Every turn comes from explicit steering (:send, nudge, resume, retry). Use for interactive tasks where the worker stops and waits for the next input \u2014 the tick forcing a turn there wastes tokens and breaks the wait. Toggleable later via the dashboard :interactive command.")
+        interactive: tool.schema.boolean().optional().describe("Manual mode: the engine never starts turns on its own (no idle recovery, no retries). Every turn comes from explicit steering (:send, nudge, resume, retry). Use for interactive tasks where the worker stops and waits for the next input \u2014 the tick forcing a turn there wastes tokens and breaks the wait. Toggleable later via the dashboard :interactive command."),
+        directory: tool.schema.string().optional().describe("Project directory this goal lives in (absolute path, must exist). Defaults to the current project. Cross-directory goals keep state, artifacts, checks, and their worker session in the target project; the target project's plugin instance drives them once they exist there.")
       },
       execute: async (args, context) => {
         const sessionID = context?.sessionID || hostSessionID;
@@ -10785,8 +10802,46 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
           }
           costBudget = args.costBudget;
         }
+        let goalDir = dir;
+        if (args.directory !== undefined) {
+          if (typeof args.directory !== "string" || !path9.isAbsolute(args.directory)) {
+            return {
+              title: "Goal not created",
+              output: JSON.stringify({
+                ok: false,
+                message: `directory must be an absolute project path, got ${JSON.stringify(args.directory)}. Omit it to create the goal in the current project.`,
+                errorCode: "invalid_directory"
+              })
+            };
+          }
+          try {
+            const stat = await fs8.stat(args.directory);
+            if (!stat.isDirectory()) {
+              return {
+                title: "Goal not created",
+                output: JSON.stringify({
+                  ok: false,
+                  message: `directory is not a directory: ${args.directory}. Pass the absolute path of an existing project directory.`,
+                  errorCode: "invalid_directory"
+                })
+              };
+            }
+            goalDir = await fs8.realpath(args.directory);
+          } catch (error) {
+            if (error?.code !== "ENOENT")
+              throw error;
+            return {
+              title: "Goal not created",
+              output: JSON.stringify({
+                ok: false,
+                message: `directory does not exist: ${args.directory}. Pass the absolute path of an existing project directory.`,
+                errorCode: "invalid_directory"
+              })
+            };
+          }
+        }
         const resolution = resolveGoalCreationConfig({
-          directory: dir,
+          directory: goalDir,
           objective: args.objective,
           config,
           defaults: await withParentIdentity(defaults, host, sessionID)
@@ -10803,7 +10858,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         }
         try {
           const parentDefaults = await withParentIdentity(defaults, host, sessionID);
-          const { goal, worker } = await goalService.start(dir, {
+          const { goal, worker } = await goalService.start(goalDir, {
             name: args.name,
             objective: args.objective,
             ownerSessionID: sessionID,
@@ -10833,6 +10888,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
               enforcedScopedExecution: goalService.scopedExecution,
               defaultsApplied: resolution.defaultsApplied,
               name: args.name,
+              directory: goalDir,
               message: `Goal "${args.name}" created and started in the background. Artifacts: ${goal.config.artifactDir}. Monitor with /loop (<leader>o).`
             })
           };
@@ -10844,6 +10900,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
               ok: false,
               name: args.name,
               message: error instanceof Error ? error.message : String(error),
+              directory: goalDir,
               ...startFailure ? {
                 goalID: startFailure.goalID,
                 status: "blocked",
@@ -11512,7 +11569,7 @@ function describeGoalState(status, phase, now = Date.now()) {
 }
 
 // src/server/owner-tools.ts
-import { promises as fs8 } from "fs";
+import { promises as fs9 } from "fs";
 function withTimeout2(promise, ms) {
   return Promise.race([
     promise,
@@ -11689,7 +11746,7 @@ function ownerTools2(options) {
             if (!dir)
               return;
             try {
-              const files = await fs8.readdir(dir);
+              const files = await fs9.readdir(dir);
               return files.length ? `${files.length} file(s): ${files.slice(0, 8).join(", ")}` : "no artifacts yet";
             } catch {
               return "no artifacts yet";
