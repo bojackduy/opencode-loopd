@@ -254,6 +254,24 @@
         .story-frame { height: 18rem; }
         .story-step { min-height: auto; opacity: 1; transform: none; }
       }
+
+      .frame-art { position: absolute; inset: 1.6rem; width: calc(100% - 3.2rem); height: calc(100% - 3.2rem); z-index: 0; pointer-events: none; }
+      .frame-layer { z-index: 1; background: linear-gradient(180deg, rgba(26,23,20,.72), rgba(26,23,20,.35)); }
+      .frame-art .orbit { fill: none; stroke: var(--code-border); stroke-width: 1; stroke-dasharray: 4 6; animation: spin 18s linear infinite; }
+      .frame-art .orbit-2 { stroke-dasharray: 2 8; animation-duration: 12s; animation-direction: reverse; }
+      .frame-art .spoke { stroke: var(--code-border); stroke-width: 1; opacity: .55; }
+      .frame-art .satellite { fill: var(--code-muted); transition: fill .35s ease, r .35s ease, filter .35s ease; }
+      .frame-art .satellite.is-hot { fill: var(--accent); filter: drop-shadow(0 0 6px var(--accent)); }
+      .frame-art .core-glow { fill: url(#coreGlow); animation: pulse 2.4s ease-in-out infinite; }
+      .frame-art .core { fill: var(--accent); }
+      .frame-art .core-text { fill: var(--on-accent); font-family: "JetBrains Mono", monospace; font-size: 9px; font-weight: 700; }
+      .orbit-group { transform-origin: 130px 95px; transform: rotate(calc(var(--p, 0) * 360deg)); transition: transform .12s linear; }
+      @keyframes spin { to { stroke-dashoffset: -40; } }
+      @keyframes pulse { 0%, 100% { transform: scale(1); opacity: .75; } 50% { transform: scale(1.18); opacity: 1; } }
+      @media (prefers-reduced-motion: reduce) {
+        .frame-art .orbit, .frame-art .core-glow { animation: none; }
+        .orbit-group { transform: none; transition: none; }
+      }
     </style>
   </head>
   <body>
@@ -332,6 +350,29 @@
           <span style="margin-left:.6rem">opencode — loop in motion</span>
         </div>
         <div class="frame-body">
+          <svg class="frame-art" viewBox="0 0 260 190" aria-hidden="true">
+            <defs>
+              <radialGradient id="coreGlow" cx="50%" cy="50%" r="50%">
+                <stop offset="0%" stop-color="#ff4d6d" stop-opacity=".9" />
+                <stop offset="100%" stop-color="#e11d48" stop-opacity="0" />
+              </radialGradient>
+            </defs>
+            <g class="orbit-group">
+              <circle class="orbit" cx="130" cy="95" r="62" />
+              <circle class="orbit orbit-2" cx="130" cy="95" r="38" />
+            </g>
+            <line class="spoke" x1="130" y1="95" x2="130" y2="33" />
+            <line class="spoke" x1="130" y1="95" x2="192" y2="95" />
+            <line class="spoke" x1="130" y1="95" x2="68" y2="95" />
+            <line class="spoke" x1="130" y1="95" x2="130" y2="157" />
+            <circle class="satellite sat-0" cx="130" cy="33" r="9" />
+            <circle class="satellite sat-1" cx="192" cy="95" r="9" />
+            <circle class="satellite sat-2" cx="68" cy="95" r="9" />
+            <circle class="satellite sat-3" cx="130" cy="157" r="9" />
+            <circle class="core-glow" cx="130" cy="95" r="26" />
+            <circle class="core" cx="130" cy="95" r="12" />
+            <text class="core-text" x="130" y="99" text-anchor="middle">loop</text>
+          </svg>
           <div class="frame-layer is-active" data-step="0">
             <div class="frame-kicker">turn 1</div>
             <div class="frame-title">Worker starts</div>
@@ -584,6 +625,7 @@ nudge_goal({ goal_id: "..." })</code></pre>
         steps.forEach((step, i) => step.classList.toggle("is-active", i === index));
         layers.forEach((layer, i) => layer.classList.toggle("is-active", i === index));
         frame.dataset.active = String(index);
+        frame.querySelectorAll(".satellite").forEach((sat, i) => sat.classList.toggle("is-hot", i === index % 4));
         if (progress) progress.style.width = ((index + 1) / steps.length * 100) + "%";
       }
       if (!("IntersectionObserver" in window)) { activate(0); return; }
@@ -625,6 +667,7 @@ nudge_goal({ goal_id: "..." })</code></pre>
         steps.forEach((step, i) => step.classList.toggle("is-active", i === index));
         layers.forEach((layer, i) => layer.classList.toggle("is-active", i === index));
         frame.dataset.active = String(index);
+        frame.querySelectorAll(".satellite").forEach((sat, i) => sat.classList.toggle("is-hot", i === index % 4));
         if (progress) progress.style.width = ((index + 1) / steps.length * 100) + "%";
       }
       if (!("IntersectionObserver" in window)) { activate(0); return; }
