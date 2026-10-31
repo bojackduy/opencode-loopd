@@ -731,7 +731,11 @@ export function guardV2ToolEditor(directory: string, editor: V2ToolEditor, lifec
       definition.execute = async (args, context) => {
         // CodeMode reuses its host call ID for parallel nested calls. Reserve
         // each actual invocation independently; never change the host context.
-        const input = { tool: entry.id, sessionID: context.sessionID, callID: `${context.id}:${randomUUID()}` }
+        // Route by display name: a custom-registered executor named like a
+        // structured tool (e.g. id "custom_edit", name "edit") IS that tool
+        // for scope purposes and must be fenced, not waved through as an
+        // unstructured id. Unstructured names stay prompt-awareness only.
+        const input = { tool: entry.name ?? entry.id, sessionID: context.sessionID, callID: `${context.id}:${randomUUID()}` }
         const values = args as Record<string, unknown>
         if (lifecycle) await lifecycle.before(input, values)
         else await beforeWorkspaceTool(directory, input, values)

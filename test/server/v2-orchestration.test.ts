@@ -95,17 +95,22 @@ describe("v2 CodeMode orchestration guards", () => {
   })
 
   for (const [id, name] of [["execute", "execute"], ["custom_edit", "edit"]] as const) {
-    it(`routes the registered ${id} executor by id, not its display name`, async () => {
+    it(`routes the registered ${id} executor by display name: unstructured ids run prompt-aware, structured names stay fenced`, async () => {
       const f = await fixture()
       const { goal } = await f.service.start(f.directory, { name: "protected", objective: "test", ownerSessionID: "parent",
         config: { workspaceWrite: true, write_scope: [] } })
       let executed = false
       const definition = { id, name, description: "custom", input: {}, execute: async () => { executed = true; return { content: "unsafe" } } }
       guardV2ToolEditor(f.directory, { list: () => [definition], update: (_id: string, update: any) => update(definition) } as any)
-      // Worker: an unstructured tool id is prompt-awareness only — allowed, never
-      // fenced, even though the display name looks like a scoped structured tool.
-      await expect(definition.execute({ filePath: "outside.ts" }, { ...f.context, sessionID: goal.workerSessionID! })).resolves.toMatchObject({ content: "unsafe" })
-      expect(executed).toBe(true)
+      if (id === "execute") {
+        // Genuinely unstructured tool id: prompt-awareness only — allowed, never fenced.
+        await expect(definition.execute({ filePath: "outside.ts" }, { ...f.context, sessionID: goal.workerSessionID! })).resolves.toMatchObject({ content: "unsafe" })
+        expect(executed).toBe(true)
+      } else {
+        // Display name is a structured tool: scope-checked like a native edit, denied outside the scope.
+        await expect(definition.execute({ filePath: "outside.ts" }, { ...f.context, sessionID: goal.workerSessionID! })).rejects.toThrow(/outside/)
+        expect(executed).toBe(false)
+      }
       // Unknown sessions are still fenced: proves the call goes through the guard.
       executed = false
       await expect(definition.execute({ filePath: "outside.ts" }, { ...f.context, sessionID: "unknown-child" })).rejects.toThrow(/unrecognized/)

@@ -39,8 +39,8 @@ export interface ContinuationContext {
 }
 
 export interface WorkerManager {
-  /** Create a worker session for a goal. */
-  createWorker(goal: Goal): Promise<WorkerSession>
+  /** Create a worker session for a goal, in the goal's project directory. */
+  createWorker(goal: Goal, directory: string): Promise<WorkerSession>
 
   /** Send a continuation prompt to the worker. Returns the SDK messageID. */
   continueWorker(worker: WorkerSession, goal: Goal, runtime: GoalRuntimeState, context?: ContinuationContext): Promise<{ messageID?: string }>
@@ -64,13 +64,14 @@ export interface WorkerManager {
 
 export function createWorkerManager(host: LoopHost): WorkerManager {
   return {
-    async createWorker(goal: Goal) {
+    async createWorker(goal: Goal, directory: string) {
       const created = toWorkerCreation(await host.createWorker({
         parentID: goal.ownerSessionID,
         title: `loopd: ${goal.name}`,
         agent: goal.config.agent,
         model: parseModelRef(goal.config.model),
         goalID: goal.id,
+        directory,
       }))
 
       return {
@@ -128,10 +129,10 @@ function buildContinuationSteering(goal: Goal, runtime: GoalRuntimeState, contex
     `Explore with reads/search → claim_goal_scope({ paths, runGeneration from get_goal }) → structured edit/write/apply_patch → run_goal_checks → report progress or complete_goal.`,
     `Claim only the minimum files needed. Request expansion BEFORE editing new paths; rename requires both endpoints. No globs.`,
     `Conflicts identify owning goal/session/path. Initial and expansion conflicts fail immediately with no partial claim and no automatic queue. Coordinate with the owner, then retry once; never sleep, poll claims, or repeatedly prompt waiting workers.`,
-    `Arbitrary shell, loopd_command_start/write, custom tools, batch, and subagent writes are denied. Configured checks are trusted commands under a workspace-wide operation lock, not an OS sandbox.`,
+    `Arbitrary shell is allowed but prompt-awareness only: shell calls are recorded as uncontrolled, never fenced, and checks wait for quiescence. loopd_command_start/write, custom tools, batch, and subagent writes are denied. Configured checks are trusted commands under a workspace-wide operation lock, not an OS sandbox.`,
     `Output-location exceptions do not grant extra source files. Only this goal's artifact directory is writable without source claims.`,
   ] : goal.config.workspaceWrite === false ? [
-    ``, `## READ-ONLY OWNERSHIP`, `Shared source writes and arbitrary shell/custom/subagent tools are denied. Write artifacts only under this goal's artifact directory. Use run_goal_checks for trusted configured verification.`,
+    ``, `## READ-ONLY OWNERSHIP`, `Shared source writes and arbitrary custom/subagent tools are denied. Shell is allowed but prompt-awareness only: recorded as uncontrolled, never fenced, and checks wait for quiescence. Write artifacts only under this goal's artifact directory. Use run_goal_checks for trusted configured verification.`,
   ] : []
 
   const approvedInstructions = goal.config.approvedCommands?.length ? [
