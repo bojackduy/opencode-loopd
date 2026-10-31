@@ -151,14 +151,12 @@
       .scene.is-active { opacity:1; transform:none; pointer-events:auto; }
       .scene-title { margin-bottom:1.3rem; color:var(--night-muted); font-size:.72rem; font-weight:800; }
       .scene-caption { width:min(100%,25rem); margin-top:1.2rem; color:var(--night-muted); font-size:.73rem; text-align:center; }
-      .story-orbit { position:absolute; z-index:2; inset:17% 6% 14%; pointer-events:none; animation:story-orbit 28s linear infinite; }
-      .story-orbit-object { position:absolute; display:block; width:.9rem; aspect-ratio:1; background:var(--green); animation:story-orbit-counter 28s linear infinite; }
+      .story-orbit { position:absolute; z-index:2; inset:17% 6% 14%; pointer-events:none; transform:rotate(var(--orbit-angle,0deg)); }
+      .story-orbit-object { position:absolute; display:block; width:.9rem; aspect-ratio:1; background:var(--green); transform:rotate(var(--orbit-counter-angle,0deg)); }
       .story-orbit-object:nth-child(1) { top:0; left:calc(50% - .45rem); }
       .story-orbit-object:nth-child(2) { top:calc(50% - .45rem); right:0; border-radius:50%; background:var(--blue); }
       .story-orbit-object:nth-child(3) { bottom:0; left:calc(50% - .45rem); background:var(--gold); clip-path:polygon(50% 0,100% 100%,0 100%); }
       .story-orbit-object:nth-child(4) { top:calc(50% - .45rem); left:0; width:.65rem; border-radius:50%; }
-      @keyframes story-orbit { to { transform:rotate(1turn); } }
-      @keyframes story-orbit-counter { to { transform:rotate(-1turn); } }
       .orbit-system { position:relative; width:min(100%,25rem); aspect-ratio:1.12; display:grid; place-items:center; }
       .orbit-ring { position:absolute; width:78%; aspect-ratio:1; border:1px dashed var(--ui-ring); border-radius:50%; transform:rotate(calc(var(--progress,0) * 1turn)); transition:transform .1s linear; }
       .orbit-ring.inner { width:50%; border-style:solid; border-color:var(--ui-inner-ring); }
@@ -493,13 +491,35 @@
     <script>
       (() => {
         const story = document.querySelector(".story");
+        const storyVisual = document.querySelector(".story-visual");
         const shell = document.getElementById("storyShell");
         const steps = [...document.querySelectorAll(".story-step")];
         const scenes = [...document.querySelectorAll(".scene")];
         const progress = document.getElementById("storyProgress");
         const shellStatus = document.getElementById("shellStatus");
-        if (!story || !shell || !steps.length || !("IntersectionObserver" in window)) return;
+        if (!story || !storyVisual || !shell || !steps.length || !("IntersectionObserver" in window)) return;
         document.documentElement.classList.add("js");
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+        let orbitFrame = 0;
+        const updateOrbit = () => {
+          orbitFrame = 0;
+          if (reducedMotion.matches) return;
+          const storyBounds = story.getBoundingClientRect();
+          const visualHeight = storyVisual.getBoundingClientRect().height;
+          const stickyTop = parseFloat(getComputedStyle(storyVisual).top) || 0;
+          const start = window.scrollY + storyBounds.top - stickyTop;
+          const end = window.scrollY + storyBounds.bottom - visualHeight - stickyTop;
+          const progress = Math.min(1, Math.max(0, (window.scrollY - start) / Math.max(1, end - start)));
+          shell.style.setProperty("--orbit-angle", `${progress * 360}deg`);
+          shell.style.setProperty("--orbit-counter-angle", `${progress * -360}deg`);
+        };
+        const queueOrbitUpdate = () => {
+          if (!orbitFrame) orbitFrame = requestAnimationFrame(updateOrbit);
+        };
+        window.addEventListener("scroll", queueOrbitUpdate, { passive: true });
+        window.addEventListener("resize", queueOrbitUpdate);
+        reducedMotion.addEventListener("change", queueOrbitUpdate);
+        queueOrbitUpdate();
         const labels = ["goal created", "tickets claimed", "worker resumed", "projects connected"];
         const activate = (index) => {
           steps.forEach((step, i) => step.classList.toggle("is-active", i === index));
