@@ -10,6 +10,7 @@ import type { GoalService } from "../application/goal-service"
 import { goalStatusLabel, phaseLabel, describeGoalState } from "../domain/status-labels"
 import { promises as fs } from "fs"
 import path from "path"
+import { listManagedDirs } from "../infrastructure/managed-dirs"
 
 export interface OwnerToolsOptions {
   directory: string
@@ -22,6 +23,13 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
     promise,
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), ms)),
   ])
+}
+
+function resolveTargetDir(instanceDir: string, override?: string): string {
+  if (typeof override !== "string" || !override.trim()) return instanceDir
+  const trimmed = override.trim()
+  if (path.isAbsolute(trimmed)) return path.normalize(trimmed)
+  return path.normalize(path.resolve(instanceDir, trimmed))
 }
 
 export function ownerTools(options: OwnerToolsOptions) {
@@ -82,9 +90,12 @@ export function ownerTools(options: OwnerToolsOptions) {
     list_background_goals: tool({
       description:
         "List all active background goals owned by this session. Shows contract (name, status, phase, turn, last progress, blocker) — only goals with your ownerSessionID appear.",
-      args: {},
-      execute: async (_args, context) => {
-        const state = await readState(directory)
+      args: {
+        directory: tool.schema.string().optional().describe("Project directory override. Omit to use the instance directory."),
+      },
+      execute: async (args, context) => {
+        const target = resolveTargetDir(directory, (args as { directory?: string }).directory)
+        const state = await readState(target)
         const ownerID = context?.sessionID
         if (!ownerID) {
           return {
@@ -148,7 +159,49 @@ export function ownerTools(options: OwnerToolsOptions) {
 
         return {
           title: `${goals.length} active goal(s)`,
-          output: JSON.stringify({ ok: true, goals: summaries }, null, 2),
+          output: JSON.stringify({ ok: true, goals: summaries, directory: target }, null, 2),
+        }
+      },
+    }),
+
+    loopd_status_all: tool({
+      description:
+        "List owned active goals across all managed directories (.opencode/loopd/managed.json plus instance directory). Each entry includes its directory.",
+      args: {},
+      execute: async (_args, context) => {
+        const ownerID = context?.sessionID
+        if (!ownerID) {
+          return {
+            title: "No session",
+            output: JSON.stringify({ ok: false, message: "No session context available." }),
+          }
+        }
+        const dirs = await listManagedDirs(directory).catch(() => [directory])
+        const goals: Array<Record<string, unknown>> = []
+        for (const dir of dirs) {
+          let state
+          try {
+            state = await readState(dir)
+          } catch {
+            continue
+          }
+          for (const g of state.goals.filter((entry) => entry.ownerSessionID === ownerID && entry.status !== "complete")) {
+            const runtime = state.runtimes.find((r) => r.goalID === g.id) as any
+            goals.push({
+              id: g.id,
+              name: g.name,
+              status: g.status,
+              phase: runtime?.phase ?? "unknown",
+              turn: runtime?.runCount ?? 0,
+              directory: dir,
+              lastProgress: g.lastProgress?.summary?.slice(0, 120),
+              blocker: g.blocker?.reason?.slice(0, 120),
+            })
+          }
+        }
+        return {
+          title: `${goals.length} active goal(s) across ${dirs.length} dir(s)`,
+          output: JSON.stringify({ ok: true, dirs, goals }, null, 2),
         }
       },
     }),
@@ -160,9 +213,11 @@ export function ownerTools(options: OwnerToolsOptions) {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to inspect the first active goal."),
         includeTranscript: tool.schema.boolean().optional().describe("Include live transcript tail (adds ~100ms). Default true. Set false for fast metadata-only."),
         transcriptLimit: tool.schema.number().optional().describe("Number of transcript messages to include (1-10). Default 3."),
+        directory: tool.schema.string().optional().describe("Project directory override. Omit to use the instance directory."),
       },
       execute: async (args, context) => {
-        const state = await readState(directory)
+        const target = resolveTargetDir(directory, args.directory)
+        const state = await readState(target)
         const ownerID = context?.sessionID
         const goal = args.goal_id
           ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID)
@@ -209,7 +264,7 @@ export function ownerTools(options: OwnerToolsOptions) {
           includeTranscript && goal.workerSessionID
             ? withTimeout(host.readMessages(goal.workerSessionID, tLimit), 900).catch(() => null)
             : Promise.resolve(null),
-          readEvents(directory, 60).then((evs) =>
+          readEvents(target, 60).then((evs) =>
             evs.filter((e) => (e as any).goalID === goal.id && (e as any).type === "goal.progress")
                .slice(-5).map((e: any) => ({ summary: String(e.summary || "").slice(0, 120), next: e.next ? String(e.next).slice(0, 80) : undefined, at: String(e.timestamp || "") }))
           ).catch(() => []),
@@ -221,7 +276,7 @@ export function ownerTools(options: OwnerToolsOptions) {
               return files.length ? `${files.length} file(s): ${files.slice(0, 8).join(", ")}` : "no artifacts yet"
             } catch { return "no artifacts yet" }
           })(),
-          peekGoalInbox(directory, goal.id).then((msgs) => msgs.slice(-3)).catch(() => []),
+          peekGoalInbox(target, goal.id).then((msgs) => msgs.slice(-3)).catch(() => []),
         ] as const)
 
         const activeToolCallIDs = runtime?.activeToolCallIDs ?? []
@@ -230,6 +285,7 @@ export function ownerTools(options: OwnerToolsOptions) {
           title: `Goal: ${goal.name}`,
           output: JSON.stringify({
             ok: true,
+            directory: target,
             id: goal.id,
             name: goal.name,
             objective: goal.objective,

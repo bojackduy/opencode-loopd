@@ -73,10 +73,27 @@ watches and steers across projects.
       Verified: typecheck + goal-tools/workspace-execution suites green.
       LIVE two-server run (owner in A, worker lands in B, writes + checks
       pass) still needs a host with two projects — owner runbook below.)
-- [ ] P2: engine-per-managed-dir
-- [ ] P3: multi-dir owner tools + aggregated list
-- [ ] P4: multi-project TUI view
-- [ ] P5: management-mode conventions doc
+- [x] P2: engine-per-managed-dir — verified NOT NEEDED, no code change.
+  Per-directory plugin instances drive their own goals (30s/5s/1s timers
+  local to each dir); manager trio would double-drive. Turn 1 already
+  prompted directly by start(). See docs/management-mode.md "Why no
+  manager engine trio".
+- [x] P3: multi-dir owner tools + aggregated list (loopd goal
+  mgmt-p3-owner-multidir, complete, typecheck pass).
+  `src/infrastructure/managed-dirs.ts` registry
+  `.opencode/loopd/managed.json` + `listManagedDirs`/`addManagedDir`;
+  `src/server/owner-tools.ts` optional `directory` on list/inspect +
+  `directory` field in outputs + new `loopd_status_all` aggregating
+  owned active goals across managed dirs. Ticket test: disjoint
+  write_scope vs P4 goal granted in parallel, holders=2 path verified,
+  no queue, no scope violation.
+- [x] P4: multi-project TUI view, CLI-first (loopd goal
+  mgmt-p4-tui-multiproj, complete, typecheck pass).
+  `src/server/managed-status.ts` `statusAll`/`statusForDirectory`/
+  `resolveManagedDirs` + env `LOOPD_MANAGED_DIRS`; `src/tui/dashboard.tsx`
+  header managed count + Store path, `:projects` panel per-dir counts
+  and blocked items. Single-dir default intact.
+- [x] P5: management-mode conventions doc (`docs/management-mode.md`).
 
 ### P1 live-verification runbook (owner: run with real sessions)
 1. Terminal A: `cd /tmp/proj-a && opencode` (opencode-loopd plugin loaded).

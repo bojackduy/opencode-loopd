@@ -30,6 +30,7 @@ import { TERMINAL_ROUTE_NAME, currentRouteSessionID, terminalRoutePayload } from
 import type { CommandSession } from "../domain/command-session"
 import { randomUUID } from "crypto"
 import { createDashboardRefresh } from "./dashboard-refresh"
+import { managedStorePath, parseManagedDirsEnv, resolveManagedDirs, statusAll, type ManagedDirStatus } from "../server/managed-status"
 
 function prevent(evt: ParsedKey) {
   const e = evt as ParsedKey & { preventDefault?: () => void; stopPropagation?: () => void }
@@ -308,6 +309,18 @@ export function LoopDashboard(props: Props) {
   const [showCompleted, setShowCompleted] = createSignal(false)
   const [clock, setClock] = createSignal(Date.now())
   const [agentIndex, setAgentIndex] = createSignal<Record<string, AgentMeta>>({})
+  // P4 multi-project view (CLI-first, single-dir default intact).
+  const managedDirs = () => resolveManagedDirs(props.directory, parseManagedDirsEnv((process as any)?.env?.LOOPD_MANAGED_DIRS))
+  const storePath = () => managedStorePath(props.directory)
+  const [projectStatuses, setProjectStatuses] = createSignal<ManagedDirStatus[] | null>(null)
+  const [showProjects, setShowProjects] = createSignal(false)
+  async function refreshProjects() {
+    try {
+      setProjectStatuses(await statusAll(managedDirs()))
+    } catch (e) {
+      setStatusText(`Error: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
   let inputEl: InputRenderable | undefined
   let focusTimer: ReturnType<typeof setTimeout> | undefined
   let disposed = false
@@ -676,6 +689,13 @@ export function LoopDashboard(props: Props) {
       case "help":
         setShowHelp(true)
         return
+      case "projects": {
+        setShowProjects(true)
+        await refreshProjects()
+        const list = projectStatuses() ?? []
+        setStatusText(list.length ? list.map((p) => `${p.directory}: ${p.total} goals (${p.active} active, ${p.blocked} blocked)`).join(" · ") : `${managedDirs().length} project(s): ${managedDirs().join(", ")}`)
+        return
+      }
       default: {
         // Bare text → stdin of the selected command (newline-terminated).
         if (selectedCommand()) {
@@ -790,6 +810,15 @@ export function LoopDashboard(props: Props) {
         }
         case "logs": setShowLogs(!showLogs()); break
         case "help": setShowHelp(true); break
+        case "projects": {
+          setShowProjects(!showProjects())
+          if (showProjects()) {
+            await refreshProjects()
+            const list = projectStatuses() ?? []
+            setStatusText(list.length ? list.map((p) => `${p.directory}: ${p.total} goals (${p.active} active, ${p.blocked} blocked)`).join(" · ") : `${managedDirs().length} project(s): ${managedDirs().join(", ")}`)
+          }
+          break
+        }
         case "q": case "close": props.api.ui.dialog.clear(); return
         default: {
           // Bare text in insert mode → treat as send to selected goal
@@ -808,6 +837,13 @@ export function LoopDashboard(props: Props) {
   const runningCount = () => state()?.runtimes.filter((runtime) => workerActivityLabel(runtime, clock()).acting).length || 0
   const fenceCount = () => state()?.workspaceCalls?.length || 0
   const runningFrame = () => ["|", "/", "-", "\\"][Math.floor(clock() / 500) % 4]
+  /** Write-ticket concurrency: who currently holds the write lock, who is queued behind overlapping files. */
+  const ticketHolders = () => state()?.writeTickets?.holders ?? []
+  const ticketQueue = () => state()?.writeTickets?.queue ?? []
+  const ticketCount = () => ticketHolders().length + ticketQueue().length
+  const goalNameFor = (goalID: string | undefined) => (goalID && state()?.goals.find((g) => g.id === goalID)?.name) || (goalID ?? "").slice(0, 8)
+  /** Quiet duration of a stuck run, for the reconcile-blocked badge. */
+  const stuckQuietFor = (at: string | undefined) => ageLabel(at, clock())
 
   function handleBugReport() {
     const goal = selectedGoal()
@@ -843,6 +879,7 @@ export function LoopDashboard(props: Props) {
             <span style={{ fg: runningCount() > 0 ? theme().success : theme().textMuted, bold: runningCount() > 0 }}>{runningCount() > 0 ? runningFrame() : "○"} {runningCount()} observed active</span>
             <span style={{ fg: theme().textMuted }}> │ </span>
             <span style={{ fg: fenceCount() > 0 ? theme().warning : theme().textMuted, bold: fenceCount() > 0 }}>{fenceCount()} fence{fenceCount() === 1 ? "" : "s"}</span>
+            {ticketCount() > 0 && <><span style={{ fg: theme().textMuted }}> │ </span><span style={{ fg: theme().info, bold: true }}>🎟 {ticketHolders().length} held</span>{ticketQueue().length > 0 && <span style={{ fg: theme().textMuted }}> · {ticketQueue().length} queued</span>}</>}
             <span style={{ fg: theme().textMuted }}> │ </span>
             <span style={{ fg: theme().success, bold: true }}>{state()?.goals.filter((g) => g.status === "complete").length || 0}</span>
             <span style={{ fg: theme().textMuted }}> done</span>
@@ -851,6 +888,9 @@ export function LoopDashboard(props: Props) {
             <span style={{ fg: theme().textMuted }}> </span>
             <span style={{ fg: tab() === "commands" ? theme().info : theme().textMuted, bold: tab() === "commands" }}>[Commands]</span>
             <span style={{ fg: theme().textMuted }}> (Tab)</span>
+            <span style={{ fg: theme().textMuted }}> │ </span>
+            <span style={{ fg: theme().accent, bold: true }}>⬣ {managedDirs().length} proj</span>
+            <span style={{ fg: theme().textMuted }}> {storePath()}</span>
           </text>
           <box
             flexDirection="row"
@@ -940,6 +980,30 @@ export function LoopDashboard(props: Props) {
             </box>
           </Show>
 
+          {/* Projects panel — :projects lists managed dirs (single-dir default). */}
+          <Show when={showProjects()}>
+            <box flexDirection="column" padding={1} border={true} borderColor={theme().border} flexShrink={0} maxHeight={12}>
+              <text>
+                <span style={{ fg: theme().accent, bold: true }}>⬣ Projects ({managedDirs().length})</span>
+                <span style={{ fg: theme().textMuted }}> — :projects to hide · LOOPD_MANAGED_DIRS adds dirs</span>
+                <For each={projectStatuses() ?? managedDirs().map((d) => ({ directory: d, storePath: managedStorePath(d), total: 0, active: 0, blocked: 0, paused: 0, complete: 0, blockedItems: [] as ManagedDirStatus["blockedItems"] }))}>{(p) => (
+                  <>
+                    {"\n"}
+                    <span style={{ fg: theme().text, bold: true }}>{p.directory}</span>
+                    <span style={{ fg: theme().textMuted }}> — {p.total} goals ({p.active} active, {p.blocked} blocked, {p.paused} paused, {p.complete} done)</span>
+                    <For each={p.blockedItems.slice(0, 3)}>{(b) => (
+                      <>
+                        {"\n"}
+                        <span style={{ fg: theme().error }}>  ✖ {b.name}: </span>
+                        <span style={{ fg: theme().textMuted }}>{b.reason.slice(0, 80)}</span>
+                      </>
+                    )}</For>
+                  </>
+                )}</For>
+              </text>
+            </box>
+          </Show>
+
           {/* Goal list — goals tab only (commands tab renders below).
               Short lists sit compact with no void below; long lists cap out
               and scroll with selection following via scrollChildIntoView.
@@ -991,6 +1055,7 @@ export function LoopDashboard(props: Props) {
                         {goal.config.agent && <span style={{ fg: theme().info }}> │ 🤖 {goal.config.agent}</span>}
                         {runtime() && (runtime() as any).retryAfter && <span style={{ fg: theme().accent }}> │ ↻ {countdownLabel((runtime() as any).retryAfter, clock())}</span>}
                         {runtime() && (runtime() as any).nextRunAt && <span style={{ fg: theme().accent }}> │ ⏰ {countdownLabel((runtime() as any).nextRunAt, clock())}</span>}
+                        {runtime() && (runtime() as any).nativeReconcileBlocked && <span style={{ fg: theme().error, bold: true }}> │ ⚠ {String((runtime() as any).nativeReconcileBlocked.reason)} {stuckQuietFor(runtime()!.lastActivityAt)}</span>}
                     </DashboardRow>
                   )
                 }}
@@ -1056,6 +1121,7 @@ export function LoopDashboard(props: Props) {
                     {goal().config.model && <><span style={{ fg: theme().info, bold: true }}>{"\n"}🧠 Model: </span><span style={{ fg: theme().text }}>{goal().config.model}</span>{goal().modelSwitch?.pending ? <span style={{ fg: theme().warning }}> → pending {goal().modelSwitch?.pending?.model} (applies next turn)</span> : null}</>}
                     {goal().config.agent && <><span style={{ fg: theme().info, bold: true }}>{"\n"}🤖 Agent: </span><span style={{ fg: theme().text }}>{goal().config.agent}</span>{goal().agentSwitch?.pending ? <span style={{ fg: theme().warning }}> → pending {goal().agentSwitch?.pending?.agent} (applies next turn)</span> : null}</>}
                     {(goal().config.checks?.length ?? 0) > 0 ? <><span style={{ fg: theme().warning }}>{"\n"}▣ </span><span style={{ fg: theme().warning, bold: true }}>Checks: </span><span style={{ fg: theme().textMuted }}>{(goal().config.checks as string[]).join(", ").slice(0, 100)}</span></> : null}
+                    {(rt() as any)?.nativeReconcileBlocked && <><span style={{ fg: theme().error }}>{"\n"}⛔ Blocked: </span><span style={{ fg: theme().error, bold: true }}>{String((rt() as any).nativeReconcileBlocked.reason)}</span><span style={{ fg: theme().textMuted }}> · quiet {stuckQuietFor(rt()!.lastActivityAt)} · nudge to force a turn</span></>}
                     <><span style={{ fg: theme().info, bold: true }}>{"\n"}Write scope: </span><span style={{ fg: theme().textMuted }}>{goal().config.workspaceWrite === false ? "read-only / own artifacts" : goal().config.write_scope === undefined ? "whole workspace (legacy exclusive)" : goal().config.write_scope!.length === 0 ? "exploration only — claim before editing" : goal().config.write_scope!.join(", ")}</span>{goal().scopeClosing || goal().scopeClearPending ? <span style={{ fg: theme().warning }}> — closing; claims retained until writes drain</span> : null}</>
                     {(rt() as any)?.evaluatorRejectionCount > 0 && <><span style={{ fg: theme().warning }}>{"\n"}⚠ rejections: </span><span style={{ fg: theme().warning }}>{String((rt() as any).evaluatorRejectionCount)} — {String((rt() as any).lastRejectionDetails || "").slice(0, 80)}</span></>}
                     {(rt() as any)?.unknownStatusCount > 0 && <><span style={{ fg: theme().error }}>{"\n"}⚠️ unreachable: </span><span style={{ fg: theme().error }}>{String((rt() as any).unknownStatusCount)}/3</span><span style={{ fg: theme().textMuted }}> — nudge to recover</span></>}
@@ -1068,6 +1134,23 @@ export function LoopDashboard(props: Props) {
                 </box>
               )
             }}
+          </Show>
+
+          {/* Write tickets — who currently holds the write lock and who is
+              queued behind overlapping files. Hidden when empty. */}
+          <Show when={tab() === "goals" && ticketCount() > 0}>
+            <box flexDirection="column" border={true} borderColor={theme().border} padding={1} flexShrink={0} maxHeight={10}>
+              <text>
+                <span style={{ fg: theme().primary, bold: true }}>🎟 Write tickets</span>
+                <span style={{ fg: theme().textMuted }}> — {ticketHolders().length} holding · {ticketQueue().length} queued · disjoint files run parallel</span>
+                <For each={ticketHolders()}>{(h) => (
+                  <><span style={{ fg: theme().warning, bold: true }}>{"\n"}HOLD </span><span style={{ fg: theme().text }}>{h.files.join(", ").slice(0, 80)}</span><span style={{ fg: theme().textMuted }}> — {(h.sessionID ?? "").slice(0, 12)}… · “{goalNameFor(h.goalID)}”</span></>
+                )}</For>
+                <For each={ticketQueue().map((w, i) => ({ w, i }))}>{({ w, i }) => (
+                  <><span style={{ fg: theme().textMuted }}>{"\n"}WAIT #{i + 1} </span><span style={{ fg: theme().text }}>{w.files.join(", ").slice(0, 80)}</span><span style={{ fg: theme().textMuted }}> — {(w.sessionID ?? "").slice(0, 12)}… · “{goalNameFor(w.goalID)}”{w.isOwner ? " ★owner" : ""}</span></>
+                )}</For>
+              </text>
+            </box>
           </Show>
           </Show>
 

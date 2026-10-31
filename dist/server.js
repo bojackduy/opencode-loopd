@@ -6315,16 +6315,18 @@ function createLoopEngine(options) {
         if (runtime.phase === "running" && runtime.activeRunID) {
           const fresh = await readState(directory);
           const rt = fresh.runtimes.find((r) => r.goalID === goal.id);
-          if (rt && rt.phase === "running" && rt.activeRunID === runtime.activeRunID && rt.nativeReconcileBlocked?.reason === "foreign-prompt" && rt.foreignPromptNotifiedRunID !== rt.activeRunID) {
+          const stuckReason = rt?.nativeReconcileBlocked?.reason;
+          const isTerminalBlock = stuckReason === "foreign-prompt" || stuckReason === "undelivered-inbox" || stuckReason === "missing-run-anchor" || stuckReason === "invalid-terminal-time";
+          if (rt && rt.phase === "running" && rt.activeRunID === runtime.activeRunID && isTerminalBlock && rt.reconcileStuckNotifiedRunID !== rt.activeRunID) {
             const leaseExpired = !rt.leaseExpiresAt || Date.now() >= Date.parse(rt.leaseExpiresAt);
             const lastActive = rt.lastActivityAt ? Date.parse(rt.lastActivityAt) : 0;
             if (leaseExpired && Date.now() - lastActive > stuckRunningMs) {
               const stuckSeconds = Math.floor((Date.now() - lastActive) / 1000);
-              const marked = await mutateState(directory, `maintenance.foreign-prompt:${goal.id}`, async (s) => {
+              const marked = await mutateState(directory, `maintenance.reconcile-stuck:${goal.id}`, async (s) => {
                 const r = s.runtimes.find((x) => x.goalID === goal.id);
                 if (!r || r.activeRunID !== runtime.activeRunID)
                   return s;
-                r.foreignPromptNotifiedRunID = r.activeRunID;
+                r.reconcileStuckNotifiedRunID = r.activeRunID;
                 r.updatedAt = new Date().toISOString();
                 return s;
               });
@@ -6338,12 +6340,14 @@ function createLoopEngine(options) {
                 timestamp: new Date().toISOString(),
                 revision: marked.revision
               });
-              await logServerEvent(directory, "maintenance.foreign-prompt-stuck", {
+              await logServerEvent(directory, "maintenance.reconcile-stuck", {
                 goalID: goal.id,
                 runID: runtime.activeRunID,
+                reason: stuckReason,
                 stuckSeconds
               });
-              await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" is stalled: its worker session's latest message is not this turn's prompt (e.g. a mid-turn model switch superseded it), so the engine will not re-prompt on its own. Use inspect_background_goal to look, nudge_goal to re-prompt with a fresh turn, or pause_goal to stop it.`, goal.parentAgent);
+              const reasonNote = stuckReason === "foreign-prompt" ? "its worker session's latest message is not this turn's prompt (e.g. a mid-turn model switch superseded it)" : stuckReason === "undelivered-inbox" ? "its queued owner input was never delivered to the worker, so the turn cannot finalize on its own" : "its run bookkeeping cannot prove a terminal turn";
+              await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" is stalled (${stuckReason}): ${reasonNote}. The engine will not re-prompt on its own. Use nudge_goal to force a fresh turn, or pause_goal to stop it.`, goal.parentAgent);
             }
           }
         }
@@ -7453,12 +7457,12 @@ function buildContinuationSteering(goal, runtime, context) {
     `Explore with reads/search \u2192 claim_goal_scope({ paths, runGeneration from get_goal }) \u2192 structured edit/write/apply_patch \u2192 run_goal_checks \u2192 report progress or complete_goal.`,
     `Claim only the minimum files needed. Request expansion BEFORE editing new paths; rename requires both endpoints. No globs.`,
     `Conflicts identify owning goal/session/path. Initial and expansion conflicts fail immediately with no partial claim and no automatic queue. Coordinate with the owner, then retry once; never sleep, poll claims, or repeatedly prompt waiting workers.`,
-    `Arbitrary shell is allowed but prompt-awareness only: shell calls are recorded as uncontrolled, never fenced, and checks wait for quiescence. loopd_command_start/write, custom tools, batch, and subagent writes are denied. Configured checks are trusted commands under a workspace-wide operation lock, not an OS sandbox.`,
+    `Arbitrary shell is allowed but prompt-awareness only: shell calls are recorded as uncontrolled, never fenced, and checks wait for quiescence. Do not use shell to write, edit, or delete files outside write_scope \u2014 shell writes bypass tickets and violate scope. Use structured edit/write/apply_patch with claimed scope only. loopd_command_start/write, custom tools, batch, and subagent writes are denied. Configured checks are trusted commands under a workspace-wide operation lock, not an OS sandbox.`,
     `Output-location exceptions do not grant extra source files. Only this goal's artifact directory is writable without source claims.`
   ] : goal.config.workspaceWrite === false ? [
     ``,
     `## READ-ONLY OWNERSHIP`,
-    `Shared source writes and arbitrary custom/subagent tools are denied. Shell is allowed but prompt-awareness only: recorded as uncontrolled, never fenced, and checks wait for quiescence. Write artifacts only under this goal's artifact directory. Use run_goal_checks for trusted configured verification.`
+    `You are a loopd goal worker on a read-only goal: you are not allowed to write source files, only shell reads plus artifact writes. Shared source writes and arbitrary custom/subagent tools are denied. Shell is allowed but prompt-awareness only: recorded as uncontrolled, never fenced, and checks wait for quiescence. Do not use shell to write, edit, or delete source files \u2014 shell writes bypass scope and violate read-only. Write artifacts only under this goal's artifact directory. Use run_goal_checks for trusted configured verification.`
   ] : [];
   const approvedInstructions = goal.config.approvedCommands?.length ? [
     ``,
@@ -7551,7 +7555,8 @@ function buildContinuationSteering(goal, runtime, context) {
       parts.push(`- ${msg}`);
     }
   }
-  parts.push(...scopeInstructions);
+  if (runtime.runCount <= 1 || (context?.inboxMessages?.length ?? 0) > 0)
+    parts.push(...scopeInstructions);
   parts.push(...approvedInstructions);
   return parts.join(`
 `);
@@ -9305,7 +9310,12 @@ function createGoalService(host) {
         }
       }
       if (currentRun.nativeInboxMessageIDs?.some((id) => !projection?.deliveredMessageIDs?.includes(id))) {
-        return rejected(goalID, "blocked", "Native inbox messages are still awaiting delivery. No duplicate nudge was sent.");
+        const workerStatus = await host.sessionStatus(goal.workerSessionID).catch(() => "unknown");
+        if (workerStatus === "idle" && !leaseIsValid(currentRun)) {
+          await logServerEvent(directory, "goal.nudge.dead-inbox-override", { goalID, runID: currentRun.activeRunID }).catch(() => {});
+        } else {
+          return rejected(goalID, "blocked", "Native inbox messages are still awaiting delivery. No duplicate nudge was sent.");
+        }
       }
     }
     if (goal.workerSessionID) {
@@ -11569,12 +11579,65 @@ function describeGoalState(status, phase, now = Date.now()) {
 }
 
 // src/server/owner-tools.ts
+import { promises as fs10 } from "fs";
+import path11 from "path";
+
+// src/infrastructure/managed-dirs.ts
 import { promises as fs9 } from "fs";
+import path10 from "path";
+var REGISTRY_VERSION = 1;
+function registryFile(instanceDir) {
+  return path10.join(instanceDir, ".opencode", "loopd", "managed.json");
+}
+function normalizeDir(input) {
+  return path10.normalize(input);
+}
+function resolveEntry(instanceDir, entry) {
+  if (path10.isAbsolute(entry))
+    return normalizeDir(entry);
+  return normalizeDir(path10.resolve(instanceDir, entry));
+}
+async function readRegistry(instanceDir) {
+  try {
+    const raw = await fs9.readFile(registryFile(instanceDir), "utf8");
+    const parsed = JSON.parse(raw);
+    const dirs = Array.isArray(parsed.dirs) ? parsed.dirs.filter((d) => typeof d === "string" && d.trim().length > 0) : [];
+    return { version: REGISTRY_VERSION, dirs };
+  } catch (error) {
+    if (error?.code === "ENOENT")
+      return { version: REGISTRY_VERSION, dirs: [] };
+    throw error;
+  }
+}
+async function listManagedDirs(instanceDir) {
+  const root = normalizeDir(path10.resolve(instanceDir));
+  const registry = await readRegistry(instanceDir);
+  const seen = new Set([root]);
+  const result = [root];
+  for (const entry of registry.dirs) {
+    const resolved = resolveEntry(root, entry.trim());
+    if (!seen.has(resolved)) {
+      seen.add(resolved);
+      result.push(resolved);
+    }
+  }
+  return result;
+}
+
+// src/server/owner-tools.ts
 function withTimeout2(promise, ms) {
   return Promise.race([
     promise,
     new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms))
   ]);
+}
+function resolveTargetDir(instanceDir, override) {
+  if (typeof override !== "string" || !override.trim())
+    return instanceDir;
+  const trimmed = override.trim();
+  if (path11.isAbsolute(trimmed))
+    return path11.normalize(trimmed);
+  return path11.normalize(path11.resolve(instanceDir, trimmed));
 }
 function ownerTools2(options) {
   const { directory, host, goalService } = options;
@@ -11638,9 +11701,12 @@ function ownerTools2(options) {
     }),
     list_background_goals: tool2({
       description: "List all active background goals owned by this session. Shows contract (name, status, phase, turn, last progress, blocker) \u2014 only goals with your ownerSessionID appear.",
-      args: {},
-      execute: async (_args, context) => {
-        const state = await readState(directory);
+      args: {
+        directory: tool2.schema.string().optional().describe("Project directory override. Omit to use the instance directory.")
+      },
+      execute: async (args, context) => {
+        const target = resolveTargetDir(directory, args.directory);
+        const state = await readState(target);
         const ownerID = context?.sessionID;
         if (!ownerID) {
           return {
@@ -11699,7 +11765,47 @@ function ownerTools2(options) {
         });
         return {
           title: `${goals.length} active goal(s)`,
-          output: JSON.stringify({ ok: true, goals: summaries }, null, 2)
+          output: JSON.stringify({ ok: true, goals: summaries, directory: target }, null, 2)
+        };
+      }
+    }),
+    loopd_status_all: tool2({
+      description: "List owned active goals across all managed directories (.opencode/loopd/managed.json plus instance directory). Each entry includes its directory.",
+      args: {},
+      execute: async (_args, context) => {
+        const ownerID = context?.sessionID;
+        if (!ownerID) {
+          return {
+            title: "No session",
+            output: JSON.stringify({ ok: false, message: "No session context available." })
+          };
+        }
+        const dirs = await listManagedDirs(directory).catch(() => [directory]);
+        const goals = [];
+        for (const dir of dirs) {
+          let state;
+          try {
+            state = await readState(dir);
+          } catch {
+            continue;
+          }
+          for (const g of state.goals.filter((entry) => entry.ownerSessionID === ownerID && entry.status !== "complete")) {
+            const runtime = state.runtimes.find((r) => r.goalID === g.id);
+            goals.push({
+              id: g.id,
+              name: g.name,
+              status: g.status,
+              phase: runtime?.phase ?? "unknown",
+              turn: runtime?.runCount ?? 0,
+              directory: dir,
+              lastProgress: g.lastProgress?.summary?.slice(0, 120),
+              blocker: g.blocker?.reason?.slice(0, 120)
+            });
+          }
+        }
+        return {
+          title: `${goals.length} active goal(s) across ${dirs.length} dir(s)`,
+          output: JSON.stringify({ ok: true, dirs, goals }, null, 2)
         };
       }
     }),
@@ -11708,10 +11814,12 @@ function ownerTools2(options) {
       args: {
         goal_id: tool2.schema.string().optional().describe("Goal ID. Omit to inspect the first active goal."),
         includeTranscript: tool2.schema.boolean().optional().describe("Include live transcript tail (adds ~100ms). Default true. Set false for fast metadata-only."),
-        transcriptLimit: tool2.schema.number().optional().describe("Number of transcript messages to include (1-10). Default 3.")
+        transcriptLimit: tool2.schema.number().optional().describe("Number of transcript messages to include (1-10). Default 3."),
+        directory: tool2.schema.string().optional().describe("Project directory override. Omit to use the instance directory.")
       },
       execute: async (args, context) => {
-        const state = await readState(directory);
+        const target = resolveTargetDir(directory, args.directory);
+        const state = await readState(target);
         const ownerID = context?.sessionID;
         const goal = args.goal_id ? state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === ownerID) : state.goals.find((g) => g.ownerSessionID === ownerID && g.status !== "complete");
         if (!goal) {
@@ -11740,25 +11848,26 @@ function ownerTools2(options) {
         const tLimit = Math.min(10, Math.max(1, args.transcriptLimit ?? 3));
         const [transcriptTail, progressHistory, artifactSummary, pendingInbox] = await Promise.all([
           includeTranscript && goal.workerSessionID ? withTimeout2(host.readMessages(goal.workerSessionID, tLimit), 900).catch(() => null) : Promise.resolve(null),
-          readEvents(directory, 60).then((evs) => evs.filter((e) => e.goalID === goal.id && e.type === "goal.progress").slice(-5).map((e) => ({ summary: String(e.summary || "").slice(0, 120), next: e.next ? String(e.next).slice(0, 80) : undefined, at: String(e.timestamp || "") }))).catch(() => []),
+          readEvents(target, 60).then((evs) => evs.filter((e) => e.goalID === goal.id && e.type === "goal.progress").slice(-5).map((e) => ({ summary: String(e.summary || "").slice(0, 120), next: e.next ? String(e.next).slice(0, 80) : undefined, at: String(e.timestamp || "") }))).catch(() => []),
           (async () => {
             const dir = goal.config.artifactDir;
             if (!dir)
               return;
             try {
-              const files = await fs9.readdir(dir);
+              const files = await fs10.readdir(dir);
               return files.length ? `${files.length} file(s): ${files.slice(0, 8).join(", ")}` : "no artifacts yet";
             } catch {
               return "no artifacts yet";
             }
           })(),
-          peekGoalInbox(directory, goal.id).then((msgs) => msgs.slice(-3)).catch(() => [])
+          peekGoalInbox(target, goal.id).then((msgs) => msgs.slice(-3)).catch(() => [])
         ]);
         const activeToolCallIDs = runtime?.activeToolCallIDs ?? [];
         return {
           title: `Goal: ${goal.name}`,
           output: JSON.stringify({
             ok: true,
+            directory: target,
             id: goal.id,
             name: goal.name,
             objective: goal.objective,
