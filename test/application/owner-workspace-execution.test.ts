@@ -179,7 +179,7 @@ describe("main/owner session execution under protected goals", () => {
     expect((await readState(root)).workspaceCalls ?? []).toHaveLength(1)
   })
 
-  it("gives worker restrictions precedence when a session is also an owner", async () => {
+  it("lets a worker shell run even when the session also owns another goal", async () => {
     const root = await fixture({ owner: "nested", worker: "worker-a" })
     await mutateState(root, "second-goal", async (state) => {
       state.goals.push(createGoal({
@@ -197,7 +197,10 @@ describe("main/owner session execution under protected goals", () => {
       return state
     })
 
-    await expect(shell(root, "nested")).rejects.toThrow(/Scope denied: uncontrolled tool/)
+    // Shells are prompt-awareness only for workers too: allowed and recorded
+    // as uncontrolled, never ticketed or fenced.
+    await shell(root, "nested")
+    expect((await readState(root)).workspaceCalls).toMatchObject([{ sessionID: "nested", uncontrolled: true }])
   })
 
   it("still fences retired workers", async () => {

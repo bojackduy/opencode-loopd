@@ -135,7 +135,7 @@ describe("real plugin scope enforcement", () => {
     await expect(before("write", { filePath: "../outside.ts" })).rejects.toThrow("outside")
   })
 
-  it("allows owner diagnostics and unclaimed owner edits but denies claimed files, workers and unknown children", async () => {
+  it("allows owner and worker shells while denying claimed files and unknown children", async () => {
     const { directory, before, after } = await fixture()
     await before("edit", { filePath: "other.ts" }, "parent", "parent-edit")
     await expect(before("edit", { filePath: "owned.ts" }, "parent")).rejects.toThrow("owner")
@@ -151,9 +151,17 @@ describe("real plugin scope enforcement", () => {
     for (const callID of ownerCalls) await after(callID, "parent")
     await after("parent-edit", "parent")
     expect((await readState(directory)).workspaceCalls).toEqual([])
+    // Worker shells are prompt-awareness only just like the owner's: allowed
+    // and recorded as uncontrolled, never ticketed or fenced.
+    const workerCalls: string[] = []
     for (const tool of ["bash", "shell", "loopd_command_start", "loopd_command_write", "task", "batch", "custom_writer"]) {
-      await expect(before(tool, { command: "true" }, "worker")).rejects.toThrow("uncontrolled")
+      const callID = crypto.randomUUID()
+      await before(tool, { command: "true" }, "worker", callID)
+      workerCalls.push(callID)
     }
+    expect((await readState(directory)).workspaceCalls?.filter((call) => call.sessionID === "worker" && call.uncontrolled).map((call) => call.callID).sort()).toEqual([...workerCalls].sort())
+    for (const callID of workerCalls) await after(callID, "worker")
+    expect((await readState(directory)).workspaceCalls).toEqual([])
     await before("read", { filePath: "owned.ts" }, "worker")
     for (const tool of ["bash", "shell", "loopd_command_start", "loopd_command_write", "task", "batch", "custom_writer"]) {
       await expect(before(tool, { command: "true" }, "unknown-child")).rejects.toThrow("unrecognized")

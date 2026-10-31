@@ -47,8 +47,13 @@ describe("persisted scope claims", () => {
         state.workspaceOperation = { id: "checks", goalID: "other", sessionID: "other" }
         return state
       })
-      await expect(beforeWorkspaceTool(root, { tool: "shell", sessionID: "worker-0", callID: "injected" }, { command: "bun", args: ["-e", "throw 1"], cwd: "/" })).rejects.toThrow()
-      expect((await readState(root)).workspaceCalls ?? []).toHaveLength(0)
+      // A tool named like an approved command gains no authority from the
+      // name/executable match: shell is prompt-awareness only, recorded as an
+      // uncontrolled call without taking the workspace operation lock.
+      await beforeWorkspaceTool(root, { tool: "shell", sessionID: "worker-0", callID: "injected" }, { command: "bun", args: ["-e", "throw 1"], cwd: "/" })
+      expect((await readState(root)).workspaceCalls).toMatchObject([{ callID: "injected", uncontrolled: true }])
+      expect((await readState(root)).workspaceOperation).toMatchObject({ id: "checks" })
+      await afterWorkspaceTool(root, "worker-0", "injected")
     }
   })
 
@@ -97,9 +102,9 @@ describe("persisted scope claims", () => {
     const root = await fixture([])
     const service = createGoalService(createFakeHost())
     const start = () => service.start(root, { name: "protected", objective: "test", ownerSessionID: "parent", config: { write_scope: [] } })
-    await beforeWorkspaceTool(root, { tool: "bash", sessionID: "parent", callID: "shell" }, { command: "anything" })
+    await beforeWorkspaceTool(root, { tool: "bash", sessionID: "owner-0", callID: "shell" }, { command: "anything" })
     await expect(start()).rejects.toThrow("uncontrolled")
-    await afterWorkspaceTool(root, "parent", "shell")
+    await afterWorkspaceTool(root, "owner-0", "shell")
     const commandHost = createFakeCommandHost()
     const commands = createCommandService(commandHost)
     const command = await commands.start(root, { title: "existing", command: "anything", ownerSessionID: "parent" })
@@ -107,9 +112,14 @@ describe("persisted scope claims", () => {
     await commands.terminate(root, command.id, "parent")
     await start()
     const workerSessionID = (await readState(root)).goals[0]!.workerSessionID!
-    await expect(commands.start(root, { title: "bypass", command: "anything", ownerSessionID: workerSessionID })).rejects.toThrow("uncontrolled")
-    expect(commandHost.procs.size).toBe(1)
-    await expect(commands.write(root, command.id, workerSessionID, "anything")).rejects.toThrow("uncontrolled")
+    // Workers may run their own commands (prompt-awareness only, like shells)
+    // but cannot touch another session's commands.
+    const workerCmd = await commands.start(root, { title: "worker-cmd", command: "anything", ownerSessionID: workerSessionID })
+    expect(workerCmd.ownerSessionID).toBe(workerSessionID)
+    await commands.terminate(root, workerCmd.id, workerSessionID)
+    expect(commandHost.procs.size).toBe(2)
+    const notYours = await commands.write(root, command.id, workerSessionID, "anything")
+    expect(notYours.ok).toBe(false)
     const result = await createControlService().execute(root, { command: "clear", requestID: "legacy", goalID: (await readState(root)).goals[0]!.id } as any)
     expect(result.errorCode).toBe("unsupported_scope")
     expect((await readState(root)).goals).toHaveLength(1)

@@ -392,12 +392,19 @@ export async function beforeWorkspaceTool(
     const goal = state.goals.find((item) => item.workerSessionID === input.sessionID)
     if (state.retiredWorkerSessions?.includes(input.sessionID)) throw new Error("Scope denied: retired worker session; goal cleared or worker rotated. Stop work; late executions are fenced.")
     if (goal?.config.workspaceWrite === false) {
-      // A read-only goal may write ONLY its private artifact directory. These
-      // writes never acquire shared workspace reservations and therefore do
-      // not block writers, checks, or other read-only goals.
+      // A read-only goal may write ONLY its private artifact directory via
+      // structured tools. Shells are prompt-awareness only (never ticketed,
+      // never fenced) and therefore allowed — recorded as uncontrolled so
+      // checks still wait for quiescence.
       if (goal.status !== "active" || goal.scopeClosing) throw new Error("Scope denied: read-only worker is not active.")
       const writes = structuredWritePaths(input.tool, args)
-      if (!writes) throw new Error(`Scope denied: uncontrolled tool "${input.tool}" in read-only goal (shell can write, so it is never allowed here). Inspect with read/glob/grep/list tools (they work anywhere), write reports with the write/edit tools into this goal's artifact directory only, verify with run_goal_checks, or ask the owner to grant a fixed executable via grant_approved_command.`)
+      if (!writes) {
+        state.workspaceCalls ??= []
+        if (!state.workspaceCalls.some((call) => call.callID === input.callID && call.sessionID === input.sessionID)) {
+          state.workspaceCalls.push({ callID: input.callID, sessionID: input.sessionID, goalID: goal?.id, generation: stampCallGeneration(state, goal?.id), paths: [], uncontrolled: true, at: new Date().toISOString() })
+        }
+        return state
+      }
       if (!goal.config.artifactDir) throw new Error("Scope denied: read-only artifact directory is missing.")
       const artifact = path.relative(directory, goal.config.artifactDir).split(path.sep).join("/")
       const paths = await Promise.all(writes.map((file) => canonicalScopePath(directory, file)))
@@ -441,14 +448,12 @@ export async function beforeWorkspaceTool(
     }
     const writes = structuredWritePaths(input.tool, args)
     if (!writes) {
-      // Shell / arbitrary tools are never ticketed — prompt awareness only.
-      // They run concurrently; the initial worker prompt explains the circumstance
-      // (not injected on every tool call). Still record for observability.
-      // Workers are never allowed to use shell (even if they also own another goal) — prompt awareness only.
-      if (goal) {
-        throw new Error(`Scope denied: uncontrolled tool "${input.tool}" in worker goal (shell can write, so it is never allowed here). Use read tools or ask the owner to grant a fixed executable via grant_approved_command.`)
-      }
-      if (!isOwner) {
+      // Shell / arbitrary tools are never ticketed and never fenced — prompt
+      // awareness only. They run concurrently for owners and workers alike;
+      // the initial worker prompt explains the circumstance (not injected on
+      // every tool call). Still recorded for observability, and checks wait
+      // for quiescence while any uncontrolled call is live.
+      if (!goal && !isOwner) {
         throw new Error(`Scope denied: unrecognized session/child "${input.sessionID}". Subagent writes are unsupported — make file writes from the worker session (or the owning main session), not from a nested subagent.`)
       }
       state.workspaceCalls ??= []

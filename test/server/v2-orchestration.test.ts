@@ -73,13 +73,14 @@ describe("v2 CodeMode orchestration guards", () => {
     })
   }
 
-  it("allows the wrapper under a scoped goal but vetoes nested shell and out-of-scope edits", async () => {
+  it("allows the wrapper under a scoped goal; shells are prompt-aware, out-of-scope edits still fenced", async () => {
     const f = await fixture()
     const { goal } = await f.service.start(f.directory, { name: "scoped", objective: "test", ownerSessionID: "parent",
       config: { workspaceWrite: true, write_scope: ["owned.ts"] } })
     const context = { ...f.context, sessionID: goal.workerSessionID! }
     await f.hooks.get("execute.before")({ tool: "execute", ...context, input: { code: "return await tools.edit({})" } })
-    await expect(f.call("bash", {}, context)).rejects.toThrow("uncontrolled")
+    // Worker shells are prompt-awareness only: allowed and recorded, never fenced.
+    await expect(f.call("bash", {}, context)).resolves.toMatchObject({ content: "shell executed" })
     await expect(f.call("edit", { filePath: "other.ts" }, context)).rejects.toThrow("outside")
     await f.call("edit", { filePath: "owned.ts" }, context)
     expect(await fs.readFile(path.join(f.directory, "owned.ts"), "utf8")).toBe("changed")
@@ -93,15 +94,21 @@ describe("v2 CodeMode orchestration guards", () => {
     expect((await readState(f.directory)).workspaceCalls).toMatchObject([{ uncontrolled: true, callID: "custom" }])
   })
 
-  for (const [id, name] of [["execute", "execute"], ["custom_edit", "edit"]]) {
-    it(`keeps the registered ${id} executor guarded instead of trusting its short name`, async () => {
+  for (const [id, name] of [["execute", "execute"], ["custom_edit", "edit"]] as const) {
+    it(`routes the registered ${id} executor by id, not its display name`, async () => {
       const f = await fixture()
       const { goal } = await f.service.start(f.directory, { name: "protected", objective: "test", ownerSessionID: "parent",
         config: { workspaceWrite: true, write_scope: [] } })
       let executed = false
       const definition = { id, name, description: "custom", input: {}, execute: async () => { executed = true; return { content: "unsafe" } } }
       guardV2ToolEditor(f.directory, { list: () => [definition], update: (_id: string, update: any) => update(definition) } as any)
-      await expect(definition.execute({ filePath: "outside.ts" }, { ...f.context, sessionID: goal.workerSessionID! })).rejects.toThrow("uncontrolled")
+      // Worker: an unstructured tool id is prompt-awareness only — allowed, never
+      // fenced, even though the display name looks like a scoped structured tool.
+      await expect(definition.execute({ filePath: "outside.ts" }, { ...f.context, sessionID: goal.workerSessionID! })).resolves.toMatchObject({ content: "unsafe" })
+      expect(executed).toBe(true)
+      // Unknown sessions are still fenced: proves the call goes through the guard.
+      executed = false
+      await expect(definition.execute({ filePath: "outside.ts" }, { ...f.context, sessionID: "unknown-child" })).rejects.toThrow(/unrecognized/)
       expect(executed).toBe(false)
     })
   }
