@@ -272,6 +272,9 @@
         .frame-art .orbit, .frame-art .core-glow { animation: none; }
         .orbit-group { transform: none; transition: none; }
       }
+
+      .frame-video { position: absolute; inset: 1.6rem; width: calc(100% - 3.2rem); height: calc(100% - 3.2rem); object-fit: cover; opacity: .22; filter: saturate(.8) contrast(1.05); z-index: 0; pointer-events: none; }
+      .frame-layer { z-index: 1; background: linear-gradient(180deg, rgba(26,23,20,.78), rgba(26,23,20,.42)); }
     </style>
   </head>
   <body>
@@ -320,27 +323,7 @@
         </div>
       </section>
 
-      <div class="demo reveal">
-        <div class="demo-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span style="margin-left:.6rem">opencode — Loop Dashboard • NORMAL • 0 goals • ○ 0 RUNNING • 7 done</span></div>
-        <img src="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/demo.png" alt="Loop Dashboard modal TUI inside OpenCode terminal" width="1200" height="675" loading="eager" fetchpriority="high" />
-        <div class="caption">Static screenshot — modal dashboard (<code>/loop</code> / <code>&lt;leader&gt;o</code>): vivid per-status coloring, running spinner, NORMAL vs INSERT.</div>
-      </div>
 
-      <div class="demo" style="margin-top:2rem">
-        <div class="demo-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span style="margin-left:.6rem">opencode — fullscreen terminal • scrollback • typing • detach</span></div>
-        <div style="display:flex; justify-content:center; background:var(--code-bg); padding:1rem">
-          <img src="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/loopd-demo.gif" alt="Recorded loopd TUI demo — /commands, fullscreen terminal, scrollback, typing, Ctrl+] detach" style="max-height:420px; width:auto; max-width:100%; display:block" loading="lazy" />
-        </div>
-        <div class="caption">Recorded session: <code>/commands</code> → select → <code>o</code> fullscreen terminal → <code>Shift+PgUp/PgDn</code> scroll 1000-line history → type → <code>Ctrl+C</code> interrupt → <code>Ctrl+]</code> detach (process keeps running).</div>
-      </div>
-
-      <div class="demo" style="margin-top:2rem">
-        <div class="demo-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span style="margin-left:.6rem">opencode — agent drives two parallel loopd goals • live</span></div>
-        <div style="display:flex; justify-content:center; background:var(--code-bg); padding:1rem">
-          <video src="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/loopd-tui.mp4" style="width:100%; max-width:100%; display:block" controls preload="metadata" playsinline aria-label="Recorded opencode TUI session — agent creates two parallel loopd goals that write through write tickets to completion"></video>
-        </div>
-        <div class="caption">Recorded live session: empty Loop Dashboard (<code>ctrl+x o</code>) → agent creates <code>tui-a</code> + <code>tui-b</code> with disjoint scopes → workers write through per-file tickets → polls to completion. Free model, real run. Cast: <code>assets/loopd-tui.cast</code> (<code>asciinema play</code>).</div>
-      </div>
 
       <section class="story reveal" id="story">
     <div class="story-sticky">
@@ -350,6 +333,7 @@
           <span style="margin-left:.6rem">opencode — loop in motion</span>
         </div>
         <div class="frame-body">
+          <video class="frame-video" src="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/loopd-tui.mp4" muted loop playsinline preload="none" poster="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/demo.png" aria-hidden="true"></video>
           <svg class="frame-art" viewBox="0 0 260 190" aria-hidden="true">
             <defs>
               <radialGradient id="coreGlow" cx="50%" cy="50%" r="50%">
@@ -561,6 +545,31 @@ loopd_status_all({})
 send_goal_input({ goal_id: "...", message: "use approach B" })
 nudge_goal({ goal_id: "..." })</code></pre>
           <p>Cross-dir goals default <code>interactive:true</code> (manager-steered). Checks run from the target root. Fences are per-dir stores — no cross-talk. Goal IDs are UUIDs; always show the directory alongside.</p>
+        </div>
+      </section>
+
+  <section class="reveal">
+        <div class="section-label">demo</div>
+        <h2>See it running.</h2>
+        <p class="lead">Lazy-loaded recordings. Open them when you want proof, not on first paint.</p>
+        <div class="demo reveal" style="margin-top:2rem">
+          <div class="demo-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span style="margin-left:.6rem">opencode — Loop Dashboard • NORMAL • 0 goals • ○ 0 RUNNING • 7 done</span></div>
+          <img src="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/demo.png" alt="Loop Dashboard modal TUI inside OpenCode terminal" width="1200" height="675" loading="lazy" />
+          <div class="caption">Static screenshot — modal dashboard (<code>/loop</code> / <code>&lt;leader&gt;o</code>): vivid per-status coloring, running spinner, NORMAL vs INSERT.</div>
+        </div>
+        <div class="demo" style="margin-top:2rem">
+          <div class="demo-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span style="margin-left:.6rem">opencode — fullscreen terminal • scrollback • typing • detach</span></div>
+          <div style="display:flex; justify-content:center; background:var(--code-bg); padding:1rem">
+            <img src="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/loopd-demo.gif" alt="Recorded loopd TUI demo — /commands, fullscreen terminal, scrollback, typing, Ctrl+] detach" style="max-height:420px; width:auto; max-width:100%; display:block" loading="lazy" />
+          </div>
+          <div class="caption">Recorded session: <code>/commands</code> → select → <code>o</code> fullscreen terminal → <code>Shift+PgUp/PgDn</code> scroll 1000-line history → type → <code>Ctrl+C</code> interrupt → <code>Ctrl+]</code> detach (process keeps running).</div>
+        </div>
+        <div class="demo" style="margin-top:2rem">
+          <div class="demo-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span style="margin-left:.6rem">opencode — agent drives two parallel loopd goals • live</span></div>
+          <div style="display:flex; justify-content:center; background:var(--code-bg); padding:1rem">
+            <video src="https://raw.githubusercontent.com/bojackduy/opencode-loopd/master/assets/loopd-tui.mp4" style="width:100%; max-width:100%; display:block" controls preload="none" playsinline aria-label="Recorded opencode TUI session — agent creates two parallel loopd goals that write through write tickets to completion"></video>
+          </div>
+          <div class="caption">Recorded live session: empty Loop Dashboard (<code>ctrl+x o</code>) → agent creates <code>tui-a</code> + <code>tui-b</code> with disjoint scopes → workers write through per-file tickets → polls to completion. Free model, real run. Cast: <code>assets/loopd-tui.cast</code> (<code>asciinema play</code>).</div>
         </div>
       </section>
 
