@@ -8,20 +8,27 @@ import { TERMINAL_COMMAND_STATUSES } from "../domain/command-await"
 import type { CommandSession } from "../domain/command-session"
 import type { Goal } from "../domain/goal"
 
-export type DashboardView = "goals" | "commands"
+export type DashboardView = "project" | "fleet" | "commands"
+
+/** Legacy alias: the goals tab is now the Project tab (one managed directory). */
+export type GoalsView = Extract<DashboardView, "project">
 
 export function toggleDashboardView(view: DashboardView): DashboardView {
-  return view === "goals" ? "commands" : "goals"
+  if (view === "project") return "fleet"
+  if (view === "fleet") return "commands"
+  return "project"
 }
 
 /**
- * Directional tab selection: `h` selects Goals, `l` selects Commands
- * (Tab toggles — see toggleDashboardView). Returns the target view, or
- * undefined when the key is not a directional tab key.
+ * Directional tab selection: `l` selects Commands. Legacy `h` (goals) is
+ * retired — `h` now toggles history and `1` selects the Project tab.
+ * Returns the target view, or undefined when the key is not a tab key.
  */
 export function dashboardViewForKey(key: string): DashboardView | undefined {
-  if (key === "h") return "goals"
   if (key === "l") return "commands"
+  if (key === "1") return "project"
+  if (key === "2") return "fleet"
+  if (key === "3") return "commands"
   return undefined
 }
 
@@ -31,7 +38,12 @@ export interface DashboardSelection {
   commandIndex: number
 }
 
-export function initialDashboardSelection(view: DashboardView = "goals"): DashboardSelection {
+/** Stable row identity across refresh/filter/history/collapse. */
+export function goalSelectionKey(directory: string, goalID: string): string {
+  return `${directory}\n${goalID}`
+}
+
+export function initialDashboardSelection(view: DashboardView = "project"): DashboardSelection {
   return { view, goalIndex: 0, commandIndex: 0 }
 }
 
@@ -46,7 +58,7 @@ export function moveDashboardSelection(
   goalCount: number,
   commandCount: number,
 ): DashboardSelection {
-  if (sel.view === "goals") {
+  if (sel.view !== "commands") {
     const max = Math.max(0, goalCount - 1)
     const cur = Math.min(sel.goalIndex, max)
     switch (move) {
@@ -92,7 +104,7 @@ export function resolveDashboardOpen(
   returnSessionID: string | undefined,
   showCompleted = false,
 ): OpenTarget {
-  if (sel.view === "goals") {
+  if (sel.view === "project" || sel.view === "fleet") {
     const goal = lists.goals[sel.goalIndex]
     return resolveOpenTarget(
       { selection: goal ? { kind: "goal", workerSessionID: goal.workerSessionID } : null, ownerSessionID, returnSessionID },
@@ -125,4 +137,21 @@ export function visibleOwnerCommands(
   if (showCompleted) return owned
   const terminal = TERMINAL_COMMAND_STATUSES as readonly string[]
   return owned.filter((c) => !terminal.includes(c.status))
+}
+
+/** Resolve a stable selection key back to a row index after re-filtering. */
+export function indexForSelectionKey(
+  keysInOrder: string[],
+  key: string | undefined,
+): number {
+  if (!key) return 0
+  const idx = keysInOrder.indexOf(key)
+  return idx < 0 ? 0 : idx
+}
+
+/** Toggle a directory in the Fleet collapse set. */
+export function toggleCollapsed(collapsed: string[], directory: string): string[] {
+  return collapsed.includes(directory)
+    ? collapsed.filter((d) => d !== directory)
+    : [...collapsed, directory]
 }

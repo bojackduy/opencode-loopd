@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Loopd / Dashboard sketch</title>
+<style>
+  :root{
+    --base:#222430; --inset:#1b1d27; --rule:#414552; --ink:#e8e9ee;
+    --muted:#a6a9b7; --cyan:#9bddce; --amber:#e9c982; --rose:#e28d99; --sage:#a8cb99;
+  }
+  *{box-sizing:border-box; border-radius:0 !important;}
+  body{background:var(--base); color:var(--ink);
+    font-family:Menlo,SFMono-Regular,Consolas,"Liberation Mono",monospace;
+    font-size:14px; line-height:1.6; margin:0; padding:24px;}
+  .terminal{max-width:1320px; min-height:calc(100svh - 48px); margin:auto; border:1px solid var(--rule); display:flex; flex-direction:column;}
+  .terminal>header{order:1;padding:14px 20px;}
+  .terminal>nav{order:2;padding:0 20px;}
+  .terminal>main{order:3;flex:1;display:flex;flex-direction:column;padding:16px 20px 20px;max-width:none;}
+  .terminal>#coordstrip{order:4;padding:12px 20px;border-top:1px solid var(--rule);border-bottom:0;}
+  .terminal>footer{order:5;position:static;padding:12px 20px;}
+  #view{flex:1;min-height:240px;overflow-x:auto;padding-bottom:18px;}
+  button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,tr:focus-visible{outline:2px solid var(--amber);outline-offset:3px;}
+  header{display:flex; align-items:center; gap:12px; padding:8px 12px;
+    border-bottom:1px solid var(--rule); background:var(--inset); flex-wrap:wrap;}
+  header .logo{color:var(--cyan); font-weight:bold; letter-spacing:1px;}
+  header .proto{color:var(--muted); font-size:11px; border:1px solid var(--rule); padding:1px 6px;}
+  header button{background:var(--base); color:var(--muted); border:1px solid var(--rule);
+    font:inherit; font-size:11px; padding:2px 8px; cursor:pointer;}
+  header button:hover{color:var(--ink); border-color:var(--cyan);}
+  nav.tabs{display:flex; gap:0; padding:0 12px; border-bottom:1px solid var(--rule); background:var(--inset);}
+  nav.tabs button{background:none; border:none; border-right:1px solid var(--rule);
+    color:var(--muted); font:inherit; padding:6px 14px; cursor:pointer;}
+  nav.tabs button small{color:var(--rule); margin-right:6px;}
+  nav.tabs button.active{background:var(--cyan); color:#14151c; font-weight:bold;}
+  nav.tabs button.active small{color:#14151c;}
+  #coordstrip{display:flex; align-items:center; gap:10px; padding:5px 12px;
+    border-bottom:1px solid var(--rule); color:var(--amber); font-size:11px; flex-wrap:wrap;}
+  #coordstrip button{background:var(--base); color:var(--cyan); border:1px solid var(--rule);
+    font:inherit; font-size:11px; padding:1px 8px; cursor:pointer;}
+  main{padding:8px 12px 60px 12px; max-width:1360px;}
+  .summary{color:var(--muted); margin:4px 0 8px 0;}
+  .summary b{color:var(--amber); font-weight:normal;}
+  .toolbar{display:flex; gap:8px; margin:6px 0; align-items:center; flex-wrap:wrap;}
+   .toolbar input:not([type=checkbox]){background:var(--inset); border:1px solid var(--rule); color:var(--ink);
+    font:inherit; padding:3px 8px; width:220px;}
+  .toolbar select{background:var(--inset); border:1px solid var(--rule); color:var(--ink); font:inherit; padding:3px 6px;}
+  .toolbar label{color:var(--muted); font-size:11px;}
+  table{width:100%; border-collapse:collapse; margin-top:4px;}
+  th{text-align:left; color:var(--muted); font-weight:normal; font-size:11px;
+    border-bottom:1px solid var(--rule); padding:4px 8px;}
+   td{border-bottom:1px solid #343744; padding:11px 8px; vertical-align:top;}
+   th:first-child,td:first-child{width:24px;color:var(--cyan);}
+   th:last-child,td:last-child{white-space:nowrap;}
+  tr.row{cursor:pointer;}
+  tr.row:hover td{background:#262836;}
+  tr.row.sel td{background:#1e2e2c;}
+  tr.row.sel td:first-child{box-shadow:inset 2px 0 0 var(--cyan);}
+  .st-blocked{color:var(--rose);} .st-working{color:var(--sage);}
+  .st-await{color:var(--amber);} .st-paused{color:var(--muted);}
+  .st-done{color:var(--muted);} .st-run{color:var(--cyan);}
+  .grp{color:var(--cyan); font-weight:bold;}
+  .grp td{border-bottom:1px solid var(--cyan); background:var(--inset);}
+   #inspector{border:1px solid var(--rule); background:var(--inset); margin-top:10px; padding:16px 18px;min-height:150px;}
+   #inspector h3{margin:0 0 8px 0; font-size:14px; font-weight:normal;color:var(--cyan);}
+  #inspector h3 .p{color:var(--muted); font-size:11px;}
+  #inspector .blk{color:var(--rose); margin:4px 0;}
+  #inspector .res{color:var(--muted); margin:4px 0;}
+  #inspector .keys{margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;}
+  #inspector button, .drawer button, #cmdpanel button{background:var(--base); color:var(--ink);
+    border:1px solid var(--rule); font:inherit; font-size:11px; padding:2px 10px; cursor:pointer;}
+  #inspector button:hover, .drawer button:hover{border-color:var(--cyan); color:var(--cyan);}
+  #details{border:1px solid var(--rule); margin-top:8px; padding:8px 10px; display:none;}
+  #details.open{display:block;}
+  #details dl{display:grid; grid-template-columns:130px 1fr; gap:2px 10px; margin:0; font-size:11px;}
+  #details dt{color:var(--muted);} #details dd{margin:0; word-break:break-word;}
+  #details pre{background:var(--base); border:1px solid var(--rule); padding:6px; overflow:auto; max-height:160px; font-size:11px;}
+   .drawer{position:fixed; top:0; right:0; margin:0 0 0 auto;width:min(610px,96vw); height:100%;max-height:100%;
+    background:var(--inset); border-left:1px solid var(--cyan); padding:10px 12px;
+    overflow:auto; display:none; z-index:20;}
+   .drawer[open]{display:block;}
+  .drawer h3{margin:0 0 6px 0; font-weight:normal; color:var(--cyan);}
+  .drawer .rtabs{display:flex; gap:0; margin-bottom:8px;}
+  .drawer .rtabs button{border:1px solid var(--rule); border-left:none; background:var(--base); color:var(--muted);}
+  .drawer .rtabs button:first-child{border-left:1px solid var(--rule);}
+  .drawer .rtabs button.active{background:var(--cyan); color:#14151c;}
+   .drawer .item{border-bottom:1px solid var(--rule); padding:18px 0; font-size:13px;overflow-wrap:anywhere;}
+  .drawer .item .who{color:var(--muted);}
+  .drawer button:disabled{opacity:.4; cursor:not-allowed;}
+  #cmdpanel{margin-top:8px;}
+  #cmdpanel pre{background:var(--inset); border:1px solid var(--rule); padding:8px; min-height:120px;
+    max-height:260px; overflow:auto;}
+   dialog{background:var(--inset); color:var(--ink); border:1px solid var(--cyan); padding:22px; width:min(650px,92vw);font:inherit;}
+   dialog h3{font:inherit;color:var(--cyan);margin:0 0 18px;}
+   dialog p{color:var(--muted);}
+   dialog button{background:var(--base);color:var(--ink);border:1px solid var(--rule);font:inherit;padding:6px 12px;cursor:pointer;}
+   dialog button:hover{border-color:var(--cyan);}
+   dialog button:disabled{opacity:.5;cursor:not-allowed;}
+   .palette{display:flex;flex-direction:column;gap:8px;}
+   .palette button{text-align:left;}
+   .toolbar{margin-bottom:16px;}
+   .toolbar input[type=checkbox]{accent-color:var(--cyan);width:auto;margin-right:6px;}
+   .toolbar label{margin-left:auto;}
+   .grp button{border:0;background:none;color:var(--cyan);font:inherit;cursor:pointer;text-align:left;}
+   .grp td{padding-top:18px;}
+   .splitline{display:flex;gap:12px;justify-content:space-between;flex-wrap:wrap;}
+   .dim{color:var(--muted);}
+   .state-label{white-space:nowrap;}
+  dialog::backdrop{background:rgba(0,0,0,.6);}
+  dialog textarea, dialog input{width:100%; background:var(--base); border:1px solid var(--rule);
+    color:var(--ink); font:inherit; padding:5px; margin:6px 0;}
+  dialog .row{display:flex; gap:8px; justify-content:flex-end; margin-top:8px;}
+  #toast{position:fixed; bottom:34px; left:50%; transform:translateX(-50%);
+    background:var(--inset); border:1px solid var(--cyan); color:var(--cyan);
+    padding:5px 14px; display:none; z-index:30;}
+  footer{position:fixed; bottom:0; left:0; right:0; background:var(--inset);
+    border-top:1px solid var(--rule); color:var(--muted); font-size:11px; padding:4px 12px;}
+  footer b{color:var(--ink); font-weight:normal;}
+  .hist{color:var(--muted); font-size:11px; margin-top:6px;}
+  .hist div{border-top:1px dotted var(--rule); padding:2px 0;}
+   @media (max-width:760px){body{padding:8px;font-size:12px;}.terminal{min-height:calc(100svh - 16px);} .terminal>header,.terminal>main,.terminal>#coordstrip,.terminal>footer{padding:12px;}nav.tabs button{padding:8px;}table, thead, tbody, th, td, tr{display:block;}
+    thead{display:none;} td{border:none; padding:2px 0;} tr.row{border-bottom:1px solid var(--rule); padding:4px 0;}
+     td:first-child{display:none;}td:last-child{color:var(--muted);}.toolbar input:not([type=checkbox]){width:100%;}.toolbar label{margin-left:0;}#view{min-height:100px;}#details dl{grid-template-columns:1fr;} }
+</style>
+</head>
+<body>
+<div class="terminal">
+<header>
+  <span class="logo">LOOPD</span>
+  <span id="hdrproj">opencode-loopd</span>
+  <span class="proto">Prototype · mock data</span>
+  <button id="resetdemo" title="restore fictional state">Reset demo</button>
+</header>
+<nav class="tabs" role="tablist">
+  <button data-tab="project" class="active"><small>[1]</small>Project</button>
+  <button data-tab="fleet"><small>[2]</small>Fleet</button>
+  <button data-tab="commands"><small>[3]</small>Commands</button>
+</nav>
+<div id="coordstrip" title="coordination state">
+  <span id="coordtext"></span>
+  <button id="opentriage">[t] Inspect coordination</button>
+</div>
+<main>
+  <div class="summary" id="summary"></div>
+  <div class="toolbar" id="toolbar">
+    <select id="projselect" title="project scope"></select>
+    <input id="filter" type="text" placeholder="/ filter workers or commands" aria-label="Filter workers or commands" title="press / to focus">
+    <label><input type="checkbox" id="histtoggle"> history <small>[h]</small></label>
+  </div>
+  <div id="view"></div>
+  <div id="inspector"></div>
+  <div id="details"></div>
+  <div id="cmdpanel" style="display:none"></div>
+</main>
+<dialog class="drawer" id="drawer" aria-label="Coordination">
+  <h3>Coordination <button id="closedrawer" style="float:right" aria-label="Close coordination">esc</button></h3>
+  <p id="coordproject" class="dim"></p>
+  <div class="rtabs" id="rtabs">
+    <button data-r="writes" class="active">Writes</button>
+    <button data-r="verify">Verification</button>
+    <button data-r="resv">Reservations</button>
+  </div>
+  <div id="rbody"></div>
+  <p style="color:var(--muted); font-size:11px">Scope = permission · Ticket = current write · Verification waits for quiet</p>
+</dialog>
+<dialog id="senddlg" aria-label="Send input">
+  <form method="dialog">
+    <b>Send input</b> <span id="sendto" style="color:var(--muted)"></span>
+    <label for="sendtext" class="dim">Simulated message. No real worker receives this.</label>
+    <textarea id="sendtext" rows="3" placeholder="Give this worker a short directive" required></textarea>
+    <div class="row"><button value="cancel" formnovalidate>Cancel</button><button id="sendsubmit" value="send">Send</button></div>
+  </form>
+</dialog>
+<dialog id="modal" aria-label="Worker actions"><div id="modalbody"></div></dialog>
+<div id="toast" role="status"></div>
+<footer><b>j/k</b> move · <b>1/2/3</b> tabs · <b>s</b> send · <b>d</b> details · <b>o</b> session · <b>t</b> coordination · <b>/</b> filter · <b>h</b> history · <b>?</b> this</footer>
+</div>
+
+<script>
+"use strict";
+/* Fictional mock state. Nothing here contacts a worker. */
+const SEED = () => ([
+  {id:"e-landing", name:"landing-refresh", project:"opencode-loopd", state:"blocked",
+    activity:"needs image-provider credentials", updated:"2m ago",
+    result:"Blocked: Image-provider credentials unavailable. Layout and copy are ready.",
+   agent:"Nature", model:"muse-spark", budget:"$0.42 / $2.00", turns:"7/50",
+   objective:"Refresh landing copy + visuals; no source-logic changes.",
+    scope:["docs/index.html","assets/hero.svg"], checks:["ls docs/index.html"],
+    transcript:["09:39 worker: layout and copy ready","09:41 worker: image generation needs credentials","09:41 host: blocked; waiting for owner"]},
+  {id:"e-ticket", name:"ticket-fix", project:"opencode-loopd", state:"working",
+   activity:"editing workspace-execution.ts gate", updated:"40s ago",
+    result:"Write-ticket diagnostics drafted. Typecheck waits for workspace quiet.",
+   agent:"Nature", model:"muse-spark", budget:"$0.31 / $2.00", turns:"3/40",
+    objective:"Show ticket holders and explain why a verification run must wait.",
+   scope:["src/application/workspace-execution.ts"], checks:["bun run typecheck"],
+   transcript:["> editing gate filter","events: ticket.granted.queued (2)"]},
+  {id:"e-docs", name:"docs-refresh", project:"opencode-loopd", state:"working",
+   activity:"rewriting README install section", updated:"5m ago",
+    result:"Install section drafted. Keeping advanced configuration one level deeper.",
+   agent:"Nature", model:"muse-spark", budget:"$0.12 / $2.00", turns:"2/30",
+   objective:"README for newcomers; tech details to docs/.",
+   scope:["README.md"], checks:["grep -q Quickstart README.md"],
+   transcript:["> wrote install steps"]},
+  {id:"e-voice", name:"voice-assistant", project:"opencode-voice", state:"awaiting",
+    activity:"architecture tour ready; available for input", updated:"12m ago",
+    result:"Tour delivered. Employee is available; no intervention needed.",
+   agent:"Nature", model:"muse-spark", budget:"$0.55 / $2.00", turns:"9/50",
+   objective:"Prototype streaming TTS toggle.",
+   scope:["lib/tts.js"], checks:["ls lib/tts.js"],
+    transcript:["09:30 worker: architecture tour delivered","09:30 worker: available for your next question"]},
+  {id:"e-assistant", name:"repo-assistant", project:"opencode-loopd", state:"awaiting",
+    activity:"review complete; available for input", updated:"6m ago",result:"Reviewed the ticket flow. Available for another task.",
+    agent:"build",model:"demo-model",budget:"$0.18 / $2.00",turns:"4/50",objective:"Explain and review repository changes without editing source.",scope:[],checks:[],transcript:["09:35 worker: review delivered; awaiting next message"]},
+  {id:"e-paused", name:"paused-by-you", project:"opencode-loopd", state:"paused",
+   activity:"paused by owner — transcript retained", updated:"1h ago",
+   result:"Paused mid-refactor; safe to resume.",
+   agent:"Nature", model:"muse-spark", budget:"$0.90 / $2.00", turns:"21/50",
+   objective:"Sweep stale workspace ownership.",
+   scope:["src/application/workspace-execution.ts"], checks:["bun run typecheck"],
+   transcript:["> paused at turn 21"]},
+  {id:"e-done", name:"graphify-tour", project:"opencode-loopd", state:"done",
+   activity:"completed 09:41", updated:"2h ago",
+   result:"933-node graph + tour delivered.",
+   agent:"Nature", model:"muse-spark", budget:"$0.08 / $2.00", turns:"4/30",
+   objective:"Graph the repo and explain it.",
+   scope:[], checks:["ls graphify-out/graph.json"],
+   transcript:["> complete_goal accepted"]},
+  {id:"e-docs2", name:"release-notes", project:"opencode-web-bridges", state:"working",
+   activity:"drafting changelog entry", updated:"7m ago",
+   result:"Collected merged PR titles.",
+   agent:"Nature", model:"muse-spark", budget:"$0.05 / $2.00", turns:"1/30",
+   objective:"Draft release notes for v0.4.",
+   scope:["CHANGELOG.md"], checks:["grep -q 0.4 CHANGELOG.md"],
+   transcript:["> reading merged commits"]}
+]);
+const PROJECTS = ["opencode-loopd","opencode-voice","opencode-web-bridges"];
+let S = { tab:"project", emps:SEED(), sel:0, showHist:false, rtab:"writes",
+  scope:"opencode-loopd", cmdScope:"all", cmdSel:0,
+  holds:[{files:["src/application/workspace-execution.ts"], by:"ticket-fix", age:"42s"},
+         {files:["README.md"], by:"docs-refresh", age:"5m"}],
+   queue:[{files:["README.md"], by:"manager edit request", pos:1}],
+  verify:"waiting on active shell (landing-refresh tail, 12s)",
+  resvLive:{id:"call-9f2c", by:"landing-refresh", age:"12s", note:"open session available"},
+   resvDead:{id:"call-71ab", by:"your manager session", note:"Own-session reservation; call ended 2h ago. Eligible in this demo snapshot.", released:false},
+  cmds:[
+    {title:"dev-server", project:"opencode-loopd", status:"running", cmd:"bun run dev", activity:"serving :3000", out:"ready in 412ms\nGET / 200"},
+     {title:"audio-capture", project:"opencode-voice", status:"running", cmd:"sox -d capture.wav", activity:"recording microphone", out:"Input: default microphone\nRecording audio…"},
+    {title:"release-build", project:"opencode-loopd", status:"exited 0", cmd:"bun run build", activity:"done in 9s", out:"server.js 0.59 MB"}]
+};
+const INITIAL = structuredClone(S);
+S.collapsed=[];
+const SYM = {blocked:"✖", working:"●", awaiting:"◐", paused:"⏸", done:"✔"};
+const CLS = {blocked:"st-blocked", working:"st-working", awaiting:"st-await", paused:"st-paused", done:"st-done"};
+const LABEL = {blocked:"Blocked",working:"Working",awaiting:"Awaiting input",paused:"Paused by you",done:"Complete"};
+const $ = (s,r=document)=>r.querySelector(s), $$ = (s,r=document)=>[...r.querySelectorAll(s)];
+const esc = s => String(s).replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+function toast(m){ const t=$("#toast"); t.textContent=m; t.style.display="block";
+  clearTimeout(t._h); t._h=setTimeout(()=>t.style.display="none",2200); }
+function counts(list){ const a=list.filter(e=>e.state==="blocked").length,
+  w=list.filter(e=>e.state==="working").length,
+  i=list.filter(e=>e.state==="awaiting").length; return {a,w,i}; }
+function visibleEmps(){
+  let list = S.tab==="project" ? S.emps.filter(e=>e.project===S.scope)
+    : S.tab==="fleet" ? S.emps.slice() : [];
+  if(!S.showHist) list = list.filter(e=>e.state!=="done");
+  const f = $("#filter").value.trim().toLowerCase();
+   if(f) list = list.filter(e=>(e.name+LABEL[e.state]+e.activity+e.project).toLowerCase().includes(f));
+   else if(S.tab==="fleet") list=list.filter(e=>!S.collapsed.includes(e.project));
+   return list;
+}
+function commandList(){const f=$("#filter").value.toLowerCase();return S.cmds.filter(c=>(S.cmdScope==="all"||c.project===S.cmdScope)&&(S.showHist||c.status==="running")&&(c.title+c.project+c.cmd+c.activity+c.status).toLowerCase().includes(f));}
+function command(){return commandList()[S.cmdSel];}
+function selectedProject(){return S.tab==="fleet"?(cur()?.project||S.scope):S.tab==="commands"?(command()?.project||S.scope):S.scope;}
+function render(){
+   $$("nav.tabs button").forEach(b=>{b.classList.toggle("active", b.dataset.tab===S.tab);b.setAttribute("role","tab");b.setAttribute("aria-selected",String(b.dataset.tab===S.tab));});
+   $("#hdrproj").textContent=S.tab==="fleet"?"All projects":S.tab==="commands"?"Command sessions":S.scope;
+   const ps=$("#projselect");ps.style.display=S.tab==="fleet"?"none":"";
+   ps.innerHTML=(S.tab==="commands"?['all',...PROJECTS]:PROJECTS).map(p=>`<option value="${p}" ${p===(S.tab==="commands"?S.cmdScope:S.scope)?"selected":""}>${p==="all"?"All projects":p}</option>`).join("");
+   $("#inspector").style.display=S.tab==="commands"?"none":"";
+   $("#details").style.display=S.tab==="commands"?"none":"";
+   $("footer").innerHTML=S.tab==="commands"?'<b>j/k</b> move · <b>1/2/3</b> tabs · <b>t</b> coordination · <b>/</b> filter · <b>h</b> history · Use terminal buttons for stdin / interrupt':'<b>j/k</b> move · <b>1/2/3</b> tabs · <b>Enter</b> actions · <b>s</b> send · <b>d</b> details · <b>o</b> session · <b>t</b> coordination · <b>/</b> filter · <b>h</b> history · <b>?</b> help';
+   if(S.tab==="commands"){ renderCmds(); }
+   else { $("#cmdpanel").style.display="none"; renderTables(); }
+   renderCoord(); renderInspector();
+}
+function renderTables(){
+   const full = visibleEmps(), c = counts(S.emps.filter(e=>S.tab==="fleet"||e.project===S.scope));
+   S.sel=Math.max(0,Math.min(S.sel,full.length-1));
+   // Detail open: collapse the table to the selected row so the drawer owns the
+   // viewport. j/k still walks every worker; closing restores the full table.
+   const refined = $("#details").classList.contains("open");
+   const list = refined ? full.slice(S.sel, S.sel+1) : full;
+   $("#summary").innerHTML = `<b>${c.a}</b> needs action · <b>${c.w}</b> working · <b>${c.i}</b> awaiting input`+(refined?` <span class="dim">· detail open — table collapsed to one row</span>`:"");
+   let h = `<table><thead><tr><th></th><th>Worker</th><th>State</th><th>Current activity</th><th>Updated</th></tr></thead><tbody>`;
+   if(S.tab==="fleet"&&!refined){
+     for(const p of PROJECTS){
+       const g = list.filter(e=>e.project===p), cc = counts(S.emps.filter(e=>e.project===p));
+       if($("#filter").value&&!g.length) continue;
+       h += `<tr class="grp"><td colspan="5"><button data-group="${p}" aria-expanded="${!S.collapsed.includes(p)}">${S.collapsed.includes(p)?"▸":"▾"} ${esc(p)}</button> <span class="dim"> / ${cc.a?cc.a+" needs action":"No intervention needed"} · ${cc.w} working</span></td></tr>`;
+       for(const e of g) h += row(e, list);
+     }
+   } else for(const e of list) h += row(e, list);
+   $("#view").innerHTML = h + "</tbody></table>" + (!list.length?'<p class="dim">No matching workers. Change the filter or expand a project.</p>':"");
+   $$("#view tr.row").forEach(tr=>tr.addEventListener("click",()=>{
+     S.sel = visibleEmps().findIndex(e=>e.id===tr.dataset.id); renderInspector(); renderTablesSel();renderCoord(); }));
+  renderTablesSel();
+}
+function row(e, list){
+  const i = visibleEmps().indexOf(e);
+  return `<tr class="row" data-id="${e.id}"><td>${i===S.sel?">":""}</td><td>${esc(e.name)}</td>`+
+     `<td class="${CLS[e.state]} state-label">${SYM[e.state]} ${LABEL[e.state]}</td><td>${esc(e.activity)}</td><td class="dim">${esc(e.updated)}</td></tr>`;
+}
+function renderTablesSel(){ $$("#view tr.row").forEach(tr=>{
+   const selected=visibleEmps().findIndex(e=>e.id===tr.dataset.id)===S.sel;
+   tr.classList.toggle("sel",selected);tr.firstElementChild.textContent=selected?">":""; }); }
+function cur(){ const l = visibleEmps(); return l[Math.min(S.sel, Math.max(0,l.length-1))]; }
+function renderInspector(){
+  const e = cur(), box = $("#inspector"), det = $("#details");
+  if(!e){ box.innerHTML = "<span style='color:var(--muted)'>no rows — adjust filter or enable history</span>"; det.className=""; det.innerHTML=""; return; }
+   box.innerHTML = `<h3 class="splitline"><span>${esc(e.name)} <span class="p">/ ${esc(e.project)}</span></span><span class="${CLS[e.state]}">${LABEL[e.state]}</span></h3>`+
+     `<div>Now: ${esc(e.activity)}</div>`+
+    (e.state==="blocked"?`<div class="blk">Blocked: ${esc(e.result.replace(/^Blocked: /,""))}</div>`:`<div class="res">${esc(e.result)}</div>`)+
+    `<div class="keys"><button data-k="s">Send [s]</button><button data-k="o">Open session [o]</button>`+
+     `<button data-k="enter">Actions [Enter]</button><button data-k="d">Details [d]</button>${S.tab==="fleet"?'<button data-k="focus">Focus project</button>':""}</div>`;
+  if(det.classList.contains("open")) fillDetails(e);
+  $$("button",box).forEach(b=>b.addEventListener("click",()=>key(b.dataset.k)));
+}
+function fillDetails(e){
+  const det = $("#details");
+  det.innerHTML = `<dl><dt>agent / model</dt><dd>${esc(e.agent)} · ${esc(e.model)}</dd>`+
+    `<dt>budget / turns</dt><dd>${esc(e.budget)} · ${esc(e.turns)}</dd>`+
+    `<dt>objective</dt><dd>${esc(e.objective)}</dd>`+
+     `<dt>scope</dt><dd>${e.scope.length?esc(e.scope.join(", ")):"(read-only)"}</dd>`+
+     `<dt>checks</dt><dd>${esc(e.checks.join(" · "))||"No source changes"}</dd><dt>diagnostics</dt><dd>goal: demo-${esc(e.id)} · session: demo-session-${esc(e.id)} · source: fictional snapshot</dd></dl>`+
+     `<pre>${e.transcript.map(esc).join("\n")}</pre>`;
+}
+function renderCoord(){
+   const p=selectedProject(),isLocal=p==="opencode-loopd";
+   const live = S.resvDead.released ? 1 : 2;
+   $("#coordtext").textContent =
+     isLocal?`${S.tab==="fleet"?p+" | ":""}Writes ${S.holds.length} running · ${S.queue.length} queued | Verification waiting | ${live} reservation${live===1?"":"s"} to inspect`:`${p} | ${p==="opencode-web-bridges"?"1 write running":"No writes running"} · No verification waits`;
+   const rp=S.resourceProject||p;
+   $("#coordproject").textContent=rp+" / sample coordination snapshot";
+   const b = $("#rbody");
+   if(rp!=="opencode-loopd"){
+     b.innerHTML=`<div class="item">${S.rtab==="writes"&&rp==="opencode-web-bridges"?"Writing CHANGELOG.md / release-notes":"No "+({writes:"active writes",verify:"verification waits",resv:"write reservations"}[S.rtab])+" in this project."}</div>`;
+   }else if(S.rtab==="writes"){
+     b.innerHTML = '<p class="dim">Current write tickets</p>'+S.holds.map(h=>`<div class="item"><span class="st-working">● Writing</span> <b>${esc(h.files.join(", "))}</b><br><span class="who">Holder: ${esc(h.by)} · held ${esc(h.age)}</span></div>`).join("")+
+       '<p class="dim">Queued write requests</p>'+S.queue.map(q=>`<div class="item">#${q.pos} <b>${esc(q.by)}</b><br>${esc(q.files.join(", "))}<br><span class="who">Waits for docs-refresh to finish its write ticket. Resumes automatically.</span></div>`).join("");
+   } else if(S.rtab==="verify"){
+     b.innerHTML = `<div class="item"><b>ticket-fix / host checks waiting</b><br>Live shell ${S.resvLive.id} · landing-refresh · 12s<br><span class="who">Checks resume after the workspace is quiet.${S.resvDead.released?" The ended reservation has been removed.":" An ended own-session reservation also needs inspection."}</span></div><button data-reservations>Inspect reservations</button>`;
+   } else {
+     b.innerHTML = `<div class="item"><span class="st-working">● Live execution</span> <b>${S.resvLive.id}</b><br>${esc(S.resvLive.by)} · running ${esc(S.resvLive.age)}<p class="who">Release unavailable: this call may still write. Inspect the owning session instead.</p><button disabled>Release unavailable</button> <button data-session="e-landing">Open session</button></div>`+
+      (S.resvDead.released
+        ? `<div class="item">Released <b>${S.resvDead.id}</b> — stale entry removed, badges updated.</div>`
+         : `<div class="item"><span class="st-blocked">! Ended reservation</span> <b>${S.resvDead.id}</b><br>${esc(S.resvDead.by)}<p class="who">${esc(S.resvDead.note)}</p><button id="relbtn">Release reservation…</button></div>`);
+    const rb = $("#relbtn");
+    if(rb) rb.addEventListener("click",()=>{
+       showModal('Release reservation',`<p><b>${S.resvDead.id}</b> / ${S.resvDead.by}</p><p>This sample call has ended and belongs to your session. Only its stale reservation will be removed.</p><p class="st-blocked">Verification will still wait for live shell ${S.resvLive.id}.</p><div class="row"><button data-close>Cancel</button><button data-release>Simulate release</button></div>`);
+    });
+  }
+  $$("#rtabs button").forEach(x=>x.classList.toggle("active", x.dataset.r===S.rtab));
+}
+function renderCmds(){
+   $("#summary").innerHTML = "Raw processes / independent from employee lifecycle. All commands here are simulated.";
+   const list = commandList(); S.cmdSel=Math.max(0,Math.min(S.cmdSel,list.length-1));
+   $("#view").innerHTML =
+    `<table><thead><tr><th></th><th>Title</th><th>Project</th><th>Status</th><th>Command</th><th>Activity</th></tr></thead><tbody>`+
+    list.map((c,i)=>`<tr class="row ${i===S.cmdSel?"sel":""}" data-i="${i}"><td>${i===S.cmdSel?">":""}</td><td>${esc(c.title)}</td><td>${esc(c.project)}</td><td class="${c.status.startsWith("running")?"st-run":"st-done"}">${esc(c.status)}</td><td>${esc(c.cmd)}</td><td>${esc(c.activity)}</td></tr>`).join("")+"</tbody></table>";
+  const c = list[S.cmdSel] || list[0];
+   $("#cmdpanel").style.display="block";
+   $("#cmdpanel").innerHTML = c ? `<div class="splitline"><span>${esc(c.title)} / ${esc(c.project)}</span><span class="dim">Terminal output · sample</span></div><pre>${esc(c.out)}</pre><div class="keys" style="display:flex;gap:6px;margin-top:6px"><button id="stdin" ${c.status!=="running"?"disabled":""}>Send stdin</button><button id="intr" ${c.status!=="running"?"disabled":""}>Interrupt</button></div>` : '<p class="dim">No commands match. Enable history to see exited commands.</p>';
+  $$("#view tr.row").forEach(tr=>tr.addEventListener("click",()=>{S.cmdSel=+tr.dataset.i; render();}));
+  const si=$("#stdin"), ii=$("#intr");
+   if(si) si.addEventListener("click",()=>showModal("Send stdin / "+c.title,'<form id="stdinForm"><label for="stdinText">Simulated terminal input</label><input id="stdinText" required autocomplete="off"><div class="row"><button type="button" data-close>Cancel</button><button>Send</button></div></form>'));
+   if(ii) ii.addEventListener("click",()=>{c.status="terminated";c.activity="interrupted by you (demo)";c.out+="\n^C\nProcess interrupted (simulated).";S.showHist=true;$("#histtoggle").checked=true;render();toast("Simulated interrupt. No real process changed.");});
+}
+function showModal(title,html){const m=$("#modal");m.setAttribute("aria-label",title);$("#modalbody").innerHTML=`<div class="splitline"><h3>${esc(title)}</h3><button data-close aria-label="Close dialog">esc</button></div>${html}`;if(!m.open)m.showModal();}
+function openSession(e){if(e)showModal(e.name+" / session",`<p>Mock transcript / ${esc(e.project)}</p><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${e.transcript.map(esc).join("\n\n")}</pre><p>No live session was opened.</p>`);}
+function key(k){
+  const e = cur();
+  if(k==="s" && e){ $("#sendto").textContent = "→ "+e.name; $("#sendtext").value=""; $("#senddlg").showModal(); setTimeout(()=>$("#sendtext").focus(),0); }
+   else if(k==="o" && e){ openSession(e); }
+  else if(k==="enter" && e){ act(e); }
+  else if(k==="d" && e){ const d=$("#details"); d.classList.toggle("open"); if(d.classList.contains("open")) fillDetails(e); renderTables(); }
+   else if(k==="t"){S.resourceProject=selectedProject();renderCoord();if(!$("#drawer").open)$("#drawer").showModal();}
+   else if(k==="focus"&&e){S.scope=e.project;S.tab="project";S.sel=0;$("#filter").value="";render();}
+}
+function act(e){
+   const opts=e.state==="paused"?[["resume","Resume worker"]]:e.state==="blocked"?[["retry","Retry worker"],["pause","Pause worker"]]:e.state==="done"?[]:[["pause","Pause worker"],["nudge","Nudge with full contract"]];
+   showModal("Actions / "+e.name,`<p>${esc(e.project)} / ${LABEL[e.state]}. Changes affect this mockup only.</p><div class="palette">${opts.map(([a,label])=>`<button data-act="${a}">${label}</button>`).join("")}<button data-session="${e.id}">Read session transcript</button><button data-close>Cancel</button></div>`);
+}
+document.addEventListener("click", ev=>{
+  const t = ev.target.closest("button"); if(!t) return;
+   if(t.dataset.tab){ S.tab=t.dataset.tab; S.sel=0; render(); }
+   else if(t.dataset.group){const p=t.dataset.group;S.collapsed=S.collapsed.includes(p)?S.collapsed.filter(x=>x!==p):[...S.collapsed,p];S.sel=0;render();}
+   else if(t.dataset.r){ S.rtab=t.dataset.r; renderCoord(); }
+   else if(t.id==="resetdemo"){ S=structuredClone(INITIAL);S.collapsed=[];$("#filter").value="";$("#histtoggle").checked=false;$("#details").className="";render();toast("Demo reset");}
+   else if(t.id==="opentriage"){key("t");}
+   else if(t.id==="closedrawer"){$("#drawer").close();}
+   else if(t.hasAttribute("data-close")){$("#modal").close();}
+   else if(t.hasAttribute("data-reservations")){S.rtab="resv";renderCoord();}
+   else if(t.dataset.session){openSession(S.emps.find(e=>e.id===t.dataset.session));}
+   else if(t.hasAttribute("data-release")){S.resvDead.released=true;$("#modal").close();renderCoord();toast("Simulated reservation released. Live shell still holds verification.");}
+   else if(t.dataset.act){const e=cur();if(!e)return;const a=t.dataset.act;e.state=a==="pause"?"paused":"working";e.activity=a==="pause"?"paused by you; session retained":a==="nudge"?"full contract queued for next turn":"continuing with existing session";e.updated="just now";e.result="Simulated "+a+". No real worker changed.";e.transcript.push("owner: "+a+" (demo)");$("#modal").close();render();toast("Simulated "+a+". No live state changed.");}
+});
+ $("#projselect").addEventListener("change",e=>{if(S.tab==="commands"){S.cmdScope=e.target.value;S.cmdSel=0;}else{S.scope=e.target.value;S.sel=0;}render();});
+ $("#filter").addEventListener("input",()=>{ S.sel=0;S.cmdSel=0; render(); });
+$("#histtoggle").addEventListener("change",e=>{ S.showHist=e.target.checked; render(); });
+ $("#senddlg form").addEventListener("submit",ev=>{
+   if(ev.submitter?.value!=="send")return;
+   const v = $("#sendtext").value.trim(); if(!v){ev.preventDefault();return;}
+  const e = cur(); if(!e) return;
+  e.activity = "input received: " + (v.length>60?v.slice(0,60)+"…":v); e.updated = "just now";
+  e.transcript = e.transcript||[]; e.transcript.push("owner: "+v);
+  render(); toast("Simulated input sent — no real worker contacted");
+});
+$("#modal").addEventListener("submit",ev=>{if(ev.target.id!=="stdinForm")return;ev.preventDefault();const c=command();const text=$("#stdinText").value.trim();if(!c||!text)return;c.out+="\n> "+text+"\n[simulated stdin received]";$("#modal").close();render();toast("Simulated stdin sent. No real process contacted.");});
+document.addEventListener("keydown",ev=>{
+   if(ev.ctrlKey||ev.metaKey||ev.altKey||$$("dialog[open]").length)return;
+   const tag = (ev.target.tagName||"").toLowerCase();
+   if(tag==="input"||tag==="textarea"||tag==="select") { if(ev.key==="Escape") ev.target.blur(); return; }
+   if(tag==="button"&&(ev.key==="Enter"||ev.key===" "))return;
+   if(["1","2","3","s","d","o","t","h","?"].includes(ev.key))ev.preventDefault();
+   if(ev.key==="j"||ev.key==="ArrowDown"){S.tab==="commands"?S.cmdSel++:S.sel++;render();ev.preventDefault();}
+   else if(ev.key==="k"||ev.key==="ArrowUp"){S.tab==="commands"?S.cmdSel=Math.max(0,S.cmdSel-1):S.sel=Math.max(0,S.sel-1);render();ev.preventDefault();}
+  else if(ev.key==="1"){ S.tab="project"; S.sel=0; render(); }
+  else if(ev.key==="2"){ S.tab="fleet"; S.sel=0; render(); }
+  else if(ev.key==="3"){ S.tab="commands"; S.sel=0; render(); }
+  else if(ev.key==="s") key("s"); else if(ev.key==="d") key("d");
+  else if(ev.key==="o") key("o"); else if(ev.key==="t") key("t");
+  else if(ev.key==="/" ){ $("#filter").focus(); ev.preventDefault(); }
+  else if(ev.key==="h"){ const h=$("#histtoggle"); h.checked=!h.checked; S.showHist=h.checked; render(); }
+   else if(ev.key==="Escape"){ $("#details").classList.remove("open"); renderTables(); }
+   else if(ev.key==="Enter"){key("enter");ev.preventDefault();}
+   else if(ev.key==="?"){showModal("Keyboard shortcuts",'<p>Click any row or control. Mouse and keyboard use the same actions.</p><pre>1 / 2 / 3    Project / Fleet / Commands\nj / k        Move selection\nEnter        Worker actions\ns            Send input\no            Read session transcript\nd            Toggle technical details\nt            Inspect project coordination\n/            Focus filter\nh            Show or hide history\nEsc          Close dialog or details</pre><p>Mock data only. Reload or Reset demo to start over.</p>');}
+});
+render();
+</script>
+</body>
+</html>

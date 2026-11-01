@@ -10,19 +10,20 @@ import type { InputRenderable, ParsedKey, ScrollBoxRenderable, TextRenderable } 
 import { readEvents, readState } from "../infrastructure/state-repository"
 import { createControlClient } from "../infrastructure/control-client"
 import type { StoreState } from "../infrastructure/state-repository"
-import type { Goal, GoalStatus } from "../domain/goal"
-import type { GoalRuntimeState, RuntimePhase } from "../domain/runtime"
+import type { Goal } from "../domain/goal"
+import type { GoalRuntimeState } from "../domain/runtime"
 import { parseCommand, commandHelp, commandTabHelp } from "./command-parser"
 import { parseNewCommand } from "./command-controller"
-import { goalStatusLabel, workerActivityLabel, describeGoalState } from "../domain/status-labels"
+import { workerActivityLabel } from "../domain/status-labels"
 import { bugReportUrl, openBrowserUrl } from "../browser"
 import {
-  initialDashboardSelection,
   moveDashboardSelection,
   resolveDashboardOpen,
   toggleDashboardView,
   dashboardViewForKey,
-  visibleOwnerCommands,
+  goalSelectionKey,
+  indexForSelectionKey,
+  toggleCollapsed,
   type DashboardSelection,
   type DashboardView,
 } from "./dashboard-view"
@@ -31,6 +32,26 @@ import type { CommandSession } from "../domain/command-session"
 import { randomUUID } from "crypto"
 import { createDashboardRefresh } from "./dashboard-refresh"
 import { managedStorePath, resolveManagedDirs, statusAll, type ManagedDirStatus } from "../server/managed-status"
+import {
+  toRowModel,
+  summarizeScope,
+  summaryText,
+  groupByDirectory,
+  filterRows,
+  ageText,
+  countdownText,
+  formatRowColumns,
+  fitHintBar,
+  FOOT_HINTS,
+  type RowModel,
+  type DirectoryGroup,
+} from "./dashboard-presentation"
+import { GoalInspector, GoalDetailsDrawer } from "./goal-details"
+import {
+  CoordinationPanel,
+  type CoordinationTab,
+  type CoordinationModel,
+} from "./coordination-panel"
 
 function prevent(evt: ParsedKey) {
   const e = evt as ParsedKey & { preventDefault?: () => void; stopPropagation?: () => void }
@@ -68,8 +89,8 @@ type Mode = "normal" | "insert"
 interface Props {
   api: TuiPluginApi
   directory: string
-  /** Which tab opens focused (`/loop` → goals, `/commands` → commands). */
-  initialView?: DashboardView
+  /** Which tab opens focused (`/loop` → project, `/commands` → commands). */
+  initialView?: DashboardView | "goals"
   /** Owner scope for the Commands view. Defaults to the current session. */
   ownerSessionID?: string
   /** Fullscreen open for commands. Default: route-navigate + close popup. */
@@ -78,65 +99,18 @@ interface Props {
   isActive?: () => boolean
 }
 
-function statusColor(status: GoalStatus, theme: TuiThemeCurrent) {
-  switch (status) {
-    case "active": return theme.success
-    case "paused": return theme.warning
-    case "blocked": return theme.error
-    case "complete": return theme.info
-    case "budget_limited": return theme.accent
-    case "usage_limited": return theme.accent
-    default: return theme.text
-  }
+/** Legacy callers pass "goals" — normalize to the Project tab. */
+function normalizeInitialView(view: DashboardView | "goals" | undefined): DashboardView {
+  if (view === "goals") return "project"
+  return view ?? "project"
 }
-function phaseColor(phase: RuntimePhase, theme: TuiThemeCurrent) {
-  switch (phase) {
-    case "running": return theme.success
-    case "compacting": return theme.warning
-    case "waiting_retry": return theme.accent
-    case "stopping": return theme.error
-    default: return theme.textMuted
-  }
-}
-function borderColorForStatus(status: GoalStatus, theme: TuiThemeCurrent): string {
-  switch (status) {
-    case "active": return theme.success as unknown as string
-    case "paused": return theme.warning as unknown as string
-    case "blocked": return theme.error as unknown as string
-    case "budget_limited":
-    case "usage_limited": return theme.accent as unknown as string
-    case "complete": return theme.info as unknown as string
-    default: return "gray"
-  }
-}
+
 function eventColor(type: string, theme: TuiThemeCurrent) {
   if (type === "goal.completed") return theme.info
   if (type === "goal.blocked" || type === "run.failed") return theme.error
   if (type === "goal.created" || type === "goal.progress") return theme.success
   if (type === "run.started" || type === "compaction.started") return theme.warning
   return theme.textMuted
-}
-function phaseIcon(phase: RuntimePhase): string {
-  switch (phase) {
-    case "running": return "▶"
-    case "compacting": return "⏳"
-    case "waiting_retry": return "🔄"
-    case "stopping": return "⏹"
-    case "queued": return "◷"
-    case "idle": return "○"
-    default: return "○"
-  }
-}
-function statusIcon(status: GoalStatus): string {
-  switch (status) {
-    case "active": return "●"
-    case "paused": return "❚❚"
-    case "blocked": return "✖"
-    case "complete": return "✓"
-    case "budget_limited": return "⬢"
-    case "usage_limited": return "⏰"
-    default: return "○"
-  }
 }
 
 function commandStatusColor(status: CommandSession["status"], theme: TuiThemeCurrent) {
@@ -179,15 +153,6 @@ function ageLabel(timestamp: string | undefined, now: number): string {
   return `${Math.floor(minutes / 60)}h ago`
 }
 
-function countdownLabel(targetIso: string | undefined, now: number): string | undefined {
-  if (!targetIso) return undefined
-  const diff = Math.max(0, Math.floor((Date.parse(targetIso) - now) / 1000))
-  if (diff < 60) return `${diff}s`
-  const minutes = Math.floor(diff / 60)
-  if (minutes < 60) return `${minutes}m ${diff % 60}s`
-  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
-}
-
 export function formatTokens(n: number | undefined): string {
   if (!n) return "0"
   if (n < 1000) return String(Math.round(n))
@@ -207,23 +172,6 @@ export function formatDuration(seconds: number | undefined): string {
   const minutes = Math.floor(seconds / 60)
   if (minutes < 60) return `${minutes}m`
   return `${(seconds / 3600).toFixed(1)}h`
-}
-
-/** Agent color from OpenCode metadata: theme name → theme value, hex → as-is. */
-export function agentColor(color: string | undefined, theme: TuiThemeCurrent): string {
-  if (!color) return theme.text as unknown as string
-  const named: Record<string, unknown> = {
-    primary: theme.primary,
-    secondary: (theme as any).secondary,
-    accent: theme.accent,
-    success: theme.success,
-    warning: theme.warning,
-    error: theme.error,
-    info: theme.info,
-  }
-  if (named[color]) return named[color] as string
-  if (/^#[0-9a-fA-F]{3,8}$/.test(color)) return color
-  return theme.text as unknown as string
 }
 
 export interface AgentMeta {
@@ -280,19 +228,110 @@ function DashboardRow(props: { id: string; backgroundColor?: TuiThemeCurrent["ba
   )
 }
 
+/** Dashboard header: exactly two lines. Line 1 is title+project+counts;
+ * line 2 is tabs+scope. Segments stay short so a phrase never wraps
+ * mid-way; each line is one <text> node. A separate component (not inline)
+ * so the OpenTUI test renderer can assert the two-line shape directly. */
+export function DashboardHeader(props: {
+  theme: TuiThemeCurrent
+  mode: string
+  scopeName: string
+  summary: string
+  tab: "project" | "fleet" | "commands"
+  projCount: number
+  onBugReport: () => void
+}): JSX.Element {
+  const theme = () => props.theme
+  const tabLabel = (id: "project" | "fleet" | "commands", text: string) => (
+    <span style={{ fg: props.tab === id ? theme().info : theme().textMuted, bold: props.tab === id }}>
+      {props.tab === id ? `[${text}]` : ` ${text} `}
+    </span>
+  )
+  // Three fixed lines, one responsibility each:
+  //   1 identity (title + bug action)
+  //   2 navigation (tabs) + interaction mode
+  //   3 status summary + scope
+  // Keeping them apart is what stops the header reading as one run-on line.
+  return (
+    <box flexDirection="column" flexShrink={0} gap={0}>
+      <box flexDirection="row" justifyContent="space-between" alignItems="center" height={1} overflow="hidden" flexShrink={0}>
+        <text wrapMode="none" truncate={true} minWidth={0} flexShrink={1}>
+          <span style={{ fg: theme().info, bold: true }}>⬢ Loop Dashboard</span>
+        </text>
+        <box flexDirection="row" alignItems="center" backgroundColor={theme().error as unknown as string} paddingLeft={1} paddingRight={1} {...({ onMouseDown: props.onBugReport } as any)}>
+          <text><span style={{ fg: "white", bold: true }}>Bug Report</span></text>
+        </box>
+      </box>
+      <box flexDirection="row" alignItems="center" height={1} overflow="hidden" flexShrink={0} gap={1}>
+        <text wrapMode="none" truncate={true} minWidth={0} flexShrink={1}>
+          {tabLabel("project", "1 Project")}
+          {tabLabel("fleet", "2 Fleet")}
+          {tabLabel("commands", "3 Commands")}
+          <span style={{ fg: theme().textMuted }}> │ </span>
+          <span style={{ fg: props.mode === "normal" ? theme().success : theme().warning, bold: true }}>{props.mode.toUpperCase()}</span>
+        </text>
+      </box>
+      <box flexDirection="row" alignItems="center" height={1} overflow="hidden" flexShrink={0}>
+        <text wrapMode="none" truncate={true} minWidth={0} flexShrink={1}>
+          <span style={{ fg: theme().text }}>{props.summary}</span>
+          <span style={{ fg: theme().textMuted }}> │ </span>
+          <span style={{ fg: theme().accent, bold: true }}>{props.scopeName}</span>
+          <span style={{ fg: theme().textMuted }}> · {props.projCount} proj</span>
+        </text>
+      </box>
+    </box>
+  )
+}
+
 export function LoopDashboard(props: Props) {
   const theme = () => props.api.theme.current
   const [mode, setMode] = createSignal<Mode>("normal")
   const [selected, setSelected] = createSignal(0)
   const [commandInput, setCommandInput] = createSignal("")
-  const [statusText, setStatusText] = createSignal("Tab goals/commands · : send/command · ? help · c toggle done · o open · q close")
+  const [statusText, setStatusText] = createSignal("")
   // Shared Goals/Commands tabs (`/loop` opens goals, `/commands` opens
   // commands). Goal indexes stay on the legacy `selected` signal; command
   // selection lives on `cmdSelected` so the two never cross-apply.
-  const [tab, setTab] = createSignal<DashboardView>(props.initialView ?? "goals")
+  const [tab, setTab] = createSignal<DashboardView>(normalizeInitialView(props.initialView))
   const [cmdSelected, setCmdSelected] = createSignal(0)
+  // Project scope for the Project tab (one managed directory) and the
+  // Commands tab filter. Fleet shows all managed dirs grouped.
+  const [projectScope, setProjectScope] = createSignal<string>(props.directory)
+  const [cmdScope, setCmdScope] = createSignal<string>("all")
+  const [filterText, setFilterText] = createSignal("")
+  const [collapsed, setCollapsed] = createSignal<string[]>([])
+  const [coordOpen, setCoordOpen] = createSignal(false)
+  const [coordTab, setCoordTab] = createSignal<CoordinationTab>("writes")
+  const [detailsOpen, setDetailsOpen] = createSignal(false)
+  const [actionsOpen, setActionsOpen] = createSignal(false)
+  const [selectedKey, setSelectedKey] = createSignal<string | undefined>(undefined)
+  const [pendingRelease, setPendingRelease] = createSignal<{ callID: string; dir: string } | null>(null)
   const ownerSessionID = () => props.ownerSessionID ?? currentRouteSessionID(props.api)
-  const ownerCommands = () => visibleOwnerCommands(state()?.commands, ownerSessionID(), showCompleted())
+  /** Command entries across the command scope: own dir (live bus) plus
+   * managed dirs (display-only reads). Owner filter + finished hiding apply
+   * per entry; mutating actions stay own-dir only (guarded at the call site). */
+  const commandEntries = (): Array<{ cmd: CommandSession; dir: string }> => {
+    const dirs = cmdScope() === "all" ? managedDirs() : [cmdScope()]
+    const out: Array<{ cmd: CommandSession; dir: string }> = []
+    for (const dir of dirs) {
+      const cmds = dir === props.directory ? (state()?.commands ?? []) : (managedStates()[dir]?.commands ?? [])
+      for (const cmd of cmds) out.push({ cmd, dir })
+    }
+    return out
+  }
+  const ownerCommands = () => {
+    const owned = commandEntries().filter(({ cmd }) =>
+      ownerSessionID() ? cmd.ownerSessionID === ownerSessionID() : false,
+    )
+    if (showCompleted()) return owned.map(({ cmd }) => cmd)
+    const terminal = ["exited", "terminated", "missing"]
+    return owned.filter(({ cmd }) => !terminal.includes(cmd.status)).map(({ cmd }) => cmd)
+  }
+  /** Directory of an owned command entry (for the foreign guard). */
+  const commandDir = (commandID: string): string => {
+    const hit = commandEntries().find(({ cmd }) => cmd.id === commandID)
+    return hit ? hit.dir : props.directory
+  }
   /** Owned-but-finished commands hidden by the `c` toggle — surfaced in the empty state. */
   const hiddenFinishedCommands = () => {
     if (showCompleted()) return 0
@@ -302,6 +341,25 @@ export function LoopDashboard(props: Props) {
     ).length
   }
   const [state, setState] = createSignal<StoreState | null>(null)
+  const [hintCols, setHintCols] = createSignal(80)
+  let hintBoxEl: { width?: number } | undefined
+  /** Whole-frame scroller: j/k past the last list row scrolls the frame so the
+   * inspector and drawer come into view, instead of clamping at the list end. */
+  let frameEl: ScrollBoxRenderable | undefined
+  // Refit footer hints to the measured bar width on every clock tick (cheap
+  // string math; the dashboard already re-renders for ages). Falls back to
+  // the 80-column default before the first measurement.
+  createEffect(() => {
+    clock()
+    const w = hintBoxEl?.width
+    if (typeof w === "number" && w > 0) {
+      // Reserve the borders (2), the row paddings (2), the gap (1) and the
+      // NORMAL/INSERT badge (8) plus a small safety margin: overshooting here
+      // clipped the last hint mid-word at the panel edge.
+      const cols = Math.max(20, Math.floor(w) - 20)
+      if (cols !== hintCols()) setHintCols(cols)
+    }
+  })
   const [events, setEvents] = createSignal<Record<string, unknown>[]>([])
   const [selectedGoal, setSelectedGoal] = createSignal<Goal | null>(null)
   const [showLogs, setShowLogs] = createSignal(false)
@@ -313,7 +371,6 @@ export function LoopDashboard(props: Props) {
   // + env + explicit). Single-dir default: [props.directory] until loaded.
   const [managedDirList, setManagedDirList] = createSignal<string[]>([props.directory])
   const managedDirs = () => managedDirList()
-  const storePath = () => managedStorePath(props.directory)
   const [projectStatuses, setProjectStatuses] = createSignal<ManagedDirStatus[] | null>(null)
   const [showProjects, setShowProjects] = createSignal(false)
   // Per-directory states for the aggregate Goals tab (own dir stays on the
@@ -339,6 +396,18 @@ export function LoopDashboard(props: Props) {
   let focusTimer: ReturnType<typeof setTimeout> | undefined
   let disposed = false
   const client = createControlClient(props.directory)
+  /** Per-directory control clients: foreign rows act on their own project bus,
+   * never the local fallback. Creation is cheap (closure over directory);
+   * a target with no live control worker surfaces an honest timeout. */
+  const clients = new Map<string, ReturnType<typeof createControlClient>>([[props.directory, client]])
+  function clientFor(dir: string): ReturnType<typeof createControlClient> {
+    let c = clients.get(dir)
+    if (!c) {
+      c = createControlClient(dir)
+      clients.set(dir, c)
+    }
+    return c
+  }
   const popMode = props.api.mode.push("loopd.dashboard")
 
   function focusInput() {
@@ -457,11 +526,8 @@ export function LoopDashboard(props: Props) {
       })
       return
     }
-    const currentGoals = activeGoals()
+    const currentGoals = rowModels()
     const currentCommands = ownerCommands()
-    // Tab toggles the Goals/Commands tabs; h selects Goals and l selects
-    // Commands directionally. j/k/g/G select within the active tab only
-    // (headless logic in dashboard-view.ts).
     if (name === "tab") {
       prevent(evt)
       setTab((v) => toggleDashboardView(v))
@@ -477,6 +543,13 @@ export function LoopDashboard(props: Props) {
       return { view: tab(), goalIndex: selected(), commandIndex: cmdSelected() }
     }
     function applyMove(move: "down" | "up" | "first" | "last") {
+      const last = Math.max(0, currentGoals.length - 1)
+      const selectedNow = tab() === "commands" ? cmdSelected() : selected()
+      // Past the list boundary, walk the frame instead: the list is capped,
+      // so the remaining content (inspector, details, logs) lives below the
+      // fold exactly as on the prototype's scrollable page.
+      if (move === "down" && selectedNow >= last) { frameEl?.scrollBy({ x: 0, y: 1 }); return }
+      if (move === "up" && selectedNow <= 0 && (frameEl?.scrollTop ?? 0) > 0) { frameEl?.scrollBy({ x: 0, y: -1 }); return }
       const next = moveDashboardSelection(dashboardSelection(), move, currentGoals.length, currentCommands.length)
       setSelected(next.goalIndex)
       setCmdSelected(next.commandIndex)
@@ -504,13 +577,12 @@ export function LoopDashboard(props: Props) {
       removeFinishedSelected()
       return
     }
-    // Goal controls apply to goals only — never to a command selection.
-    // Model controls (model/models) are goal verbs too: on the Commands tab
-    // they would otherwise be written into a command's stdin.
-    const needsGoalsTab = ["p", "r", "A", "N", "W", "model", "models", "agent", "agents"].includes(key)
-    if (needsGoalsTab && tab() !== "goals") {
+    // Goal controls apply to the worker tabs — never on Commands or to a
+    // command selection. Model controls (model/models) are goal verbs too.
+    const needsWorkerTab = ["p", "r", "A", "N", "W", "model", "models", "agent", "agents"].includes(key)
+    if (needsWorkerTab && tab() === "commands") {
       prevent(evt)
-      setStatusText("Goal controls need the Goals tab (Tab to switch).")
+      setStatusText("Goal controls need the Project or Fleet tab (Tab to switch).")
       return
     }
     if (key === "p") { prevent(evt); void executeCommand("pause"); return }
@@ -519,15 +591,74 @@ export function LoopDashboard(props: Props) {
     if (key === "x") { prevent(evt); void executeCommand("clear"); return }
     if (key === "A") { prevent(evt); void executeCommand("abort"); return }
     if (key === "N") { prevent(evt); void executeCommand("nudge"); return }
+    // Revamp keys: history, filter, details, coordination, send-prefill.
+    // `h` no longer selects a tab (`1` covers Project); `l` still opens
+    // Commands alongside `3`.
+    if (key === "h") {
+      prevent(evt)
+      setShowCompleted((v) => {
+        const next = !v
+        setStatusText(next ? "Showing finished goals and commands." : "Hiding finished goals and commands.")
+        return next
+      })
+      return
+    }
+    if (key === "/") {
+      prevent(evt)
+      // Filter runs through the command input (:filter) — no second focusable.
+      setCommandInput("filter ")
+      if (inputEl) inputEl.value = "filter "
+      setMode("insert")
+      focusInput()
+      return
+    }
+    if (key === "d") { prevent(evt); setDetailsOpen((v) => !v); return }
+    if (key === "t") { prevent(evt); setCoordOpen((v) => !v); return }
+    if (key === "s") {
+      prevent(evt)
+      if (!selectedGoal()) { setStatusText("No goal selected"); return }
+      setCommandInput("send ")
+      if (inputEl) inputEl.value = "send "
+      setMode("insert")
+      focusInput()
+      return
+    }
+    if (isEnterKey(evt)) { prevent(evt); setActionsOpen((v) => !v); return }
+    if (pendingRelease()) {
+      if (key === "y") {
+        prevent(evt)
+        const target = pendingRelease()!
+        setPendingRelease(null)
+        void releaseWorkspaceFences({ callID: target.callID }, target.dir)
+        return
+      }
+      if (isEscapeKey(evt)) { prevent(evt); setPendingRelease(null); return }
+    }
+    if (key === "[") {
+      prevent(evt)
+      cycleScope(-1)
+      return
+    }
+    if (key === "]") {
+      prevent(evt)
+      cycleScope(1)
+      return
+    }
+    if (isEscapeKey(evt)) {
+      if (actionsOpen()) { prevent(evt); setActionsOpen(false); return }
+      if (detailsOpen()) { prevent(evt); setDetailsOpen(false); return }
+      if (coordOpen()) { prevent(evt); setCoordOpen(false); focusInput(); return }
+      if (filterText()) { prevent(evt); setFilterText(""); setStatusText("filter cleared"); return }
+    }
     if (key === "W") {
       prevent(evt)
-      // One-key fence release for the selected goal. No goal = inspect only.
+      // One-key fence release for the selected goal's own project bus.
       if (fenceCount() === 0) {
         setStatusText("No workspace fences to release — nothing is blocking writes or checks.")
         return
       }
       const goal = selectedGoal()
-      void releaseWorkspaceFences(goal ? { goalID: goal.id } : {})
+      void releaseWorkspaceFences(goal ? { goalID: goal.id } : {}, goal ? goalDir(goal.id) : undefined)
       return
     }
     if (key === "L") { prevent(evt); setShowLogs((value) => !value); return }
@@ -537,7 +668,7 @@ export function LoopDashboard(props: Props) {
       // worker session; commands close the popup and open the fullscreen
       // terminal route. Never cross-applies.
       const target = resolveDashboardOpen(
-        { goals: currentGoals, commands: state()?.commands ?? [] },
+        { goals: activeGoals().map((e) => e.goal), commands: state()?.commands ?? [] },
         dashboardSelection(),
         ownerSessionID(),
         currentRouteSessionID(props.api),
@@ -585,11 +716,17 @@ export function LoopDashboard(props: Props) {
 
   const goals = () => state()?.goals.filter((g) => showCompleted() || g.status !== "complete") || []
 
-  /** Raw control-bus send for the Commands tab (owner-scoped, fail closed). */
+  /** Raw control-bus send for the Commands tab (owner-scoped, fail closed).
+   * Mutations route to the local bus only: foreign rows are display-only
+   * (open their own dashboard or steer via agent tools). */
   async function executeCommandRaw(command: string, args: Record<string, unknown>, commandID?: string) {
     const owner = ownerSessionID()
     if (!owner) {
       setStatusText("No owning session (open from a session view) — mutations disabled.")
+      return
+    }
+    if (commandID && commandDir(commandID) !== props.directory) {
+      setStatusText(`Foreign command — open the ${commandDir(commandID)} dashboard. Mutations stay local.`)
       return
     }
     setStatusText(`sending ${command}…`)
@@ -611,12 +748,13 @@ export function LoopDashboard(props: Props) {
    * agent tool uses. No selector = inspect; every safety refusal is reported
    * verbatim. Refresh afterwards: the fence state is what the user acted on.
    */
-  async function releaseWorkspaceFences(selection: { callID?: string; goalID?: string; sessionID?: string }) {
+  async function releaseWorkspaceFences(selection: { callID?: string; goalID?: string; sessionID?: string }, dir?: string) {
     const owner = ownerSessionID()
     if (!owner) {
       setStatusText("No owning session (open from a session view) — release disabled.")
       return
     }
+    const targetDir = dir ?? props.directory
     const selecting = Boolean(selection.callID || selection.goalID || selection.sessionID)
     if (!selecting && fenceCount() === 0) {
       setStatusText("No live workspace reservations — nothing is fencing this project.")
@@ -624,7 +762,7 @@ export function LoopDashboard(props: Props) {
     }
     setStatusText(selecting ? "releasing workspace fence…" : "inspecting workspace fences…")
     try {
-      const r = await client.execute({
+      const r = await clientFor(targetDir).execute({
         version: 1,
         requestID: randomUUID(),
         requestedAt: new Date().toISOString(),
@@ -732,15 +870,14 @@ export function LoopDashboard(props: Props) {
       returnToNormalMode()
       return
     }
-    // Foreign goals are display-only here: this tab's control bus reaches
-    // only the instance directory. Steer them from their own dashboard or
-    // via agent tools (nudge_goal / send_goal_input).
-    const foreignMutating = ["send", "force", "block", "pause", "resume", "retry", "clear", "abort", "nudge", "interactive", "agent", "model", "release"]
-    if (parsed.command && foreignMutating.includes(parsed.command) && selectedGoal() && goalDir(selectedGoal()!.id) !== props.directory) {
-      setStatusText(`Foreign goal — open the ${goalDir(selectedGoal()!.id)} dashboard or steer via agent tools.`)
-      returnToNormalMode()
-      return
-    }
+    // Goal verbs reach the selected goal's own project bus (see bus above):
+    // foreign rows act remotely, never through the local fallback. The old
+    // display-only guard is gone — routing replaced blocking.
+    // Worker-tab verbs route through the selected goal's own project bus
+    // (per-directory client). A target with no live control worker answers
+    // with an honest timeout — never a local fallback, never fake success.
+    const verbDir = selectedGoal() ? goalDir(selectedGoal()!.id) : props.directory
+    const bus = clientFor(verbDir)
     // Immediate feedback: the control round-trip can take seconds (or time
     // out at 30s), and silence until then reads as "keys do nothing".
     if (!["help", "logs", "q", "close"].includes(parsed.command)) {
@@ -748,26 +885,74 @@ export function LoopDashboard(props: Props) {
     }
     try {
       switch (parsed.command) {
+        case "filter": {
+          setFilterText(parsed.positional.join(" "))
+          setStatusText(parsed.positional.length ? `filter: "${parsed.positional.join(" ")}"` : "filter cleared")
+          break
+        }
+        case "project": {
+          const name = parsed.positional.join(" ").trim()
+          if (!name) {
+            setStatusText(`projects: ${managedDirs().join(" · ")}`)
+            break
+          }
+          const match = managedDirs().find((d) => d === name || d.split("/").pop() === name || String(managedDirs().indexOf(d) + 1) === name)
+          if (!match) { setStatusText(`Unknown project "${name}" — :project lists managed dirs.`); break }
+          if (tab() === "commands") setCmdScope(match)
+          else setProjectScope(match)
+          setSelected(0)
+          setStatusText(`scope: ${match}`)
+          break
+        }
+        case "collapse": {
+          const name = parsed.positional.join(" ").trim()
+          const dir = name
+            ? (managedDirs().find((d) => d === name || d.split("/").pop() === name) ?? null)
+            : (selectedDir() || null)
+          if (!dir) { setStatusText(`Unknown project "${name}"`); break }
+          setCollapsed(toggleCollapsed(collapsed(), dir))
+          setSelected(0)
+          setStatusText(collapsed().includes(dir) ? `collapsed ${dir}` : `expanded ${dir}`)
+          break
+        }
+        case "focus": {
+          const dir = selectedDir()
+          setProjectScope(dir)
+          setTab("project")
+          setSelected(0)
+          setFilterText("")
+          setStatusText(`scope: ${dir}`)
+          break
+        }
+        case "history": {
+          setShowCompleted((v) => !v)
+          setStatusText(showCompleted() ? "Showing finished goals and commands." : "Hiding finished goals and commands.")
+          break
+        }
         case "send": {
           if (!selectedGoal()) { setStatusText("No goal selected"); break }
           const message = parsed.positional.join(" ") || parsed.args.message || ""
           if (!message) { setStatusText("Usage: :send <message>"); break }
-          const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "send", goalID: selectedGoal()!.id, args: { message } })
+          const r = await bus.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "send", goalID: selectedGoal()!.id, args: { message } })
           setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh()
           break
         }
         case "open": {
           const goal = selectedGoal()
           if (!goal?.workerSessionID) { setStatusText("No worker session"); break }
-          props.api.route.navigate("session", { sessionID: goal.workerSessionID })
-          props.api.ui.dialog.clear()
+          try {
+            props.api.route.navigate("session", { sessionID: goal.workerSessionID })
+            props.api.ui.dialog.clear()
+          } catch {
+            setStatusText("Navigate unsupported here — read the transcript via agent tools (read_goal_transcript).")
+          }
           return
         }
         case "force": {
           if (!selectedGoal()) { setStatusText("No goal"); break }
           const summary = parsed.positional.join(" ") || parsed.args.summary || "Force-completed from dashboard."
           const evidence = parsed.args.evidence || "Manual override — no verification checks run."
-          const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "force_complete", goalID: selectedGoal()!.id, args: { summary, evidence } })
+          const r = await bus.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "force_complete", goalID: selectedGoal()!.id, args: { summary, evidence } })
           setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh()
           break
         }
@@ -775,20 +960,20 @@ export function LoopDashboard(props: Props) {
           if (!selectedGoal()) { setStatusText("No goal"); break }
           const reason = parsed.positional.join(" ") || parsed.args.reason || "Blocked from dashboard."
           const needed = parsed.args.needed || "User intervention required."
-          const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "block", goalID: selectedGoal()!.id, args: { reason, needed } })
+          const r = await bus.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "block", goalID: selectedGoal()!.id, args: { reason, needed } })
           setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh()
           break
         }
-        case "pause": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "pause", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
-        case "resume": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "resume", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
-        case "retry": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "retry", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
-        case "clear": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "clear", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
-        case "abort": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "abort_worker", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
-        case "nudge": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "nudge", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
+        case "pause": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await bus.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "pause", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
+        case "resume": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await bus.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "resume", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
+        case "retry": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await bus.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "retry", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
+        case "clear": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await bus.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "clear", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
+        case "abort": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await bus.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "abort_worker", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
+        case "nudge": { if (!selectedGoal()) { setStatusText("No goal"); break } const r = await bus.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "nudge", goalID: selectedGoal()!.id }); setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh(); break }
         case "interactive": {
           if (!selectedGoal()) { setStatusText("No goal"); break }
           const next = !(selectedGoal()!.interactive === true)
-          const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "set_interactive", goalID: selectedGoal()!.id, args: { interactive: next } })
+          const r = await bus.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "set_interactive", goalID: selectedGoal()!.id, args: { interactive: next } })
           setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh()
           break
         }
@@ -796,12 +981,12 @@ export function LoopDashboard(props: Props) {
           if (!selectedGoal()) { setStatusText("No goal selected"); break }
           const agent = parsed.positional.join(" ").trim()
           if (!agent) { setStatusText("Usage: :agent <name> — :agents lists available agents."); break }
-          const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "switch_goal_identity", goalID: selectedGoal()!.id, args: { agent } })
+          const r = await bus.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "switch_goal_identity", goalID: selectedGoal()!.id, args: { agent } })
           setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh()
           break
         }
         case "agents": {
-          const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "list_agents" })
+          const r = await bus.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "list_agents" })
           setStatusText(r.ok ? r.message : `Error: ${r.message}`)
           break
         }
@@ -809,12 +994,12 @@ export function LoopDashboard(props: Props) {
           if (!selectedGoal()) { setStatusText("No goal selected"); break }
           const target = parsed.positional.join(" ").trim()
           if (!target) { setStatusText("Usage: :model <provider/model> — e.g. :model openai/gpt-5.6-sol. :models lists what's available."); break }
-          const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "switch_goal_identity", goalID: selectedGoal()!.id, args: { model: target } })
+          const r = await bus.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "switch_goal_identity", goalID: selectedGoal()!.id, args: { model: target } })
           setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh()
           break
         }
         case "models": {
-          const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "list_models" })
+          const r = await bus.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "list_models" })
           setStatusText(r.ok ? r.message : `Error: ${r.message}`)
           break
         }
@@ -848,13 +1033,9 @@ export function LoopDashboard(props: Props) {
         default: {
           // Bare text in insert mode → treat as send to selected goal
           if (parsed.command && selectedGoal()) {
-            if (goalDir(selectedGoal()!.id) !== props.directory) {
-              setStatusText(`Foreign goal — open the ${goalDir(selectedGoal()!.id)} dashboard or steer via agent tools.`)
-            } else {
-              const message = parsed.raw
-              const r = await client.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "send", goalID: selectedGoal()!.id, args: { message } })
-              setStatusText(r.ok ? `sent: ${message.slice(0, 80)}` : `Error: ${r.message}`); if (r.ok) await refresh()
-            }
+            const message = parsed.raw
+            const r = await bus.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "send", goalID: selectedGoal()!.id, args: { message } })
+            setStatusText(r.ok ? `sent: ${message.slice(0, 80)}` : `Error: ${r.message}`); if (r.ok) await refresh()
           } else setStatusText(`Unknown: ${parsed.command}. ? for help`)
         }
       }
@@ -862,21 +1043,60 @@ export function LoopDashboard(props: Props) {
     returnToNormalMode()
   }
 
-  /** Aggregate Goals tab: own goals plus other managed dirs, tagged by
-   * directory. Single-dir default intact — one dir means own goals only. */
+  /** Worker rows for the active tab. Project shows one managed directory
+   * (projectScope); Fleet merges all managed dirs; both hide completed
+   * unless history is on, then apply the text filter. */
   const activeGoals = () => {
-    const own = state()?.goals.filter((g) => showCompleted() || g.status !== "complete") || []
-    if (managedDirs().length <= 1) return own
-    const seen = new Set(own.map((g) => g.id))
-    const out = [...own]
-    for (const [dir, st] of Object.entries(managedStates())) {
-      if (dir === props.directory) continue
-      for (const g of st.goals ?? []) {
-        if ((showCompleted() || g.status !== "complete") && !seen.has(g.id)) {
-          seen.add(g.id)
-          out.push(g)
+    const inScope = (g: Goal) => showCompleted() || g.status !== "complete"
+    if (tab() === "fleet") {
+      const own = (state()?.goals ?? []).filter(inScope).map((g) => ({ goal: g, dir: props.directory }))
+      const seen = new Set(own.map((e) => e.goal.id))
+      const out = [...own]
+      for (const [dir, st] of Object.entries(managedStates())) {
+        if (dir === props.directory) continue
+        for (const g of st.goals ?? []) {
+          if (inScope(g) && !seen.has(g.id)) {
+            seen.add(g.id)
+            out.push({ goal: g, dir })
+          }
         }
       }
+      return out
+    }
+    const dir = projectScope()
+    const list = dir === props.directory
+      ? (state()?.goals ?? [])
+      : (managedStates()[dir]?.goals ?? [])
+    return list.filter(inScope).map((goal) => ({ goal, dir }))
+  }
+  /** Row models for the table: filtered, with stable directory+ID keys. */
+  const rowModels = (): RowModel[] => {
+    const now = clock()
+    const rows = activeGoals().map(({ goal, dir }) => toRowModel(goal, dir, runtimeFor(goal.id), now))
+    return filterRows(rows, filterText())
+  }
+  /** Actions/coordination take over the panel like the prototype's modal:
+   * while either is open the table and inspector step aside so the panel owns
+   * the viewport instead of getting squeezed into a few rows. */
+  const panelOpen = () => actionsOpen() || coordOpen()
+  /** Display list for the worker tabs: flat rows on Project, directory
+   * group headers + rows on Fleet. Selection addresses rows only.
+   *
+   * Expanded-detail mode (`d`): the table collapses to the selected row only,
+   * so the inspector + technical drawer get the vertical space. j/k still
+   * walks every worker; the visible row follows the selection, and closing
+   * the drawer restores the full table. This mirrors the prototype's
+   * "detail open = one row" rule and avoids a cropped drawer. */
+  const displayItems = (): Array<{ kind: "header"; dir: string; group: DirectoryGroup } | { kind: "row"; row: RowModel; index: number }> => {
+    const all = rowModels()
+    const rows = detailsOpen() ? all.slice(selected(), selected() + 1) : all
+    if (tab() !== "fleet") return rows.map((row) => ({ kind: "row" as const, row, index: all.indexOf(row) }))
+    const out: Array<{ kind: "header"; dir: string; group: DirectoryGroup } | { kind: "row"; row: RowModel; index: number }> = []
+    for (const group of groupByDirectory(rows, collapsed())) {
+      out.push({ kind: "header", dir: group.directory, group })
+      rows.forEach((row) => {
+        if (row.directory === group.directory) out.push({ kind: "row", row, index: all.indexOf(row) })
+      })
     }
     return out
   }
@@ -892,16 +1112,119 @@ export function LoopDashboard(props: Props) {
   const runtimeFor = (goalID: string): GoalRuntimeState | undefined =>
     state()?.runtimes.find((r) => r.goalID === goalID)
     ?? Object.values(managedStates()).map((st) => (st.runtimes ?? []).find((r) => r.goalID === goalID)).find(Boolean)
-  const runningCount = () => state()?.runtimes.filter((runtime) => workerActivityLabel(runtime, clock()).acting).length || 0
+  /** Recent event lines for a goal's technical drawer. */
+  const recentTranscriptFor = (goalID: string): string[] =>
+    events()
+      .filter((e) => (e as { goalID?: string }).goalID === goalID)
+      .slice(-12)
+      .map((e) => {
+        const ev = e as { type?: string; summary?: string }
+        return `${String(ev.type ?? "event")}${ev.summary ? ` — ${ev.summary}` : ""}`.slice(0, 160)
+      })
+  /** State-correct palette verbs for the selected goal. */
+  const paletteVerbs = (): Array<{ key: string; label: string }> => {
+    const g = selectedGoal()
+    if (!g) return []
+    if (g.status === "paused") return [{ key: "r", label: "Resume worker" }]
+    if (g.status === "blocked") return [{ key: "R", label: "Retry worker" }, { key: "p", label: "Pause worker" }]
+    if (g.status === "complete") return [{ key: "x", label: "Clear (removes goal)" }]
+    return [{ key: "p", label: "Pause worker" }, { key: "N", label: "Nudge with full contract" }]
+  }
+  /** Project context for the coordination drawer: fleet follows the
+   * selected row, project tab follows scope, commands tab follows filter. */
+  const coordDir = () => {
+    if (tab() === "fleet") return selectedDir()
+    if (tab() === "commands") return cmdScope() === "all" ? props.directory : cmdScope()
+    return projectScope()
+  }
+  const stateForDir = (dir: string): StoreState | null =>
+    dir === props.directory ? state() : (managedStates()[dir] ?? null)
+  /** Coordination model built from authoritative store reads only. */
+  const coordModel = (): CoordinationModel => {
+    const dir = coordDir()
+    const st = stateForDir(dir)
+    const goals = st?.goals ?? []
+    const nameOf = (goalID: string | undefined) =>
+      (goalID && goals.find((g) => g.id === goalID)?.name) || (goalID ?? "").slice(0, 8)
+    const holds = (st?.writeTickets?.holders ?? []).map((h) => ({
+      files: h.files ?? [],
+      sessionID: h.sessionID ?? "?",
+      goalName: nameOf(h.goalID),
+      age: ageText((h as { grantedAt?: string }).grantedAt, clock()),
+    }))
+    const queue = (st?.writeTickets?.queue ?? []).map((w, i) => {
+      const conflict = holds.find((h) => h.files.some((f) => (w.files ?? []).includes(f)))
+      return {
+        files: w.files ?? [],
+        sessionID: w.sessionID ?? "?",
+        goalName: nameOf(w.goalID),
+        position: i + 1,
+        waitsFor: conflict ? `${conflict.goalName} (${conflict.files.join(", ").slice(0, 40)})` : "clearing writes",
+        ownerPriority: w.isOwner === true,
+      }
+    })
+    const blockers: CoordinationModel["verifyBlockers"] = []
+    const op = (st as unknown as { workspaceOperation?: { id: string; sessionID: string; goalID?: string } } | null)?.workspaceOperation
+    if (op) blockers.push({ kind: "operation", text: `operation ${op.id}`, holder: `session ${op.sessionID}${op.goalID ? ` · ${nameOf(op.goalID)}` : ""}` })
+    for (const h of holds) blockers.push({ kind: "ticket", text: `ticket on ${h.files.join(", ").slice(0, 60)}`, holder: `${h.goalName} · held ${h.age}` })
+    for (const c of (st?.workspaceCalls ?? []).filter((c) => c.uncontrolled)) {
+      blockers.push({ kind: "uncontrolled", text: "live shell/command (writes unknown)", holder: `session ${(c.sessionID ?? "").slice(0, 12)}…`, age: ageText(c.at, clock()) })
+    }
+    for (const c of (st?.workspaceCalls ?? []).filter((c) => (c.paths?.length ?? 0) > 0)) {
+      blockers.push({ kind: "legacy", text: `legacy write on ${(c.paths ?? []).join(", ").slice(0, 60)}`, holder: `session ${(c.sessionID ?? "").slice(0, 12)}…`, age: ageText(c.at, clock()) })
+    }
+    return {
+      directory: dir,
+      shortName: dir.split("/").pop() || dir,
+      holds,
+      queue,
+      verifyBlockers: blockers,
+      verifyNote: blockers.length === 0 ? "quiet — checks can run" : undefined,
+      reservations: (st?.workspaceCalls ?? []).map((c) => ({
+        callID: c.callID,
+        sessionID: c.sessionID ?? "?",
+        goalName: nameOf(c.goalID),
+        live: true,
+        releasable: false,
+        reason: "liveness unconfirmed from here — Inspect refreshes from server; release asks the server, refusal names why",
+        age: ageText(c.at, clock()),
+      })),
+    }
+  }
+  /** Cycle the scope picker: project tab rotates projectScope, commands
+   * tab rotates cmdScope (including "all"). Selection resets. */
+  function cycleScope(dir: 1 | -1) {
+    if (tab() === "commands") {
+      const opts = ["all", ...managedDirs()]
+      const idx = opts.indexOf(cmdScope())
+      setCmdScope(opts[(idx + dir + opts.length) % opts.length]!)
+      setCmdSelected(0)
+      return
+    }
+    const dirs = managedDirs()
+    if (dirs.length <= 1) { setStatusText("one project managed — :project lists managed dirs"); return }
+    const idx = dirs.indexOf(projectScope())
+    setProjectScope(dirs[(idx + dir + dirs.length) % dirs.length]!)
+    setSelected(0)
+  }
+  /** Compact scope summary for the header: needs-action / working / awaiting.
+   * Completed stay hidden with no giant done count. */
+  const scopeSummaryText = () => {
+    if (tab() === "commands") {
+      const running = ownerCommands().filter((c) => c.status === "running").length
+      return `${running} running · ${ownerCommands().length} shown`
+    }
+    const entries = activeGoals()
+    const s = summarizeScope(
+      entries.map((e) => e.goal),
+      (i) => {
+        const rt = runtimeFor(entries[i]!.goal.id) as (GoalRuntimeState & { activeRunID?: string }) | undefined
+        return entries[i]!.goal.interactive === true && !!rt && rt.phase === "idle" && !rt.activeRunID
+      },
+    )
+    return summaryText(s)
+  }
   const fenceCount = () => state()?.workspaceCalls?.length || 0
-  const runningFrame = () => ["|", "/", "-", "\\"][Math.floor(clock() / 500) % 4]
-  /** Write-ticket concurrency: who currently holds the write lock, who is queued behind overlapping files. */
-  const ticketHolders = () => state()?.writeTickets?.holders ?? []
-  const ticketQueue = () => state()?.writeTickets?.queue ?? []
-  const ticketCount = () => ticketHolders().length + ticketQueue().length
-  const goalNameFor = (goalID: string | undefined) => (goalID && state()?.goals.find((g) => g.id === goalID)?.name) || (goalID ?? "").slice(0, 8)
-  /** Quiet duration of a stuck run, for the reconcile-blocked badge. */
-  const stuckQuietFor = (at: string | undefined) => ageLabel(at, clock())
 
   function handleBugReport() {
     const goal = selectedGoal()
@@ -912,10 +1235,25 @@ export function LoopDashboard(props: Props) {
   }
 
   createEffect(() => {
-    setSelected(Math.max(0, Math.min(selected(), activeGoals().length - 1)))
+    const rows = rowModels()
+    setSelected(Math.max(0, Math.min(selected(), Math.max(0, rows.length - 1))))
     setCmdSelected(Math.max(0, Math.min(cmdSelected(), ownerCommands().length - 1)))
-    setSelectedGoal(activeGoals()[selected()] || null)
+    // Selection follows the filtered row list; resolve back to the goal entry
+    // so inspector/actions never target a hidden or stale row.
+    const row = rows[selected()] ?? null
+    const entry = row ? activeGoals().find((e) => e.goal.id === row.id && e.dir === row.directory) ?? null : null
+    setSelectedGoal(entry ? entry.goal : null)
+    // Keep keyboard selection glued to the same directory+ID row across
+    // refresh/filter/collapse instead of drifting by index.
+    const key = entry ? goalSelectionKey(entry.dir, entry.goal.id) : undefined
+    if (key !== selectedKey()) {
+      const idx = key ? indexForSelectionKey(rows.map((r) => goalSelectionKey(r.directory, r.id)), key) : 0
+      if (idx !== selected()) setSelected(idx)
+      setSelectedKey(key)
+    }
   })
+  /** Project directory of the selected worker row. */
+  const selectedDir = () => activeGoals()[selected()]?.dir ?? props.directory
 
   function rowIdFor(goalID: string): string {
     return `loopd-goal-${goalID}`
@@ -924,52 +1262,27 @@ export function LoopDashboard(props: Props) {
   return (
     <box flexDirection="column" width="100%" alignItems="center" padding={1}>
       <box flexDirection="column" width="90%" border={true} borderColor={theme().border} padding={1}>
-        {/* Header — always visible, vivid */}
-        <box flexDirection="row" justifyContent="space-between" alignItems="center" padding={0} flexShrink={0} gap={1}>
-          <text>
-            <span style={{ fg: theme().info, bold: true }}>⬢ Loop Dashboard</span>
-            <span style={{ fg: theme().textMuted }}> │ </span>
-            <span style={{ fg: mode() === "normal" ? theme().success : theme().warning, bold: true, bg: mode() === "insert" ? (theme().backgroundElement as unknown as string) : undefined }}> {mode().toUpperCase()} </span>
-            <span style={{ fg: theme().textMuted }}> │ </span>
-            <span style={{ fg: theme().accent, bold: true }}>{activeGoals().length}</span>
-            <span style={{ fg: theme().textMuted }}> open</span>
-            <span style={{ fg: theme().textMuted }}> │ </span>
-            <span style={{ fg: runningCount() > 0 ? theme().success : theme().textMuted, bold: runningCount() > 0 }}>{runningCount() > 0 ? runningFrame() : "○"} {runningCount()} observed active</span>
-            <span style={{ fg: theme().textMuted }}> │ </span>
-            <span style={{ fg: fenceCount() > 0 ? theme().warning : theme().textMuted, bold: fenceCount() > 0 }}>{fenceCount()} fence{fenceCount() === 1 ? "" : "s"}</span>
-            {ticketCount() > 0 && <><span style={{ fg: theme().textMuted }}> │ </span><span style={{ fg: theme().info, bold: true }}>🎟 {ticketHolders().length} held</span>{ticketQueue().length > 0 && <span style={{ fg: theme().textMuted }}> · {ticketQueue().length} queued</span>}</>}
-            <span style={{ fg: theme().textMuted }}> │ </span>
-            <span style={{ fg: theme().success, bold: true }}>{state()?.goals.filter((g) => g.status === "complete").length || 0}</span>
-            <span style={{ fg: theme().textMuted }}> done</span>
-            <span style={{ fg: theme().textMuted }}> │ </span>
-            <span style={{ fg: tab() === "goals" ? theme().info : theme().textMuted, bold: tab() === "goals" }}>[Goals]</span>
-            <span style={{ fg: theme().textMuted }}> </span>
-            <span style={{ fg: tab() === "commands" ? theme().info : theme().textMuted, bold: tab() === "commands" }}>[Commands]</span>
-            <span style={{ fg: theme().textMuted }}> (Tab)</span>
-            <span style={{ fg: theme().textMuted }}> │ </span>
-            <span style={{ fg: theme().accent, bold: true }}>⬣ {managedDirs().length} proj</span>
-            <span style={{ fg: theme().textMuted }}> {storePath()}</span>
-          </text>
-          <box
-            flexDirection="row"
-            alignItems="center"
-            backgroundColor={theme().error as unknown as string}
-            paddingLeft={1}
-            paddingRight={1}
-            {...({ onMouseDown: handleBugReport } as any)}
-          >
-            <text><span style={{ fg: "white", bold: true }}>Bug Report</span></text>
-          </box>
-        </box>
+        {/* Header — always visible, vivid (see DashboardHeader: two fixed lines). */}
+        <DashboardHeader
+          theme={theme()}
+          mode={mode()}
+          scopeName={tab() === "fleet" ? "All projects" : tab() === "commands" ? "Command sessions" : (projectScope().split("/").pop() || projectScope())}
+          summary={scopeSummaryText()}
+          tab={tab()}
+          projCount={managedDirs().length}
+          onBugReport={handleBugReport}
+        />
 
-        {/* Scrollable body — sizes to content; the list caps itself so detail + input stay visible */}
-        <box flexDirection="column" flexShrink={1} minHeight={0} overflow="hidden">
+        {/* Scrollable body — the whole frame scrolls (list is capped), so the
+            inspector and drawer always stay reachable via j/k or wheel. */}
+        <scrollbox ref={(el) => { frameEl = el }} flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0}
+          scrollX={false} scrollY={true} stickyScroll={false}>
           {/* Help panel — single text to avoid flex overlap */}
 <Show when={showHelp()}>
               <box flexDirection="column" padding={1} border={true} borderColor="yellow" backgroundColor={theme().background} flexShrink={0} maxHeight={22}>
                 <box flexDirection="column" padding={1} backgroundColor={theme().background} flexShrink={1} minHeight={0} overflow="scroll">
                   <text>
-                <span style={{ fg: "yellow", bold: true }}>{tab() === "commands" ? "━━━ Commands: ? help  : insert  c toggle done  X kill  R restart  x remove-done  o fullscreen  q close ━━━" : "━━━ Keys: ? toggle help  c toggle done  : insert  Ctrl+N normal  o open  A abort worker  N nudge  W release  q close ━━━"}</span>
+                <span style={{ fg: "yellow", bold: true }}>{tab() === "commands" ? "━━━ Commands: ? help  : insert  h history  X kill  R restart  x remove-done  o fullscreen  q close ━━━" : "━━━ Keys: 1/2/3 tabs  j/k move  Enter actions  s send  d details  o session  t coordination  / filter  h history  W release  q close ━━━"}</span>
                 <For each={(tab() === "commands" ? commandTabHelp() : commandHelp()).split("\n")}>{(line) => {
                   // Modes / Nav — split into label + segments, color keys vs descs
                   if (line.startsWith("Modes:") || line.startsWith("Nav:")) {
@@ -1061,60 +1374,62 @@ export function LoopDashboard(props: Props) {
             </box>
           </Show>
 
-          {/* Goal list — goals tab only (commands tab renders below).
-              Short lists sit compact with no void below; long lists cap out
-              and scroll with selection following via scrollChildIntoView.
-              Detail + input stay pinned below in both cases. */}
-          <Show when={tab() === "goals"}>
-          <Show when={activeGoals().length > 0} fallback={
+          {/* Worker tabs: Project (one directory) and Fleet (grouped).
+              Toolbar: scope picker state, filter state, history state. */}
+          <Show when={tab() === "project" || tab() === "fleet"}>
+          <Show when={!panelOpen()}>
+          <Show when={rowModels().length > 0} fallback={
             <box flexDirection="column" gap={1} padding={1}>
-              <text><span style={{ fg: theme().textMuted }}>No active goals.</span><span style={{ fg: theme().accent }}> /goal</span><span style={{ fg: theme().textMuted }}> in parent chat to create one.</span></text>
-              <text style={{ fg: theme().textMuted }}>Store: {props.directory}/.opencode/loopd</text>
-              <text><span style={{ fg: theme().textMuted }}>Tip: </span><span style={{ fg: theme().warning }}>:send</span><span style={{ fg: theme().textMuted }}> to steer the worker · </span><span style={{ fg: theme().warning }}>o</span><span style={{ fg: theme().textMuted }}> to open child · </span><span style={{ fg: theme().warning }}>:force</span><span style={{ fg: theme().textMuted }}> to complete manually.</span></text>
+              <text><span style={{ fg: theme().textMuted }}>No workers{filterText() ? ` matching "${filterText()}"` : ""}.</span><span style={{ fg: theme().accent }}> /goal</span><span style={{ fg: theme().textMuted }}> in parent chat to create one.</span></text>
+              <text style={{ fg: theme().textMuted }}>Scope: {tab() === "fleet" ? "all projects" : projectScope()}/.opencode/loopd</text>
+              <text><span style={{ fg: theme().textMuted }}>Tip: </span><span style={{ fg: theme().warning }}>s</span><span style={{ fg: theme().textMuted }}> send · </span><span style={{ fg: theme().warning }}>o</span><span style={{ fg: theme().textMuted }}> open child · </span><span style={{ fg: theme().warning }}>t</span><span style={{ fg: theme().textMuted }}> coordination · </span><span style={{ fg: theme().warning }}>/</span><span style={{ fg: theme().textMuted }}> filter.</span></text>
             </box>
           }>
-            <DashboardList count={activeGoals().length} selectedID={activeGoals()[selected()] ? rowIdFor(activeGoals()[selected()]!.id) : undefined}>
-              <For each={activeGoals()}>
-                {(goal, i) => {
-                  const runtime = () => runtimeFor(goal.id)
-                  const activity = () => runtime() ? workerActivityLabel(runtime()!, clock()) : undefined
-                  const isActive = () => i() === selected()
-                  const maxTurns = (goal.config as any)?.maxTurns as number | undefined
-                  const dirName = () => goalDir(goal.id).split("/").pop() ?? goalDir(goal.id)
-                  const turnColor = () => {
-                    if (!runtime() || !maxTurns) return phaseColor(runtime()?.phase || "idle", theme())
-                    const ratio = runtime()!.budgetTurnCount / maxTurns
-                    if (ratio >= 1) return theme().error
-                    if (ratio >= 0.8) return theme().warning
-                    return phaseColor(runtime()!.phase || "idle", theme())
+            <text>
+              <span style={{ fg: theme().textMuted }}>Scope </span>
+              <span style={{ fg: theme().accent, bold: true }}>{tab() === "fleet" ? `all projects (${managedDirs().length})` : (projectScope().split("/").pop() || projectScope())}</span>
+              {filterText() && <><span style={{ fg: theme().textMuted }}> · filter </span><span style={{ fg: theme().text }}>"{filterText()}"</span></>}
+              <span style={{ fg: theme().textMuted }}> · history {showCompleted() ? "shown" : "hidden"}</span>
+              {detailsOpen() && <span style={{ fg: theme().textMuted }}> · detail open — table collapsed to the selected row</span>}
+            </text>
+            {/* Column header: one line, same fixed geometry as the rows, so a
+                reader scans columns instead of decoding each row. */}
+            <box flexDirection="row" paddingLeft={3} paddingRight={1} height={1} flexShrink={0}>
+              <text wrapMode="none" truncate={true}>
+                <span style={{ fg: theme().textMuted }}>{"WORKER".padEnd(22)}│ {"STATE".padEnd(30)}│ ACTIVITY</span>
+              </text>
+            </box>
+            <DashboardList count={displayItems().length} selectedID={rowModels()[selected()] ? rowIdFor(rowModels()[selected()]!.id) : undefined}>
+              <For each={displayItems()}>
+                {(item) => {
+                  if (item.kind === "header") {
+                    const g = item.group
+                    return (
+                      <DashboardRow id={`loopd-group-${g.directory}`} backgroundColor={theme().backgroundElement}>
+                        <span style={{ fg: theme().accent, bold: true }}>{collapsed().includes(g.directory) ? "▸" : "▾"} {g.shortName}</span>
+                        <span style={{ fg: theme().textMuted }}> / {g.needsAction > 0 ? `${g.needsAction} needs action · ` : "no intervention needed · "}{g.working} working (:collapse toggles)</span>
+                      </DashboardRow>
+                    )
                   }
+                  const row = item.row
+                  const isActive = () => item.index === selected()
+                  const stateFg = () => row.state === "blocked" ? theme().error : row.state === "active" ? theme().success : row.state === "paused" ? theme().warning : theme().textMuted
+                  const attnFg = () => row.attention === "blocker" || row.attention === "unreachable" || row.attention === "stale" || row.attention === "error" ? theme().error : theme().warning
+                  // Fixed columns (name / state / activity / updated) keep rows
+                  // aligned no matter how long the underlying values are.
+                  const cols = () => formatRowColumns(row)
                   return (
-                    <DashboardRow id={rowIdFor(goal.id)} backgroundColor={isActive() ? theme().backgroundElement : undefined}>
-                      {/* Single-line row: wrapMode+truncate pin the height so the
-                          list viewport math (1 line per row) stays exact in any
-                          dialog width. Full info lives in the detail panel. */}
-                        <span style={{ fg: statusColor(goal.status, theme()), bold: isActive() }}>{isActive() ? `▶ ${statusIcon(goal.status)} ${goal.name}` : `  ${statusIcon(goal.status)} ${goal.name}`}</span>
+                    <DashboardRow id={rowIdFor(row.id)} backgroundColor={isActive() ? theme().backgroundElement : undefined}>
+                      {/* Single-line row: name / state / current activity / updated.
+                          Full info lives in the inspector + technical drawer. */}
+                        <span style={{ fg: stateFg(), bold: isActive() }}>{isActive() ? `▶ ${cols().name}` : `  ${cols().name}`}</span>
                         <span style={{ fg: theme().textMuted }}> │ </span>
-                        <span style={{ fg: theme().textMuted }}>Goal </span>
-                        <span style={{ fg: statusColor(goal.status, theme()), bold: true }}>{goalStatusLabel(goal.status).short.toUpperCase()}</span>
-                        {managedDirs().length > 1 && <><span style={{ fg: theme().textMuted }}> │ </span><span style={{ fg: theme().accent }}>⬣ {dirName()}</span></>}
-                        {runtime() && <>
-                          <span style={{ fg: theme().textMuted }}> │ Worker </span>
-                          <span style={{ fg: activity()?.acting ? turnColor() : theme().textMuted, bold: activity()?.acting }}>{activity()?.acting ? runningFrame() : runtime()!.phase === "running" ? "◷" : phaseIcon(runtime()!.phase)} {activity()!.short.toUpperCase()}</span>
-                          <span style={{ fg: turnColor() }}> {runtime()!.budgetTurnCount}{maxTurns ? `/${maxTurns}` : ""}</span>
-                          <span style={{ fg: theme().textMuted }}> {ageLabel(runtime()!.lastProgressAt || runtime()!.lastRunAt, clock())}</span>
-                        </>}
-                        {runtime() && runtime()!.consecutiveFailures > 0 && <span style={{ fg: theme().error, bold: true }}> │ ⚠ {runtime()!.consecutiveFailures} fail</span>}
-                        {runtime() && (runtime()!.noProgressCount || 0) > 0 && <span style={{ fg: theme().warning }}> │ {runtime()!.noProgressCount} no-progress</span>}
-                        {runtime() && (runtime() as any).evaluatorRejectionCount > 0 && <span style={{ fg: theme().warning, bold: true }}> │ ⚠ {String((runtime() as any).evaluatorRejectionCount)} rejected</span>}
-                        {runtime() && (runtime() as any).unknownStatusCount >= 3 && <span style={{ fg: theme().error, bold: true }}> │ ⚠️ UNREACHABLE</span>}
-                        {runtime() && runtime()!.phase === "idle" && (runtime() as any).activeRunID && <span style={{ fg: theme().error, bold: true }}> │ ⚠️ STALE LEASE</span>}
-                        {goal.interactive === true && <span style={{ fg: theme().accent, bold: true }}> │ ✋ MANUAL</span>}
-                        {goal.config.model && <span style={{ fg: theme().info }}> │ 🧠 {goal.config.model}</span>}
-                        {goal.config.agent && <span style={{ fg: theme().info }}> │ 🤖 {goal.config.agent}</span>}
-                        {runtime() && (runtime() as any).retryAfter && <span style={{ fg: theme().accent }}> │ ↻ {countdownLabel((runtime() as any).retryAfter, clock())}</span>}
-                        {runtime() && (runtime() as any).nextRunAt && <span style={{ fg: theme().accent }}> │ ⏰ {countdownLabel((runtime() as any).nextRunAt, clock())}</span>}
-                        {runtime() && (runtime() as any).nativeReconcileBlocked && <span style={{ fg: theme().error, bold: true }}> │ ⚠ {String((runtime() as any).nativeReconcileBlocked.reason)} {stuckQuietFor(runtime()!.lastActivityAt)}</span>}
+                        <span style={{ fg: stateFg(), bold: true }}>{cols().state}</span>
+                        <span style={{ fg: theme().textMuted }}> │ </span>
+                        <span style={{ fg: row.attention === null ? theme().text : attnFg() }}>{cols().activity}</span>
+                        {row.turnText && <span style={{ fg: theme().textMuted }}> · {row.turnText}</span>}
+                        <span style={{ fg: theme().textMuted }}> · {cols().updated}</span>
+                        {row.attention && row.attentionText && <span style={{ fg: attnFg(), bold: true }}> │ ⚠ {row.attentionText.slice(0, 60)}</span>}
                     </DashboardRow>
                   )
                 }}
@@ -1122,101 +1437,103 @@ export function LoopDashboard(props: Props) {
             </DashboardList>
           </Show>
 
-          {/* Goal detail — fixed, bounded, border matches status */}
-          <Show when={selectedGoal()}>
+          </Show>
+
+          <Show when={!panelOpen() && selectedGoal()}>
             {(goal) => {
+              const entry = () => activeGoals().find((e) => e.goal.id === goal().id)
+              const dir = () => entry()?.dir ?? props.directory
               const rt = () => runtimeFor(goal().id)
               const activity = () => rt() ? workerActivityLabel(rt()!, clock()) : undefined
               const lp = () => goal().lastProgress
               const blk = () => goal().blocker
-              return (
-                <box flexDirection="column" border={true} borderColor={borderColorForStatus(goal().status, theme())} padding={1} flexShrink={0} maxHeight={13}>
-                  <box flexDirection="column" padding={1} backgroundColor={theme().background} flexShrink={1} minHeight={0} overflow="scroll">
-                    <text>
-                    <span style={{ fg: statusColor(goal().status, theme()), bold: true }}>{statusIcon(goal().status)} {goal().name}</span>
-                    <span style={{ fg: theme().textMuted }}> Goal </span>
-                    <span style={{ fg: statusColor(goal().status, theme()) }}>{goalStatusLabel(goal().status).short} — {goalStatusLabel(goal().status).hint}</span>
-                    {rt() && <><span style={{ fg: theme().textMuted }}> │ Worker </span><span style={{ fg: activity()?.acting ? phaseColor(rt()!.phase, theme()) : theme().textMuted, bold: true }}>{activity()?.acting ? runningFrame() : rt()!.phase === "running" ? "◷" : phaseIcon(rt()!.phase)} {activity()!.short} — {activity()!.hint}</span><span style={{ fg: theme().textMuted }}> run {rt()!.runCount} (budget {rt()!.budgetTurnCount})</span></>}
-                    {"\n"}
-                    <span style={{ fg: theme().textMuted }}>{describeGoalState(goal().status, rt(), clock())}</span>
-                    {(rt() as any)?.workerAbortedAt && <><span style={{ fg: theme().warning, bold: true }}> │ ⚠ worker aborted </span><span style={{ fg: theme().textMuted }}>{ageLabel((rt() as any).workerAbortedAt, clock())} — session kept, next turn reuses it</span></>}
-                    {(() => {
-                      const agentName = goal().config.agent
-                      const meta = agentName ? (agentIndex()[agentName] ?? agentIndex()[agentName.toLowerCase()]) : undefined
-                      const model = goal().config.model
-                      const slash = model?.indexOf("/") ?? -1
-                      return (<>
-                        {"\n"}
-                        <span style={{ fg: theme().textMuted }}>🤖 </span>
-                        <span style={{ fg: theme().primary, bold: true }}>Agent: </span>
-                        {agentName
-                          ? <><span style={{ fg: agentColor(meta?.color, theme()) as any, bold: true }}>{agentName}</span>{meta?.mode && <span style={{ fg: theme().textMuted }}> ({meta.mode})</span>}</>
-                          : goal().parentAgent
-                            ? <><span style={{ fg: theme().textMuted }}>↩ </span><span style={{ fg: theme().text, bold: true }}>{goal().parentAgent}</span><span style={{ fg: theme().textMuted }}> (parent)</span></>
-                            : <span style={{ fg: theme().textMuted }}>parent</span>}
-                        <span style={{ fg: theme().textMuted }}> │ 🧠 </span>
-                        <span style={{ fg: theme().primary, bold: true }}>Model: </span>
-                        {model && slash > 0
-                          ? <><span style={{ fg: theme().textMuted }}>{model.slice(0, slash)}/</span><span style={{ fg: theme().info, bold: true }}>{model.slice(slash + 1)}</span></>
-                          : goal().parentModel
-                            ? <><span style={{ fg: theme().textMuted }}>↩ </span><span style={{ fg: theme().info, bold: true }}>{goal().parentModel}</span><span style={{ fg: theme().textMuted }}> (parent)</span></>
-                            : <span style={{ fg: theme().textMuted }}>parent</span>}
-                        <span style={{ fg: theme().textMuted }}> │ 💰 </span>
-                        <span style={{ fg: theme().primary, bold: true }}>Spent: </span>
-                        <span style={{ fg: theme().success, bold: true }}>{formatCost((goal() as any).costUsed)}</span>
-                        <span style={{ fg: theme().textMuted }}> · </span>
-                        <span style={{ fg: theme().warning, bold: true }}>{formatTokens(goal().tokensUsed)}</span>
-                        <span style={{ fg: theme().textMuted }}> tokens · {formatDuration(goal().timeUsedSeconds)}</span>
-                      </>)
-                    })()}
-                    {"\n"}
-                    <span style={{ fg: theme().primary, bold: true }}>🎯 Target: </span>
-                    <span style={{ fg: theme().text }}>{goal().objective.slice(0, 160)}</span>
-                    {lp() && <><span style={{ fg: theme().success }}>{"\n"}✔ </span><span style={{ fg: theme().success, bold: true }}>Progress: </span><span style={{ fg: theme().text }}>{lp()!.summary.slice(0, 100)}</span><span style={{ fg: theme().textMuted }}> → {lp()!.next?.slice(0, 60) || ""}</span></>}
-                    {blk() && <><span style={{ fg: theme().error, bold: true }}>{"\n"}✖ Blocked: </span><span style={{ fg: theme().error }}>{blk()!.reason.slice(0, 140)}</span><span style={{ fg: theme().textMuted }}> — {blk()!.needed.slice(0, 60)}</span></>}
-                    {goal().config.artifactDir && <><span style={{ fg: theme().accent }}>{"\n"}📁 </span><span style={{ fg: theme().accent, bold: true }}>Artifacts: </span><span style={{ fg: theme().textMuted }}>{String(goal().config.artifactDir).replace(String(props.directory), ".")}</span></>}
-                    {managedDirs().length > 1 && <><span style={{ fg: theme().accent }}>{"\n"}⬣ </span><span style={{ fg: theme().accent, bold: true }}>Project: </span><span style={{ fg: theme().textMuted }}>{goalDir(goal().id)}</span></>}
-                    {goal().workerTopology && <><span style={{ fg: theme().textMuted }}>{"\n"}🌿 Worker: </span><span style={{ fg: theme().text }}>{goal().workerTopology === "v2-native-child" ? "native child" : goal().workerTopology === "v2-root-fallback" ? "root fallback" : "v1 child"}</span>{goal().nativeParentID ? <span style={{ fg: theme().textMuted }}> of {(goal().nativeParentID as string).slice(0, 12)}…</span> : null}</>}
-                    {goal().interactive === true && <><span style={{ fg: theme().accent, bold: true }}>{"\n"}✋ Manual: </span><span style={{ fg: theme().textMuted }}>engine never starts turns — steer with :send/nudge (:interactive to re-enable auto)</span></>}
-                    {goal().config.model && <><span style={{ fg: theme().info, bold: true }}>{"\n"}🧠 Model: </span><span style={{ fg: theme().text }}>{goal().config.model}</span>{goal().modelSwitch?.pending ? <span style={{ fg: theme().warning }}> → pending {goal().modelSwitch?.pending?.model} (applies next turn)</span> : null}</>}
-                    {goal().config.agent && <><span style={{ fg: theme().info, bold: true }}>{"\n"}🤖 Agent: </span><span style={{ fg: theme().text }}>{goal().config.agent}</span>{goal().agentSwitch?.pending ? <span style={{ fg: theme().warning }}> → pending {goal().agentSwitch?.pending?.agent} (applies next turn)</span> : null}</>}
-                    {(goal().config.checks?.length ?? 0) > 0 ? <><span style={{ fg: theme().warning }}>{"\n"}▣ </span><span style={{ fg: theme().warning, bold: true }}>Checks: </span><span style={{ fg: theme().textMuted }}>{(goal().config.checks as string[]).join(", ").slice(0, 100)}</span></> : null}
-                    {(rt() as any)?.nativeReconcileBlocked && <><span style={{ fg: theme().error }}>{"\n"}⛔ Blocked: </span><span style={{ fg: theme().error, bold: true }}>{String((rt() as any).nativeReconcileBlocked.reason)}</span><span style={{ fg: theme().textMuted }}> · quiet {stuckQuietFor(rt()!.lastActivityAt)} · nudge to force a turn</span></>}
-                    <><span style={{ fg: theme().info, bold: true }}>{"\n"}Write scope: </span><span style={{ fg: theme().textMuted }}>{goal().config.workspaceWrite === false ? "read-only / own artifacts" : goal().config.write_scope === undefined ? "whole workspace (legacy exclusive)" : goal().config.write_scope!.length === 0 ? "exploration only — claim before editing" : goal().config.write_scope!.join(", ")}</span>{goal().scopeClosing || goal().scopeClearPending ? <span style={{ fg: theme().warning }}> — closing; claims retained until writes drain</span> : null}</>
-                    {(rt() as any)?.evaluatorRejectionCount > 0 && <><span style={{ fg: theme().warning }}>{"\n"}⚠ rejections: </span><span style={{ fg: theme().warning }}>{String((rt() as any).evaluatorRejectionCount)} — {String((rt() as any).lastRejectionDetails || "").slice(0, 80)}</span></>}
-                    {(rt() as any)?.unknownStatusCount > 0 && <><span style={{ fg: theme().error }}>{"\n"}⚠️ unreachable: </span><span style={{ fg: theme().error }}>{String((rt() as any).unknownStatusCount)}/3</span><span style={{ fg: theme().textMuted }}> — nudge to recover</span></>}
-                    {(rt() as any)?.retryAfter && <><span style={{ fg: theme().accent }}>{"\n"}↻ retry in: </span><span style={{ fg: theme().accent }}>{countdownLabel((rt() as any).retryAfter, clock())}</span></>}
-                    {(rt() as any)?.nextRunAt && <><span style={{ fg: theme().accent }}>{"\n"}⏰ next run: </span><span style={{ fg: theme().accent }}>{countdownLabel((rt() as any).nextRunAt, clock())}</span><span style={{ fg: theme().textMuted }}> ({String((rt() as any).scheduleRunCount || 0)} runs)</span></>}
-{rt()?.lastError && <><span style={{ fg: theme().error }}>{"\n"}⚠ </span><span style={{ fg: theme().error, bold: true }}>Error: </span><span style={{ fg: theme().error }}>{rt()!.lastError!.slice(0, 120)}</span></>}
-                    </text>
-                  </box>
-                  <text style={{ fg: theme().textMuted }}><span style={{ italic: true }}>▼ scroll for more</span></text>
-                </box>
-              )
+              const agentName = () => goal().config.agent
+              const meta = () => agentName() ? (agentIndex()[agentName()!] ?? agentIndex()[agentName()!.toLowerCase()]) : undefined
+              const model = () => goal().config.model
+              return (<>
+                <GoalInspector
+                  theme={theme()}
+                  model={{
+                    goal: goal(),
+                    directory: dir(),
+                    activityLine: activity() ? `${activity()!.short} — ${activity()!.hint}` : undefined,
+                    acting: activity()?.acting ?? false,
+                    lastResult: lp()?.summary,
+                    blocked: blk() ? { reason: blk()!.reason, needed: blk()!.needed } : undefined,
+                    lastProgress: lp() ?? undefined,
+                    agentMeta: meta()?.mode,
+                    showFocusProject: tab() === "fleet",
+                  }}
+                  onSend={() => { setCommandInput("send "); if (inputEl) inputEl.value = "send "; setMode("insert"); focusInput() }}
+                  onOpen={() => { if (goal().workerSessionID) { try { props.api.route.navigate("session", { sessionID: goal().workerSessionID }); props.api.ui.dialog.clear() } catch { setStatusText("Navigate unsupported here — read the transcript via agent tools (read_goal_transcript).") } } else setStatusText("No worker session") }}
+                  onActions={() => setActionsOpen(true)}
+                  onDetails={() => setDetailsOpen((v) => !v)}
+                  onFocusProject={() => { setProjectScope(dir()); setTab("project"); setSelected(0); setStatusText(`scope: ${dir()}`) }}
+                />
+                <Show when={detailsOpen()}>
+                  <GoalDetailsDrawer
+                    theme={theme()}
+                    model={{
+                      goal: goal(),
+                      runtime: rt(),
+                      transcript: recentTranscriptFor(goal().id),
+                      progressHistory: lp() ? [{ summary: lp()!.summary, next: lp()!.next, at: lp()!.at }] : [],
+                      agentLabel: agentName() ? `${agentName()!}${meta()?.mode ? ` (${meta()!.mode})` : ""}` : (goal().parentAgent ?? "parent"),
+                      modelLabel: model() ?? goal().parentModel ?? "parent",
+                    }}
+                  />
+                </Show>
+              </>)
             }}
           </Show>
 
-          {/* Write tickets — who currently holds the write lock and who is
-              queued behind overlapping files. Hidden when empty. */}
-          <Show when={tab() === "goals" && ticketCount() > 0}>
-            <box flexDirection="column" border={true} borderColor={theme().border} padding={1} flexShrink={0} maxHeight={10}>
+          {/* Actions palette — state-correct verbs for the selected goal.
+              The palette lists; existing keys act (no new interaction risk). */}
+          <Show when={actionsOpen() && selectedGoal()}>
+            <box flexDirection="column" border={true} borderColor={theme().accent} padding={1} flexShrink={0} maxHeight={10}>
               <text>
-                <span style={{ fg: theme().primary, bold: true }}>🎟 Write tickets</span>
-                <span style={{ fg: theme().textMuted }}> — {ticketHolders().length} holding · {ticketQueue().length} queued · disjoint files run parallel</span>
-                <For each={ticketHolders()}>{(h) => (
-                  <><span style={{ fg: theme().warning, bold: true }}>{"\n"}HOLD </span><span style={{ fg: theme().text }}>{h.files.join(", ").slice(0, 80)}</span><span style={{ fg: theme().textMuted }}> — {(h.sessionID ?? "").slice(0, 12)}… · “{goalNameFor(h.goalID)}”</span></>
+                <span style={{ fg: theme().accent, bold: true }}>Actions / {selectedGoal()!.name}</span>
+                <span style={{ fg: theme().textMuted }}> — press the key, Esc closes</span>
+                <For each={paletteVerbs()}>{(v) => (
+                  <><span style={{ fg: theme().warning, bold: true }}>{"\n"}[{v.key}] </span><span style={{ fg: theme().text }}>{v.label}</span></>
                 )}</For>
-                <For each={ticketQueue().map((w, i) => ({ w, i }))}>{({ w, i }) => (
-                  <><span style={{ fg: theme().textMuted }}>{"\n"}WAIT #{i + 1} </span><span style={{ fg: theme().text }}>{w.files.join(", ").slice(0, 80)}</span><span style={{ fg: theme().textMuted }}> — {(w.sessionID ?? "").slice(0, 12)}… · “{goalNameFor(w.goalID)}”{w.isOwner ? " ★owner" : ""}</span></>
-                )}</For>
+                {"\n"}<span style={{ fg: theme().textMuted }}>[s] Send · [o] Open session · [d] Technical details</span>
               </text>
             </box>
           </Show>
+
+          {/* Coordination drawer — project-scoped triage (see coordination-panel.tsx). */}
+          <Show when={coordOpen()}>
+            <CoordinationPanel
+              theme={theme()}
+              model={coordModel()}
+              tab={coordTab()}
+              onTab={(t) => setCoordTab(t)}
+              onInspectReservations={() => void releaseWorkspaceFences({}, coordDir())}
+              onRelease={(callID) => setPendingRelease({ callID, dir: coordDir() })}
+              onOpenSession={() => { const g = selectedGoal(); if (g?.workerSessionID) { try { props.api.route.navigate("session", { sessionID: g.workerSessionID }); props.api.ui.dialog.clear() } catch { setStatusText("Navigate unsupported here.") } } }}
+            />
+          </Show>
+          <Show when={pendingRelease()}>
+            <box flexDirection="column" border={true} borderColor={theme().error} padding={1} flexShrink={0}>
+              <text>
+                <span style={{ fg: theme().error, bold: true }}>Release {pendingRelease()!.callID.slice(0, 12)}… in {pendingRelease()!.dir}?</span>
+                <span style={{ fg: theme().textMuted }}> — server decides; refusal names the reason. </span>
+                <span style={{ fg: theme().warning, bold: true }}>[y] release · [Esc] cancel</span>
+              </text>
+            </box>
+          </Show>
+
           </Show>
 
           {/* Commands tab — owner-scoped sessions. `o` opens the fullscreen
               terminal route; goal controls never apply here. */}
           <Show when={tab() === "commands"}>
+            <text>
+              <span style={{ fg: theme().textMuted }}>Scope: </span>
+              <span style={{ fg: theme().accent, bold: true }}>{cmdScope() === "all" ? `all projects (${managedDirs().length})` : (cmdScope().split("/").pop() || cmdScope())}</span>
+              <span style={{ fg: theme().textMuted }}> · history: {showCompleted() ? "shown (h to hide)" : "hidden (h to show)"} · :project :history · [ ] cycle scope</span>
+            </text>
             <Show when={ownerCommands().length > 0} fallback={
               <box flexDirection="column" gap={1} padding={1}>
                 <text><span style={{ fg: theme().textMuted }}>No live command sessions{hiddenFinishedCommands() > 0 ? ` — ${hiddenFinishedCommands()} finished hidden` : ""}. </span><span style={{ fg: theme().warning }}>:new &lt;command&gt;</span><span style={{ fg: theme().textMuted }}> to start one{hiddenFinishedCommands() > 0 ? ", or " : "; "}</span>{hiddenFinishedCommands() > 0 && <span><span style={{ fg: theme().warning }}>c</span><span style={{ fg: theme().textMuted }}> to show finished.</span></span>}</text>
@@ -1232,6 +1549,7 @@ export function LoopDashboard(props: Props) {
                         {/* Single-line row mirrors the Goals row: icon+bold name,
                             status-colored badge, accent executable, muted args. */}
                           <span style={{ fg: commandStatusColor(cmd.status, theme()), bold: isActive() }}>{isActive() ? `▶ ${cmd.title}` : `  ${commandStatusIcon(cmd.status)} ${cmd.title}`}</span>
+                          {managedDirs().length > 1 && <><span style={{ fg: theme().textMuted }}> │ </span><span style={{ fg: theme().accent }}>⬣ {commandDir(cmd.id).split("/").pop() ?? commandDir(cmd.id)}</span></>}
                           <span style={{ fg: theme().textMuted }}> │ </span>
                           <span style={{ fg: theme().textMuted }}>Cmd </span>
                           <span style={{ fg: commandStatusColor(cmd.status, theme()), bold: true }}>{commandStatusLabel(cmd.status).short}</span>
@@ -1295,17 +1613,17 @@ export function LoopDashboard(props: Props) {
               </text>
             </box>
           </Show>
-        </box>
+        </scrollbox>
 
         {/* Input — always visible at bottom, vivid mode badge */}
-        <box flexDirection="row" border={true} borderColor={mode() === "insert" ? theme().warning : theme().border} paddingLeft={1} paddingRight={1} flexShrink={0} height={3} gap={1}>
+        <box ref={(el) => { hintBoxEl = el as unknown as { width?: number } }} flexDirection="row" border={true} borderColor={mode() === "insert" ? theme().warning : theme().border} paddingLeft={1} paddingRight={1} flexShrink={0} height={3} gap={1}>
           <text>
             <span style={{ fg: mode() === "insert" ? theme().warning : theme().success, bold: true, bg: mode() === "insert" ? (theme().backgroundElement as unknown as string) : undefined }}>{mode() === "insert" ? " INSERT " : " NORMAL "}</span>
           </text>
           <input
             ref={(el: InputRenderable) => { inputEl = el; focusInput() }}
             flexGrow={1}
-            placeholder={mode() === "insert" ? ":send hello  or  :force done --evidence proof  or  :open  (Ctrl+N: normal)" : statusText() || "Press : to send/command  ·  ? help  ·  o open child  ·  q close"}
+            placeholder={mode() === "insert" ? ":send hello  or  :filter text  or  :project name  (Ctrl+N: normal)" : statusText() || fitHintBar(FOOT_HINTS, hintCols())}
             placeholderColor={theme().textMuted}
             cursorColor={theme().primary}
             focusedTextColor={theme().text}
