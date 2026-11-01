@@ -14,7 +14,7 @@ import { mergeProps as _$mergeProps3 } from "@opentui/solid";
 import { effect as _$effect3 } from "@opentui/solid";
 import { insert as _$insert3 } from "@opentui/solid";
 import { setProp as _$setProp3 } from "@opentui/solid";
-import { use as _$use2 } from "@opentui/solid";
+import { use as _$use3 } from "@opentui/solid";
 import { createElement as _$createElement3 } from "@opentui/solid";
 import { batch, createSignal, For as For3, Show as Show3, onCleanup, onMount, createEffect } from "solid-js";
 import { useKeyboard } from "@opentui/solid";
@@ -835,8 +835,6 @@ function toggleDashboardView(view) {
   return "project";
 }
 function dashboardViewForKey(key) {
-  if (key === "l")
-    return "commands";
   if (key === "1")
     return "project";
   if (key === "2")
@@ -1063,18 +1061,20 @@ async function statusAll(managedDirs) {
 
 // src/tui/dashboard-presentation.ts
 var PALETTE = {
-  base: "#222430",
-  inset: "#1b1d27",
-  rule: "#414552",
-  rowRule: "#343744",
-  selectedBg: "#1e2e2c",
-  ink: "#e8e9ee",
-  muted: "#a6a9b7",
-  cyan: "#9bddce",
-  amber: "#e9c982",
-  rose: "#e28d99",
-  sage: "#a8cb99",
-  tabActiveFg: "#14151c"
+  base: "#242736",
+  inset: "#1c1f2b",
+  rule: "#4e5468",
+  rowRule: "#383d52",
+  selectedBg: "#1e3538",
+  ink: "#f3f5fa",
+  muted: "#b4bbd0",
+  cyan: "#67e8f9",
+  amber: "#fbbf24",
+  rose: "#fb7185",
+  sage: "#4ade80",
+  violet: "#c4b5fd",
+  sky: "#38bdf8",
+  tabActiveFg: "#11131a"
 };
 var ATTENTION_STATES = new Set(["blocked", "budget_limited", "usage_limited"]);
 function stateSymbol(status, manual) {
@@ -1276,39 +1276,49 @@ import { memo as _$memo } from "@opentui/solid";
 import { createElement as _$createElement } from "@opentui/solid";
 import { For, Show } from "solid-js";
 function stateBadge(goal) {
-  if (goal.status === "blocked")
+  if (goal.status === "blocked") {
     return {
       text: "\u2716 Blocked",
-      fg: PALETTE.rose
+      fg: PALETTE.rose,
+      nameFg: PALETTE.rose
     };
+  }
   if (goal.status === "budget_limited" || goal.status === "usage_limited") {
     return {
       text: `! ${goalStatusShort(goal.status)}`,
-      fg: PALETTE.rose
+      fg: PALETTE.rose,
+      nameFg: PALETTE.rose
     };
   }
   if (goal.status === "active") {
     return goal.interactive === true ? {
       text: "\u25D0 Awaiting input",
-      fg: PALETTE.amber
+      fg: PALETTE.amber,
+      nameFg: PALETTE.amber
     } : {
       text: "\u25CF Working",
-      fg: PALETTE.sage
+      fg: PALETTE.sage,
+      nameFg: PALETTE.sage
     };
   }
-  if (goal.status === "paused")
+  if (goal.status === "paused") {
     return {
       text: "\u2016 Paused",
-      fg: PALETTE.muted
+      fg: PALETTE.violet,
+      nameFg: PALETTE.violet
     };
-  if (goal.status === "complete")
+  }
+  if (goal.status === "complete") {
     return {
       text: "\u2713 Completed",
-      fg: PALETTE.muted
+      fg: PALETTE.sky,
+      nameFg: PALETTE.sky
     };
+  }
   return {
     text: goalStatusShort(goal.status),
-    fg: PALETTE.ink
+    fg: PALETTE.ink,
+    nameFg: PALETTE.cyan
   };
 }
 function GoalInspector(props) {
@@ -1345,7 +1355,8 @@ function GoalInspector(props) {
         fg: active ? PALETTE.tabActiveFg : PALETTE.ink,
         bold: active
       }, _v$2 = {
-        fg: active ? PALETTE.tabActiveFg : PALETTE.cyan
+        fg: active ? PALETTE.tabActiveFg : PALETTE.cyan,
+        bold: true
       };
       _v$ !== _p$.e && (_p$.e = _$setProp(_el$3, "style", _v$, _p$.e));
       _v$2 !== _p$.t && (_p$.t = _$setProp(_el$5, "style", _v$2, _p$.t));
@@ -1357,11 +1368,11 @@ function GoalInspector(props) {
     return _el$;
   })();
   return (() => {
-    var _el$8 = _$createElement("box"), _el$9 = _$createElement("box"), _el$0 = _$createElement("text"), _el$1 = _$createElement("span"), _el$10 = _$createElement("span"), _el$11 = _$createTextNode(` / `), _el$12 = _$createElement("text"), _el$13 = _$createElement("span"), _el$14 = _$createElement("box"), _el$15 = _$createElement("text"), _el$16 = _$createElement("span"), _el$18 = _$createElement("span"), _el$19 = _$createElement("box"), _el$20 = _$createElement("box");
+    var _el$8 = _$createElement("box"), _el$9 = _$createElement("box"), _el$0 = _$createElement("text"), _el$1 = _$createElement("span"), _el$10 = _$createElement("span"), _el$12 = _$createElement("span"), _el$13 = _$createElement("text"), _el$14 = _$createElement("span"), _el$15 = _$createElement("box"), _el$16 = _$createElement("text"), _el$17 = _$createElement("span"), _el$19 = _$createElement("span"), _el$20 = _$createElement("box"), _el$21 = _$createElement("box");
     _$insertNode(_el$8, _el$9);
-    _$insertNode(_el$8, _el$14);
-    _$insertNode(_el$8, _el$19);
+    _$insertNode(_el$8, _el$15);
     _$insertNode(_el$8, _el$20);
+    _$insertNode(_el$8, _el$21);
     _$setProp(_el$8, "flexDirection", "column");
     _$setProp(_el$8, "border", true);
     _$setProp(_el$8, "paddingLeft", 1);
@@ -1370,7 +1381,7 @@ function GoalInspector(props) {
     _$setProp(_el$8, "paddingBottom", 0);
     _$setProp(_el$8, "flexShrink", 0);
     _$insertNode(_el$9, _el$0);
-    _$insertNode(_el$9, _el$12);
+    _$insertNode(_el$9, _el$13);
     _$setProp(_el$9, "flexDirection", "row");
     _$setProp(_el$9, "justifyContent", "space-between");
     _$setProp(_el$9, "alignItems", "center");
@@ -1378,75 +1389,76 @@ function GoalInspector(props) {
     _$setProp(_el$9, "flexShrink", 0);
     _$insertNode(_el$0, _el$1);
     _$insertNode(_el$0, _el$10);
+    _$insertNode(_el$0, _el$12);
     _$setProp(_el$0, "wrapMode", "none");
     _$insert(_el$1, () => m().goal.name);
-    _$insertNode(_el$10, _el$11);
-    _$insert(_el$10, proj, null);
-    _$insertNode(_el$12, _el$13);
-    _$setProp(_el$12, "wrapMode", "none");
-    _$insert(_el$13, () => badge().text);
-    _$insertNode(_el$14, _el$15);
-    _$setProp(_el$14, "flexDirection", "row");
-    _$setProp(_el$14, "height", 1);
-    _$setProp(_el$14, "flexShrink", 0);
+    _$insertNode(_el$10, _$createTextNode(` / `));
+    _$insert(_el$12, proj);
+    _$insertNode(_el$13, _el$14);
+    _$setProp(_el$13, "wrapMode", "none");
+    _$insert(_el$14, () => badge().text);
     _$insertNode(_el$15, _el$16);
-    _$insertNode(_el$15, _el$18);
-    _$setProp(_el$15, "wrapMode", "none");
-    _$insertNode(_el$16, _$createTextNode(`Now: `));
-    _$insert(_el$18, () => m().activityLine ?? "Idle \u2014 between turns");
-    _$setProp(_el$19, "flexDirection", "column");
-    _$setProp(_el$19, "flexShrink", 0);
-    _$insert(_el$19, (() => {
+    _$setProp(_el$15, "flexDirection", "row");
+    _$setProp(_el$15, "height", 1);
+    _$setProp(_el$15, "flexShrink", 0);
+    _$insertNode(_el$16, _el$17);
+    _$insertNode(_el$16, _el$19);
+    _$setProp(_el$16, "wrapMode", "none");
+    _$insertNode(_el$17, _$createTextNode(`Now: `));
+    _$insert(_el$19, () => m().activityLine ?? "Idle \u2014 between turns");
+    _$setProp(_el$20, "flexDirection", "column");
+    _$setProp(_el$20, "flexShrink", 0);
+    _$insert(_el$20, (() => {
       var _c$ = _$memo(() => !!m().blocked);
       return () => _c$() ? (() => {
-        var _el$21 = _$createElement("text"), _el$22 = _$createElement("span"), _el$24 = _$createElement("span"), _el$25 = _$createElement("span"), _el$26 = _$createTextNode(` \u2014 `);
-        _$insertNode(_el$21, _el$22);
-        _$insertNode(_el$21, _el$24);
-        _$insertNode(_el$21, _el$25);
-        _$setProp(_el$21, "wrapMode", "word");
-        _$insertNode(_el$22, _$createTextNode(`Blocked: `));
-        _$insert(_el$24, () => m().blocked.reason.replace(/\s+/g, " ").slice(0, 180));
-        _$insertNode(_el$25, _el$26);
-        _$insert(_el$25, () => m().blocked.needed.replace(/\s+/g, " ").slice(0, 90), null);
+        var _el$22 = _$createElement("text"), _el$23 = _$createElement("span"), _el$25 = _$createElement("span"), _el$26 = _$createElement("span"), _el$27 = _$createTextNode(` \u2014 `);
+        _$insertNode(_el$22, _el$23);
+        _$insertNode(_el$22, _el$25);
+        _$insertNode(_el$22, _el$26);
+        _$setProp(_el$22, "wrapMode", "word");
+        _$insertNode(_el$23, _$createTextNode(`Blocked: `));
+        _$insert(_el$25, () => m().blocked.reason.replace(/\s+/g, " ").slice(0, 180));
+        _$insertNode(_el$26, _el$27);
+        _$insert(_el$26, () => m().blocked.needed.replace(/\s+/g, " ").slice(0, 90), null);
         _$effect((_p$) => {
-          var _v$0 = {
+          var _v$1 = {
             fg: PALETTE.rose,
             bold: true
-          }, _v$1 = {
-            fg: PALETTE.rose
           }, _v$10 = {
+            fg: PALETTE.rose
+          }, _v$11 = {
             fg: PALETTE.muted
           };
-          _v$0 !== _p$.e && (_p$.e = _$setProp(_el$22, "style", _v$0, _p$.e));
-          _v$1 !== _p$.t && (_p$.t = _$setProp(_el$24, "style", _v$1, _p$.t));
-          _v$10 !== _p$.a && (_p$.a = _$setProp(_el$25, "style", _v$10, _p$.a));
+          _v$1 !== _p$.e && (_p$.e = _$setProp(_el$23, "style", _v$1, _p$.e));
+          _v$10 !== _p$.t && (_p$.t = _$setProp(_el$25, "style", _v$10, _p$.t));
+          _v$11 !== _p$.a && (_p$.a = _$setProp(_el$26, "style", _v$11, _p$.a));
           return _p$;
         }, {
           e: undefined,
           t: undefined,
           a: undefined
         });
-        return _el$21;
+        return _el$22;
       })() : (() => {
-        var _el$27 = _$createElement("text"), _el$28 = _$createElement("span");
-        _$insertNode(_el$27, _el$28);
-        _$setProp(_el$27, "wrapMode", "word");
-        _$insert(_el$28, () => (m().lastResult ?? "No progress reported yet \u2014 steer with [s] Send or [Enter] Actions.").replace(/\s+/g, " ").slice(0, 200));
-        _$effect((_$p) => _$setProp(_el$28, "style", {
+        var _el$28 = _$createElement("text"), _el$29 = _$createElement("span");
+        _$insertNode(_el$28, _el$29);
+        _$setProp(_el$28, "wrapMode", "word");
+        _$insert(_el$29, () => (m().lastResult ?? "No progress reported yet \u2014 steer with [s] Send or [Enter] Actions.").replace(/\s+/g, " ").slice(0, 200));
+        _$effect((_$p) => _$setProp(_el$29, "style", {
           fg: PALETTE.muted
         }, _$p));
-        return _el$27;
+        return _el$28;
       })();
     })());
-    _$setProp(_el$20, "flexDirection", "row");
-    _$setProp(_el$20, "gap", 1);
-    _$setProp(_el$20, "flexShrink", 0);
-    _$setProp(_el$20, "alignItems", "center");
-    _$insert(_el$20, () => btn("Send", "s", props.onSend), null);
-    _$insert(_el$20, () => btn("Open session", "o", props.onOpen), null);
-    _$insert(_el$20, () => btn("Actions", "Enter", props.onActions), null);
-    _$insert(_el$20, () => btn("Details", "d", props.onDetails, Boolean(m().detailsOpen)), null);
-    _$insert(_el$20, _$createComponent(Show, {
+    _$setProp(_el$21, "flexDirection", "row");
+    _$setProp(_el$21, "gap", 1);
+    _$setProp(_el$21, "flexShrink", 0);
+    _$setProp(_el$21, "alignItems", "center");
+    _$insert(_el$21, () => btn("Send", "s", props.onSend), null);
+    _$insert(_el$21, () => btn("Open session", "o", props.onOpen), null);
+    _$insert(_el$21, () => btn("Actions", "Enter", props.onActions), null);
+    _$insert(_el$21, () => btn("Details", "d", props.onDetails, Boolean(m().detailsOpen)), null);
+    _$insert(_el$21, _$createComponent(Show, {
       get when() {
         return _$memo(() => !!m().showFocusProject)() && props.onFocusProject;
       },
@@ -1461,20 +1473,23 @@ function GoalInspector(props) {
       }, _v$6 = {
         fg: PALETTE.muted
       }, _v$7 = {
+        fg: PALETTE.violet
+      }, _v$8 = {
         fg: badge().fg,
         bold: true
-      }, _v$8 = {
-        fg: PALETTE.ink
       }, _v$9 = {
+        fg: PALETTE.muted
+      }, _v$0 = {
         fg: m().acting ? PALETTE.sage : PALETTE.ink
       };
       _v$3 !== _p$.e && (_p$.e = _$setProp(_el$8, "borderColor", _v$3, _p$.e));
       _v$4 !== _p$.t && (_p$.t = _$setProp(_el$8, "backgroundColor", _v$4, _p$.t));
       _v$5 !== _p$.a && (_p$.a = _$setProp(_el$1, "style", _v$5, _p$.a));
       _v$6 !== _p$.o && (_p$.o = _$setProp(_el$10, "style", _v$6, _p$.o));
-      _v$7 !== _p$.i && (_p$.i = _$setProp(_el$13, "style", _v$7, _p$.i));
-      _v$8 !== _p$.n && (_p$.n = _$setProp(_el$16, "style", _v$8, _p$.n));
-      _v$9 !== _p$.s && (_p$.s = _$setProp(_el$18, "style", _v$9, _p$.s));
+      _v$7 !== _p$.i && (_p$.i = _$setProp(_el$12, "style", _v$7, _p$.i));
+      _v$8 !== _p$.n && (_p$.n = _$setProp(_el$14, "style", _v$8, _p$.n));
+      _v$9 !== _p$.s && (_p$.s = _$setProp(_el$17, "style", _v$9, _p$.s));
+      _v$0 !== _p$.h && (_p$.h = _$setProp(_el$19, "style", _v$0, _p$.h));
       return _p$;
     }, {
       e: undefined,
@@ -1483,7 +1498,8 @@ function GoalInspector(props) {
       o: undefined,
       i: undefined,
       n: undefined,
-      s: undefined
+      s: undefined,
+      h: undefined
     });
     return _el$8;
   })();
@@ -1491,80 +1507,117 @@ function GoalInspector(props) {
 function GoalDetailsDrawer(props) {
   const m = () => props.model;
   const g = () => m().goal;
+  const badge = () => stateBadge(g());
+  const proj = () => m().directory ? m().directory.split("/").pop() ?? m().directory : "";
   const maxTurns = () => g().config?.maxTurns;
   const turnsLabel = () => {
     const rt = m().runtime;
     return rt ? `${rt.budgetTurnCount}${maxTurns() ? `/${maxTurns()}` : ""} turns` : "0 turns";
   };
-  const dtRow = (dt, dd) => (() => {
-    var _el$29 = _$createElement("box"), _el$30 = _$createElement("box"), _el$31 = _$createElement("text"), _el$32 = _$createElement("span"), _el$33 = _$createElement("box"), _el$34 = _$createElement("text"), _el$35 = _$createElement("span");
-    _$insertNode(_el$29, _el$30);
-    _$insertNode(_el$29, _el$33);
-    _$setProp(_el$29, "flexDirection", "row");
-    _$setProp(_el$29, "flexShrink", 0);
-    _$setProp(_el$29, "paddingLeft", 1);
-    _$setProp(_el$29, "paddingRight", 1);
+  const dtRow = (dt, dd, valueColor = PALETTE.ink) => (() => {
+    var _el$30 = _$createElement("box"), _el$31 = _$createElement("box"), _el$32 = _$createElement("text"), _el$33 = _$createElement("span"), _el$34 = _$createElement("box"), _el$35 = _$createElement("text"), _el$36 = _$createElement("span");
     _$insertNode(_el$30, _el$31);
-    _$setProp(_el$30, "width", 16);
+    _$insertNode(_el$30, _el$34);
+    _$setProp(_el$30, "flexDirection", "row");
     _$setProp(_el$30, "flexShrink", 0);
+    _$setProp(_el$30, "paddingLeft", 1);
+    _$setProp(_el$30, "paddingRight", 1);
     _$insertNode(_el$31, _el$32);
-    _$setProp(_el$31, "wrapMode", "none");
-    _$insert(_el$32, dt);
-    _$insertNode(_el$33, _el$34);
-    _$setProp(_el$33, "flexGrow", 1);
-    _$setProp(_el$33, "flexShrink", 1);
-    _$setProp(_el$33, "minWidth", 0);
+    _$setProp(_el$31, "width", 16);
+    _$setProp(_el$31, "flexShrink", 0);
+    _$insertNode(_el$32, _el$33);
+    _$setProp(_el$32, "wrapMode", "none");
+    _$insert(_el$33, dt);
     _$insertNode(_el$34, _el$35);
-    _$setProp(_el$34, "wrapMode", "word");
-    _$insert(_el$35, dd);
-    _$effect((_p$) => {
-      var _v$11 = {
-        fg: PALETTE.muted
-      }, _v$12 = {
-        fg: PALETTE.ink
-      };
-      _v$11 !== _p$.e && (_p$.e = _$setProp(_el$32, "style", _v$11, _p$.e));
-      _v$12 !== _p$.t && (_p$.t = _$setProp(_el$35, "style", _v$12, _p$.t));
-      return _p$;
-    }, {
-      e: undefined,
-      t: undefined
+    _$setProp(_el$34, "flexGrow", 1);
+    _$setProp(_el$34, "flexShrink", 1);
+    _$setProp(_el$34, "minWidth", 0);
+    _$insertNode(_el$35, _el$36);
+    _$setProp(_el$35, "wrapMode", "word");
+    _$setProp(_el$36, "style", {
+      fg: valueColor
     });
-    return _el$29;
+    _$insert(_el$36, dd);
+    _$effect((_$p) => _$setProp(_el$33, "style", {
+      fg: PALETTE.cyan
+    }, _$p));
+    return _el$30;
   })();
   return (() => {
-    var _el$36 = _$createElement("box"), _el$37 = _$createElement("box"), _el$38 = _$createElement("text"), _el$39 = _$createElement("span"), _el$41 = _$createElement("span"), _el$43 = _$createElement("text"), _el$44 = _$createElement("span"), _el$46 = _$createElement("scrollbox"), _el$47 = _$createElement("box");
-    _$insertNode(_el$36, _el$37);
-    _$insertNode(_el$36, _el$46);
-    _$setProp(_el$36, "flexDirection", "column");
-    _$setProp(_el$36, "border", true);
-    _$setProp(_el$36, "paddingLeft", 1);
-    _$setProp(_el$36, "paddingRight", 1);
-    _$setProp(_el$36, "flexShrink", 0);
+    var _el$37 = _$createElement("box"), _el$38 = _$createElement("box"), _el$39 = _$createElement("text"), _el$40 = _$createElement("span"), _el$41 = _$createTextNode(`Details / `), _el$45 = _$createElement("span"), _el$47 = _$createElement("span"), _el$48 = _$createElement("box"), _el$49 = _$createElement("text"), _el$50 = _$createElement("span"), _el$52 = _$createElement("box"), _el$53 = _$createElement("text"), _el$54 = _$createElement("span"), _el$56 = _$createElement("scrollbox"), _el$57 = _$createElement("box"), _el$58 = _$createElement("text"), _el$59 = _$createElement("span");
     _$insertNode(_el$37, _el$38);
-    _$insertNode(_el$37, _el$43);
-    _$setProp(_el$37, "flexDirection", "row");
-    _$setProp(_el$37, "justifyContent", "space-between");
-    _$setProp(_el$37, "height", 1);
+    _$insertNode(_el$37, _el$52);
+    _$insertNode(_el$37, _el$56);
+    _$setProp(_el$37, "flexDirection", "column");
+    _$setProp(_el$37, "border", true);
+    _$setProp(_el$37, "paddingLeft", 2);
+    _$setProp(_el$37, "paddingRight", 2);
+    _$setProp(_el$37, "paddingTop", 1);
+    _$setProp(_el$37, "paddingBottom", 1);
+    _$setProp(_el$37, "gap", 1);
     _$setProp(_el$37, "flexShrink", 0);
     _$insertNode(_el$38, _el$39);
-    _$insertNode(_el$38, _el$41);
-    _$setProp(_el$38, "wrapMode", "none");
-    _$insertNode(_el$39, _$createTextNode(`Technical details`));
-    _$insertNode(_el$41, _$createTextNode(` \xB7 table collapsed to 1 row (j/k switches worker, J/K scrolls details)`));
-    _$insertNode(_el$43, _el$44);
-    _$setProp(_el$43, "wrapMode", "none");
-    _$insertNode(_el$44, _$createTextNode(`[d / esc] close`));
-    _$insertNode(_el$46, _el$47);
-    _$use((el) => props.scrollRef?.(el), _el$46);
-    _$setProp(_el$46, "height", 9);
-    _$setProp(_el$46, "scrollX", false);
-    _$setProp(_el$46, "scrollY", true);
-    _$setProp(_el$46, "stickyScroll", false);
-    _$insert(_el$46, () => dtRow("agent / model", `${m().agentLabel} \xB7 ${m().modelLabel}`), _el$47);
-    _$insert(_el$46, () => dtRow("budget / turns", `${formatCost(g().costUsed)} \xB7 ${turnsLabel()} \xB7 ${formatTokens(g().tokensUsed)} tok \xB7 ${formatDuration(g().timeUsedSeconds)}`), _el$47);
-    _$insert(_el$46, () => dtRow("objective", g().objective.replace(/\s+/g, " ")), _el$47);
-    _$insert(_el$46, () => dtRow("scope", (() => {
+    _$insertNode(_el$38, _el$48);
+    _$setProp(_el$38, "flexDirection", "row");
+    _$setProp(_el$38, "justifyContent", "space-between");
+    _$setProp(_el$38, "alignItems", "center");
+    _$setProp(_el$38, "height", 1);
+    _$setProp(_el$38, "flexShrink", 0);
+    _$insertNode(_el$39, _el$40);
+    _$insertNode(_el$39, _el$45);
+    _$insertNode(_el$39, _el$47);
+    _$setProp(_el$39, "wrapMode", "none");
+    _$insertNode(_el$40, _el$41);
+    _$insert(_el$40, () => g().name, null);
+    _$insert(_el$39, _$createComponent(Show, {
+      get when() {
+        return proj();
+      },
+      get children() {
+        var _el$42 = _$createElement("span"), _el$43 = _$createTextNode(` (`), _el$44 = _$createTextNode(`)`);
+        _$insertNode(_el$42, _el$43);
+        _$insertNode(_el$42, _el$44);
+        _$insert(_el$42, proj, _el$44);
+        _$effect((_$p) => _$setProp(_el$42, "style", {
+          fg: PALETTE.muted
+        }, _$p));
+        return _el$42;
+      }
+    }), _el$45);
+    _$insertNode(_el$45, _$createTextNode(` \xB7 `));
+    _$insert(_el$47, () => badge().text);
+    _$insertNode(_el$48, _el$49);
+    _$setProp(_el$48, "flexDirection", "row");
+    _$setProp(_el$48, "paddingLeft", 1);
+    _$setProp(_el$48, "paddingRight", 1);
+    _$setProp(_el$48, "height", 1);
+    _$spread(_el$48, _$mergeProps({
+      get backgroundColor() {
+        return PALETTE.base;
+      }
+    }, {
+      onMouseDown: () => props.onClose?.()
+    }), true);
+    _$insertNode(_el$49, _el$50);
+    _$setProp(_el$49, "wrapMode", "none");
+    _$insertNode(_el$50, _$createTextNode(`[esc]`));
+    _$insertNode(_el$52, _el$53);
+    _$setProp(_el$52, "flexDirection", "row");
+    _$setProp(_el$52, "height", 1);
+    _$setProp(_el$52, "flexShrink", 0);
+    _$insertNode(_el$53, _el$54);
+    _$setProp(_el$53, "wrapMode", "none");
+    _$insertNode(_el$54, _$createTextNode(`j / k scrolls details \xB7 n / p switches worker \xB7 d or Esc returns to table`));
+    _$insertNode(_el$56, _el$57);
+    _$use((el) => props.scrollRef?.(el), _el$56);
+    _$setProp(_el$56, "height", 12);
+    _$setProp(_el$56, "scrollX", false);
+    _$setProp(_el$56, "scrollY", true);
+    _$setProp(_el$56, "stickyScroll", false);
+    _$insert(_el$56, () => dtRow("agent / model", `${m().agentLabel} \xB7 ${m().modelLabel}`, PALETTE.amber), _el$57);
+    _$insert(_el$56, () => dtRow("budget / turns", `${formatCost(g().costUsed)} \xB7 ${turnsLabel()} \xB7 ${formatTokens(g().tokensUsed)} tok \xB7 ${formatDuration(g().timeUsedSeconds)}`, PALETTE.sage), _el$57);
+    _$insert(_el$56, () => dtRow("objective", g().objective.replace(/\s+/g, " "), PALETTE.ink), _el$57);
+    _$insert(_el$56, () => dtRow("scope", (() => {
       const writeable = g().config.workspaceWrite !== false;
       const scope = g().config.write_scope;
       if (!writeable)
@@ -1574,97 +1627,114 @@ function GoalDetailsDrawer(props) {
       if (scope.length === 0)
         return "exploration only";
       return scope.join(", ");
-    })()), _el$47);
-    _$insert(_el$46, () => dtRow("checks", (g().config.checks ?? []).join(" \xB7 ") || "No source changes"), _el$47);
-    _$insert(_el$46, () => dtRow("diagnostics", `goal: ${g().id} \xB7 worker: ${g().workerSessionID ?? "\u2014"} \xB7 owner: ${g().ownerSessionID ?? "\u2014"}`), _el$47);
-    _$setProp(_el$47, "flexDirection", "column");
-    _$setProp(_el$47, "border", true);
-    _$setProp(_el$47, "paddingLeft", 1);
-    _$setProp(_el$47, "paddingRight", 1);
-    _$setProp(_el$47, "flexShrink", 0);
-    _$insert(_el$47, _$createComponent(For, {
+    })(), PALETTE.violet), _el$57);
+    _$insert(_el$56, () => dtRow("checks", (g().config.checks ?? []).join(" \xB7 ") || "No source changes", PALETTE.cyan), _el$57);
+    _$insert(_el$56, () => dtRow("diagnostics", `goal: ${g().id} \xB7 worker: ${g().workerSessionID ?? "\u2014"} \xB7 owner: ${g().ownerSessionID ?? "\u2014"}`, PALETTE.muted), _el$57);
+    _$insertNode(_el$57, _el$58);
+    _$setProp(_el$57, "flexDirection", "column");
+    _$setProp(_el$57, "border", true);
+    _$setProp(_el$57, "paddingLeft", 1);
+    _$setProp(_el$57, "paddingRight", 1);
+    _$setProp(_el$57, "flexShrink", 0);
+    _$insertNode(_el$58, _el$59);
+    _$setProp(_el$58, "wrapMode", "none");
+    _$insertNode(_el$59, _$createTextNode(`Recent progress & events`));
+    _$insert(_el$57, _$createComponent(For, {
       get each() {
         return m().progressHistory.slice(-4);
       },
       children: (p) => (() => {
-        var _el$48 = _$createElement("text"), _el$49 = _$createElement("span"), _el$51 = _$createElement("span");
-        _$insertNode(_el$48, _el$49);
-        _$insertNode(_el$48, _el$51);
-        _$setProp(_el$48, "wrapMode", "word");
-        _$insertNode(_el$49, _$createTextNode(`\u2713 `));
-        _$insert(_el$51, () => p.summary.replace(/\s+/g, " "));
-        _$insert(_el$48, _$createComponent(Show, {
+        var _el$61 = _$createElement("text"), _el$62 = _$createElement("span"), _el$64 = _$createElement("span");
+        _$insertNode(_el$61, _el$62);
+        _$insertNode(_el$61, _el$64);
+        _$setProp(_el$61, "wrapMode", "word");
+        _$insertNode(_el$62, _$createTextNode(`\u2713 `));
+        _$insert(_el$64, () => p.summary.replace(/\s+/g, " "));
+        _$insert(_el$61, _$createComponent(Show, {
           get when() {
             return p.next;
           },
           get children() {
-            var _el$52 = _$createElement("span"), _el$53 = _$createTextNode(` \u2192 `);
-            _$insertNode(_el$52, _el$53);
-            _$insert(_el$52, () => p.next.replace(/\s+/g, " "), null);
-            _$effect((_$p) => _$setProp(_el$52, "style", {
+            var _el$65 = _$createElement("span"), _el$66 = _$createTextNode(` \u2192 `);
+            _$insertNode(_el$65, _el$66);
+            _$insert(_el$65, () => p.next.replace(/\s+/g, " "), null);
+            _$effect((_$p) => _$setProp(_el$65, "style", {
               fg: PALETTE.muted
             }, _$p));
-            return _el$52;
+            return _el$65;
           }
         }), null);
         _$effect((_p$) => {
-          var _v$20 = {
-            fg: PALETTE.sage
-          }, _v$21 = {
+          var _v$22 = {
+            fg: PALETTE.sage,
+            bold: true
+          }, _v$23 = {
             fg: PALETTE.ink
           };
-          _v$20 !== _p$.e && (_p$.e = _$setProp(_el$49, "style", _v$20, _p$.e));
-          _v$21 !== _p$.t && (_p$.t = _$setProp(_el$51, "style", _v$21, _p$.t));
+          _v$22 !== _p$.e && (_p$.e = _$setProp(_el$62, "style", _v$22, _p$.e));
+          _v$23 !== _p$.t && (_p$.t = _$setProp(_el$64, "style", _v$23, _p$.t));
           return _p$;
         }, {
           e: undefined,
           t: undefined
         });
-        return _el$48;
+        return _el$61;
       })()
     }), null);
-    _$insert(_el$47, _$createComponent(For, {
+    _$insert(_el$57, _$createComponent(For, {
       get each() {
-        return m().transcript.slice(-8);
+        return m().transcript.slice(-10);
       },
       get fallback() {
         return (() => {
-          var _el$54 = _$createElement("text"), _el$55 = _$createElement("span");
-          _$insertNode(_el$54, _el$55);
-          _$insertNode(_el$55, _$createTextNode(`No recent events recorded yet.`));
-          _$effect((_$p) => _$setProp(_el$55, "style", {
+          var _el$67 = _$createElement("text"), _el$68 = _$createElement("span");
+          _$insertNode(_el$67, _el$68);
+          _$insertNode(_el$68, _$createTextNode(`No recent events recorded yet.`));
+          _$effect((_$p) => _$setProp(_el$68, "style", {
             fg: PALETTE.muted
           }, _$p));
-          return _el$54;
+          return _el$67;
         })();
       },
       children: (line) => (() => {
-        var _el$57 = _$createElement("text"), _el$58 = _$createElement("span");
-        _$insertNode(_el$57, _el$58);
-        _$setProp(_el$57, "wrapMode", "word");
-        _$insert(_el$58, line);
-        _$effect((_$p) => _$setProp(_el$58, "style", {
+        var _el$70 = _$createElement("text"), _el$71 = _$createElement("span");
+        _$insertNode(_el$70, _el$71);
+        _$setProp(_el$70, "wrapMode", "word");
+        _$insert(_el$71, line);
+        _$effect((_$p) => _$setProp(_el$71, "style", {
           fg: PALETTE.muted
         }, _$p));
-        return _el$57;
+        return _el$70;
       })()
     }), null);
     _$effect((_p$) => {
-      var _v$13 = PALETTE.rule, _v$14 = PALETTE.inset, _v$15 = {
+      var _v$12 = PALETTE.cyan, _v$13 = PALETTE.inset, _v$14 = {
         fg: PALETTE.cyan,
         bold: true
+      }, _v$15 = {
+        fg: PALETTE.muted
       }, _v$16 = {
-        fg: PALETTE.muted
+        fg: badge().fg,
+        bold: true
       }, _v$17 = {
+        fg: PALETTE.amber,
+        bold: true
+      }, _v$18 = {
         fg: PALETTE.muted
-      }, _v$18 = PALETTE.rule, _v$19 = PALETTE.base;
-      _v$13 !== _p$.e && (_p$.e = _$setProp(_el$36, "borderColor", _v$13, _p$.e));
-      _v$14 !== _p$.t && (_p$.t = _$setProp(_el$36, "backgroundColor", _v$14, _p$.t));
-      _v$15 !== _p$.a && (_p$.a = _$setProp(_el$39, "style", _v$15, _p$.a));
-      _v$16 !== _p$.o && (_p$.o = _$setProp(_el$41, "style", _v$16, _p$.o));
-      _v$17 !== _p$.i && (_p$.i = _$setProp(_el$44, "style", _v$17, _p$.i));
-      _v$18 !== _p$.n && (_p$.n = _$setProp(_el$47, "borderColor", _v$18, _p$.n));
-      _v$19 !== _p$.s && (_p$.s = _$setProp(_el$47, "backgroundColor", _v$19, _p$.s));
+      }, _v$19 = PALETTE.rule, _v$20 = PALETTE.base, _v$21 = {
+        fg: PALETTE.cyan,
+        bold: true
+      };
+      _v$12 !== _p$.e && (_p$.e = _$setProp(_el$37, "borderColor", _v$12, _p$.e));
+      _v$13 !== _p$.t && (_p$.t = _$setProp(_el$37, "backgroundColor", _v$13, _p$.t));
+      _v$14 !== _p$.a && (_p$.a = _$setProp(_el$40, "style", _v$14, _p$.a));
+      _v$15 !== _p$.o && (_p$.o = _$setProp(_el$45, "style", _v$15, _p$.o));
+      _v$16 !== _p$.i && (_p$.i = _$setProp(_el$47, "style", _v$16, _p$.i));
+      _v$17 !== _p$.n && (_p$.n = _$setProp(_el$50, "style", _v$17, _p$.n));
+      _v$18 !== _p$.s && (_p$.s = _$setProp(_el$54, "style", _v$18, _p$.s));
+      _v$19 !== _p$.h && (_p$.h = _$setProp(_el$57, "borderColor", _v$19, _p$.h));
+      _v$20 !== _p$.r && (_p$.r = _$setProp(_el$57, "backgroundColor", _v$20, _p$.r));
+      _v$21 !== _p$.d && (_p$.d = _$setProp(_el$59, "style", _v$21, _p$.d));
       return _p$;
     }, {
       e: undefined,
@@ -1673,14 +1743,18 @@ function GoalDetailsDrawer(props) {
       o: undefined,
       i: undefined,
       n: undefined,
-      s: undefined
+      s: undefined,
+      h: undefined,
+      r: undefined,
+      d: undefined
     });
-    return _el$36;
+    return _el$37;
   })();
 }
 
 // src/tui/coordination-panel.tsx
 import { createComponent as _$createComponent2 } from "@opentui/solid";
+import { use as _$use2 } from "@opentui/solid";
 import { effect as _$effect2 } from "@opentui/solid";
 import { insert as _$insert2 } from "@opentui/solid";
 import { createTextNode as _$createTextNode2 } from "@opentui/solid";
@@ -1737,21 +1811,22 @@ function CoordinationPanel(props) {
     })();
   };
   return (() => {
-    var _el$7 = _$createElement2("box"), _el$8 = _$createElement2("box"), _el$9 = _$createElement2("text"), _el$0 = _$createElement2("span"), _el$10 = _$createElement2("span"), _el$11 = _$createTextNode2(` / `), _el$12 = _$createElement2("box"), _el$13 = _$createElement2("text"), _el$14 = _$createElement2("span"), _el$16 = _$createElement2("box"), _el$17 = _$createElement2("text"), _el$18 = _$createElement2("span"), _el$19 = _$createTextNode2(` \xB7 Tab / \u2190 \u2192 switches sub-tab \xB7 Esc returns to dashboard`), _el$20 = _$createElement2("box"), _el$21 = _$createElement2("scrollbox"), _el$35 = _$createElement2("box"), _el$36 = _$createElement2("text"), _el$37 = _$createElement2("span");
+    var _el$7 = _$createElement2("box"), _el$8 = _$createElement2("box"), _el$9 = _$createElement2("text"), _el$0 = _$createElement2("span"), _el$10 = _$createElement2("span"), _el$12 = _$createElement2("span"), _el$13 = _$createElement2("box"), _el$14 = _$createElement2("text"), _el$15 = _$createElement2("span"), _el$17 = _$createElement2("box"), _el$18 = _$createElement2("text"), _el$19 = _$createElement2("span"), _el$20 = _$createTextNode2(` \xB7 j / k scrolls \xB7 w / v / r or Tab switches tab \xB7 Esc closes`), _el$21 = _$createElement2("box"), _el$22 = _$createElement2("scrollbox"), _el$36 = _$createElement2("box"), _el$37 = _$createElement2("text"), _el$38 = _$createElement2("span");
     _$insertNode2(_el$7, _el$8);
-    _$insertNode2(_el$7, _el$16);
-    _$insertNode2(_el$7, _el$20);
+    _$insertNode2(_el$7, _el$17);
     _$insertNode2(_el$7, _el$21);
-    _$insertNode2(_el$7, _el$35);
+    _$insertNode2(_el$7, _el$22);
+    _$insertNode2(_el$7, _el$36);
     _$setProp2(_el$7, "flexDirection", "column");
     _$setProp2(_el$7, "border", true);
     _$setProp2(_el$7, "paddingLeft", 2);
     _$setProp2(_el$7, "paddingRight", 2);
     _$setProp2(_el$7, "paddingTop", 1);
     _$setProp2(_el$7, "paddingBottom", 1);
+    _$setProp2(_el$7, "gap", 1);
     _$setProp2(_el$7, "flexShrink", 0);
     _$insertNode2(_el$8, _el$9);
-    _$insertNode2(_el$8, _el$12);
+    _$insertNode2(_el$8, _el$13);
     _$setProp2(_el$8, "flexDirection", "row");
     _$setProp2(_el$8, "justifyContent", "space-between");
     _$setProp2(_el$8, "alignItems", "center");
@@ -1759,473 +1834,134 @@ function CoordinationPanel(props) {
     _$setProp2(_el$8, "flexShrink", 0);
     _$insertNode2(_el$9, _el$0);
     _$insertNode2(_el$9, _el$10);
+    _$insertNode2(_el$9, _el$12);
     _$setProp2(_el$9, "wrapMode", "none");
     _$insertNode2(_el$0, _$createTextNode2(`Coordination`));
-    _$insertNode2(_el$10, _el$11);
-    _$insert2(_el$10, () => m().shortName, null);
-    _$insertNode2(_el$12, _el$13);
-    _$setProp2(_el$12, "flexDirection", "row");
-    _$setProp2(_el$12, "border", true);
-    _$setProp2(_el$12, "paddingLeft", 1);
-    _$setProp2(_el$12, "paddingRight", 1);
-    _$spread2(_el$12, _$mergeProps2({
-      get borderColor() {
-        return PALETTE.rule;
-      },
+    _$insertNode2(_el$10, _$createTextNode2(` / `));
+    _$insert2(_el$12, () => m().shortName);
+    _$insertNode2(_el$13, _el$14);
+    _$setProp2(_el$13, "flexDirection", "row");
+    _$setProp2(_el$13, "paddingLeft", 1);
+    _$setProp2(_el$13, "paddingRight", 1);
+    _$setProp2(_el$13, "height", 1);
+    _$spread2(_el$13, _$mergeProps2({
       get backgroundColor() {
         return PALETTE.base;
       }
     }, {
       onMouseDown: () => props.onClose?.()
     }), true);
-    _$insertNode2(_el$13, _el$14);
-    _$setProp2(_el$13, "wrapMode", "none");
-    _$insertNode2(_el$14, _$createTextNode2(`esc`));
-    _$insertNode2(_el$16, _el$17);
-    _$setProp2(_el$16, "flexDirection", "row");
-    _$setProp2(_el$16, "height", 1);
-    _$setProp2(_el$16, "flexShrink", 0);
+    _$insertNode2(_el$14, _el$15);
+    _$setProp2(_el$14, "wrapMode", "none");
+    _$insertNode2(_el$15, _$createTextNode2(`[esc]`));
     _$insertNode2(_el$17, _el$18);
-    _$setProp2(_el$17, "wrapMode", "none");
+    _$setProp2(_el$17, "flexDirection", "row");
+    _$setProp2(_el$17, "height", 1);
+    _$setProp2(_el$17, "flexShrink", 0);
     _$insertNode2(_el$18, _el$19);
-    _$insert2(_el$18, () => m().directory, _el$19);
-    _$setProp2(_el$20, "flexDirection", "row");
-    _$setProp2(_el$20, "gap", 1);
-    _$setProp2(_el$20, "flexShrink", 0);
-    _$setProp2(_el$20, "alignItems", "center");
-    _$insert2(_el$20, () => tabBtn("writes", "w", `Writes (${m().holds.length})`), null);
-    _$insert2(_el$20, () => tabBtn("verify", "v", `Verification (${m().verifyBlockers.length})`), null);
-    _$insert2(_el$20, () => tabBtn("resv", "r", `Reservations (${m().reservations.length})`), null);
-    _$setProp2(_el$21, "height", 10);
-    _$setProp2(_el$21, "scrollX", false);
-    _$setProp2(_el$21, "scrollY", true);
-    _$setProp2(_el$21, "stickyScroll", false);
-    _$insert2(_el$21, _$createComponent2(Show2, {
+    _$setProp2(_el$18, "wrapMode", "none");
+    _$insertNode2(_el$19, _el$20);
+    _$insert2(_el$19, () => m().directory, _el$20);
+    _$setProp2(_el$21, "flexDirection", "row");
+    _$setProp2(_el$21, "gap", 1);
+    _$setProp2(_el$21, "flexShrink", 0);
+    _$setProp2(_el$21, "alignItems", "center");
+    _$insert2(_el$21, () => tabBtn("writes", "w", `Writes (${m().holds.length})`), null);
+    _$insert2(_el$21, () => tabBtn("verify", "v", `Verification (${m().verifyBlockers.length})`), null);
+    _$insert2(_el$21, () => tabBtn("resv", "r", `Reservations (${m().reservations.length})`), null);
+    _$use2((el) => props.scrollRef?.(el), _el$22);
+    _$setProp2(_el$22, "height", 10);
+    _$setProp2(_el$22, "scrollX", false);
+    _$setProp2(_el$22, "scrollY", true);
+    _$setProp2(_el$22, "stickyScroll", false);
+    _$insert2(_el$22, _$createComponent2(Show2, {
       get when() {
         return props.tab === "writes";
       },
       get children() {
-        var _el$22 = _$createElement2("box"), _el$23 = _$createElement2("text"), _el$24 = _$createElement2("span"), _el$26 = _$createElement2("text"), _el$27 = _$createElement2("span");
-        _$insertNode2(_el$22, _el$23);
-        _$insertNode2(_el$22, _el$26);
-        _$setProp2(_el$22, "flexDirection", "column");
-        _$setProp2(_el$22, "flexShrink", 0);
-        _$setProp2(_el$22, "gap", 1);
-        _$setProp2(_el$22, "paddingTop", 1);
+        var _el$23 = _$createElement2("box"), _el$24 = _$createElement2("text"), _el$25 = _$createElement2("span"), _el$27 = _$createElement2("text"), _el$28 = _$createElement2("span");
         _$insertNode2(_el$23, _el$24);
-        _$setProp2(_el$23, "wrapMode", "none");
-        _$insertNode2(_el$24, _$createTextNode2(`Current write tickets`));
-        _$insert2(_el$22, _$createComponent2(For2, {
+        _$insertNode2(_el$23, _el$27);
+        _$setProp2(_el$23, "flexDirection", "column");
+        _$setProp2(_el$23, "flexShrink", 0);
+        _$setProp2(_el$23, "gap", 1);
+        _$insertNode2(_el$24, _el$25);
+        _$setProp2(_el$24, "wrapMode", "none");
+        _$insertNode2(_el$25, _$createTextNode2(`Current write tickets`));
+        _$insert2(_el$23, _$createComponent2(For2, {
           get each() {
             return m().holds;
           },
           get fallback() {
             return (() => {
-              var _el$39 = _$createElement2("box"), _el$40 = _$createElement2("text"), _el$41 = _$createElement2("span");
-              _$insertNode2(_el$39, _el$40);
-              _$setProp2(_el$39, "border", true);
-              _$setProp2(_el$39, "paddingLeft", 1);
-              _$setProp2(_el$39, "paddingRight", 1);
+              var _el$40 = _$createElement2("box"), _el$41 = _$createElement2("text"), _el$42 = _$createElement2("span");
               _$insertNode2(_el$40, _el$41);
-              _$setProp2(_el$40, "wrapMode", "none");
-              _$insertNode2(_el$41, _$createTextNode2(`No active writes in this project.`));
+              _$setProp2(_el$40, "border", true);
+              _$setProp2(_el$40, "paddingLeft", 1);
+              _$setProp2(_el$40, "paddingRight", 1);
+              _$insertNode2(_el$41, _el$42);
+              _$setProp2(_el$41, "wrapMode", "none");
+              _$insertNode2(_el$42, _$createTextNode2(`No active writes in this project.`));
               _$effect2((_p$) => {
-                var _v$10 = PALETTE.rule, _v$11 = PALETTE.base, _v$12 = {
+                var _v$11 = PALETTE.rule, _v$12 = PALETTE.base, _v$13 = {
                   fg: PALETTE.muted
                 };
-                _v$10 !== _p$.e && (_p$.e = _$setProp2(_el$39, "borderColor", _v$10, _p$.e));
-                _v$11 !== _p$.t && (_p$.t = _$setProp2(_el$39, "backgroundColor", _v$11, _p$.t));
-                _v$12 !== _p$.a && (_p$.a = _$setProp2(_el$41, "style", _v$12, _p$.a));
+                _v$11 !== _p$.e && (_p$.e = _$setProp2(_el$40, "borderColor", _v$11, _p$.e));
+                _v$12 !== _p$.t && (_p$.t = _$setProp2(_el$40, "backgroundColor", _v$12, _p$.t));
+                _v$13 !== _p$.a && (_p$.a = _$setProp2(_el$42, "style", _v$13, _p$.a));
                 return _p$;
               }, {
                 e: undefined,
                 t: undefined,
                 a: undefined
               });
-              return _el$39;
+              return _el$40;
             })();
           },
           children: (h) => (() => {
-            var _el$43 = _$createElement2("box"), _el$44 = _$createElement2("text"), _el$45 = _$createElement2("span"), _el$47 = _$createElement2("span"), _el$48 = _$createElement2("text"), _el$49 = _$createElement2("span"), _el$50 = _$createTextNode2(`Holder: `), _el$51 = _$createTextNode2(` \xB7 session `), _el$52 = _$createTextNode2(` \xB7 held `);
-            _$insertNode2(_el$43, _el$44);
-            _$insertNode2(_el$43, _el$48);
-            _$setProp2(_el$43, "flexDirection", "column");
-            _$setProp2(_el$43, "border", true);
-            _$setProp2(_el$43, "paddingLeft", 1);
-            _$setProp2(_el$43, "paddingRight", 1);
+            var _el$44 = _$createElement2("box"), _el$45 = _$createElement2("text"), _el$46 = _$createElement2("span"), _el$48 = _$createElement2("span"), _el$49 = _$createElement2("text"), _el$50 = _$createElement2("span"), _el$52 = _$createElement2("span"), _el$53 = _$createElement2("span"), _el$54 = _$createTextNode2(` \xB7 session `), _el$55 = _$createTextNode2(` \xB7 held `);
             _$insertNode2(_el$44, _el$45);
-            _$insertNode2(_el$44, _el$47);
-            _$setProp2(_el$44, "wrapMode", "word");
-            _$insertNode2(_el$45, _$createTextNode2(`\u25CF Writing `));
-            _$insert2(_el$47, () => h.files.join(", "));
-            _$insertNode2(_el$48, _el$49);
-            _$setProp2(_el$48, "wrapMode", "none");
+            _$insertNode2(_el$44, _el$49);
+            _$setProp2(_el$44, "flexDirection", "column");
+            _$setProp2(_el$44, "border", true);
+            _$setProp2(_el$44, "paddingLeft", 1);
+            _$setProp2(_el$44, "paddingRight", 1);
+            _$insertNode2(_el$45, _el$46);
+            _$insertNode2(_el$45, _el$48);
+            _$setProp2(_el$45, "wrapMode", "word");
+            _$insertNode2(_el$46, _$createTextNode2(`\u25CF Writing `));
+            _$insert2(_el$48, () => h.files.join(", "));
             _$insertNode2(_el$49, _el$50);
-            _$insertNode2(_el$49, _el$51);
             _$insertNode2(_el$49, _el$52);
-            _$insert2(_el$49, () => h.goalName, _el$51);
-            _$insert2(_el$49, () => h.sessionID.slice(0, 14), _el$52);
-            _$insert2(_el$49, () => h.age, null);
+            _$insertNode2(_el$49, _el$53);
+            _$setProp2(_el$49, "wrapMode", "none");
+            _$insertNode2(_el$50, _$createTextNode2(`Holder: `));
+            _$insert2(_el$52, () => h.goalName);
+            _$insertNode2(_el$53, _el$54);
+            _$insertNode2(_el$53, _el$55);
+            _$insert2(_el$53, () => h.sessionID.slice(0, 14), _el$55);
+            _$insert2(_el$53, () => h.age, null);
             _$effect2((_p$) => {
-              var _v$13 = PALETTE.rule, _v$14 = PALETTE.base, _v$15 = {
+              var _v$14 = PALETTE.rule, _v$15 = PALETTE.base, _v$16 = {
                 fg: PALETTE.sage,
                 bold: true
-              }, _v$16 = {
-                fg: PALETTE.ink,
-                bold: true
               }, _v$17 = {
-                fg: PALETTE.muted
-              };
-              _v$13 !== _p$.e && (_p$.e = _$setProp2(_el$43, "borderColor", _v$13, _p$.e));
-              _v$14 !== _p$.t && (_p$.t = _$setProp2(_el$43, "backgroundColor", _v$14, _p$.t));
-              _v$15 !== _p$.a && (_p$.a = _$setProp2(_el$45, "style", _v$15, _p$.a));
-              _v$16 !== _p$.o && (_p$.o = _$setProp2(_el$47, "style", _v$16, _p$.o));
-              _v$17 !== _p$.i && (_p$.i = _$setProp2(_el$49, "style", _v$17, _p$.i));
-              return _p$;
-            }, {
-              e: undefined,
-              t: undefined,
-              a: undefined,
-              o: undefined,
-              i: undefined
-            });
-            return _el$43;
-          })()
-        }), _el$26);
-        _$insertNode2(_el$26, _el$27);
-        _$setProp2(_el$26, "wrapMode", "none");
-        _$insertNode2(_el$27, _$createTextNode2(`Queued write requests (scope claims are NOT a queue)`));
-        _$insert2(_el$22, _$createComponent2(For2, {
-          get each() {
-            return m().queue;
-          },
-          get fallback() {
-            return (() => {
-              var _el$53 = _$createElement2("box"), _el$54 = _$createElement2("text"), _el$55 = _$createElement2("span");
-              _$insertNode2(_el$53, _el$54);
-              _$setProp2(_el$53, "border", true);
-              _$setProp2(_el$53, "paddingLeft", 1);
-              _$setProp2(_el$53, "paddingRight", 1);
-              _$insertNode2(_el$54, _el$55);
-              _$setProp2(_el$54, "wrapMode", "none");
-              _$insertNode2(_el$55, _$createTextNode2(`No queued write requests.`));
-              _$effect2((_p$) => {
-                var _v$18 = PALETTE.rule, _v$19 = PALETTE.base, _v$20 = {
-                  fg: PALETTE.muted
-                };
-                _v$18 !== _p$.e && (_p$.e = _$setProp2(_el$53, "borderColor", _v$18, _p$.e));
-                _v$19 !== _p$.t && (_p$.t = _$setProp2(_el$53, "backgroundColor", _v$19, _p$.t));
-                _v$20 !== _p$.a && (_p$.a = _$setProp2(_el$55, "style", _v$20, _p$.a));
-                return _p$;
-              }, {
-                e: undefined,
-                t: undefined,
-                a: undefined
-              });
-              return _el$53;
-            })();
-          },
-          children: (q) => (() => {
-            var _el$57 = _$createElement2("box"), _el$58 = _$createElement2("text"), _el$59 = _$createElement2("span"), _el$60 = _$createTextNode2(`#`), _el$61 = _$createTextNode2(` `), _el$62 = _$createElement2("span"), _el$65 = _$createElement2("text"), _el$66 = _$createElement2("span"), _el$67 = _$createElement2("text"), _el$68 = _$createElement2("span"), _el$69 = _$createTextNode2(`Waits for `), _el$70 = _$createTextNode2(` to finish its write ticket.`);
-            _$insertNode2(_el$57, _el$58);
-            _$insertNode2(_el$57, _el$65);
-            _$insertNode2(_el$57, _el$67);
-            _$setProp2(_el$57, "flexDirection", "column");
-            _$setProp2(_el$57, "border", true);
-            _$setProp2(_el$57, "paddingLeft", 1);
-            _$setProp2(_el$57, "paddingRight", 1);
-            _$insertNode2(_el$58, _el$59);
-            _$insertNode2(_el$58, _el$62);
-            _$setProp2(_el$58, "wrapMode", "word");
-            _$insertNode2(_el$59, _el$60);
-            _$insertNode2(_el$59, _el$61);
-            _$insert2(_el$59, () => q.position, _el$61);
-            _$insert2(_el$62, () => q.goalName);
-            _$insert2(_el$58, _$createComponent2(Show2, {
-              get when() {
-                return q.ownerPriority;
-              },
-              get children() {
-                var _el$63 = _$createElement2("span");
-                _$insertNode2(_el$63, _$createTextNode2(` \u2605owner priority`));
-                _$effect2((_$p) => _$setProp2(_el$63, "style", {
-                  fg: PALETTE.cyan
-                }, _$p));
-                return _el$63;
-              }
-            }), null);
-            _$insertNode2(_el$65, _el$66);
-            _$setProp2(_el$65, "wrapMode", "word");
-            _$insert2(_el$66, () => q.files.join(", "));
-            _$insertNode2(_el$67, _el$68);
-            _$setProp2(_el$67, "wrapMode", "word");
-            _$insertNode2(_el$68, _el$69);
-            _$insertNode2(_el$68, _el$70);
-            _$insert2(_el$68, () => q.waitsFor, _el$70);
-            _$effect2((_p$) => {
-              var _v$21 = PALETTE.rule, _v$22 = PALETTE.base, _v$23 = {
-                fg: PALETTE.amber,
-                bold: true
-              }, _v$24 = {
                 fg: PALETTE.ink,
                 bold: true
-              }, _v$25 = {
-                fg: PALETTE.ink
-              }, _v$26 = {
+              }, _v$18 = {
                 fg: PALETTE.muted
-              };
-              _v$21 !== _p$.e && (_p$.e = _$setProp2(_el$57, "borderColor", _v$21, _p$.e));
-              _v$22 !== _p$.t && (_p$.t = _$setProp2(_el$57, "backgroundColor", _v$22, _p$.t));
-              _v$23 !== _p$.a && (_p$.a = _$setProp2(_el$59, "style", _v$23, _p$.a));
-              _v$24 !== _p$.o && (_p$.o = _$setProp2(_el$62, "style", _v$24, _p$.o));
-              _v$25 !== _p$.i && (_p$.i = _$setProp2(_el$66, "style", _v$25, _p$.i));
-              _v$26 !== _p$.n && (_p$.n = _$setProp2(_el$68, "style", _v$26, _p$.n));
-              return _p$;
-            }, {
-              e: undefined,
-              t: undefined,
-              a: undefined,
-              o: undefined,
-              i: undefined,
-              n: undefined
-            });
-            return _el$57;
-          })()
-        }), null);
-        _$effect2((_p$) => {
-          var _v$3 = {
-            fg: PALETTE.muted
-          }, _v$4 = {
-            fg: PALETTE.muted
-          };
-          _v$3 !== _p$.e && (_p$.e = _$setProp2(_el$24, "style", _v$3, _p$.e));
-          _v$4 !== _p$.t && (_p$.t = _$setProp2(_el$27, "style", _v$4, _p$.t));
-          return _p$;
-        }, {
-          e: undefined,
-          t: undefined
-        });
-        return _el$22;
-      }
-    }), null);
-    _$insert2(_el$21, _$createComponent2(Show2, {
-      get when() {
-        return props.tab === "verify";
-      },
-      get children() {
-        var _el$29 = _$createElement2("box"), _el$30 = _$createElement2("box"), _el$31 = _$createElement2("text"), _el$32 = _$createElement2("span");
-        _$insertNode2(_el$29, _el$30);
-        _$setProp2(_el$29, "flexDirection", "column");
-        _$setProp2(_el$29, "flexShrink", 0);
-        _$setProp2(_el$29, "gap", 1);
-        _$setProp2(_el$29, "paddingTop", 1);
-        _$insert2(_el$29, _$createComponent2(For2, {
-          get each() {
-            return m().verifyBlockers;
-          },
-          get fallback() {
-            return (() => {
-              var _el$71 = _$createElement2("box"), _el$72 = _$createElement2("text"), _el$73 = _$createElement2("span");
-              _$insertNode2(_el$71, _el$72);
-              _$setProp2(_el$71, "border", true);
-              _$setProp2(_el$71, "paddingLeft", 1);
-              _$setProp2(_el$71, "paddingRight", 1);
-              _$insertNode2(_el$72, _el$73);
-              _$setProp2(_el$72, "wrapMode", "none");
-              _$insertNode2(_el$73, _$createTextNode2(`\u25CF Workspace quiet \u2014 host checks can run immediately.`));
-              _$effect2((_p$) => {
-                var _v$27 = PALETTE.rule, _v$28 = PALETTE.base, _v$29 = {
-                  fg: PALETTE.sage
-                };
-                _v$27 !== _p$.e && (_p$.e = _$setProp2(_el$71, "borderColor", _v$27, _p$.e));
-                _v$28 !== _p$.t && (_p$.t = _$setProp2(_el$71, "backgroundColor", _v$28, _p$.t));
-                _v$29 !== _p$.a && (_p$.a = _$setProp2(_el$73, "style", _v$29, _p$.a));
-                return _p$;
-              }, {
-                e: undefined,
-                t: undefined,
-                a: undefined
-              });
-              return _el$71;
-            })();
-          },
-          children: (b) => (() => {
-            var _el$75 = _$createElement2("box"), _el$76 = _$createElement2("text"), _el$77 = _$createElement2("span"), _el$79 = _$createElement2("span"), _el$80 = _$createElement2("text"), _el$81 = _$createElement2("span"), _el$82 = _$createTextNode2(` \u2014 checks resume after the workspace is quiet.`);
-            _$insertNode2(_el$75, _el$76);
-            _$insertNode2(_el$75, _el$80);
-            _$setProp2(_el$75, "flexDirection", "column");
-            _$setProp2(_el$75, "border", true);
-            _$setProp2(_el$75, "paddingLeft", 1);
-            _$setProp2(_el$75, "paddingRight", 1);
-            _$insertNode2(_el$76, _el$77);
-            _$insertNode2(_el$76, _el$79);
-            _$setProp2(_el$76, "wrapMode", "word");
-            _$insertNode2(_el$77, _$createTextNode2(`\u25CF Host checks waiting: `));
-            _$insert2(_el$79, () => b.text);
-            _$insertNode2(_el$80, _el$81);
-            _$setProp2(_el$80, "wrapMode", "word");
-            _$insertNode2(_el$81, _el$82);
-            _$insert2(_el$81, () => b.holder ?? "unknown holder", _el$82);
-            _$insert2(_el$81, (() => {
-              var _c$ = _$memo2(() => !!b.age);
-              return () => _c$() ? ` \xB7 ${b.age}` : "";
-            })(), _el$82);
-            _$effect2((_p$) => {
-              var _v$30 = PALETTE.rule, _v$31 = PALETTE.base, _v$32 = {
-                fg: PALETTE.amber,
-                bold: true
-              }, _v$33 = {
-                fg: PALETTE.ink
-              }, _v$34 = {
-                fg: PALETTE.muted
-              };
-              _v$30 !== _p$.e && (_p$.e = _$setProp2(_el$75, "borderColor", _v$30, _p$.e));
-              _v$31 !== _p$.t && (_p$.t = _$setProp2(_el$75, "backgroundColor", _v$31, _p$.t));
-              _v$32 !== _p$.a && (_p$.a = _$setProp2(_el$77, "style", _v$32, _p$.a));
-              _v$33 !== _p$.o && (_p$.o = _$setProp2(_el$79, "style", _v$33, _p$.o));
-              _v$34 !== _p$.i && (_p$.i = _$setProp2(_el$81, "style", _v$34, _p$.i));
-              return _p$;
-            }, {
-              e: undefined,
-              t: undefined,
-              a: undefined,
-              o: undefined,
-              i: undefined
-            });
-            return _el$75;
-          })()
-        }), _el$30);
-        _$insertNode2(_el$30, _el$31);
-        _$setProp2(_el$30, "flexDirection", "row");
-        _$setProp2(_el$30, "border", true);
-        _$setProp2(_el$30, "paddingLeft", 1);
-        _$setProp2(_el$30, "paddingRight", 1);
-        _$spread2(_el$30, _$mergeProps2({
-          get borderColor() {
-            return PALETTE.rule;
-          },
-          get backgroundColor() {
-            return PALETTE.base;
-          }
-        }, {
-          onMouseDown: () => props.onTab("resv")
-        }), true);
-        _$insertNode2(_el$31, _el$32);
-        _$setProp2(_el$31, "wrapMode", "none");
-        _$insertNode2(_el$32, _$createTextNode2(`[r] Inspect reservations \u2192`));
-        _$effect2((_$p) => _$setProp2(_el$32, "style", {
-          fg: PALETTE.cyan
-        }, _$p));
-        return _el$29;
-      }
-    }), null);
-    _$insert2(_el$21, _$createComponent2(Show2, {
-      get when() {
-        return props.tab === "resv";
-      },
-      get children() {
-        var _el$34 = _$createElement2("box");
-        _$setProp2(_el$34, "flexDirection", "column");
-        _$setProp2(_el$34, "flexShrink", 0);
-        _$setProp2(_el$34, "gap", 1);
-        _$setProp2(_el$34, "paddingTop", 1);
-        _$insert2(_el$34, _$createComponent2(For2, {
-          get each() {
-            return m().reservations;
-          },
-          get fallback() {
-            return (() => {
-              var _el$83 = _$createElement2("box"), _el$84 = _$createElement2("text"), _el$85 = _$createElement2("span");
-              _$insertNode2(_el$83, _el$84);
-              _$setProp2(_el$83, "border", true);
-              _$setProp2(_el$83, "paddingLeft", 1);
-              _$setProp2(_el$83, "paddingRight", 1);
-              _$insertNode2(_el$84, _el$85);
-              _$setProp2(_el$84, "wrapMode", "none");
-              _$insertNode2(_el$85, _$createTextNode2(`No active or stale reservations in this project.`));
-              _$effect2((_p$) => {
-                var _v$35 = PALETTE.rule, _v$36 = PALETTE.base, _v$37 = {
-                  fg: PALETTE.muted
-                };
-                _v$35 !== _p$.e && (_p$.e = _$setProp2(_el$83, "borderColor", _v$35, _p$.e));
-                _v$36 !== _p$.t && (_p$.t = _$setProp2(_el$83, "backgroundColor", _v$36, _p$.t));
-                _v$37 !== _p$.a && (_p$.a = _$setProp2(_el$85, "style", _v$37, _p$.a));
-                return _p$;
-              }, {
-                e: undefined,
-                t: undefined,
-                a: undefined
-              });
-              return _el$83;
-            })();
-          },
-          children: (r) => (() => {
-            var _el$87 = _$createElement2("box"), _el$88 = _$createElement2("text"), _el$89 = _$createElement2("span"), _el$90 = _$createElement2("span"), _el$91 = _$createElement2("text"), _el$92 = _$createElement2("span"), _el$93 = _$createTextNode2(` \xB7 session `), _el$94 = _$createTextNode2(` \xB7 `), _el$95 = _$createElement2("text"), _el$96 = _$createElement2("span"), _el$97 = _$createElement2("box"), _el$98 = _$createElement2("box"), _el$99 = _$createElement2("text"), _el$100 = _$createElement2("span");
-            _$insertNode2(_el$87, _el$88);
-            _$insertNode2(_el$87, _el$91);
-            _$insertNode2(_el$87, _el$95);
-            _$insertNode2(_el$87, _el$97);
-            _$setProp2(_el$87, "flexDirection", "column");
-            _$setProp2(_el$87, "border", true);
-            _$setProp2(_el$87, "paddingLeft", 1);
-            _$setProp2(_el$87, "paddingRight", 1);
-            _$insertNode2(_el$88, _el$89);
-            _$insertNode2(_el$88, _el$90);
-            _$setProp2(_el$88, "wrapMode", "word");
-            _$insert2(_el$89, () => r.live ? "\u25CF Live / tracked reservation " : "! Ended reservation ");
-            _$insert2(_el$90, () => r.callID.slice(0, 18));
-            _$insertNode2(_el$91, _el$92);
-            _$setProp2(_el$91, "wrapMode", "word");
-            _$insertNode2(_el$92, _el$93);
-            _$insertNode2(_el$92, _el$94);
-            _$insert2(_el$92, () => r.goalName, _el$93);
-            _$insert2(_el$92, () => r.sessionID.slice(0, 14), _el$94);
-            _$insert2(_el$92, () => r.age, null);
-            _$insertNode2(_el$95, _el$96);
-            _$setProp2(_el$95, "wrapMode", "word");
-            _$insert2(_el$96, () => r.reason);
-            _$insertNode2(_el$97, _el$98);
-            _$setProp2(_el$97, "flexDirection", "row");
-            _$setProp2(_el$97, "gap", 1);
-            _$insertNode2(_el$98, _el$99);
-            _$setProp2(_el$98, "flexDirection", "row");
-            _$setProp2(_el$98, "border", true);
-            _$setProp2(_el$98, "paddingLeft", 1);
-            _$setProp2(_el$98, "paddingRight", 1);
-            _$spread2(_el$98, _$mergeProps2({
-              get borderColor() {
-                return PALETTE.cyan;
-              },
-              get backgroundColor() {
-                return PALETTE.inset;
-              }
-            }, {
-              onMouseDown: () => props.onRelease(r.callID)
-            }), true);
-            _$insertNode2(_el$99, _el$100);
-            _$setProp2(_el$99, "wrapMode", "none");
-            _$insertNode2(_el$100, _$createTextNode2(`Release reservation\u2026 [W]`));
-            _$effect2((_p$) => {
-              var _v$38 = PALETTE.rule, _v$39 = PALETTE.base, _v$40 = {
-                fg: r.live ? PALETTE.sage : PALETTE.rose,
-                bold: true
-              }, _v$41 = {
-                fg: PALETTE.ink,
-                bold: true
-              }, _v$42 = {
-                fg: PALETTE.muted
-              }, _v$43 = {
-                fg: PALETTE.muted
-              }, _v$44 = {
+              }, _v$19 = {
                 fg: PALETTE.cyan
+              }, _v$20 = {
+                fg: PALETTE.muted
               };
-              _v$38 !== _p$.e && (_p$.e = _$setProp2(_el$87, "borderColor", _v$38, _p$.e));
-              _v$39 !== _p$.t && (_p$.t = _$setProp2(_el$87, "backgroundColor", _v$39, _p$.t));
-              _v$40 !== _p$.a && (_p$.a = _$setProp2(_el$89, "style", _v$40, _p$.a));
-              _v$41 !== _p$.o && (_p$.o = _$setProp2(_el$90, "style", _v$41, _p$.o));
-              _v$42 !== _p$.i && (_p$.i = _$setProp2(_el$92, "style", _v$42, _p$.i));
-              _v$43 !== _p$.n && (_p$.n = _$setProp2(_el$96, "style", _v$43, _p$.n));
-              _v$44 !== _p$.s && (_p$.s = _$setProp2(_el$100, "style", _v$44, _p$.s));
+              _v$14 !== _p$.e && (_p$.e = _$setProp2(_el$44, "borderColor", _v$14, _p$.e));
+              _v$15 !== _p$.t && (_p$.t = _$setProp2(_el$44, "backgroundColor", _v$15, _p$.t));
+              _v$16 !== _p$.a && (_p$.a = _$setProp2(_el$46, "style", _v$16, _p$.a));
+              _v$17 !== _p$.o && (_p$.o = _$setProp2(_el$48, "style", _v$17, _p$.o));
+              _v$18 !== _p$.i && (_p$.i = _$setProp2(_el$50, "style", _v$18, _p$.i));
+              _v$19 !== _p$.n && (_p$.n = _$setProp2(_el$52, "style", _v$19, _p$.n));
+              _v$20 !== _p$.s && (_p$.s = _$setProp2(_el$53, "style", _v$20, _p$.s));
               return _p$;
             }, {
               e: undefined,
@@ -2236,19 +1972,369 @@ function CoordinationPanel(props) {
               n: undefined,
               s: undefined
             });
-            return _el$87;
+            return _el$44;
           })()
-        }));
-        return _el$34;
+        }), _el$27);
+        _$insertNode2(_el$27, _el$28);
+        _$setProp2(_el$27, "wrapMode", "none");
+        _$insertNode2(_el$28, _$createTextNode2(`Queued write requests (scope claims are NOT a queue)`));
+        _$insert2(_el$23, _$createComponent2(For2, {
+          get each() {
+            return m().queue;
+          },
+          get fallback() {
+            return (() => {
+              var _el$56 = _$createElement2("box"), _el$57 = _$createElement2("text"), _el$58 = _$createElement2("span");
+              _$insertNode2(_el$56, _el$57);
+              _$setProp2(_el$56, "border", true);
+              _$setProp2(_el$56, "paddingLeft", 1);
+              _$setProp2(_el$56, "paddingRight", 1);
+              _$insertNode2(_el$57, _el$58);
+              _$setProp2(_el$57, "wrapMode", "none");
+              _$insertNode2(_el$58, _$createTextNode2(`No queued write requests.`));
+              _$effect2((_p$) => {
+                var _v$21 = PALETTE.rule, _v$22 = PALETTE.base, _v$23 = {
+                  fg: PALETTE.muted
+                };
+                _v$21 !== _p$.e && (_p$.e = _$setProp2(_el$56, "borderColor", _v$21, _p$.e));
+                _v$22 !== _p$.t && (_p$.t = _$setProp2(_el$56, "backgroundColor", _v$22, _p$.t));
+                _v$23 !== _p$.a && (_p$.a = _$setProp2(_el$58, "style", _v$23, _p$.a));
+                return _p$;
+              }, {
+                e: undefined,
+                t: undefined,
+                a: undefined
+              });
+              return _el$56;
+            })();
+          },
+          children: (q) => (() => {
+            var _el$60 = _$createElement2("box"), _el$61 = _$createElement2("text"), _el$62 = _$createElement2("span"), _el$63 = _$createTextNode2(`#`), _el$64 = _$createTextNode2(` `), _el$65 = _$createElement2("span"), _el$68 = _$createElement2("text"), _el$69 = _$createElement2("span"), _el$70 = _$createElement2("text"), _el$71 = _$createElement2("span"), _el$72 = _$createTextNode2(`Waits for `), _el$73 = _$createTextNode2(` to finish its write ticket.`);
+            _$insertNode2(_el$60, _el$61);
+            _$insertNode2(_el$60, _el$68);
+            _$insertNode2(_el$60, _el$70);
+            _$setProp2(_el$60, "flexDirection", "column");
+            _$setProp2(_el$60, "border", true);
+            _$setProp2(_el$60, "paddingLeft", 1);
+            _$setProp2(_el$60, "paddingRight", 1);
+            _$insertNode2(_el$61, _el$62);
+            _$insertNode2(_el$61, _el$65);
+            _$setProp2(_el$61, "wrapMode", "word");
+            _$insertNode2(_el$62, _el$63);
+            _$insertNode2(_el$62, _el$64);
+            _$insert2(_el$62, () => q.position, _el$64);
+            _$insert2(_el$65, () => q.goalName);
+            _$insert2(_el$61, _$createComponent2(Show2, {
+              get when() {
+                return q.ownerPriority;
+              },
+              get children() {
+                var _el$66 = _$createElement2("span");
+                _$insertNode2(_el$66, _$createTextNode2(` \u2605owner priority`));
+                _$effect2((_$p) => _$setProp2(_el$66, "style", {
+                  fg: PALETTE.cyan
+                }, _$p));
+                return _el$66;
+              }
+            }), null);
+            _$insertNode2(_el$68, _el$69);
+            _$setProp2(_el$68, "wrapMode", "word");
+            _$insert2(_el$69, () => q.files.join(", "));
+            _$insertNode2(_el$70, _el$71);
+            _$setProp2(_el$70, "wrapMode", "word");
+            _$insertNode2(_el$71, _el$72);
+            _$insertNode2(_el$71, _el$73);
+            _$insert2(_el$71, () => q.waitsFor, _el$73);
+            _$effect2((_p$) => {
+              var _v$24 = PALETTE.rule, _v$25 = PALETTE.base, _v$26 = {
+                fg: PALETTE.amber,
+                bold: true
+              }, _v$27 = {
+                fg: PALETTE.ink,
+                bold: true
+              }, _v$28 = {
+                fg: PALETTE.ink
+              }, _v$29 = {
+                fg: PALETTE.muted
+              };
+              _v$24 !== _p$.e && (_p$.e = _$setProp2(_el$60, "borderColor", _v$24, _p$.e));
+              _v$25 !== _p$.t && (_p$.t = _$setProp2(_el$60, "backgroundColor", _v$25, _p$.t));
+              _v$26 !== _p$.a && (_p$.a = _$setProp2(_el$62, "style", _v$26, _p$.a));
+              _v$27 !== _p$.o && (_p$.o = _$setProp2(_el$65, "style", _v$27, _p$.o));
+              _v$28 !== _p$.i && (_p$.i = _$setProp2(_el$69, "style", _v$28, _p$.i));
+              _v$29 !== _p$.n && (_p$.n = _$setProp2(_el$71, "style", _v$29, _p$.n));
+              return _p$;
+            }, {
+              e: undefined,
+              t: undefined,
+              a: undefined,
+              o: undefined,
+              i: undefined,
+              n: undefined
+            });
+            return _el$60;
+          })()
+        }), null);
+        _$effect2((_p$) => {
+          var _v$3 = {
+            fg: PALETTE.cyan
+          }, _v$4 = {
+            fg: PALETTE.cyan
+          };
+          _v$3 !== _p$.e && (_p$.e = _$setProp2(_el$25, "style", _v$3, _p$.e));
+          _v$4 !== _p$.t && (_p$.t = _$setProp2(_el$28, "style", _v$4, _p$.t));
+          return _p$;
+        }, {
+          e: undefined,
+          t: undefined
+        });
+        return _el$23;
       }
     }), null);
-    _$insertNode2(_el$35, _el$36);
-    _$setProp2(_el$35, "flexDirection", "row");
-    _$setProp2(_el$35, "height", 1);
-    _$setProp2(_el$35, "flexShrink", 0);
+    _$insert2(_el$22, _$createComponent2(Show2, {
+      get when() {
+        return props.tab === "verify";
+      },
+      get children() {
+        var _el$30 = _$createElement2("box"), _el$31 = _$createElement2("box"), _el$32 = _$createElement2("text"), _el$33 = _$createElement2("span");
+        _$insertNode2(_el$30, _el$31);
+        _$setProp2(_el$30, "flexDirection", "column");
+        _$setProp2(_el$30, "flexShrink", 0);
+        _$setProp2(_el$30, "gap", 1);
+        _$insert2(_el$30, _$createComponent2(For2, {
+          get each() {
+            return m().verifyBlockers;
+          },
+          get fallback() {
+            return (() => {
+              var _el$74 = _$createElement2("box"), _el$75 = _$createElement2("text"), _el$76 = _$createElement2("span");
+              _$insertNode2(_el$74, _el$75);
+              _$setProp2(_el$74, "border", true);
+              _$setProp2(_el$74, "paddingLeft", 1);
+              _$setProp2(_el$74, "paddingRight", 1);
+              _$insertNode2(_el$75, _el$76);
+              _$setProp2(_el$75, "wrapMode", "none");
+              _$insertNode2(_el$76, _$createTextNode2(`\u25CF Workspace quiet \u2014 host checks can run immediately.`));
+              _$effect2((_p$) => {
+                var _v$30 = PALETTE.rule, _v$31 = PALETTE.base, _v$32 = {
+                  fg: PALETTE.sage
+                };
+                _v$30 !== _p$.e && (_p$.e = _$setProp2(_el$74, "borderColor", _v$30, _p$.e));
+                _v$31 !== _p$.t && (_p$.t = _$setProp2(_el$74, "backgroundColor", _v$31, _p$.t));
+                _v$32 !== _p$.a && (_p$.a = _$setProp2(_el$76, "style", _v$32, _p$.a));
+                return _p$;
+              }, {
+                e: undefined,
+                t: undefined,
+                a: undefined
+              });
+              return _el$74;
+            })();
+          },
+          children: (b) => (() => {
+            var _el$78 = _$createElement2("box"), _el$79 = _$createElement2("text"), _el$80 = _$createElement2("span"), _el$82 = _$createElement2("span"), _el$83 = _$createElement2("text"), _el$84 = _$createElement2("span"), _el$85 = _$createTextNode2(` \u2014 checks resume after the workspace is quiet.`);
+            _$insertNode2(_el$78, _el$79);
+            _$insertNode2(_el$78, _el$83);
+            _$setProp2(_el$78, "flexDirection", "column");
+            _$setProp2(_el$78, "border", true);
+            _$setProp2(_el$78, "paddingLeft", 1);
+            _$setProp2(_el$78, "paddingRight", 1);
+            _$insertNode2(_el$79, _el$80);
+            _$insertNode2(_el$79, _el$82);
+            _$setProp2(_el$79, "wrapMode", "word");
+            _$insertNode2(_el$80, _$createTextNode2(`\u25CF Host checks waiting: `));
+            _$insert2(_el$82, () => b.text);
+            _$insertNode2(_el$83, _el$84);
+            _$setProp2(_el$83, "wrapMode", "word");
+            _$insertNode2(_el$84, _el$85);
+            _$insert2(_el$84, () => b.holder ?? "unknown holder", _el$85);
+            _$insert2(_el$84, (() => {
+              var _c$ = _$memo2(() => !!b.age);
+              return () => _c$() ? ` \xB7 ${b.age}` : "";
+            })(), _el$85);
+            _$effect2((_p$) => {
+              var _v$33 = PALETTE.rule, _v$34 = PALETTE.base, _v$35 = {
+                fg: PALETTE.amber,
+                bold: true
+              }, _v$36 = {
+                fg: PALETTE.ink
+              }, _v$37 = {
+                fg: PALETTE.muted
+              };
+              _v$33 !== _p$.e && (_p$.e = _$setProp2(_el$78, "borderColor", _v$33, _p$.e));
+              _v$34 !== _p$.t && (_p$.t = _$setProp2(_el$78, "backgroundColor", _v$34, _p$.t));
+              _v$35 !== _p$.a && (_p$.a = _$setProp2(_el$80, "style", _v$35, _p$.a));
+              _v$36 !== _p$.o && (_p$.o = _$setProp2(_el$82, "style", _v$36, _p$.o));
+              _v$37 !== _p$.i && (_p$.i = _$setProp2(_el$84, "style", _v$37, _p$.i));
+              return _p$;
+            }, {
+              e: undefined,
+              t: undefined,
+              a: undefined,
+              o: undefined,
+              i: undefined
+            });
+            return _el$78;
+          })()
+        }), _el$31);
+        _$insertNode2(_el$31, _el$32);
+        _$setProp2(_el$31, "flexDirection", "row");
+        _$setProp2(_el$31, "border", true);
+        _$setProp2(_el$31, "paddingLeft", 1);
+        _$setProp2(_el$31, "paddingRight", 1);
+        _$spread2(_el$31, _$mergeProps2({
+          get borderColor() {
+            return PALETTE.rule;
+          },
+          get backgroundColor() {
+            return PALETTE.base;
+          }
+        }, {
+          onMouseDown: () => props.onTab("resv")
+        }), true);
+        _$insertNode2(_el$32, _el$33);
+        _$setProp2(_el$32, "wrapMode", "none");
+        _$insertNode2(_el$33, _$createTextNode2(`[r] Inspect reservations \u2192`));
+        _$effect2((_$p) => _$setProp2(_el$33, "style", {
+          fg: PALETTE.cyan
+        }, _$p));
+        return _el$30;
+      }
+    }), null);
+    _$insert2(_el$22, _$createComponent2(Show2, {
+      get when() {
+        return props.tab === "resv";
+      },
+      get children() {
+        var _el$35 = _$createElement2("box");
+        _$setProp2(_el$35, "flexDirection", "column");
+        _$setProp2(_el$35, "flexShrink", 0);
+        _$setProp2(_el$35, "gap", 1);
+        _$insert2(_el$35, _$createComponent2(For2, {
+          get each() {
+            return m().reservations;
+          },
+          get fallback() {
+            return (() => {
+              var _el$86 = _$createElement2("box"), _el$87 = _$createElement2("text"), _el$88 = _$createElement2("span");
+              _$insertNode2(_el$86, _el$87);
+              _$setProp2(_el$86, "border", true);
+              _$setProp2(_el$86, "paddingLeft", 1);
+              _$setProp2(_el$86, "paddingRight", 1);
+              _$insertNode2(_el$87, _el$88);
+              _$setProp2(_el$87, "wrapMode", "none");
+              _$insertNode2(_el$88, _$createTextNode2(`No active or stale reservations in this project.`));
+              _$effect2((_p$) => {
+                var _v$38 = PALETTE.rule, _v$39 = PALETTE.base, _v$40 = {
+                  fg: PALETTE.muted
+                };
+                _v$38 !== _p$.e && (_p$.e = _$setProp2(_el$86, "borderColor", _v$38, _p$.e));
+                _v$39 !== _p$.t && (_p$.t = _$setProp2(_el$86, "backgroundColor", _v$39, _p$.t));
+                _v$40 !== _p$.a && (_p$.a = _$setProp2(_el$88, "style", _v$40, _p$.a));
+                return _p$;
+              }, {
+                e: undefined,
+                t: undefined,
+                a: undefined
+              });
+              return _el$86;
+            })();
+          },
+          children: (r) => (() => {
+            var _el$90 = _$createElement2("box"), _el$91 = _$createElement2("text"), _el$92 = _$createElement2("span"), _el$93 = _$createElement2("span"), _el$94 = _$createElement2("text"), _el$95 = _$createElement2("span"), _el$96 = _$createElement2("span"), _el$97 = _$createTextNode2(` \xB7 session `), _el$98 = _$createTextNode2(` \xB7 `), _el$99 = _$createElement2("text"), _el$100 = _$createElement2("span"), _el$101 = _$createElement2("box"), _el$102 = _$createElement2("box"), _el$103 = _$createElement2("text"), _el$104 = _$createElement2("span");
+            _$insertNode2(_el$90, _el$91);
+            _$insertNode2(_el$90, _el$94);
+            _$insertNode2(_el$90, _el$99);
+            _$insertNode2(_el$90, _el$101);
+            _$setProp2(_el$90, "flexDirection", "column");
+            _$setProp2(_el$90, "border", true);
+            _$setProp2(_el$90, "paddingLeft", 1);
+            _$setProp2(_el$90, "paddingRight", 1);
+            _$insertNode2(_el$91, _el$92);
+            _$insertNode2(_el$91, _el$93);
+            _$setProp2(_el$91, "wrapMode", "word");
+            _$insert2(_el$92, () => r.live ? "\u25CF Live / tracked reservation " : "! Ended reservation ");
+            _$insert2(_el$93, () => r.callID.slice(0, 18));
+            _$insertNode2(_el$94, _el$95);
+            _$insertNode2(_el$94, _el$96);
+            _$setProp2(_el$94, "wrapMode", "word");
+            _$insert2(_el$95, () => r.goalName);
+            _$insertNode2(_el$96, _el$97);
+            _$insertNode2(_el$96, _el$98);
+            _$insert2(_el$96, () => r.sessionID.slice(0, 14), _el$98);
+            _$insert2(_el$96, () => r.age, null);
+            _$insertNode2(_el$99, _el$100);
+            _$setProp2(_el$99, "wrapMode", "word");
+            _$insert2(_el$100, () => r.reason);
+            _$insertNode2(_el$101, _el$102);
+            _$setProp2(_el$101, "flexDirection", "row");
+            _$setProp2(_el$101, "gap", 1);
+            _$insertNode2(_el$102, _el$103);
+            _$setProp2(_el$102, "flexDirection", "row");
+            _$setProp2(_el$102, "border", true);
+            _$setProp2(_el$102, "paddingLeft", 1);
+            _$setProp2(_el$102, "paddingRight", 1);
+            _$spread2(_el$102, _$mergeProps2({
+              get borderColor() {
+                return PALETTE.cyan;
+              },
+              get backgroundColor() {
+                return PALETTE.inset;
+              }
+            }, {
+              onMouseDown: () => props.onRelease(r.callID)
+            }), true);
+            _$insertNode2(_el$103, _el$104);
+            _$setProp2(_el$103, "wrapMode", "none");
+            _$insertNode2(_el$104, _$createTextNode2(`Release reservation\u2026 [W]`));
+            _$effect2((_p$) => {
+              var _v$41 = PALETTE.rule, _v$42 = PALETTE.base, _v$43 = {
+                fg: r.live ? PALETTE.sage : PALETTE.rose,
+                bold: true
+              }, _v$44 = {
+                fg: PALETTE.ink,
+                bold: true
+              }, _v$45 = {
+                fg: PALETTE.violet
+              }, _v$46 = {
+                fg: PALETTE.muted
+              }, _v$47 = {
+                fg: PALETTE.muted
+              }, _v$48 = {
+                fg: PALETTE.cyan
+              };
+              _v$41 !== _p$.e && (_p$.e = _$setProp2(_el$90, "borderColor", _v$41, _p$.e));
+              _v$42 !== _p$.t && (_p$.t = _$setProp2(_el$90, "backgroundColor", _v$42, _p$.t));
+              _v$43 !== _p$.a && (_p$.a = _$setProp2(_el$92, "style", _v$43, _p$.a));
+              _v$44 !== _p$.o && (_p$.o = _$setProp2(_el$93, "style", _v$44, _p$.o));
+              _v$45 !== _p$.i && (_p$.i = _$setProp2(_el$95, "style", _v$45, _p$.i));
+              _v$46 !== _p$.n && (_p$.n = _$setProp2(_el$96, "style", _v$46, _p$.n));
+              _v$47 !== _p$.s && (_p$.s = _$setProp2(_el$100, "style", _v$47, _p$.s));
+              _v$48 !== _p$.h && (_p$.h = _$setProp2(_el$104, "style", _v$48, _p$.h));
+              return _p$;
+            }, {
+              e: undefined,
+              t: undefined,
+              a: undefined,
+              o: undefined,
+              i: undefined,
+              n: undefined,
+              s: undefined,
+              h: undefined
+            });
+            return _el$90;
+          })()
+        }));
+        return _el$35;
+      }
+    }), null);
     _$insertNode2(_el$36, _el$37);
-    _$setProp2(_el$36, "wrapMode", "none");
-    _$insertNode2(_el$37, _$createTextNode2(`Scope = permission \xB7 Ticket = current write \xB7 Verification waits for quiet \xB7 [W] release \xB7 [Esc] close`));
+    _$setProp2(_el$36, "flexDirection", "row");
+    _$setProp2(_el$36, "height", 1);
+    _$setProp2(_el$36, "flexShrink", 0);
+    _$insertNode2(_el$37, _el$38);
+    _$setProp2(_el$37, "wrapMode", "none");
+    _$insertNode2(_el$38, _$createTextNode2(`Scope = permission \xB7 Ticket = current write \xB7 Verification waits for quiet \xB7 [W] release \xB7 [Esc] close`));
     _$effect2((_p$) => {
       var _v$5 = PALETTE.cyan, _v$6 = PALETTE.inset, _v$7 = {
         fg: PALETTE.cyan,
@@ -2256,19 +2342,24 @@ function CoordinationPanel(props) {
       }, _v$8 = {
         fg: PALETTE.muted
       }, _v$9 = {
-        fg: PALETTE.ink
+        fg: PALETTE.violet,
+        bold: true
       }, _v$0 = {
-        fg: PALETTE.muted
+        fg: PALETTE.amber,
+        bold: true
       }, _v$1 = {
+        fg: PALETTE.muted
+      }, _v$10 = {
         fg: PALETTE.muted
       };
       _v$5 !== _p$.e && (_p$.e = _$setProp2(_el$7, "borderColor", _v$5, _p$.e));
       _v$6 !== _p$.t && (_p$.t = _$setProp2(_el$7, "backgroundColor", _v$6, _p$.t));
       _v$7 !== _p$.a && (_p$.a = _$setProp2(_el$0, "style", _v$7, _p$.a));
       _v$8 !== _p$.o && (_p$.o = _$setProp2(_el$10, "style", _v$8, _p$.o));
-      _v$9 !== _p$.i && (_p$.i = _$setProp2(_el$14, "style", _v$9, _p$.i));
-      _v$0 !== _p$.n && (_p$.n = _$setProp2(_el$18, "style", _v$0, _p$.n));
-      _v$1 !== _p$.s && (_p$.s = _$setProp2(_el$37, "style", _v$1, _p$.s));
+      _v$9 !== _p$.i && (_p$.i = _$setProp2(_el$12, "style", _v$9, _p$.i));
+      _v$0 !== _p$.n && (_p$.n = _$setProp2(_el$15, "style", _v$0, _p$.n));
+      _v$1 !== _p$.s && (_p$.s = _$setProp2(_el$19, "style", _v$1, _p$.s));
+      _v$10 !== _p$.h && (_p$.h = _$setProp2(_el$38, "style", _v$10, _p$.h));
       return _p$;
     }, {
       e: undefined,
@@ -2277,7 +2368,8 @@ function CoordinationPanel(props) {
       o: undefined,
       i: undefined,
       n: undefined,
-      s: undefined
+      s: undefined,
+      h: undefined
     });
     return _el$7;
   })();
@@ -2440,7 +2532,7 @@ function DashboardList(props) {
   const rows = () => Math.max(1, Math.min(props.count, props.maxRows ?? 6));
   return (() => {
     var _el$ = _$createElement3("scrollbox");
-    _$use2((el) => {
+    _$use3((el) => {
       scroll = el;
     }, _el$);
     _$setProp3(_el$, "scrollX", false);
@@ -2485,7 +2577,7 @@ function DashboardRow(props) {
     }, () => props.onClick ? {
       onMouseDown: props.onClick
     } : {}), true);
-    _$use2((el) => {
+    _$use3((el) => {
       text = el;
     }, _el$3);
     _$setProp3(_el$3, "wrapMode", "none");
@@ -2654,6 +2746,7 @@ function LoopDashboard(props) {
   const [pendingRelease, setPendingRelease] = createSignal(null);
   const ownerSessionID = () => props.ownerSessionID ?? currentRouteSessionID(props.api);
   let detailsScrollEl;
+  let coordScrollEl;
   const commandEntries = () => {
     const dirs = cmdScope() === "all" ? managedDirs() : [cmdScope()];
     const out = [];
@@ -3076,6 +3169,32 @@ function LoopDashboard(props) {
         focusInput();
         return;
       }
+      if (name === "down" || key === "j") {
+        prevent(evt);
+        coordScrollEl?.scrollBy({
+          x: 0,
+          y: 2
+        });
+        return;
+      }
+      if (name === "up" || key === "k") {
+        prevent(evt);
+        coordScrollEl?.scrollBy({
+          x: 0,
+          y: -2
+        });
+        return;
+      }
+      if (key === "g") {
+        prevent(evt);
+        coordScrollEl?.scrollTo(0);
+        return;
+      }
+      if (key === "G") {
+        prevent(evt);
+        coordScrollEl?.scrollTo(9999);
+        return;
+      }
       if (key === "w" || key === "1") {
         prevent(evt);
         setCoordTab("writes");
@@ -3091,12 +3210,12 @@ function LoopDashboard(props) {
         setCoordTab("resv");
         return;
       }
-      if (name === "tab" || name === "right" || key === "l") {
+      if (name === "tab" || name === "right") {
         prevent(evt);
         setCoordTab((t) => t === "writes" ? "verify" : t === "verify" ? "resv" : "writes");
         return;
       }
-      if (name === "left" || key === "h") {
+      if (name === "left") {
         prevent(evt);
         setCoordTab((t) => t === "resv" ? "verify" : t === "verify" ? "writes" : "resv");
         return;
@@ -3111,6 +3230,51 @@ function LoopDashboard(props) {
           });
         else
           releaseWorkspaceFences({}, coordDir());
+        return;
+      }
+      return;
+    }
+    if (detailsOpen()) {
+      if (isEscapeKey(evt) || key === "d") {
+        prevent(evt);
+        setDetailsOpen(false);
+        return;
+      }
+      if (name === "down" || key === "j" || key === "J" || name === "pagedown") {
+        prevent(evt);
+        detailsScrollEl?.scrollBy({
+          x: 0,
+          y: 2
+        });
+        return;
+      }
+      if (name === "up" || key === "k" || key === "K" || name === "pageup") {
+        prevent(evt);
+        detailsScrollEl?.scrollBy({
+          x: 0,
+          y: -2
+        });
+        return;
+      }
+      if (key === "g") {
+        prevent(evt);
+        detailsScrollEl?.scrollTo(0);
+        return;
+      }
+      if (key === "G") {
+        prevent(evt);
+        detailsScrollEl?.scrollTo(9999);
+        return;
+      }
+      if (key === "n" || key === "]") {
+        prevent(evt);
+        const max = Math.max(0, rowModels().length - 1);
+        setSelected((s) => Math.min(max, s + 1));
+        return;
+      }
+      if (key === "p" || key === "[") {
+        prevent(evt);
+        setSelected((s) => Math.max(0, s - 1));
         return;
       }
       return;
@@ -3159,7 +3323,7 @@ function LoopDashboard(props) {
       }, sel.id);
       return;
     }
-    if (key === "c" || key === "h") {
+    if (key === "h") {
       prevent(evt);
       setShowCompleted((v) => {
         const next = !v;
@@ -3181,22 +3345,6 @@ function LoopDashboard(props) {
       setTab(directionalView);
       return;
     }
-    if (detailsOpen() && (key === "J" || name === "pagedown")) {
-      prevent(evt);
-      detailsScrollEl?.scrollBy({
-        x: 0,
-        y: 2
-      });
-      return;
-    }
-    if (detailsOpen() && (key === "K" || name === "pageup")) {
-      prevent(evt);
-      detailsScrollEl?.scrollBy({
-        x: 0,
-        y: -2
-      });
-      return;
-    }
     function dashboardSelection() {
       return {
         view: tab(),
@@ -3205,22 +3353,6 @@ function LoopDashboard(props) {
       };
     }
     function applyMove(move) {
-      const last = Math.max(0, (tab() === "commands" ? currentCommands.length : currentGoals.length) - 1);
-      const selectedNow = tab() === "commands" ? cmdSelected() : selected();
-      if (detailsOpen() && move === "down" && selectedNow >= last) {
-        detailsScrollEl?.scrollBy({
-          x: 0,
-          y: 1
-        });
-        return;
-      }
-      if (detailsOpen() && move === "up" && selectedNow <= 0 && (detailsScrollEl?.scrollTop ?? 0) > 0) {
-        detailsScrollEl?.scrollBy({
-          x: 0,
-          y: -1
-        });
-        return;
-      }
       const next = moveDashboardSelection(dashboardSelection(), move, currentGoals.length, currentCommands.length);
       setSelected(next.goalIndex);
       setCmdSelected(next.commandIndex);
@@ -4016,15 +4148,14 @@ function LoopDashboard(props) {
     }) => toRowModel(goal, dir, runtimeFor(goal.id), now));
     return filterRows(rows, activeFilterQuery());
   };
-  const modalPopupOpen = () => Boolean(pendingRelease()) || sendOpen() || actionsOpen() || coordOpen() || showHelp() || showProjects();
+  const modalPopupOpen = () => Boolean(pendingRelease()) || sendOpen() || actionsOpen() || coordOpen() || detailsOpen() || showHelp() || showProjects();
   const displayItems = () => {
-    const all = rowModels();
-    const rows = detailsOpen() ? all.slice(selected(), selected() + 1) : all;
-    if (tab() !== "fleet" || detailsOpen()) {
-      return rows.map((row) => ({
+    const rows = rowModels();
+    if (tab() !== "fleet") {
+      return rows.map((row, index) => ({
         kind: "row",
         row,
-        index: all.indexOf(row)
+        index
       }));
     }
     const out = [];
@@ -4034,12 +4165,12 @@ function LoopDashboard(props) {
         dir: group.directory,
         group
       });
-      rows.forEach((row) => {
+      rows.forEach((row, idx) => {
         if (row.directory === group.directory)
           out.push({
             kind: "row",
             row,
-            index: all.indexOf(row)
+            index: idx
           });
       });
     }
@@ -4203,7 +4334,24 @@ function LoopDashboard(props) {
       return PALETTE.rose;
     if (row.state === "active")
       return row.manual ? PALETTE.amber : PALETTE.sage;
+    if (row.state === "paused")
+      return PALETTE.violet;
+    if (row.state === "complete")
+      return PALETTE.sky;
     return PALETTE.muted;
+  };
+  const rowNameColor = (row, active) => {
+    if (active)
+      return PALETTE.cyan;
+    if (row.state === "blocked" || row.state === "budget_limited" || row.state === "usage_limited")
+      return PALETTE.rose;
+    if (row.state === "active")
+      return row.manual ? PALETTE.amber : PALETTE.sage;
+    if (row.state === "paused")
+      return PALETTE.violet;
+    if (row.state === "complete")
+      return PALETTE.sky;
+    return PALETTE.ink;
   };
   const coordStripSummary = () => {
     const cm = coordModel();
@@ -4401,13 +4549,10 @@ function LoopDashboard(props) {
           return () => _c$() ? selectedCommand()?.title ?? "command" : selectedGoal()?.name ?? "worker";
         })(), null);
         _$insertNode3(_el$60, _el$61);
-        _$setProp3(_el$60, "border", true);
         _$setProp3(_el$60, "paddingLeft", 1);
         _$setProp3(_el$60, "paddingRight", 1);
+        _$setProp3(_el$60, "height", 1);
         _$spread3(_el$60, _$mergeProps3({
-          get borderColor() {
-            return PALETTE.rule;
-          },
           get backgroundColor() {
             return PALETTE.base;
           }
@@ -4416,7 +4561,7 @@ function LoopDashboard(props) {
         }), true);
         _$insertNode3(_el$61, _el$62);
         _$setProp3(_el$61, "wrapMode", "none");
-        _$insertNode3(_el$62, _$createTextNode3(`esc`));
+        _$insertNode3(_el$62, _$createTextNode3(`[esc]`));
         _$insertNode3(_el$64, _el$65);
         _$setProp3(_el$64, "wrapMode", "none");
         _$insert3(_el$65, () => tab() === "commands" ? "Writes a line to the selected process stdin:" : "Delivers bare words as the worker's own turn (no steering wrapper):");
@@ -4456,7 +4601,8 @@ function LoopDashboard(props) {
           }, _v$24 = {
             fg: PALETTE.muted
           }, _v$25 = {
-            fg: PALETTE.ink
+            fg: PALETTE.amber,
+            bold: true
           }, _v$26 = {
             fg: PALETTE.muted
           }, _v$27 = PALETTE.amber, _v$28 = PALETTE.base, _v$29 = {
@@ -4544,13 +4690,10 @@ function LoopDashboard(props) {
         _$insertNode3(_el$88, _el$89);
         _$insert3(_el$88, () => selectedGoal().name, null);
         _$insertNode3(_el$90, _el$91);
-        _$setProp3(_el$90, "border", true);
         _$setProp3(_el$90, "paddingLeft", 1);
         _$setProp3(_el$90, "paddingRight", 1);
+        _$setProp3(_el$90, "height", 1);
         _$spread3(_el$90, _$mergeProps3({
-          get borderColor() {
-            return PALETTE.rule;
-          },
           get backgroundColor() {
             return PALETTE.base;
           }
@@ -4559,7 +4702,7 @@ function LoopDashboard(props) {
         }), true);
         _$insertNode3(_el$91, _el$92);
         _$setProp3(_el$91, "wrapMode", "none");
-        _$insertNode3(_el$92, _$createTextNode3(`esc`));
+        _$insertNode3(_el$92, _$createTextNode3(`[esc]`));
         _$insertNode3(_el$94, _el$95);
         _$setProp3(_el$94, "wrapMode", "none");
         _$insertNode3(_el$95, _el$96);
@@ -4629,7 +4772,8 @@ function LoopDashboard(props) {
             fg: PALETTE.cyan,
             bold: true
           }, _v$40 = {
-            fg: PALETTE.ink
+            fg: PALETTE.amber,
+            bold: true
           }, _v$41 = {
             fg: PALETTE.muted
           };
@@ -4683,13 +4827,54 @@ function LoopDashboard(props) {
               }
             }
           },
-          onClose: () => setCoordOpen(false)
+          onClose: () => setCoordOpen(false),
+          scrollRef: (el) => {
+            coordScrollEl = el;
+          }
         });
       }
     }), null);
     _$insert3(_el$29, _$createComponent3(Show3, {
       get when() {
-        return _$memo3(() => !!(!pendingRelease() && !sendOpen() && !actionsOpen() && !coordOpen()))() && showHelp();
+        return _$memo3(() => !!(!pendingRelease() && !sendOpen() && !actionsOpen() && !coordOpen() && detailsOpen()))() && selectedGoal();
+      },
+      children: (goal) => {
+        const entry = () => activeGoals().find((e) => e.goal.id === goal().id);
+        const dir = () => entry()?.dir ?? props.directory;
+        const rt = () => runtimeFor(goal().id);
+        const lp = () => goal().lastProgress;
+        const agentName = () => goal().config.agent;
+        const meta = () => agentName() ? agentIndex()[agentName()] ?? agentIndex()[agentName().toLowerCase()] : undefined;
+        const model = () => goal().config.model;
+        return _$createComponent3(GoalDetailsDrawer, {
+          get theme() {
+            return theme();
+          },
+          scrollRef: (el) => {
+            detailsScrollEl = el;
+          },
+          onClose: () => setDetailsOpen(false),
+          get model() {
+            return {
+              goal: goal(),
+              directory: dir(),
+              runtime: rt(),
+              transcript: recentTranscriptFor(goal().id),
+              progressHistory: lp() ? [{
+                summary: lp().summary,
+                next: lp().next,
+                at: lp().at
+              }] : [],
+              agentLabel: agentName() ? `${agentName()}${meta()?.mode ? ` (${meta().mode})` : ""}` : goal().parentAgent ?? "parent",
+              modelLabel: model() ?? goal().parentModel ?? "parent"
+            };
+          }
+        });
+      }
+    }), null);
+    _$insert3(_el$29, _$createComponent3(Show3, {
+      get when() {
+        return _$memo3(() => !!(!pendingRelease() && !sendOpen() && !actionsOpen() && !coordOpen() && !detailsOpen()))() && showHelp();
       },
       get children() {
         var _el$98 = _$createElement3("box"), _el$99 = _$createElement3("box"), _el$100 = _$createElement3("text"), _el$101 = _$createElement3("span"), _el$103 = _$createElement3("box"), _el$104 = _$createElement3("text"), _el$105 = _$createElement3("span"), _el$107 = _$createElement3("box"), _el$108 = _$createElement3("text"), _el$109 = _$createElement3("span"), _el$111 = _$createElement3("span"), _el$113 = _$createTextNode3(`
@@ -4721,13 +4906,10 @@ function LoopDashboard(props) {
         _$setProp3(_el$100, "wrapMode", "none");
         _$insertNode3(_el$101, _$createTextNode3(`Keyboard shortcuts`));
         _$insertNode3(_el$103, _el$104);
-        _$setProp3(_el$103, "border", true);
         _$setProp3(_el$103, "paddingLeft", 1);
         _$setProp3(_el$103, "paddingRight", 1);
+        _$setProp3(_el$103, "height", 1);
         _$spread3(_el$103, _$mergeProps3({
-          get borderColor() {
-            return PALETTE.rule;
-          },
           get backgroundColor() {
             return PALETTE.base;
           }
@@ -4736,7 +4918,7 @@ function LoopDashboard(props) {
         }), true);
         _$insertNode3(_el$104, _el$105);
         _$setProp3(_el$104, "wrapMode", "none");
-        _$insertNode3(_el$105, _$createTextNode3(`esc`));
+        _$insertNode3(_el$105, _$createTextNode3(`[esc]`));
         _$insertNode3(_el$107, _el$108);
         _$setProp3(_el$107, "border", true);
         _$setProp3(_el$107, "paddingLeft", 1);
@@ -4777,7 +4959,7 @@ function LoopDashboard(props) {
         _$insertNode3(_el$109, _$createTextNode3(`1 / 2 / 3 `));
         _$insertNode3(_el$111, _$createTextNode3(`Project / Fleet / Commands tabs`));
         _$insertNode3(_el$114, _$createTextNode3(`j / k `));
-        _$insertNode3(_el$116, _$createTextNode3(`Move selection (J / K scrolls open details)`));
+        _$insertNode3(_el$116, _$createTextNode3(`Move selection (or scroll inside Details / Coordination)`));
         _$insertNode3(_el$119, _$createTextNode3(`Enter `));
         _$insertNode3(_el$121, _$createTextNode3(`Worker actions popup`));
         _$insertNode3(_el$124, _$createTextNode3(`s `));
@@ -4785,9 +4967,9 @@ function LoopDashboard(props) {
         _$insertNode3(_el$129, _$createTextNode3(`o `));
         _$insertNode3(_el$131, _$createTextNode3(`Open worker session / fullscreen command`));
         _$insertNode3(_el$134, _$createTextNode3(`d `));
-        _$insertNode3(_el$136, _$createTextNode3(`Toggle technical details (collapses table to 1 row)`));
+        _$insertNode3(_el$136, _$createTextNode3(`Technical details popup (j/k scrolls, n/p switches worker)`));
         _$insertNode3(_el$139, _$createTextNode3(`t `));
-        _$insertNode3(_el$141, _$createTextNode3(`Inspect project coordination (Writes / Verify / Reservations)`));
+        _$insertNode3(_el$141, _$createTextNode3(`Project coordination popup (j/k scrolls, w/v/r switches tab)`));
         _$insertNode3(_el$144, _$createTextNode3(`/ `));
         _$insertNode3(_el$146, _$createTextNode3(`Focus filter box in toolbar`));
         _$insertNode3(_el$149, _$createTextNode3(`h `));
@@ -4795,13 +4977,14 @@ function LoopDashboard(props) {
         _$insertNode3(_el$154, _$createTextNode3(`[ / ] `));
         _$insertNode3(_el$156, _$createTextNode3(`Cycle project scope`));
         _$insertNode3(_el$159, _$createTextNode3(`Esc `));
-        _$insertNode3(_el$161, _$createTextNode3(`Close active popup / details / filter, or close dashboard`));
+        _$insertNode3(_el$161, _$createTextNode3(`Close active popup / filter, or close dashboard`));
         _$effect3((_p$) => {
           var _v$42 = PALETTE.cyan, _v$43 = PALETTE.inset, _v$44 = {
             fg: PALETTE.cyan,
             bold: true
           }, _v$45 = {
-            fg: PALETTE.ink
+            fg: PALETTE.amber,
+            bold: true
           }, _v$46 = PALETTE.rule, _v$47 = PALETTE.base, _v$48 = {
             fg: PALETTE.cyan
           }, _v$49 = {
@@ -4911,7 +5094,7 @@ function LoopDashboard(props) {
     }), null);
     _$insert3(_el$29, _$createComponent3(Show3, {
       get when() {
-        return _$memo3(() => !!(!pendingRelease() && !sendOpen() && !actionsOpen() && !coordOpen() && !showHelp()))() && showProjects();
+        return _$memo3(() => !!(!pendingRelease() && !sendOpen() && !actionsOpen() && !coordOpen() && !detailsOpen() && !showHelp()))() && showProjects();
       },
       get children() {
         var _el$163 = _$createElement3("box"), _el$164 = _$createElement3("box"), _el$165 = _$createElement3("text"), _el$166 = _$createElement3("span"), _el$167 = _$createTextNode3(`Managed projects (`), _el$168 = _$createTextNode3(`)`), _el$169 = _$createElement3("text"), _el$170 = _$createElement3("span");
@@ -5384,9 +5567,7 @@ function LoopDashboard(props) {
                   get count() {
                     return displayItems().length;
                   },
-                  get maxRows() {
-                    return detailsOpen() ? 1 : 6;
-                  },
+                  maxRows: 6,
                   get selectedID() {
                     return _$memo3(() => !!rowModels()[selected()])() ? rowIdFor(rowModels()[selected()].id) : undefined;
                   },
@@ -5438,6 +5619,7 @@ function LoopDashboard(props) {
                         const row = item.row;
                         const isActive = () => item.index === selected();
                         const stateFg = () => rowStateColor(row);
+                        const nameFg = () => rowNameColor(row, isActive());
                         const cols = () => formatRowColumns(row);
                         return _$createComponent3(DashboardRow, {
                           get id() {
@@ -5460,8 +5642,8 @@ function LoopDashboard(props) {
                               var _el$288 = _$createElement3("span");
                               _$insert3(_el$288, () => cols().name);
                               _$effect3((_$p) => _$setProp3(_el$288, "style", {
-                                fg: PALETTE.ink,
-                                bold: isActive()
+                                fg: nameFg(),
+                                bold: true
                               }, _$p));
                               return _el$288;
                             })(), (() => {
@@ -5476,7 +5658,7 @@ function LoopDashboard(props) {
                               _$insert3(_el$291, () => cols().state);
                               _$effect3((_$p) => _$setProp3(_el$291, "style", {
                                 fg: stateFg(),
-                                bold: isActive()
+                                bold: true
                               }, _$p));
                               return _el$291;
                             })(), (() => {
@@ -5536,8 +5718,7 @@ function LoopDashboard(props) {
                 const blk = () => goal().blocker;
                 const agentName = () => goal().config.agent;
                 const meta = () => agentName() ? agentIndex()[agentName()] ?? agentIndex()[agentName().toLowerCase()] : undefined;
-                const model = () => goal().config.model;
-                return [_$createComponent3(GoalInspector, {
+                return _$createComponent3(GoalInspector, {
                   get theme() {
                     return theme();
                   },
@@ -5576,42 +5757,14 @@ function LoopDashboard(props) {
                     setActionIdx(0);
                     setActionsOpen(true);
                   },
-                  onDetails: () => setDetailsOpen((v) => !v),
+                  onDetails: () => setDetailsOpen(true),
                   onFocusProject: () => {
                     setProjectScope(dir());
                     setTab("project");
                     setSelected(0);
                     setStatusText(`scope: ${dir().split("/").pop() || dir()}`);
                   }
-                }), _$createComponent3(Show3, {
-                  get when() {
-                    return detailsOpen();
-                  },
-                  get children() {
-                    return _$createComponent3(GoalDetailsDrawer, {
-                      get theme() {
-                        return theme();
-                      },
-                      scrollRef: (el) => {
-                        detailsScrollEl = el;
-                      },
-                      get model() {
-                        return {
-                          goal: goal(),
-                          runtime: rt(),
-                          transcript: recentTranscriptFor(goal().id),
-                          progressHistory: lp() ? [{
-                            summary: lp().summary,
-                            next: lp().next,
-                            at: lp().at
-                          }] : [],
-                          agentLabel: agentName() ? `${agentName()}${meta()?.mode ? ` (${meta().mode})` : ""}` : goal().parentAgent ?? "parent",
-                          modelLabel: model() ?? goal().parentModel ?? "parent"
-                        };
-                      }
-                    });
-                  }
-                })];
+                });
               }
             })];
           }
@@ -6000,7 +6153,7 @@ function LoopDashboard(props) {
     _$setProp3(_el$242, "wrapMode", "none");
     _$insertNode3(_el$243, _$createTextNode3(`[t] Inspect coordination`));
     _$insertNode3(_el$245, _el$249);
-    _$use2((el) => {
+    _$use3((el) => {
       hintBoxEl = el;
     }, _el$245);
     _$setProp3(_el$245, "flexDirection", "row");
@@ -6025,7 +6178,7 @@ function LoopDashboard(props) {
         return _el$246;
       }
     }), _el$249);
-    _$use2((el) => {
+    _$use3((el) => {
       inputEl = el;
       focusInput();
     }, _el$249);
@@ -6080,7 +6233,7 @@ function LoopDashboard(props) {
 
 // src/tui/command-panel.tsx
 import { effect as _$effect4 } from "@opentui/solid";
-import { use as _$use3 } from "@opentui/solid";
+import { use as _$use4 } from "@opentui/solid";
 import { createComponent as _$createComponent4 } from "@opentui/solid";
 import { insert as _$insert4 } from "@opentui/solid";
 import { memo as _$memo4 } from "@opentui/solid";
@@ -8055,7 +8208,7 @@ function CommandPanel(props) {
     _$setProp4(_el$10, "gap", 1);
     _$insertNode4(_el$11, _el$12);
     _$insert4(_el$12, () => insertMode() ? " INPUT " : " NORMAL ");
-    _$use3((el) => {
+    _$use4((el) => {
       inputEl = el;
     }, _el$13);
     _$setProp4(_el$13, "flexGrow", 1);
@@ -8107,7 +8260,7 @@ function CommandPanel(props) {
 }
 
 // src/tui/terminal-view.tsx
-import { use as _$use4 } from "@opentui/solid";
+import { use as _$use5 } from "@opentui/solid";
 import { createComponent as _$createComponent5 } from "@opentui/solid";
 import { effect as _$effect5 } from "@opentui/solid";
 import { insert as _$insert5 } from "@opentui/solid";
@@ -9083,7 +9236,7 @@ Press Ctrl+] to go back. Nothing was subscribed or written.`);
         return _el$26;
       }
     }), _el$30);
-    _$use4((el) => {
+    _$use5((el) => {
       viewportEl = el;
       try {
         el.onSizeChange = () => measureViewport();

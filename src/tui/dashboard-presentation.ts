@@ -33,18 +33,20 @@ export interface ScopeSummary {
 }
 
 export const PALETTE = {
-  base: "#222430",
-  inset: "#1b1d27",
-  rule: "#414552",
-  rowRule: "#343744",
-  selectedBg: "#1e2e2c",
-  ink: "#e8e9ee",
-  muted: "#a6a9b7",
-  cyan: "#9bddce",
-  amber: "#e9c982",
-  rose: "#e28d99",
-  sage: "#a8cb99",
-  tabActiveFg: "#14151c",
+  base: "#242736",
+  inset: "#1c1f2b",
+  rule: "#4e5468",
+  rowRule: "#383d52",
+  selectedBg: "#1e3538",
+  ink: "#f3f5fa",
+  muted: "#b4bbd0",
+  cyan: "#67e8f9",
+  amber: "#fbbf24",
+  rose: "#fb7185",
+  sage: "#4ade80",
+  violet: "#c4b5fd",
+  sky: "#38bdf8",
+  tabActiveFg: "#11131a",
 } as const
 
 const ATTENTION_STATES = new Set(["blocked", "budget_limited", "usage_limited"])

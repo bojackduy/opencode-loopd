@@ -20,12 +20,10 @@ export function toggleDashboardView(view: DashboardView): DashboardView {
 }
 
 /**
- * Directional tab selection: `l` selects Commands. Legacy `h` (goals) is
- * retired — `h` now toggles history and `1` selects the Project tab.
- * Returns the target view, or undefined when the key is not a tab key.
+ * Tab selection keys: `1` Project, `2` Fleet, `3` Commands.
+ * Legacy `h`/`l` tab keys are retired so `h` is exclusively history.
  */
 export function dashboardViewForKey(key: string): DashboardView | undefined {
-  if (key === "l") return "commands"
   if (key === "1") return "project"
   if (key === "2") return "fleet"
   if (key === "3") return "commands"

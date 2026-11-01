@@ -1,7 +1,7 @@
-// ─── TUI: Goal Details (inspector + technical drawer) ─────────────────────────
-// Mirrors #inspector and #details from docs/superpowers/prototypes/2026-11-01-dashboard.html:
-// split title/state header, current activity, latest result or blocker, button
-// row, and a 2-column dl-style technical drawer with a bounded scrollbox.
+// ─── TUI: Goal Details (inspector + technical details popup) ─────────────────
+// Pinned compact inspector (colorful worker name, state badge, current
+// activity, latest result/blocker, and action buttons) plus the Technical
+// Details modal popup (`d`) with j/k scrolling and a 1-line [esc] pill.
 
 /** @jsxImportSource @opentui/solid */
 import { For, Show, type JSX } from "solid-js"
@@ -25,19 +25,25 @@ export interface InspectorModel {
   detailsOpen?: boolean
 }
 
-function stateBadge(goal: Goal): { text: string; fg: string } {
-  if (goal.status === "blocked") return { text: "✖ Blocked", fg: PALETTE.rose }
+export function stateBadge(goal: Goal): { text: string; fg: string; nameFg: string } {
+  if (goal.status === "blocked") {
+    return { text: "✖ Blocked", fg: PALETTE.rose, nameFg: PALETTE.rose }
+  }
   if (goal.status === "budget_limited" || goal.status === "usage_limited") {
-    return { text: `! ${goalStatusShort(goal.status)}`, fg: PALETTE.rose }
+    return { text: `! ${goalStatusShort(goal.status)}`, fg: PALETTE.rose, nameFg: PALETTE.rose }
   }
   if (goal.status === "active") {
     return goal.interactive === true
-      ? { text: "◐ Awaiting input", fg: PALETTE.amber }
-      : { text: "● Working", fg: PALETTE.sage }
+      ? { text: "◐ Awaiting input", fg: PALETTE.amber, nameFg: PALETTE.amber }
+      : { text: "● Working", fg: PALETTE.sage, nameFg: PALETTE.sage }
   }
-  if (goal.status === "paused") return { text: "‖ Paused", fg: PALETTE.muted }
-  if (goal.status === "complete") return { text: "✓ Completed", fg: PALETTE.muted }
-  return { text: goalStatusShort(goal.status), fg: PALETTE.ink }
+  if (goal.status === "paused") {
+    return { text: "‖ Paused", fg: PALETTE.violet, nameFg: PALETTE.violet }
+  }
+  if (goal.status === "complete") {
+    return { text: "✓ Completed", fg: PALETTE.sky, nameFg: PALETTE.sky }
+  }
+  return { text: goalStatusShort(goal.status), fg: PALETTE.ink, nameFg: PALETTE.cyan }
 }
 
 export function GoalInspector(props: {
@@ -64,7 +70,7 @@ export function GoalInspector(props: {
     >
       <text wrapMode="none">
         <span style={{ fg: active ? PALETTE.tabActiveFg : PALETTE.ink, bold: active }}>{label} </span>
-        <span style={{ fg: active ? PALETTE.tabActiveFg : PALETTE.cyan }}>[{keyHint}]</span>
+        <span style={{ fg: active ? PALETTE.tabActiveFg : PALETTE.cyan, bold: true }}>[{keyHint}]</span>
       </text>
     </box>
   )
@@ -83,7 +89,8 @@ export function GoalInspector(props: {
       <box flexDirection="row" justifyContent="space-between" alignItems="center" height={1} flexShrink={0}>
         <text wrapMode="none">
           <span style={{ fg: PALETTE.cyan, bold: true }}>{m().goal.name}</span>
-          <span style={{ fg: PALETTE.muted }}> / {proj()}</span>
+          <span style={{ fg: PALETTE.muted }}> / </span>
+          <span style={{ fg: PALETTE.violet }}>{proj()}</span>
         </text>
         <text wrapMode="none">
           <span style={{ fg: badge().fg, bold: true }}>{badge().text}</span>
@@ -91,7 +98,7 @@ export function GoalInspector(props: {
       </box>
       <box flexDirection="row" height={1} flexShrink={0}>
         <text wrapMode="none">
-          <span style={{ fg: PALETTE.ink }}>Now: </span>
+          <span style={{ fg: PALETTE.muted }}>Now: </span>
           <span style={{ fg: m().acting ? PALETTE.sage : PALETTE.ink }}>{m().activityLine ?? "Idle — between turns"}</span>
         </text>
       </box>
@@ -125,6 +132,7 @@ export function GoalInspector(props: {
 
 export interface DetailsModel {
   goal: Goal
+  directory?: string
   runtime?: GoalRuntimeState
   transcript: string[]
   progressHistory: Array<{ summary: string; next?: string; at?: string }>
@@ -136,24 +144,27 @@ export function GoalDetailsDrawer(props: {
   theme: TuiThemeCurrent
   model: DetailsModel
   scrollRef?: (el: ScrollBoxRenderable | undefined) => void
+  onClose?: () => void
 }): JSX.Element {
   const m = () => props.model
   const g = () => m().goal
+  const badge = () => stateBadge(g())
+  const proj = () => (m().directory ? (m().directory!.split("/").pop() ?? m().directory!) : "")
   const maxTurns = () => (g().config as { maxTurns?: number } | undefined)?.maxTurns
   const turnsLabel = () => {
     const rt = m().runtime
     return rt ? `${rt.budgetTurnCount}${maxTurns() ? `/${maxTurns()}` : ""} turns` : "0 turns"
   }
-  const dtRow = (dt: string, dd: string) => (
+  const dtRow = (dt: string, dd: string, valueColor: string = PALETTE.ink) => (
     <box flexDirection="row" flexShrink={0} paddingLeft={1} paddingRight={1}>
       <box width={16} flexShrink={0}>
         <text wrapMode="none">
-          <span style={{ fg: PALETTE.muted }}>{dt}</span>
+          <span style={{ fg: PALETTE.cyan }}>{dt}</span>
         </text>
       </box>
       <box flexGrow={1} flexShrink={1} minWidth={0}>
         <text wrapMode="word">
-          <span style={{ fg: PALETTE.ink }}>{dd}</span>
+          <span style={{ fg: valueColor }}>{dd}</span>
         </text>
       </box>
     </box>
@@ -162,31 +173,55 @@ export function GoalDetailsDrawer(props: {
     <box
       flexDirection="column"
       border={true}
-      borderColor={PALETTE.rule}
+      borderColor={PALETTE.cyan}
       backgroundColor={PALETTE.inset}
-      paddingLeft={1}
-      paddingRight={1}
+      paddingLeft={2}
+      paddingRight={2}
+      paddingTop={1}
+      paddingBottom={1}
+      gap={1}
       flexShrink={0}
     >
-      <box flexDirection="row" justifyContent="space-between" height={1} flexShrink={0}>
+      {/* 1-line header: never put border={true} inside height={1} */}
+      <box flexDirection="row" justifyContent="space-between" alignItems="center" height={1} flexShrink={0}>
         <text wrapMode="none">
-          <span style={{ fg: PALETTE.cyan, bold: true }}>Technical details</span>
-          <span style={{ fg: PALETTE.muted }}> · table collapsed to 1 row (j/k switches worker, J/K scrolls details)</span>
+          <span style={{ fg: PALETTE.cyan, bold: true }}>Details / {g().name}</span>
+          <Show when={proj()}>
+            <span style={{ fg: PALETTE.muted }}> ({proj()})</span>
+          </Show>
+          <span style={{ fg: PALETTE.muted }}> · </span>
+          <span style={{ fg: badge().fg, bold: true }}>{badge().text}</span>
         </text>
+        <box
+          flexDirection="row"
+          backgroundColor={PALETTE.base}
+          paddingLeft={1}
+          paddingRight={1}
+          height={1}
+          {...({ onMouseDown: () => props.onClose?.() } as any)}
+        >
+          <text wrapMode="none">
+            <span style={{ fg: PALETTE.amber, bold: true }}>[esc]</span>
+          </text>
+        </box>
+      </box>
+      <box flexDirection="row" height={1} flexShrink={0}>
         <text wrapMode="none">
-          <span style={{ fg: PALETTE.muted }}>[d / esc] close</span>
+          <span style={{ fg: PALETTE.muted }}>
+            j / k scrolls details · n / p switches worker · d or Esc returns to table
+          </span>
         </text>
       </box>
       <scrollbox
         ref={(el) => props.scrollRef?.(el)}
-        height={9}
+        height={12}
         scrollX={false}
         scrollY={true}
         stickyScroll={false}
       >
-        {dtRow("agent / model", `${m().agentLabel} · ${m().modelLabel}`)}
-        {dtRow("budget / turns", `${formatCost((g() as unknown as { costUsed?: number }).costUsed)} · ${turnsLabel()} · ${formatTokens(g().tokensUsed)} tok · ${formatDuration(g().timeUsedSeconds)}`)}
-        {dtRow("objective", g().objective.replace(/\s+/g, " "))}
+        {dtRow("agent / model", `${m().agentLabel} · ${m().modelLabel}`, PALETTE.amber)}
+        {dtRow("budget / turns", `${formatCost((g() as unknown as { costUsed?: number }).costUsed)} · ${turnsLabel()} · ${formatTokens(g().tokensUsed)} tok · ${formatDuration(g().timeUsedSeconds)}`, PALETTE.sage)}
+        {dtRow("objective", g().objective.replace(/\s+/g, " "), PALETTE.ink)}
         {dtRow("scope", (() => {
           const writeable = g().config.workspaceWrite !== false
           const scope = g().config.write_scope
@@ -194,9 +229,9 @@ export function GoalDetailsDrawer(props: {
           if (scope === undefined) return "whole workspace (legacy exclusive)"
           if (scope.length === 0) return "exploration only"
           return scope.join(", ")
-        })())}
-        {dtRow("checks", (g().config.checks ?? []).join(" · ") || "No source changes")}
-        {dtRow("diagnostics", `goal: ${g().id} · worker: ${g().workerSessionID ?? "—"} · owner: ${g().ownerSessionID ?? "—"}`)}
+        })(), PALETTE.violet)}
+        {dtRow("checks", (g().config.checks ?? []).join(" · ") || "No source changes", PALETTE.cyan)}
+        {dtRow("diagnostics", `goal: ${g().id} · worker: ${g().workerSessionID ?? "—"} · owner: ${g().ownerSessionID ?? "—"}`, PALETTE.muted)}
         <box
           flexDirection="column"
           border={true}
@@ -206,10 +241,13 @@ export function GoalDetailsDrawer(props: {
           paddingRight={1}
           flexShrink={0}
         >
+          <text wrapMode="none">
+            <span style={{ fg: PALETTE.cyan, bold: true }}>Recent progress & events</span>
+          </text>
           <For each={m().progressHistory.slice(-4)}>
             {(p) => (
               <text wrapMode="word">
-                <span style={{ fg: PALETTE.sage }}>✓ </span>
+                <span style={{ fg: PALETTE.sage, bold: true }}>✓ </span>
                 <span style={{ fg: PALETTE.ink }}>{p.summary.replace(/\s+/g, " ")}</span>
                 <Show when={p.next}>
                   <span style={{ fg: PALETTE.muted }}> → {p.next!.replace(/\s+/g, " ")}</span>
@@ -218,7 +256,7 @@ export function GoalDetailsDrawer(props: {
             )}
           </For>
           <For
-            each={m().transcript.slice(-8)}
+            each={m().transcript.slice(-10)}
             fallback={
               <text>
                 <span style={{ fg: PALETTE.muted }}>No recent events recorded yet.</span>

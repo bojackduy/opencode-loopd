@@ -285,15 +285,11 @@ function render(){
    renderCoord(); renderInspector();
 }
 function renderTables(){
-   const full = visibleEmps(), c = counts(S.emps.filter(e=>S.tab==="fleet"||e.project===S.scope));
-   S.sel=Math.max(0,Math.min(S.sel,full.length-1));
-   // Detail open: collapse the table to the selected row so the drawer owns the
-   // viewport. j/k still walks every worker; closing restores the full table.
-   const refined = $("#details").classList.contains("open");
-   const list = refined ? full.slice(S.sel, S.sel+1) : full;
-   $("#summary").innerHTML = `<b>${c.a}</b> needs action · <b>${c.w}</b> working · <b>${c.i}</b> awaiting input`+(refined?` <span class="dim">· detail open — table collapsed to one row</span>`:"");
+   const list = visibleEmps(), c = counts(S.emps.filter(e=>S.tab==="fleet"||e.project===S.scope));
+   S.sel=Math.max(0,Math.min(S.sel,list.length-1));
+   $("#summary").innerHTML = `<b>${c.a}</b> needs action · <b>${c.w}</b> working · <b>${c.i}</b> awaiting input`;
    let h = `<table><thead><tr><th></th><th>Worker</th><th>State</th><th>Current activity</th><th>Updated</th></tr></thead><tbody>`;
-   if(S.tab==="fleet"&&!refined){
+   if(S.tab==="fleet"){
      for(const p of PROJECTS){
        const g = list.filter(e=>e.project===p), cc = counts(S.emps.filter(e=>e.project===p));
        if($("#filter").value&&!g.length) continue;
@@ -383,7 +379,7 @@ function key(k){
   if(k==="s" && e){ $("#sendto").textContent = "→ "+e.name; $("#sendtext").value=""; $("#senddlg").showModal(); setTimeout(()=>$("#sendtext").focus(),0); }
    else if(k==="o" && e){ openSession(e); }
   else if(k==="enter" && e){ act(e); }
-  else if(k==="d" && e){ const d=$("#details"); d.classList.toggle("open"); if(d.classList.contains("open")) fillDetails(e); renderTables(); }
+  else if(k==="d" && e){ fillDetails(e); showModal("Details / "+e.name, $("#details").innerHTML); }
    else if(k==="t"){S.resourceProject=selectedProject();renderCoord();if(!$("#drawer").open)$("#drawer").showModal();}
    else if(k==="focus"&&e){S.scope=e.project;S.tab="project";S.sel=0;$("#filter").value="";render();}
 }

@@ -368,6 +368,7 @@ export function LoopDashboard(props: Props) {
   const ownerSessionID = () => props.ownerSessionID ?? currentRouteSessionID(props.api)
 
   let detailsScrollEl: ScrollBoxRenderable | undefined
+  let coordScrollEl: ScrollBoxRenderable | undefined
 
   const commandEntries = (): Array<{ cmd: CommandSession; dir: string }> => {
     const dirs = cmdScope() === "all" ? managedDirs() : [cmdScope()]
@@ -701,7 +702,7 @@ export function LoopDashboard(props: Props) {
       return
     }
 
-    // 3. Coordination drawer modal (w/v/r or 1/2/3 or Tab switches sub-tab, W releases, Esc closes)
+    // 3. Coordination drawer modal (j/k scrolls, w/v/r or 1/2/3 or Tab switches sub-tab, W releases, Esc closes)
     if (coordOpen()) {
       if (isEscapeKey(evt) || key === "t") {
         prevent(evt)
@@ -709,15 +710,27 @@ export function LoopDashboard(props: Props) {
         focusInput()
         return
       }
+      if (name === "down" || key === "j") {
+        prevent(evt)
+        coordScrollEl?.scrollBy({ x: 0, y: 2 })
+        return
+      }
+      if (name === "up" || key === "k") {
+        prevent(evt)
+        coordScrollEl?.scrollBy({ x: 0, y: -2 })
+        return
+      }
+      if (key === "g") { prevent(evt); coordScrollEl?.scrollTo(0); return }
+      if (key === "G") { prevent(evt); coordScrollEl?.scrollTo(9999); return }
       if (key === "w" || key === "1") { prevent(evt); setCoordTab("writes"); return }
       if (key === "v" || key === "2") { prevent(evt); setCoordTab("verify"); return }
       if (key === "r" || key === "3") { prevent(evt); setCoordTab("resv"); return }
-      if (name === "tab" || name === "right" || key === "l") {
+      if (name === "tab" || name === "right") {
         prevent(evt)
         setCoordTab((t) => (t === "writes" ? "verify" : t === "verify" ? "resv" : "writes"))
         return
       }
-      if (name === "left" || key === "h") {
+      if (name === "left") {
         prevent(evt)
         setCoordTab((t) => (t === "resv" ? "verify" : t === "verify" ? "writes" : "resv"))
         return
@@ -732,7 +745,40 @@ export function LoopDashboard(props: Props) {
       return
     }
 
-    // 4. Help or Projects popup
+    // 4. Technical details popup modal (j/k scrolls, n/p switches worker, d or Esc closes)
+    if (detailsOpen()) {
+      if (isEscapeKey(evt) || key === "d") {
+        prevent(evt)
+        setDetailsOpen(false)
+        return
+      }
+      if (name === "down" || key === "j" || key === "J" || name === "pagedown") {
+        prevent(evt)
+        detailsScrollEl?.scrollBy({ x: 0, y: 2 })
+        return
+      }
+      if (name === "up" || key === "k" || key === "K" || name === "pageup") {
+        prevent(evt)
+        detailsScrollEl?.scrollBy({ x: 0, y: -2 })
+        return
+      }
+      if (key === "g") { prevent(evt); detailsScrollEl?.scrollTo(0); return }
+      if (key === "G") { prevent(evt); detailsScrollEl?.scrollTo(9999); return }
+      if (key === "n" || key === "]") {
+        prevent(evt)
+        const max = Math.max(0, rowModels().length - 1)
+        setSelected((s) => Math.min(max, s + 1))
+        return
+      }
+      if (key === "p" || key === "[") {
+        prevent(evt)
+        setSelected((s) => Math.max(0, s - 1))
+        return
+      }
+      return
+    }
+
+    // 5. Help or Projects popup
     if (showHelp()) {
       if (isEscapeKey(evt) || isQuestion || key === "q") {
         prevent(evt)
@@ -749,7 +795,7 @@ export function LoopDashboard(props: Props) {
       }
     }
 
-    // 5. Escape in base view closes Details or clears Filter before closing dialog
+    // 6. Escape in base view clears Filter before closing dialog
     if (isEscapeKey(evt)) {
       if (dismissTopSubPopup()) {
         prevent(evt)
@@ -768,7 +814,7 @@ export function LoopDashboard(props: Props) {
       void executeCommandRaw("cmd_interrupt", { commandID: sel.id }, sel.id)
       return
     }
-    if (key === "c" || key === "h") {
+    if (key === "h") {
       prevent(evt)
       setShowCompleted((v) => {
         const next = !v
@@ -790,31 +836,10 @@ export function LoopDashboard(props: Props) {
       setTab(directionalView)
       return
     }
-    // J / K (Shift+j / Shift+k) or PageDown / PageUp scrolls Details directly
-    if (detailsOpen() && (key === "J" || name === "pagedown")) {
-      prevent(evt)
-      detailsScrollEl?.scrollBy({ x: 0, y: 2 })
-      return
-    }
-    if (detailsOpen() && (key === "K" || name === "pageup")) {
-      prevent(evt)
-      detailsScrollEl?.scrollBy({ x: 0, y: -2 })
-      return
-    }
     function dashboardSelection(): DashboardSelection {
       return { view: tab(), goalIndex: selected(), commandIndex: cmdSelected() }
     }
     function applyMove(move: "down" | "up" | "first" | "last") {
-      const last = Math.max(0, (tab() === "commands" ? currentCommands.length : currentGoals.length) - 1)
-      const selectedNow = tab() === "commands" ? cmdSelected() : selected()
-      if (detailsOpen() && move === "down" && selectedNow >= last) {
-        detailsScrollEl?.scrollBy({ x: 0, y: 1 })
-        return
-      }
-      if (detailsOpen() && move === "up" && selectedNow <= 0 && (detailsScrollEl?.scrollTop ?? 0) > 0) {
-        detailsScrollEl?.scrollBy({ x: 0, y: -1 })
-        return
-      }
       const next = moveDashboardSelection(dashboardSelection(), move, currentGoals.length, currentCommands.length)
       setSelected(next.goalIndex)
       setCmdSelected(next.commandIndex)
@@ -1257,24 +1282,21 @@ export function LoopDashboard(props: Props) {
   }
 
   /** Modal popups take the main body so they behave like real dialogs and
-   * never stretch or clip the dashboard vertically. */
+   * never stretch or clip the dashboard vertically. Details (`d`) is also a
+   * full popup view now so the worker table never has to collapse to 1 row. */
   const modalPopupOpen = () =>
-    Boolean(pendingRelease()) || sendOpen() || actionsOpen() || coordOpen() || showHelp() || showProjects()
+    Boolean(pendingRelease()) || sendOpen() || actionsOpen() || coordOpen() || detailsOpen() || showHelp() || showProjects()
 
-  /** When Details (`d`) is open, collapse the worker table to the 1 selected
-   * row so the Details drawer gets the vertical space without overflowing.
-   * j/k still walks all rows; closing Details restores the full table. */
   const displayItems = (): Array<{ kind: "header"; dir: string; group: DirectoryGroup } | { kind: "row"; row: RowModel; index: number }> => {
-    const all = rowModels()
-    const rows = detailsOpen() ? all.slice(selected(), selected() + 1) : all
-    if (tab() !== "fleet" || detailsOpen()) {
-      return rows.map((row) => ({ kind: "row" as const, row, index: all.indexOf(row) }))
+    const rows = rowModels()
+    if (tab() !== "fleet") {
+      return rows.map((row, index) => ({ kind: "row" as const, row, index }))
     }
     const out: Array<{ kind: "header"; dir: string; group: DirectoryGroup } | { kind: "row"; row: RowModel; index: number }> = []
     for (const group of groupByDirectory(rows, collapsed())) {
       out.push({ kind: "header", dir: group.directory, group })
-      rows.forEach((row) => {
-        if (row.directory === group.directory) out.push({ kind: "row", row, index: all.indexOf(row) })
+      rows.forEach((row, idx) => {
+        if (row.directory === group.directory) out.push({ kind: "row", row, index: idx })
       })
     }
     return out
@@ -1428,7 +1450,18 @@ export function LoopDashboard(props: Props) {
   const rowStateColor = (row: RowModel): string => {
     if (row.state === "blocked" || row.state === "budget_limited" || row.state === "usage_limited") return PALETTE.rose
     if (row.state === "active") return row.manual ? PALETTE.amber : PALETTE.sage
+    if (row.state === "paused") return PALETTE.violet
+    if (row.state === "complete") return PALETTE.sky
     return PALETTE.muted
+  }
+
+  const rowNameColor = (row: RowModel, active: boolean): string => {
+    if (active) return PALETTE.cyan
+    if (row.state === "blocked" || row.state === "budget_limited" || row.state === "usage_limited") return PALETTE.rose
+    if (row.state === "active") return row.manual ? PALETTE.amber : PALETTE.sage
+    if (row.state === "paused") return PALETTE.violet
+    if (row.state === "complete") return PALETTE.sky
+    return PALETTE.ink
   }
 
   const coordStripSummary = () => {
@@ -1542,14 +1575,13 @@ export function LoopDashboard(props: Props) {
                 </span>
               </text>
               <box
-                border={true}
-                borderColor={PALETTE.rule}
                 backgroundColor={PALETTE.base}
                 paddingLeft={1}
                 paddingRight={1}
+                height={1}
                 {...({ onMouseDown: () => returnToNormalMode() } as any)}
               >
-                <text wrapMode="none"><span style={{ fg: PALETTE.ink }}>esc</span></text>
+                <text wrapMode="none"><span style={{ fg: PALETTE.amber, bold: true }}>[esc]</span></text>
               </box>
             </box>
             <text wrapMode="none">
@@ -1606,14 +1638,13 @@ export function LoopDashboard(props: Props) {
                 <span style={{ fg: PALETTE.cyan, bold: true }}>Actions / {selectedGoal()!.name}</span>
               </text>
               <box
-                border={true}
-                borderColor={PALETTE.rule}
                 backgroundColor={PALETTE.base}
                 paddingLeft={1}
                 paddingRight={1}
+                height={1}
                 {...({ onMouseDown: () => setActionsOpen(false) } as any)}
               >
-                <text wrapMode="none"><span style={{ fg: PALETTE.ink }}>esc</span></text>
+                <text wrapMode="none"><span style={{ fg: PALETTE.amber, bold: true }}>[esc]</span></text>
               </box>
             </box>
             <text wrapMode="none">
@@ -1673,10 +1704,39 @@ export function LoopDashboard(props: Props) {
               }
             }}
             onClose={() => setCoordOpen(false)}
+            scrollRef={(el) => { coordScrollEl = el }}
           />
         </Show>
 
-        <Show when={!pendingRelease() && !sendOpen() && !actionsOpen() && !coordOpen() && showHelp()}>
+        <Show when={!pendingRelease() && !sendOpen() && !actionsOpen() && !coordOpen() && detailsOpen() && selectedGoal()}>
+          {(goal) => {
+            const entry = () => activeGoals().find((e) => e.goal.id === goal().id)
+            const dir = () => entry()?.dir ?? props.directory
+            const rt = () => runtimeFor(goal().id)
+            const lp = () => goal().lastProgress
+            const agentName = () => goal().config.agent
+            const meta = () => (agentName() ? (agentIndex()[agentName()!] ?? agentIndex()[agentName()!.toLowerCase()]) : undefined)
+            const model = () => goal().config.model
+            return (
+              <GoalDetailsDrawer
+                theme={theme()}
+                scrollRef={(el) => { detailsScrollEl = el }}
+                onClose={() => setDetailsOpen(false)}
+                model={{
+                  goal: goal(),
+                  directory: dir(),
+                  runtime: rt(),
+                  transcript: recentTranscriptFor(goal().id),
+                  progressHistory: lp() ? [{ summary: lp()!.summary, next: lp()!.next, at: lp()!.at }] : [],
+                  agentLabel: agentName() ? `${agentName()!}${meta()?.mode ? ` (${meta()!.mode})` : ""}` : (goal().parentAgent ?? "parent"),
+                  modelLabel: model() ?? goal().parentModel ?? "parent",
+                }}
+              />
+            )
+          }}
+        </Show>
+
+        <Show when={!pendingRelease() && !sendOpen() && !actionsOpen() && !coordOpen() && !detailsOpen() && showHelp()}>
           <box
             flexDirection="column"
             border={true}
@@ -1693,35 +1753,34 @@ export function LoopDashboard(props: Props) {
                 <span style={{ fg: PALETTE.cyan, bold: true }}>Keyboard shortcuts</span>
               </text>
               <box
-                border={true}
-                borderColor={PALETTE.rule}
                 backgroundColor={PALETTE.base}
                 paddingLeft={1}
                 paddingRight={1}
+                height={1}
                 {...({ onMouseDown: () => setShowHelp(false) } as any)}
               >
-                <text wrapMode="none"><span style={{ fg: PALETTE.ink }}>esc</span></text>
+                <text wrapMode="none"><span style={{ fg: PALETTE.amber, bold: true }}>[esc]</span></text>
               </box>
             </box>
             <box border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1}>
               <text wrapMode="none">
                 <span style={{ fg: PALETTE.cyan }}>1 / 2 / 3   </span><span style={{ fg: PALETTE.ink }}>Project / Fleet / Commands tabs</span>{"\n"}
-                <span style={{ fg: PALETTE.cyan }}>j / k       </span><span style={{ fg: PALETTE.ink }}>Move selection (J / K scrolls open details)</span>{"\n"}
+                <span style={{ fg: PALETTE.cyan }}>j / k       </span><span style={{ fg: PALETTE.ink }}>Move selection (or scroll inside Details / Coordination)</span>{"\n"}
                 <span style={{ fg: PALETTE.cyan }}>Enter       </span><span style={{ fg: PALETTE.ink }}>Worker actions popup</span>{"\n"}
                 <span style={{ fg: PALETTE.cyan }}>s           </span><span style={{ fg: PALETTE.ink }}>Send input popup</span>{"\n"}
                 <span style={{ fg: PALETTE.cyan }}>o           </span><span style={{ fg: PALETTE.ink }}>Open worker session / fullscreen command</span>{"\n"}
-                <span style={{ fg: PALETTE.cyan }}>d           </span><span style={{ fg: PALETTE.ink }}>Toggle technical details (collapses table to 1 row)</span>{"\n"}
-                <span style={{ fg: PALETTE.cyan }}>t           </span><span style={{ fg: PALETTE.ink }}>Inspect project coordination (Writes / Verify / Reservations)</span>{"\n"}
+                <span style={{ fg: PALETTE.cyan }}>d           </span><span style={{ fg: PALETTE.ink }}>Technical details popup (j/k scrolls, n/p switches worker)</span>{"\n"}
+                <span style={{ fg: PALETTE.cyan }}>t           </span><span style={{ fg: PALETTE.ink }}>Project coordination popup (j/k scrolls, w/v/r switches tab)</span>{"\n"}
                 <span style={{ fg: PALETTE.cyan }}>/           </span><span style={{ fg: PALETTE.ink }}>Focus filter box in toolbar</span>{"\n"}
                 <span style={{ fg: PALETTE.cyan }}>h           </span><span style={{ fg: PALETTE.ink }}>Show or hide completed history</span>{"\n"}
                 <span style={{ fg: PALETTE.cyan }}>[ / ]       </span><span style={{ fg: PALETTE.ink }}>Cycle project scope</span>{"\n"}
-                <span style={{ fg: PALETTE.cyan }}>Esc         </span><span style={{ fg: PALETTE.ink }}>Close active popup / details / filter, or close dashboard</span>
+                <span style={{ fg: PALETTE.cyan }}>Esc         </span><span style={{ fg: PALETTE.ink }}>Close active popup / filter, or close dashboard</span>
               </text>
             </box>
           </box>
         </Show>
 
-        <Show when={!pendingRelease() && !sendOpen() && !actionsOpen() && !coordOpen() && !showHelp() && showProjects()}>
+        <Show when={!pendingRelease() && !sendOpen() && !actionsOpen() && !coordOpen() && !detailsOpen() && !showHelp() && showProjects()}>
           <box
             flexDirection="column"
             border={true}
@@ -1896,7 +1955,7 @@ export function LoopDashboard(props: Props) {
                 </box>
                 <DashboardList
                   count={displayItems().length}
-                  maxRows={detailsOpen() ? 1 : 6}
+                  maxRows={6}
                   selectedID={rowModels()[selected()] ? rowIdFor(rowModels()[selected()]!.id) : undefined}
                 >
                   <For each={displayItems()}>
@@ -1924,6 +1983,7 @@ export function LoopDashboard(props: Props) {
                       const row = item.row
                       const isActive = () => item.index === selected()
                       const stateFg = () => rowStateColor(row)
+                      const nameFg = () => rowNameColor(row, isActive())
                       const cols = () => formatRowColumns(row)
                       return (
                         <DashboardRow
@@ -1932,9 +1992,9 @@ export function LoopDashboard(props: Props) {
                           onClick={() => setSelected(item.index)}
                         >
                           <span style={{ fg: PALETTE.cyan, bold: true }}>{isActive() ? "> " : "  "}</span>
-                          <span style={{ fg: PALETTE.ink, bold: isActive() }}>{cols().name}</span>
+                          <span style={{ fg: nameFg(), bold: true }}>{cols().name}</span>
                           <span style={{ fg: PALETTE.muted }}>{"  "}</span>
-                          <span style={{ fg: stateFg(), bold: isActive() }}>{cols().state}</span>
+                          <span style={{ fg: stateFg(), bold: true }}>{cols().state}</span>
                           <span style={{ fg: PALETTE.muted }}>{"  "}</span>
                           <span style={{ fg: row.state === "blocked" ? PALETTE.rose : PALETTE.ink }}>{cols().activity}</span>
                           <span style={{ fg: PALETTE.muted }}>{"  "}{cols().updated}</span>
@@ -1946,7 +2006,7 @@ export function LoopDashboard(props: Props) {
               </box>
             </Show>
 
-            {/* 5. Selected Worker Inspector + optional Technical Details drawer */}
+            {/* 5. Selected Worker Inspector (Details opens as a modal popup on [d]) */}
             <Show when={selectedGoal()}>
               {(goal) => {
                 const entry = () => activeGoals().find((e) => e.goal.id === goal().id)
@@ -1957,58 +2017,41 @@ export function LoopDashboard(props: Props) {
                 const blk = () => goal().blocker
                 const agentName = () => goal().config.agent
                 const meta = () => (agentName() ? (agentIndex()[agentName()!] ?? agentIndex()[agentName()!.toLowerCase()]) : undefined)
-                const model = () => goal().config.model
                 return (
-                  <>
-                    <GoalInspector
-                      theme={theme()}
-                      model={{
-                        goal: goal(),
-                        directory: dir(),
-                        activityLine: activity() ? `${activity()!.short} — ${activity()!.hint}` : undefined,
-                        acting: activity()?.acting ?? false,
-                        lastResult: lp()?.summary,
-                        blocked: blk() ? { reason: blk()!.reason, needed: blk()!.needed } : undefined,
-                        lastProgress: lp() ?? undefined,
-                        agentMeta: meta()?.mode,
-                        showFocusProject: tab() === "fleet",
-                        detailsOpen: detailsOpen(),
-                      }}
-                      onSend={() => openSendModal()}
-                      onOpen={() => {
-                        if (goal().workerSessionID) {
-                          try {
-                            props.api.route.navigate("session", { sessionID: goal().workerSessionID })
-                            props.api.ui.dialog.clear()
-                          } catch {
-                            setStatusText("Navigate unsupported here.")
-                          }
-                        } else setStatusText("No worker session")
-                      }}
-                      onActions={() => { setActionIdx(0); setActionsOpen(true) }}
-                      onDetails={() => setDetailsOpen((v) => !v)}
-                      onFocusProject={() => {
-                        setProjectScope(dir())
-                        setTab("project")
-                        setSelected(0)
-                        setStatusText(`scope: ${dir().split("/").pop() || dir()}`)
-                      }}
-                    />
-                    <Show when={detailsOpen()}>
-                      <GoalDetailsDrawer
-                        theme={theme()}
-                        scrollRef={(el) => { detailsScrollEl = el }}
-                        model={{
-                          goal: goal(),
-                          runtime: rt(),
-                          transcript: recentTranscriptFor(goal().id),
-                          progressHistory: lp() ? [{ summary: lp()!.summary, next: lp()!.next, at: lp()!.at }] : [],
-                          agentLabel: agentName() ? `${agentName()!}${meta()?.mode ? ` (${meta()!.mode})` : ""}` : (goal().parentAgent ?? "parent"),
-                          modelLabel: model() ?? goal().parentModel ?? "parent",
-                        }}
-                      />
-                    </Show>
-                  </>
+                  <GoalInspector
+                    theme={theme()}
+                    model={{
+                      goal: goal(),
+                      directory: dir(),
+                      activityLine: activity() ? `${activity()!.short} — ${activity()!.hint}` : undefined,
+                      acting: activity()?.acting ?? false,
+                      lastResult: lp()?.summary,
+                      blocked: blk() ? { reason: blk()!.reason, needed: blk()!.needed } : undefined,
+                      lastProgress: lp() ?? undefined,
+                      agentMeta: meta()?.mode,
+                      showFocusProject: tab() === "fleet",
+                      detailsOpen: detailsOpen(),
+                    }}
+                    onSend={() => openSendModal()}
+                    onOpen={() => {
+                      if (goal().workerSessionID) {
+                        try {
+                          props.api.route.navigate("session", { sessionID: goal().workerSessionID })
+                          props.api.ui.dialog.clear()
+                        } catch {
+                          setStatusText("Navigate unsupported here.")
+                        }
+                      } else setStatusText("No worker session")
+                    }}
+                    onActions={() => { setActionIdx(0); setActionsOpen(true) }}
+                    onDetails={() => setDetailsOpen(true)}
+                    onFocusProject={() => {
+                      setProjectScope(dir())
+                      setTab("project")
+                      setSelected(0)
+                      setStatusText(`scope: ${dir().split("/").pop() || dir()}`)
+                    }}
+                  />
                 )
               }}
             </Show>
