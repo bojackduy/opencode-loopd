@@ -28,6 +28,7 @@ import {
   moveDashboardSelection,
   resolveDashboardOpen,
   toggleDashboardView,
+  toggleDashboardViewBack,
   dashboardViewForKey,
   goalSelectionKey,
   indexForSelectionKey,
@@ -423,6 +424,7 @@ export function LoopDashboard(props: Props) {
   const managedDirs = () => managedDirList()
   const [projectStatuses, setProjectStatuses] = createSignal<ManagedDirStatus[] | null>(null)
   const [showProjects, setShowProjects] = createSignal(false)
+  const [projectIdx, setProjectIdx] = createSignal(0)
   const [managedStates, setManagedStates] = createSignal<Record<string, StoreState>>({})
 
   // Persist view state so an Escape-intercepted remount restores seamlessly.
@@ -439,6 +441,23 @@ export function LoopDashboard(props: Props) {
     }
   })
 
+  async function openProjectsPicker() {
+    setActionsOpen(false)
+    setCoordOpen(false)
+    setSendOpen(false)
+    setProjectIdx(Math.max(0, managedDirs().indexOf(tab() === "commands" ? cmdScope() === "all" ? props.directory : cmdScope() : projectScope())))
+    setShowProjects(true)
+    await refreshProjects()
+  }
+
+  function applyProjectChoice(dir: string) {
+    if (tab() === "commands") setCmdScope(dir)
+    else setProjectScope(dir)
+    setSelected(0)
+    setCmdSelected(0)
+    setShowProjects(false)
+    setStatusText(`scope: ${dir.split("/").pop() || dir}`)
+  }
   async function refreshProjects() {
     try {
       setManagedDirList(await resolveManagedDirs(props.directory))
@@ -799,6 +818,23 @@ export function LoopDashboard(props: Props) {
         setShowProjects(false)
         return
       }
+      if (name === "down" || key === "j") {
+        prevent(evt)
+        setProjectIdx((i) => Math.min(managedDirs().length - 1, i + 1))
+        return
+      }
+      if (name === "up" || key === "k") {
+        prevent(evt)
+        setProjectIdx((i) => Math.max(0, i - 1))
+        return
+      }
+      if (isEnterKey(evt)) {
+        prevent(evt)
+        const dir = managedDirs()[projectIdx()]
+        if (dir) applyProjectChoice(dir)
+        return
+      }
+      return
     }
 
     // 6. Escape in base view clears Filter before closing dialog
@@ -829,11 +865,18 @@ export function LoopDashboard(props: Props) {
       })
       return
     }
+    if (key === "P") {
+      prevent(evt)
+      void openProjectsPicker()
+      return
+    }
     const currentGoals = rowModels()
     const currentCommands = ownerCommands()
     if (name === "tab") {
       prevent(evt)
-      setTab((v) => toggleDashboardView(v))
+      // Shift+Tab walks back (fleet → project), plain Tab walks forward.
+      if ((evt as unknown as { shift?: boolean }).shift) setTab((v) => toggleDashboardViewBack(v))
+      else setTab((v) => toggleDashboardView(v))
       return
     }
     const directionalView = dashboardViewForKey(key)
@@ -1237,8 +1280,7 @@ export function LoopDashboard(props: Props) {
         case "logs": setShowLogs(!showLogs()); break
         case "help": setShowHelp(true); break
         case "projects": {
-          setShowProjects(!showProjects())
-          if (showProjects()) await refreshProjects()
+          await openProjectsPicker()
           break
         }
         case "q": case "close": props.api.ui.dialog.clear(); return
@@ -1781,6 +1823,7 @@ export function LoopDashboard(props: Props) {
                 <span style={{ fg: PALETTE.cyan }}>t           </span><span style={{ fg: PALETTE.ink }}>Project coordination popup (j/k scrolls, w/v/r switches tab)</span>{"\n"}
                 <span style={{ fg: PALETTE.cyan }}>/           </span><span style={{ fg: PALETTE.ink }}>Focus filter box in toolbar</span>{"\n"}
                 <span style={{ fg: PALETTE.cyan }}>h           </span><span style={{ fg: PALETTE.ink }}>Show or hide completed history</span>{"\n"}
+                <span style={{ fg: PALETTE.cyan }}>P           </span><span style={{ fg: PALETTE.ink }}>Pick project scope (j/k + Enter)</span>{"\n"}
                 <span style={{ fg: PALETTE.cyan }}>[ / ]       </span><span style={{ fg: PALETTE.ink }}>Cycle project scope</span>{"\n"}
                 <span style={{ fg: PALETTE.cyan }}>Esc         </span><span style={{ fg: PALETTE.ink }}>Close active popup / filter, or close dashboard</span>
               </text>
@@ -1801,17 +1844,38 @@ export function LoopDashboard(props: Props) {
           >
             <box flexDirection="row" justifyContent="space-between" height={1}>
               <text wrapMode="none">
-                <span style={{ fg: PALETTE.cyan, bold: true }}>Managed projects ({managedDirs().length})</span>
+                <span style={{ fg: PALETTE.cyan, bold: true }}>Projects ({managedDirs().length})</span>
+                <span style={{ fg: PALETTE.muted }}> · j/k move · Enter applies scope</span>
               </text>
               <text wrapMode="none"><span style={{ fg: PALETTE.muted }}>[esc] close</span></text>
             </box>
-            <For each={projectStatuses() ?? managedDirs().map((d) => ({ directory: d, storePath: managedStorePath(d), total: 0, active: 0, blocked: 0, paused: 0, complete: 0, blockedItems: [] as ManagedDirStatus["blockedItems"] }))}>
-              {(p) => (
-                <text wrapMode="none">
-                  <span style={{ fg: PALETTE.ink, bold: true }}>{p.directory}</span>
-                  <span style={{ fg: PALETTE.muted }}> — {p.total} goals ({p.active} active, {p.blocked} blocked, {p.paused} paused)</span>
-                </text>
-              )}
+            <For each={managedDirs()}>
+              {(d, i) => {
+                const active = () => i() === projectIdx()
+                const st = () => projectStatuses()?.find((p) => p.directory === d)
+                return (
+                  <box
+                    flexDirection="row"
+                    backgroundColor={active() ? PALETTE.selectedBg : undefined}
+                    paddingLeft={1}
+                    paddingRight={1}
+                    {...({ onMouseDown: () => applyProjectChoice(d) } as any)}
+                  >
+                    <text wrapMode="none">
+                      <span style={{ fg: active() ? PALETTE.cyan : PALETTE.muted, bold: true }}>
+                        {active() ? "> " : "  "}
+                      </span>
+                      <span style={{ fg: active() ? PALETTE.cyan : PALETTE.ink, bold: active() }}>
+                        {d.split("/").pop() || d}
+                      </span>
+                      <span style={{ fg: PALETTE.muted }}>
+                        {" — "}
+                        {st() ? `${st()!.total} goals (${st()!.active} active, ${st()!.blocked} blocked, ${st()!.paused} paused)` : d}
+                      </span>
+                    </text>
+                  </box>
+                )
+              }}
             </For>
           </box>
         </Show>
@@ -1871,7 +1935,7 @@ export function LoopDashboard(props: Props) {
                         ? (cmdScope() === "all" ? "All projects" : (cmdScope().split("/").pop() || cmdScope()))
                         : (projectScope().split("/").pop() || projectScope())}
                     </span>
-                    <span style={{ fg: PALETTE.muted }}> ▾ [ ]</span>
+                    <span style={{ fg: PALETTE.muted }}> ▾ [P]</span>
                   </text>
                 </box>
               </Show>

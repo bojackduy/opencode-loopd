@@ -19,6 +19,12 @@ export function toggleDashboardView(view: DashboardView): DashboardView {
   return "project"
 }
 
+export function toggleDashboardViewBack(view: DashboardView): DashboardView {
+  if (view === "project") return "commands"
+  if (view === "fleet") return "project"
+  return "fleet"
+}
+
 /**
  * Tab selection keys: `1` Project, `2` Fleet, `3` Commands.
  * Legacy `h`/`l` tab keys are retired so `h` is exclusively history.

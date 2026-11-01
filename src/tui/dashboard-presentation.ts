@@ -192,6 +192,7 @@ export const FOOT_HINTS = [
   "t coordination",
   "/ filter",
   "h history",
+  "P projects",
   "? help",
 ] as const
 

@@ -155,11 +155,12 @@ export function GoalDetailsDrawer(props: {
     const rt = m().runtime
     return rt ? `${rt.budgetTurnCount}${maxTurns() ? `/${maxTurns()}` : ""} turns` : "0 turns"
   }
-  const dtRow = (dt: string, dd: string, valueColor: string = PALETTE.ink) => (
+  const dtRow = (icon: string, dt: string, dd: string, labelColor: string, valueColor: string = PALETTE.ink) => (
     <box flexDirection="row" flexShrink={0} paddingLeft={1} paddingRight={1}>
       <box width={16} flexShrink={0}>
         <text wrapMode="none">
-          <span style={{ fg: PALETTE.cyan }}>{dt}</span>
+          <span style={{ fg: labelColor, bold: true }}>{icon} </span>
+          <span style={{ fg: labelColor }}>{dt}</span>
         </text>
       </box>
       <box flexGrow={1} flexShrink={1} minWidth={0}>
@@ -219,19 +220,19 @@ export function GoalDetailsDrawer(props: {
         scrollY={true}
         stickyScroll={false}
       >
-        {dtRow("agent / model", `${m().agentLabel} · ${m().modelLabel}`, PALETTE.amber)}
-        {dtRow("budget / turns", `${formatCost((g() as unknown as { costUsed?: number }).costUsed)} · ${turnsLabel()} · ${formatTokens(g().tokensUsed)} tok · ${formatDuration(g().timeUsedSeconds)}`, PALETTE.sage)}
-        {dtRow("objective", g().objective.replace(/\s+/g, " "), PALETTE.ink)}
-        {dtRow("scope", (() => {
+        {dtRow("❖", "agent/model", `${m().agentLabel} · ${m().modelLabel}`, PALETTE.sage, PALETTE.amber)}
+        {dtRow("◉", "budget/turns", `${formatCost((g() as unknown as { costUsed?: number }).costUsed)} · ${turnsLabel()} · ${formatTokens(g().tokensUsed)} tok · ${formatDuration(g().timeUsedSeconds)}`, PALETTE.amber, PALETTE.sage)}
+        {dtRow("◎", "objective", g().objective.replace(/\s+/g, " "), PALETTE.cyan, PALETTE.ink)}
+        {dtRow("⬣", "scope", (() => {
           const writeable = g().config.workspaceWrite !== false
           const scope = g().config.write_scope
           if (!writeable) return "(read-only)"
           if (scope === undefined) return "whole workspace (legacy exclusive)"
           if (scope.length === 0) return "exploration only"
           return scope.join(", ")
-        })(), PALETTE.violet)}
-        {dtRow("checks", (g().config.checks ?? []).join(" · ") || "No source changes", PALETTE.cyan)}
-        {dtRow("diagnostics", `goal: ${g().id} · worker: ${g().workerSessionID ?? "—"} · owner: ${g().ownerSessionID ?? "—"}`, PALETTE.muted)}
+        })(), PALETTE.violet, PALETTE.violet)}
+        {dtRow("✓", "checks", (g().config.checks ?? []).join(" · ") || "No source changes", PALETTE.sky, PALETTE.sky)}
+        {dtRow("⚙", "diagnostics", `goal: ${g().id} · worker: ${g().workerSessionID ?? "—"} · owner: ${g().ownerSessionID ?? "—"}`, PALETTE.muted, PALETTE.muted)}
         <box
           flexDirection="column"
           border={true}
