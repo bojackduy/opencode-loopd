@@ -1,18 +1,26 @@
 // ─── TUI: Dashboard Component ────────────────────────────────────────────────
-// Modal dashboard — single always-focused input traps keys, no leak to chat.
-// Scrollable sections with input always visible at bottom.
+// Mirrors docs/superpowers/prototypes/2026-11-01-dashboard.html:
+//   1. Header (LOOPD + project + [Bug Report])
+//   2. Nav tabs ([1] Project / [2] Fleet / [3] Commands, filled cyan active)
+//   3. Summary + Toolbar (project picker, visible / filter input, [h] history)
+//   4. 4-column Worker table (Worker | State | Current activity | Updated)
+//      — collapses to 1 row when [d] Details is open; j/k still walks all rows
+//   5. Selected Worker Inspector + optional Technical Details drawer
+//   6. Coordination strip (#coordstrip) right above Footer
+//   7. Modal popups for [Enter] Actions, [s] Send input, [t] Coordination, [?] Help
+//      where Esc closes ONLY the active popup/filter/details, never the whole UI.
 
 /** @jsxImportSource @opentui/solid */
 import { batch, createSignal, For, Show, onCleanup, onMount, createEffect, type JSX } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
 import type { TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import type { InputRenderable, ParsedKey, ScrollBoxRenderable, TextRenderable } from "@opentui/core"
-import { readEvents, readState } from "../infrastructure/state-repository"
+import { readState } from "../infrastructure/state-repository"
 import { createControlClient } from "../infrastructure/control-client"
 import type { StoreState } from "../infrastructure/state-repository"
 import type { Goal } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
-import { parseCommand, commandHelp, commandTabHelp } from "./command-parser"
+import { parseCommand } from "./command-parser"
 import { parseNewCommand } from "./command-controller"
 import { workerActivityLabel } from "../domain/status-labels"
 import { bugReportUrl, openBrowserUrl } from "../browser"
@@ -33,13 +41,14 @@ import { randomUUID } from "crypto"
 import { createDashboardRefresh } from "./dashboard-refresh"
 import { managedStorePath, resolveManagedDirs, statusAll, type ManagedDirStatus } from "../server/managed-status"
 import {
+  PALETTE,
+  ROW_COLS,
   toRowModel,
   summarizeScope,
   summaryText,
   groupByDirectory,
   filterRows,
   ageText,
-  countdownText,
   formatRowColumns,
   fitHintBar,
   FOOT_HINTS,
@@ -53,13 +62,44 @@ import {
   type CoordinationModel,
 } from "./coordination-panel"
 
+// ─── Sub-popup Escape coordinator (shared with plugin.tsx) ──────────────────
+// OpenCode's host dialog closes on Esc unless intercepted. Whenever a child
+// popup/drawer/input is open, tryDismissDashboardSubPopup() consumes Esc and
+// closes only that child; plugin.tsx also checks this in onClose so even a
+// host-level dialog clear immediately re-mounts the dashboard at the same state.
+
+export interface SavedDashboardState {
+  tab: DashboardView
+  selected: number
+  cmdSelected: number
+  projectScope: string
+  cmdScope: string
+  filterText: string
+  showCompleted: boolean
+  detailsOpen: boolean
+}
+
+let activeSubPopupDismiss: (() => boolean) | undefined
+let lastDashboardState: SavedDashboardState | undefined
+
+export function tryDismissDashboardSubPopup(): boolean {
+  try {
+    return activeSubPopupDismiss?.() === true
+  } catch {
+    return false
+  }
+}
+
+export function getSavedDashboardState(): SavedDashboardState | undefined {
+  return lastDashboardState
+}
+
 function prevent(evt: ParsedKey) {
   const e = evt as ParsedKey & { preventDefault?: () => void; stopPropagation?: () => void }
   e.preventDefault?.()
   e.stopPropagation?.()
 }
 
-/** Key names arriving from different terminals/protocols for the same physical key. */
 function keyName(evt: ParsedKey): string {
   return ((evt as unknown as { name?: string }).name || "").toLowerCase()
 }
@@ -85,72 +125,49 @@ export function isCtrlN(evt: ParsedKey): boolean {
 }
 
 type Mode = "normal" | "insert"
+type InsertKind = "colon" | "filter" | "send"
 
 interface Props {
   api: TuiPluginApi
   directory: string
-  /** Which tab opens focused (`/loop` → project, `/commands` → commands). */
   initialView?: DashboardView | "goals"
-  /** Owner scope for the Commands view. Defaults to the current session. */
   ownerSessionID?: string
-  /** Fullscreen open for commands. Default: route-navigate + close popup. */
   onOpenCommand?: (payload: { commandID: string; ownerSessionID: string; returnSessionID: string }) => void
-  /** Keyboard-active gate. Default: the popup dialog is open. */
   isActive?: () => boolean
+  restoredState?: SavedDashboardState
 }
 
-/** Legacy callers pass "goals" — normalize to the Project tab. */
 function normalizeInitialView(view: DashboardView | "goals" | undefined): DashboardView {
   if (view === "goals") return "project"
   return view ?? "project"
 }
 
-function eventColor(type: string, theme: TuiThemeCurrent) {
-  if (type === "goal.completed") return theme.info
-  if (type === "goal.blocked" || type === "run.failed") return theme.error
-  if (type === "goal.created" || type === "goal.progress") return theme.success
-  if (type === "run.started" || type === "compaction.started") return theme.warning
-  return theme.textMuted
-}
-
-function commandStatusColor(status: CommandSession["status"], theme: TuiThemeCurrent) {
+function commandStatusColor(status: CommandSession["status"]): string {
   switch (status) {
-    case "running": return theme.success
-    case "exited": return theme.info
-    case "terminated": return theme.warning
-    case "missing": return theme.error
-    default: return theme.text
+    case "running": return PALETTE.cyan
+    case "exited": return PALETTE.muted
+    case "terminated": return PALETTE.amber
+    case "missing": return PALETTE.rose
+    default: return PALETTE.ink
   }
 }
 function commandStatusIcon(status: CommandSession["status"]): string {
   switch (status) {
-    case "running": return "▶"
+    case "running": return "●"
     case "exited": return "✓"
     case "terminated": return "■"
-    case "missing": return "?"
+    case "missing": return "!"
     default: return "○"
   }
 }
 function commandStatusLabel(status: CommandSession["status"]): { short: string; hint: string } {
   switch (status) {
-    case "running": return { short: "RUNNING", hint: "process is executing" }
-    case "exited": return { short: "EXITED", hint: "process ended on its own" }
-    case "terminated": return { short: "TERMINATED", hint: "stopped via interrupt/terminate" }
-    case "missing": return { short: "MISSING", hint: "no live execution found — reconcile" }
-    default: return { short: String(status).toUpperCase(), hint: "" }
+    case "running": return { short: "running", hint: "process is executing" }
+    case "exited": return { short: "exited", hint: "process ended on its own" }
+    case "terminated": return { short: "terminated", hint: "stopped via interrupt/terminate" }
+    case "missing": return { short: "missing", hint: "no live execution found" }
+    default: return { short: String(status), hint: "" }
   }
-}
-function commandBorderColor(status: CommandSession["status"], theme: TuiThemeCurrent): string {
-  return commandStatusColor(status, theme) as unknown as string
-}
-
-function ageLabel(timestamp: string | undefined, now: number): string {
-  if (!timestamp) return "never"
-  const seconds = Math.max(0, Math.floor((now - Date.parse(timestamp)) / 1000))
-  if (seconds < 60) return `${seconds}s ago`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  return `${Math.floor(minutes / 60)}h ago`
 }
 
 export function formatTokens(n: number | undefined): string {
@@ -189,9 +206,7 @@ export function indexAgents(list: Array<{ name: string; color?: string; mode?: s
   return map
 }
 
-/** Both tabs follow selection only after layout (including a tab remount).
- * Wheel scrolling alone must not pull the viewport back to the selection. */
-function DashboardList(props: { count: number; selectedID?: string; children: JSX.Element }) {
+function DashboardList(props: { count: number; maxRows?: number; selectedID?: string; children: JSX.Element }) {
   let scroll: ScrollBoxRenderable | undefined
   let followPending = true
   createEffect(() => {
@@ -200,38 +215,53 @@ function DashboardList(props: { count: number; selectedID?: string; children: JS
     followPending = true
     scroll?.requestRender()
   })
+  const rows = () => Math.max(1, Math.min(props.count, props.maxRows ?? 6))
   return (
-    <scrollbox ref={(el) => { scroll = el }} height={Math.min(props.count, 10)}
-      scrollX={false} scrollY={true} stickyScroll={false}
+    <scrollbox
+      ref={(el) => { scroll = el }}
+      height={rows()}
+      scrollX={false}
+      scrollY={true}
+      stickyScroll={false}
       renderAfter={() => {
         if (!followPending || !scroll) return
         followPending = false
         if (props.selectedID) scroll.scrollChildIntoView(props.selectedID)
-      }}>
+      }}
+    >
       {props.children}
     </scrollbox>
   )
 }
 
-/** TextRenderable scrolls unwrapped text independently, even with truncate.
- * Reset that local offset as the wheel bubbles up to the vertical list. */
-function DashboardRow(props: { id: string; backgroundColor?: TuiThemeCurrent["backgroundElement"]; children: JSX.Element }) {
+/** Never set truncate={true} on multi-column rows: OpenTUI's native truncate
+ * places "..." in the middle of the string, mangling the State column. Each
+ * column is already width-bounded by formatRowColumns(). */
+function DashboardRow(props: { id: string; backgroundColor?: string; onClick?: () => void; children: JSX.Element }) {
   let text: TextRenderable | undefined
   return (
-    <box id={props.id} flexDirection="row" paddingLeft={1} paddingRight={1}
-      height={1} flexShrink={0} overflow="hidden" backgroundColor={props.backgroundColor}
-      onMouseScroll={() => { if (text) { text.scrollX = 0; text.scrollY = 0 } }}>
-      <text ref={(el) => { text = el }} wrapMode="none" truncate={true} minWidth={0} flexShrink={1}>
+    <box
+      id={props.id}
+      flexDirection="row"
+      paddingLeft={1}
+      paddingRight={1}
+      height={1}
+      flexShrink={0}
+      overflow="hidden"
+      backgroundColor={props.backgroundColor}
+      onMouseScroll={() => { if (text) { text.scrollX = 0; text.scrollY = 0 } }}
+      {...(props.onClick ? ({ onMouseDown: props.onClick } as any) : {})}
+    >
+      <text ref={(el) => { text = el }} wrapMode="none">
         {props.children}
       </text>
     </box>
   )
 }
 
-/** Dashboard header: exactly two lines. Line 1 is title+project+counts;
- * line 2 is tabs+scope. Segments stay short so a phrase never wraps
- * mid-way; each line is one <text> node. A separate component (not inline)
- * so the OpenTUI test renderer can assert the two-line shape directly. */
+/** Header + navigation tabs modeled directly after the web prototype:
+ *  Line 1: LOOPD + active project + [Bug Report]
+ *  Line 2: [1] Project | [2] Fleet | [3] Commands (filled cyan active tab) */
 export function DashboardHeader(props: {
   theme: TuiThemeCurrent
   mode: string
@@ -240,43 +270,73 @@ export function DashboardHeader(props: {
   tab: "project" | "fleet" | "commands"
   projCount: number
   onBugReport: () => void
+  onSelectTab?: (tab: "project" | "fleet" | "commands") => void
 }): JSX.Element {
-  const theme = () => props.theme
-  const tabLabel = (id: "project" | "fleet" | "commands", text: string) => (
-    <span style={{ fg: props.tab === id ? theme().info : theme().textMuted, bold: props.tab === id }}>
-      {props.tab === id ? `[${text}]` : ` ${text} `}
-    </span>
-  )
-  // Three fixed lines, one responsibility each:
-  //   1 identity (title + bug action)
-  //   2 navigation (tabs) + interaction mode
-  //   3 status summary + scope
-  // Keeping them apart is what stops the header reading as one run-on line.
-  return (
-    <box flexDirection="column" flexShrink={0} gap={0}>
-      <box flexDirection="row" justifyContent="space-between" alignItems="center" height={1} overflow="hidden" flexShrink={0}>
-        <text wrapMode="none" truncate={true} minWidth={0} flexShrink={1}>
-          <span style={{ fg: theme().info, bold: true }}>⬢ Loop Dashboard</span>
+  const tabBtn = (id: "project" | "fleet" | "commands", num: string, label: string) => {
+    const active = () => props.tab === id
+    return (
+      <box
+        flexDirection="row"
+        backgroundColor={active() ? PALETTE.cyan : PALETTE.inset}
+        paddingLeft={2}
+        paddingRight={2}
+        height={1}
+        {...({ onMouseDown: () => props.onSelectTab?.(id) } as any)}
+      >
+        <text wrapMode="none">
+          <span style={{ fg: active() ? PALETTE.tabActiveFg : PALETTE.rule }}>[{num}] </span>
+          <span style={{ fg: active() ? PALETTE.tabActiveFg : PALETTE.muted, bold: active() }}>{label}</span>
         </text>
-        <box flexDirection="row" alignItems="center" backgroundColor={theme().error as unknown as string} paddingLeft={1} paddingRight={1} {...({ onMouseDown: props.onBugReport } as any)}>
-          <text><span style={{ fg: "white", bold: true }}>Bug Report</span></text>
+      </box>
+    )
+  }
+  return (
+    <box flexDirection="column" flexShrink={0} backgroundColor={PALETTE.inset}>
+      <box
+        flexDirection="row"
+        justifyContent="space-between"
+        alignItems="center"
+        paddingLeft={2}
+        paddingRight={2}
+        height={1}
+        flexShrink={0}
+      >
+        <text wrapMode="none">
+          <span style={{ fg: PALETTE.cyan, bold: true }}>LOOPD</span>
+          <span style={{ fg: PALETTE.muted }}>   </span>
+          <span style={{ fg: PALETTE.ink }}>{props.scopeName}</span>
+          <span style={{ fg: PALETTE.muted }}>   [{props.projCount} project{props.projCount === 1 ? "" : "s"}]</span>
+        </text>
+        <box
+          flexDirection="row"
+          backgroundColor={PALETTE.base}
+          paddingLeft={1}
+          paddingRight={1}
+          {...({ onMouseDown: props.onBugReport } as any)}
+        >
+          <text wrapMode="none">
+            <span style={{ fg: PALETTE.muted }}>[Bug Report]</span>
+          </text>
         </box>
       </box>
-      <box flexDirection="row" alignItems="center" height={1} overflow="hidden" flexShrink={0} gap={1}>
-        <text wrapMode="none" truncate={true} minWidth={0} flexShrink={1}>
-          {tabLabel("project", "1 Project")}
-          {tabLabel("fleet", "2 Fleet")}
-          {tabLabel("commands", "3 Commands")}
-          <span style={{ fg: theme().textMuted }}> │ </span>
-          <span style={{ fg: props.mode === "normal" ? theme().success : theme().warning, bold: true }}>{props.mode.toUpperCase()}</span>
-        </text>
-      </box>
-      <box flexDirection="row" alignItems="center" height={1} overflow="hidden" flexShrink={0}>
-        <text wrapMode="none" truncate={true} minWidth={0} flexShrink={1}>
-          <span style={{ fg: theme().text }}>{props.summary}</span>
-          <span style={{ fg: theme().textMuted }}> │ </span>
-          <span style={{ fg: theme().accent, bold: true }}>{props.scopeName}</span>
-          <span style={{ fg: theme().textMuted }}> · {props.projCount} proj</span>
+      <box
+        flexDirection="row"
+        justifyContent="space-between"
+        alignItems="center"
+        paddingLeft={1}
+        paddingRight={2}
+        height={1}
+        flexShrink={0}
+      >
+        <box flexDirection="row" gap={1} alignItems="center">
+          {tabBtn("project", "1", "Project")}
+          {tabBtn("fleet", "2", "Fleet")}
+          {tabBtn("commands", "3", "Commands")}
+        </box>
+        <text wrapMode="none">
+          <span style={{ fg: props.mode === "normal" ? PALETTE.muted : PALETTE.amber, bold: props.mode !== "normal" }}>
+            {props.mode.toUpperCase()}
+          </span>
         </text>
       </box>
     </box>
@@ -285,31 +345,30 @@ export function DashboardHeader(props: {
 
 export function LoopDashboard(props: Props) {
   const theme = () => props.api.theme.current
+  const initial = props.restoredState
   const [mode, setMode] = createSignal<Mode>("normal")
-  const [selected, setSelected] = createSignal(0)
+  const [insertKind, setInsertKind] = createSignal<InsertKind>("colon")
+  const [selected, setSelected] = createSignal(initial?.selected ?? 0)
   const [commandInput, setCommandInput] = createSignal("")
   const [statusText, setStatusText] = createSignal("")
-  // Shared Goals/Commands tabs (`/loop` opens goals, `/commands` opens
-  // commands). Goal indexes stay on the legacy `selected` signal; command
-  // selection lives on `cmdSelected` so the two never cross-apply.
-  const [tab, setTab] = createSignal<DashboardView>(normalizeInitialView(props.initialView))
-  const [cmdSelected, setCmdSelected] = createSignal(0)
-  // Project scope for the Project tab (one managed directory) and the
-  // Commands tab filter. Fleet shows all managed dirs grouped.
-  const [projectScope, setProjectScope] = createSignal<string>(props.directory)
-  const [cmdScope, setCmdScope] = createSignal<string>("all")
-  const [filterText, setFilterText] = createSignal("")
+  const [tab, setTab] = createSignal<DashboardView>(initial?.tab ?? normalizeInitialView(props.initialView))
+  const [cmdSelected, setCmdSelected] = createSignal(initial?.cmdSelected ?? 0)
+  const [projectScope, setProjectScope] = createSignal<string>(initial?.projectScope ?? props.directory)
+  const [cmdScope, setCmdScope] = createSignal<string>(initial?.cmdScope ?? "all")
+  const [filterText, setFilterText] = createSignal(initial?.filterText ?? "")
   const [collapsed, setCollapsed] = createSignal<string[]>([])
   const [coordOpen, setCoordOpen] = createSignal(false)
   const [coordTab, setCoordTab] = createSignal<CoordinationTab>("writes")
-  const [detailsOpen, setDetailsOpen] = createSignal(false)
+  const [detailsOpen, setDetailsOpen] = createSignal(initial?.detailsOpen ?? false)
   const [actionsOpen, setActionsOpen] = createSignal(false)
+  const [actionIdx, setActionIdx] = createSignal(0)
+  const [sendOpen, setSendOpen] = createSignal(false)
   const [selectedKey, setSelectedKey] = createSignal<string | undefined>(undefined)
   const [pendingRelease, setPendingRelease] = createSignal<{ callID: string; dir: string } | null>(null)
   const ownerSessionID = () => props.ownerSessionID ?? currentRouteSessionID(props.api)
-  /** Command entries across the command scope: own dir (live bus) plus
-   * managed dirs (display-only reads). Owner filter + finished hiding apply
-   * per entry; mutating actions stay own-dir only (guarded at the call site). */
+
+  let detailsScrollEl: ScrollBoxRenderable | undefined
+
   const commandEntries = (): Array<{ cmd: CommandSession; dir: string }> => {
     const dirs = cmdScope() === "all" ? managedDirs() : [cmdScope()]
     const out: Array<{ cmd: CommandSession; dir: string }> = []
@@ -323,16 +382,17 @@ export function LoopDashboard(props: Props) {
     const owned = commandEntries().filter(({ cmd }) =>
       ownerSessionID() ? cmd.ownerSessionID === ownerSessionID() : false,
     )
-    if (showCompleted()) return owned.map(({ cmd }) => cmd)
-    const terminal = ["exited", "terminated", "missing"]
-    return owned.filter(({ cmd }) => !terminal.includes(cmd.status)).map(({ cmd }) => cmd)
+    const base = showCompleted()
+      ? owned.map(({ cmd }) => cmd)
+      : owned.filter(({ cmd }) => !["exited", "terminated", "missing"].includes(cmd.status)).map(({ cmd }) => cmd)
+    const q = filterText().trim().toLowerCase()
+    if (!q) return base
+    return base.filter((c) => `${c.title} ${c.command} ${c.args.join(" ")} ${c.status}`.toLowerCase().includes(q))
   }
-  /** Directory of an owned command entry (for the foreign guard). */
   const commandDir = (commandID: string): string => {
     const hit = commandEntries().find(({ cmd }) => cmd.id === commandID)
     return hit ? hit.dir : props.directory
   }
-  /** Owned-but-finished commands hidden by the `c` toggle — surfaced in the empty state. */
   const hiddenFinishedCommands = () => {
     if (showCompleted()) return 0
     const terminal = ["exited", "terminated", "missing"]
@@ -341,22 +401,13 @@ export function LoopDashboard(props: Props) {
     ).length
   }
   const [state, setState] = createSignal<StoreState | null>(null)
-  const [hintCols, setHintCols] = createSignal(80)
+  const [hintCols, setHintCols] = createSignal(84)
   let hintBoxEl: { width?: number } | undefined
-  /** Whole-frame scroller: j/k past the last list row scrolls the frame so the
-   * inspector and drawer come into view, instead of clamping at the list end. */
-  let frameEl: ScrollBoxRenderable | undefined
-  // Refit footer hints to the measured bar width on every clock tick (cheap
-  // string math; the dashboard already re-renders for ages). Falls back to
-  // the 80-column default before the first measurement.
   createEffect(() => {
     clock()
     const w = hintBoxEl?.width
     if (typeof w === "number" && w > 0) {
-      // Reserve the borders (2), the row paddings (2), the gap (1) and the
-      // NORMAL/INSERT badge (8) plus a small safety margin: overshooting here
-      // clipped the last hint mid-word at the panel edge.
-      const cols = Math.max(20, Math.floor(w) - 20)
+      const cols = Math.max(24, Math.floor(w) - 6)
       if (cols !== hintCols()) setHintCols(cols)
     }
   })
@@ -364,18 +415,29 @@ export function LoopDashboard(props: Props) {
   const [selectedGoal, setSelectedGoal] = createSignal<Goal | null>(null)
   const [showLogs, setShowLogs] = createSignal(false)
   const [showHelp, setShowHelp] = createSignal(false)
-  const [showCompleted, setShowCompleted] = createSignal(false)
+  const [showCompleted, setShowCompleted] = createSignal(initial?.showCompleted ?? false)
   const [clock, setClock] = createSignal(Date.now())
   const [agentIndex, setAgentIndex] = createSignal<Record<string, AgentMeta>>({})
-  // Multi-project view over the single managed-dirs resolver (registry file
-  // + env + explicit). Single-dir default: [props.directory] until loaded.
   const [managedDirList, setManagedDirList] = createSignal<string[]>([props.directory])
   const managedDirs = () => managedDirList()
   const [projectStatuses, setProjectStatuses] = createSignal<ManagedDirStatus[] | null>(null)
   const [showProjects, setShowProjects] = createSignal(false)
-  // Per-directory states for the aggregate Goals tab (own dir stays on the
-  // live control-bus state; foreign dirs are read directly, display-only).
   const [managedStates, setManagedStates] = createSignal<Record<string, StoreState>>({})
+
+  // Persist view state so an Escape-intercepted remount restores seamlessly.
+  createEffect(() => {
+    lastDashboardState = {
+      tab: tab(),
+      selected: selected(),
+      cmdSelected: cmdSelected(),
+      projectScope: projectScope(),
+      cmdScope: cmdScope(),
+      filterText: filterText(),
+      showCompleted: showCompleted(),
+      detailsOpen: detailsOpen(),
+    }
+  })
+
   async function refreshProjects() {
     try {
       setManagedDirList(await resolveManagedDirs(props.directory))
@@ -385,7 +447,7 @@ export function LoopDashboard(props: Props) {
         if (dir === props.directory) continue
         try {
           states[dir] = await readState(dir)
-        } catch { /* per-dir failure shows in :projects; Goals tab keeps own goals */ }
+        } catch {}
       }
       if (!disposed) setManagedStates(states)
     } catch (e) {
@@ -396,9 +458,6 @@ export function LoopDashboard(props: Props) {
   let focusTimer: ReturnType<typeof setTimeout> | undefined
   let disposed = false
   const client = createControlClient(props.directory)
-  /** Per-directory control clients: foreign rows act on their own project bus,
-   * never the local fallback. Creation is cheap (closure over directory);
-   * a target with no live control worker surfaces an honest timeout. */
   const clients = new Map<string, ReturnType<typeof createControlClient>>([[props.directory, client]])
   function clientFor(dir: string): ReturnType<typeof createControlClient> {
     let c = clients.get(dir)
@@ -421,6 +480,62 @@ export function LoopDashboard(props: Props) {
     }, 10)
   }
 
+  function enterInsertMode(kind: InsertKind, initialValue = "") {
+    setInsertKind(kind)
+    setCommandInput(initialValue)
+    if (inputEl) inputEl.value = initialValue
+    setMode("insert")
+    focusInput()
+  }
+
+  function returnToNormalMode() {
+    setCommandInput("")
+    if (inputEl) inputEl.value = ""
+    setSendOpen(false)
+    setMode("normal")
+    focusInput()
+  }
+
+  function openSendModal() {
+    if (!selectedGoal() && tab() !== "commands") {
+      setStatusText("No worker selected")
+      return
+    }
+    setActionsOpen(false)
+    setCoordOpen(false)
+    setShowHelp(false)
+    setSendOpen(true)
+    enterInsertMode("send", "")
+  }
+
+  function openFilterBox() {
+    setActionsOpen(false)
+    setCoordOpen(false)
+    setSendOpen(false)
+    enterInsertMode("filter", filterText())
+  }
+
+  /** Dismiss the topmost child popup/drawer/input. Returns true if something
+   * was closed, false when the dashboard is already at the base view. */
+  function dismissTopSubPopup(): boolean {
+    if (pendingRelease()) { setPendingRelease(null); return true }
+    if (sendOpen()) { returnToNormalMode(); return true }
+    if (actionsOpen()) { setActionsOpen(false); return true }
+    if (coordOpen()) { setCoordOpen(false); focusInput(); return true }
+    if (showHelp()) { setShowHelp(false); return true }
+    if (showProjects()) { setShowProjects(false); return true }
+    if (mode() === "insert") {
+      if (insertKind() === "filter") setFilterText("")
+      returnToNormalMode()
+      return true
+    }
+    if (detailsOpen()) { setDetailsOpen(false); return true }
+    if (filterText()) { setFilterText(""); setStatusText("filter cleared"); return true }
+    return false
+  }
+
+  activeSubPopupDismiss = dismissTopSubPopup
+
   const refreshQueue = createDashboardRefresh(client, (s, logs) => {
     batch(() => { setState(s); setEvents(logs) })
   }, (e) => {
@@ -433,7 +548,7 @@ export function LoopDashboard(props: Props) {
       const res = await (props.api.client as any)?.app?.agents?.()
       const list = (res as any)?.data ?? res ?? []
       if (!disposed && Array.isArray(list)) setAgentIndex(indexAgents(list))
-    } catch { /* agent colors are decorative — dashboard works without them */ }
+    } catch {}
   }
   refreshAgents()
   refreshProjects()
@@ -447,6 +562,7 @@ export function LoopDashboard(props: Props) {
   ]
   onCleanup(() => {
     disposed = true
+    if (activeSubPopupDismiss === dismissTopSubPopup) activeSubPopupDismiss = undefined
     refreshQueue.dispose()
     popMode()
     if (focusTimer) clearTimeout(focusTimer)
@@ -458,18 +574,34 @@ export function LoopDashboard(props: Props) {
   })
   createEffect(() => { mode(); focusInput() })
 
-  function enterInsertMode() {
-    setCommandInput("")
-    if (inputEl) inputEl.value = ""
-    setMode("insert")
-    focusInput()
+  /** State-correct palette verbs for the selected goal (also used by Enter popup). */
+  const paletteVerbs = (): Array<{ key: string; cmd: string; label: string }> => {
+    const g = selectedGoal()
+    if (!g) return []
+    const list: Array<{ key: string; cmd: string; label: string }> = []
+    if (g.status === "paused") list.push({ key: "r", cmd: "resume", label: "Resume worker" })
+    else if (g.status === "blocked") {
+      list.push({ key: "R", cmd: "retry", label: "Retry worker" })
+      list.push({ key: "p", cmd: "pause", label: "Pause worker" })
+    } else if (g.status === "complete") {
+      list.push({ key: "x", cmd: "clear", label: "Clear completed goal" })
+    } else {
+      list.push({ key: "p", cmd: "pause", label: "Pause worker" })
+      list.push({ key: "N", cmd: "nudge", label: "Nudge with full contract" })
+      list.push({ key: "A", cmd: "abort", label: "Abort current turn only" })
+    }
+    list.push({ key: "s", cmd: "__send__", label: "Send bare input to worker" })
+    list.push({ key: "o", cmd: "open", label: "Open worker session transcript" })
+    list.push({ key: "m", cmd: "interactive", label: g.interactive ? "Switch to autonomous turns" : "Switch to manual (await input)" })
+    list.push({ key: "Esc", cmd: "__cancel__", label: "Cancel" })
+    return list
   }
 
-  function returnToNormalMode() {
-    setCommandInput("")
-    if (inputEl) inputEl.value = ""
-    setMode("normal")
-    focusInput()
+  async function runPaletteVerb(item: { key: string; cmd: string; label: string }) {
+    setActionsOpen(false)
+    if (item.cmd === "__cancel__") return
+    if (item.cmd === "__send__") { openSendModal(); return }
+    await executeCommand(item.cmd)
   }
 
   useKeyboard((evt: ParsedKey) => {
@@ -484,28 +616,151 @@ export function LoopDashboard(props: Props) {
       }
     })()
     if (!active) return
-    const isColon = name === ":" || seq === ":" || raw === ":" || seq.includes(":") || raw.includes(":") || name === ";" || name === "colon"
-    const isQuestion = name === "?" || seq === "?" || raw === "?" || seq.includes("?") || raw.includes("?")
-    // Insert mode: the ONLY keys that act here are Enter (send), Escape and
-    // Ctrl+N (back to normal). Everything else must reach the input as text.
-    // Enter is handled here — not in the input's onKeyDown — because the
-    // focused InputRenderable consumes Enter internally and our prop handler
-    // never reliably fires for it (typing worked, sending never did).
+    const isColon = name === ":" || seq === ":" || raw === ":" || name === "colon"
+    const isQuestion = name === "?" || seq === "?" || raw === "?"
+
+    // Insert mode (Send modal, Filter box, or :command bar)
     if (mode() === "insert") {
-      if (isEnterKey(evt)) { prevent(evt); void executeCommand(commandInput()); return }
       if (isEscapeKey(evt) || isCtrlN(evt)) {
         prevent(evt)
+        if (insertKind() === "filter") setFilterText("")
         returnToNormalMode()
+        return
+      }
+      if (isEnterKey(evt)) {
+        prevent(evt)
+        const val = commandInput().trim()
+        const kind = insertKind()
+        if (kind === "filter") {
+          setFilterText(val)
+          setStatusText(val ? `filter: "${val}"` : "filter cleared")
+          returnToNormalMode()
+          return
+        }
+        if (kind === "send") {
+          returnToNormalMode()
+          if (!val) return
+          if (tab() === "commands") {
+            void executeCommand(val)
+          } else {
+            void executeCommand(`send ${val}`)
+          }
+          return
+        }
+        void executeCommand(val)
         return
       }
       return
     }
-    if (isColon) { prevent(evt); enterInsertMode(); return }
-    if (isQuestion) { prevent(evt); setShowHelp((value) => !value); return }
+
     const key = raw || seq || name
-    // Ctrl-C on the Commands tab interrupts the selected command (SIGINT
-    // delivery, never a kill) — mirrors the fallback panel. Plain `c`
-    // (below) still toggles completed goals.
+
+    // 1. Release confirmation modal
+    if (pendingRelease()) {
+      if (key === "y" || isEnterKey(evt)) {
+        prevent(evt)
+        const target = pendingRelease()!
+        setPendingRelease(null)
+        void releaseWorkspaceFences({ callID: target.callID }, target.dir)
+        return
+      }
+      if (isEscapeKey(evt) || key === "n") {
+        prevent(evt)
+        setPendingRelease(null)
+        return
+      }
+      return
+    }
+
+    // 2. Actions popup modal (j/k + Enter + hotkeys + Esc)
+    if (actionsOpen()) {
+      const verbs = paletteVerbs()
+      if (isEscapeKey(evt)) { prevent(evt); setActionsOpen(false); return }
+      if (name === "down" || key === "j") {
+        prevent(evt)
+        setActionIdx((i) => Math.min(verbs.length - 1, i + 1))
+        return
+      }
+      if (name === "up" || key === "k") {
+        prevent(evt)
+        setActionIdx((i) => Math.max(0, i - 1))
+        return
+      }
+      if (isEnterKey(evt)) {
+        prevent(evt)
+        const chosen = verbs[actionIdx()]
+        if (chosen) void runPaletteVerb(chosen)
+        return
+      }
+      const match = verbs.find((v) => v.key === key)
+      if (match) {
+        prevent(evt)
+        void runPaletteVerb(match)
+        return
+      }
+      return
+    }
+
+    // 3. Coordination drawer modal (w/v/r or 1/2/3 or Tab switches sub-tab, W releases, Esc closes)
+    if (coordOpen()) {
+      if (isEscapeKey(evt) || key === "t") {
+        prevent(evt)
+        setCoordOpen(false)
+        focusInput()
+        return
+      }
+      if (key === "w" || key === "1") { prevent(evt); setCoordTab("writes"); return }
+      if (key === "v" || key === "2") { prevent(evt); setCoordTab("verify"); return }
+      if (key === "r" || key === "3") { prevent(evt); setCoordTab("resv"); return }
+      if (name === "tab" || name === "right" || key === "l") {
+        prevent(evt)
+        setCoordTab((t) => (t === "writes" ? "verify" : t === "verify" ? "resv" : "writes"))
+        return
+      }
+      if (name === "left" || key === "h") {
+        prevent(evt)
+        setCoordTab((t) => (t === "resv" ? "verify" : t === "verify" ? "writes" : "resv"))
+        return
+      }
+      if (key === "W") {
+        prevent(evt)
+        const first = coordModel().reservations[0]
+        if (first) setPendingRelease({ callID: first.callID, dir: coordDir() })
+        else void releaseWorkspaceFences({}, coordDir())
+        return
+      }
+      return
+    }
+
+    // 4. Help or Projects popup
+    if (showHelp()) {
+      if (isEscapeKey(evt) || isQuestion || key === "q") {
+        prevent(evt)
+        setShowHelp(false)
+        return
+      }
+      return
+    }
+    if (showProjects()) {
+      if (isEscapeKey(evt) || key === "q") {
+        prevent(evt)
+        setShowProjects(false)
+        return
+      }
+    }
+
+    // 5. Escape in base view closes Details or clears Filter before closing dialog
+    if (isEscapeKey(evt)) {
+      if (dismissTopSubPopup()) {
+        prevent(evt)
+        return
+      }
+      return
+    }
+
+    if (isColon) { prevent(evt); enterInsertMode("colon", ""); return }
+    if (isQuestion) { prevent(evt); setShowHelp((v) => !v); return }
+
     if (tab() === "commands" && Boolean(evt.ctrl) && name === "c") {
       prevent(evt)
       const sel = selectedCommand()
@@ -513,15 +768,11 @@ export function LoopDashboard(props: Props) {
       void executeCommandRaw("cmd_interrupt", { commandID: sel.id }, sel.id)
       return
     }
-    if (key === "c") {
+    if (key === "c" || key === "h") {
       prevent(evt)
       setShowCompleted((v) => {
         const next = !v
-        // Same toggle on both tabs: goals hide `complete`, commands hide
-        // exited/terminated/missing.
-        setStatusText(next
-          ? `Showing finished ${tab() === "commands" ? "commands" : "goals"}.`
-          : `Hiding finished ${tab() === "commands" ? "commands" : "goals"}.`)
+        setStatusText(next ? "History shown" : "History hidden")
         return next
       })
       return
@@ -539,17 +790,31 @@ export function LoopDashboard(props: Props) {
       setTab(directionalView)
       return
     }
+    // J / K (Shift+j / Shift+k) or PageDown / PageUp scrolls Details directly
+    if (detailsOpen() && (key === "J" || name === "pagedown")) {
+      prevent(evt)
+      detailsScrollEl?.scrollBy({ x: 0, y: 2 })
+      return
+    }
+    if (detailsOpen() && (key === "K" || name === "pageup")) {
+      prevent(evt)
+      detailsScrollEl?.scrollBy({ x: 0, y: -2 })
+      return
+    }
     function dashboardSelection(): DashboardSelection {
       return { view: tab(), goalIndex: selected(), commandIndex: cmdSelected() }
     }
     function applyMove(move: "down" | "up" | "first" | "last") {
-      const last = Math.max(0, currentGoals.length - 1)
+      const last = Math.max(0, (tab() === "commands" ? currentCommands.length : currentGoals.length) - 1)
       const selectedNow = tab() === "commands" ? cmdSelected() : selected()
-      // Past the list boundary, walk the frame instead: the list is capped,
-      // so the remaining content (inspector, details, logs) lives below the
-      // fold exactly as on the prototype's scrollable page.
-      if (move === "down" && selectedNow >= last) { frameEl?.scrollBy({ x: 0, y: 1 }); return }
-      if (move === "up" && selectedNow <= 0 && (frameEl?.scrollTop ?? 0) > 0) { frameEl?.scrollBy({ x: 0, y: -1 }); return }
+      if (detailsOpen() && move === "down" && selectedNow >= last) {
+        detailsScrollEl?.scrollBy({ x: 0, y: 1 })
+        return
+      }
+      if (detailsOpen() && move === "up" && selectedNow <= 0 && (detailsScrollEl?.scrollTop ?? 0) > 0) {
+        detailsScrollEl?.scrollBy({ x: 0, y: -1 })
+        return
+      }
       const next = moveDashboardSelection(dashboardSelection(), move, currentGoals.length, currentCommands.length)
       setSelected(next.goalIndex)
       setCmdSelected(next.commandIndex)
@@ -558,10 +823,7 @@ export function LoopDashboard(props: Props) {
     if (name === "up" || key === "k") { prevent(evt); applyMove("up"); return }
     if (key === "g") { prevent(evt); applyMove("first"); return }
     if (key === "G") { prevent(evt); applyMove("last"); return }
-    // Commands-tab helpers are tab-scoped: X force-kills (SIGKILL now),
-    // R restarts with the same spec, x removes finished commands (running
-    // ones get a hint, never a kill). Goal keys R/x keep their Goals-tab
-    // meaning; only p/r/A/N are refused here.
+
     if (tab() === "commands" && key === "X") {
       prevent(evt)
       void killSelectedCommand()
@@ -577,12 +839,9 @@ export function LoopDashboard(props: Props) {
       removeFinishedSelected()
       return
     }
-    // Goal controls apply to the worker tabs — never on Commands or to a
-    // command selection. Model controls (model/models) are goal verbs too.
-    const needsWorkerTab = ["p", "r", "A", "N", "W", "model", "models", "agent", "agents"].includes(key)
-    if (needsWorkerTab && tab() === "commands") {
+    if (tab() === "commands" && ["p", "r", "A", "N"].includes(key)) {
       prevent(evt)
-      setStatusText("Goal controls need the Project or Fleet tab (Tab to switch).")
+      setStatusText(`Key "${key}" is a Worker control — switch to [1] Project or [2] Fleet.`)
       return
     }
     if (key === "p") { prevent(evt); void executeCommand("pause"); return }
@@ -591,70 +850,43 @@ export function LoopDashboard(props: Props) {
     if (key === "x") { prevent(evt); void executeCommand("clear"); return }
     if (key === "A") { prevent(evt); void executeCommand("abort"); return }
     if (key === "N") { prevent(evt); void executeCommand("nudge"); return }
-    // Revamp keys: history, filter, details, coordination, send-prefill.
-    // `h` no longer selects a tab (`1` covers Project); `l` still opens
-    // Commands alongside `3`.
-    if (key === "h") {
-      prevent(evt)
-      setShowCompleted((v) => {
-        const next = !v
-        setStatusText(next ? "Showing finished goals and commands." : "Hiding finished goals and commands.")
-        return next
-      })
-      return
-    }
     if (key === "/") {
       prevent(evt)
-      // Filter runs through the command input (:filter) — no second focusable.
-      setCommandInput("filter ")
-      if (inputEl) inputEl.value = "filter "
-      setMode("insert")
-      focusInput()
+      openFilterBox()
       return
     }
     if (key === "d") { prevent(evt); setDetailsOpen((v) => !v); return }
     if (key === "t") { prevent(evt); setCoordOpen((v) => !v); return }
     if (key === "s") {
       prevent(evt)
-      if (!selectedGoal()) { setStatusText("No goal selected"); return }
-      setCommandInput("send ")
-      if (inputEl) inputEl.value = "send "
-      setMode("insert")
-      focusInput()
+      openSendModal()
       return
     }
-    if (isEnterKey(evt)) { prevent(evt); setActionsOpen((v) => !v); return }
-    if (pendingRelease()) {
-      if (key === "y") {
-        prevent(evt)
-        const target = pendingRelease()!
-        setPendingRelease(null)
-        void releaseWorkspaceFences({ callID: target.callID }, target.dir)
+    if (key === "f" && tab() === "fleet" && selectedGoal()) {
+      prevent(evt)
+      const dir = selectedDir()
+      setProjectScope(dir)
+      setTab("project")
+      setSelected(0)
+      setStatusText(`scope: ${dir.split("/").pop() || dir}`)
+      return
+    }
+    if (isEnterKey(evt)) {
+      prevent(evt)
+      if (tab() === "commands") {
+        openSendModal()
         return
       }
-      if (isEscapeKey(evt)) { prevent(evt); setPendingRelease(null); return }
-    }
-    if (key === "[") {
-      prevent(evt)
-      cycleScope(-1)
+      setActionIdx(0)
+      setActionsOpen(true)
       return
     }
-    if (key === "]") {
-      prevent(evt)
-      cycleScope(1)
-      return
-    }
-    if (isEscapeKey(evt)) {
-      if (actionsOpen()) { prevent(evt); setActionsOpen(false); return }
-      if (detailsOpen()) { prevent(evt); setDetailsOpen(false); return }
-      if (coordOpen()) { prevent(evt); setCoordOpen(false); focusInput(); return }
-      if (filterText()) { prevent(evt); setFilterText(""); setStatusText("filter cleared"); return }
-    }
+    if (key === "[") { prevent(evt); cycleScope(-1); return }
+    if (key === "]") { prevent(evt); cycleScope(1); return }
     if (key === "W") {
       prevent(evt)
-      // One-key fence release for the selected goal's own project bus.
       if (fenceCount() === 0) {
-        setStatusText("No workspace fences to release — nothing is blocking writes or checks.")
+        setStatusText("No workspace fences to release.")
         return
       }
       const goal = selectedGoal()
@@ -664,9 +896,6 @@ export function LoopDashboard(props: Props) {
     if (key === "L") { prevent(evt); setShowLogs((value) => !value); return }
     if (key === "o") {
       prevent(evt)
-      // `o` dispatches by active selection type: goals open their native
-      // worker session; commands close the popup and open the fullscreen
-      // terminal route. Never cross-applies.
       const target = resolveDashboardOpen(
         { goals: activeGoals().map((e) => e.goal), commands: state()?.commands ?? [] },
         dashboardSelection(),
@@ -697,28 +926,15 @@ export function LoopDashboard(props: Props) {
             ? "No worker session"
             : target.reason === "no-command"
               ? "No command selected."
-              : target.reason === "owner-required"
-                ? "No owning session — open disabled."
-                : target.reason === "return-required"
-                  ? "No return session — open disabled."
-                  : "Nothing to open.",
+              : "Nothing to open.",
         )
       }
       return
     }
-    if (key === "B") {
-      prevent(evt)
-      handleBugReport()
-      return
-    }
+    if (key === "B") { prevent(evt); handleBugReport(); return }
     if (key === "q") { prevent(evt); props.api.ui.dialog.clear(); return }
   })
 
-  const goals = () => state()?.goals.filter((g) => showCompleted() || g.status !== "complete") || []
-
-  /** Raw control-bus send for the Commands tab (owner-scoped, fail closed).
-   * Mutations route to the local bus only: foreign rows are display-only
-   * (open their own dashboard or steer via agent tools). */
   async function executeCommandRaw(command: string, args: Record<string, unknown>, commandID?: string) {
     const owner = ownerSessionID()
     if (!owner) {
@@ -743,15 +959,10 @@ export function LoopDashboard(props: Props) {
     return ownerCommands()[cmdSelected()] ?? null
   }
 
-  /**
-   * Inspect or release workspace fences through the same goalService path the
-   * agent tool uses. No selector = inspect; every safety refusal is reported
-   * verbatim. Refresh afterwards: the fence state is what the user acted on.
-   */
   async function releaseWorkspaceFences(selection: { callID?: string; goalID?: string; sessionID?: string }, dir?: string) {
     const owner = ownerSessionID()
     if (!owner) {
-      setStatusText("No owning session (open from a session view) — release disabled.")
+      setStatusText("No owning session — release disabled.")
       return
     }
     const targetDir = dir ?? props.directory
@@ -776,7 +987,6 @@ export function LoopDashboard(props: Props) {
     }
   }
 
-  /** Commands-tab process helpers (X/R keys + colon). */
   async function killSelectedCommand() {
     const sel = selectedCommand()
     if (!sel) { setStatusText("No command selected."); return }
@@ -787,29 +997,24 @@ export function LoopDashboard(props: Props) {
     const sel = selectedCommand()
     if (!sel) { setStatusText("No command selected."); return }
     await executeCommandRaw("cmd_restart", { commandID: sel.id }, sel.id)
-    return
   }
 
   function removeFinishedSelected() {
     const sel = selectedCommand()
     if (!sel) { setStatusText("No command selected."); return }
     if (sel.status === "running") {
-      setStatusText(`"${sel.title}" is still running — X force kill · :terminate graceful · q detach (keeps running).`)
+      setStatusText(`"${sel.title}" is still running — X force kill · :terminate graceful.`)
       return
     }
     void executeCommandRaw("cmd_remove", { commandID: sel.id }, sel.id)
   }
 
-  /** Commands-tab colon commands: launch/open/interrupt/terminate/kill/restart/remove/write. */
-  async function executeCommandTabCommand(verb: string, positional: string[], raw: string) {
+  async function executeCommandTabCommand(verb: string, _positional: string[], raw: string) {
     switch (verb) {
       case "model": case "models": case "agent": case "agents":
-        setStatusText(`:${verb} is only available on the Goals tab.`)
+        setStatusText(`:${verb} is only available on the Project / Fleet tabs.`)
         return
       case "new": {
-        // Parse the raw tail after `new` (not the re-joined positionals) so
-        // quoted/escaped boundaries survive: :new bash -c "echo hi" spawns
-        // bash with argv ["-c", "echo hi"].
         const argv = parseNewCommand(raw)
         if (!argv) {
           setStatusText("Usage: :new <command> [args...]")
@@ -846,12 +1051,9 @@ export function LoopDashboard(props: Props) {
       case "projects": {
         setShowProjects(true)
         await refreshProjects()
-        const list = projectStatuses() ?? []
-        setStatusText(list.length ? list.map((p) => `${p.directory}: ${p.total} goals (${p.active} active, ${p.blocked} blocked)`).join(" · ") : `${managedDirs().length} project(s): ${managedDirs().join(", ")}`)
         return
       }
       default: {
-        // Bare text → stdin of the selected command (newline-terminated).
         if (selectedCommand()) {
           const payload = raw.endsWith("\n") ? raw : `${raw}\n`
           await executeCommandRaw("cmd_write", { commandID: selectedCommand()!.id, input: payload }, selectedCommand()!.id)
@@ -863,24 +1065,14 @@ export function LoopDashboard(props: Props) {
   async function executeCommand(cmd: string) {
     const parsed = parseCommand(cmd)
     if (!parsed) { setStatusText("Empty command"); return }
-    // Commands tab: launch/open/interrupt/remove/write on the selected
-    // command — goal actions never run here.
-    if (tab() === "commands" && !["q", "close"].includes(parsed.command)) {
+    if (tab() === "commands" && !["q", "close", "filter", "project", "history"].includes(parsed.command)) {
       await executeCommandTabCommand(parsed.command, parsed.positional, parsed.raw)
       returnToNormalMode()
       return
     }
-    // Goal verbs reach the selected goal's own project bus (see bus above):
-    // foreign rows act remotely, never through the local fallback. The old
-    // display-only guard is gone — routing replaced blocking.
-    // Worker-tab verbs route through the selected goal's own project bus
-    // (per-directory client). A target with no live control worker answers
-    // with an honest timeout — never a local fallback, never fake success.
     const verbDir = selectedGoal() ? goalDir(selectedGoal()!.id) : props.directory
     const bus = clientFor(verbDir)
-    // Immediate feedback: the control round-trip can take seconds (or time
-    // out at 30s), and silence until then reads as "keys do nothing".
-    if (!["help", "logs", "q", "close"].includes(parsed.command)) {
+    if (!["help", "logs", "q", "close", "filter", "project", "history", "collapse", "focus"].includes(parsed.command)) {
       setStatusText(`sending ${parsed.command}…`)
     }
     try {
@@ -897,22 +1089,19 @@ export function LoopDashboard(props: Props) {
             break
           }
           const match = managedDirs().find((d) => d === name || d.split("/").pop() === name || String(managedDirs().indexOf(d) + 1) === name)
-          if (!match) { setStatusText(`Unknown project "${name}" — :project lists managed dirs.`); break }
+          if (!match) { setStatusText(`Unknown project "${name}"`); break }
           if (tab() === "commands") setCmdScope(match)
           else setProjectScope(match)
           setSelected(0)
-          setStatusText(`scope: ${match}`)
+          setStatusText(`scope: ${match.split("/").pop() || match}`)
           break
         }
         case "collapse": {
           const name = parsed.positional.join(" ").trim()
           const dir = name
-            ? (managedDirs().find((d) => d === name || d.split("/").pop() === name) ?? null)
-            : (selectedDir() || null)
-          if (!dir) { setStatusText(`Unknown project "${name}"`); break }
-          setCollapsed(toggleCollapsed(collapsed(), dir))
-          setSelected(0)
-          setStatusText(collapsed().includes(dir) ? `collapsed ${dir}` : `expanded ${dir}`)
+            ? managedDirs().find((d) => d === name || d.split("/").pop() === name) ?? selectedDir()
+            : selectedDir()
+          setCollapsed((list) => toggleCollapsed(list, dir))
           break
         }
         case "focus": {
@@ -921,18 +1110,18 @@ export function LoopDashboard(props: Props) {
           setTab("project")
           setSelected(0)
           setFilterText("")
-          setStatusText(`scope: ${dir}`)
+          setStatusText(`scope: ${dir.split("/").pop() || dir}`)
           break
         }
         case "history": {
           setShowCompleted((v) => !v)
-          setStatusText(showCompleted() ? "Showing finished goals and commands." : "Hiding finished goals and commands.")
+          setStatusText(showCompleted() ? "History shown" : "History hidden")
           break
         }
         case "send": {
           if (!selectedGoal()) { setStatusText("No goal selected"); break }
           const message = parsed.positional.join(" ") || parsed.args.message || ""
-          if (!message) { setStatusText("Usage: :send <message>"); break }
+          if (!message) { openSendModal(); return }
           const r = await bus.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "send", goalID: selectedGoal()!.id, args: { message } })
           setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh()
           break
@@ -944,7 +1133,7 @@ export function LoopDashboard(props: Props) {
             props.api.route.navigate("session", { sessionID: goal.workerSessionID })
             props.api.ui.dialog.clear()
           } catch {
-            setStatusText("Navigate unsupported here — read the transcript via agent tools (read_goal_transcript).")
+            setStatusText("Navigate unsupported here — read transcript via read_goal_transcript.")
           }
           return
         }
@@ -980,7 +1169,7 @@ export function LoopDashboard(props: Props) {
         case "agent": {
           if (!selectedGoal()) { setStatusText("No goal selected"); break }
           const agent = parsed.positional.join(" ").trim()
-          if (!agent) { setStatusText("Usage: :agent <name> — :agents lists available agents."); break }
+          if (!agent) { setStatusText("Usage: :agent <name>"); break }
           const r = await bus.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "switch_goal_identity", goalID: selectedGoal()!.id, args: { agent } })
           setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh()
           break
@@ -993,7 +1182,7 @@ export function LoopDashboard(props: Props) {
         case "model": {
           if (!selectedGoal()) { setStatusText("No goal selected"); break }
           const target = parsed.positional.join(" ").trim()
-          if (!target) { setStatusText("Usage: :model <provider/model> — e.g. :model openai/gpt-5.6-sol. :models lists what's available."); break }
+          if (!target) { setStatusText("Usage: :model <provider/model>"); break }
           const r = await bus.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "switch_goal_identity", goalID: selectedGoal()!.id, args: { model: target } })
           setStatusText(r.ok ? r.message : `Error: ${r.message}`); if (r.ok) await refresh()
           break
@@ -1011,31 +1200,22 @@ export function LoopDashboard(props: Props) {
           })
           break
         }
-        // Legacy: keep :goal start but redirect — creation belongs in parent chat
-        case "goal": { setStatusText("Create goals via /goal in the parent chat (agent clarifies first). Dashboard: :send to steer the worker."); break }
+        case "goal": { setStatusText("Create goals via /goal in parent chat."); break }
         case "bug":
-        case "report": {
-          handleBugReport()
-          break
-        }
+        case "report": { handleBugReport(); break }
         case "logs": setShowLogs(!showLogs()); break
         case "help": setShowHelp(true); break
         case "projects": {
           setShowProjects(!showProjects())
-          if (showProjects()) {
-            await refreshProjects()
-            const list = projectStatuses() ?? []
-            setStatusText(list.length ? list.map((p) => `${p.directory}: ${p.total} goals (${p.active} active, ${p.blocked} blocked)`).join(" · ") : `${managedDirs().length} project(s): ${managedDirs().join(", ")}`)
-          }
+          if (showProjects()) await refreshProjects()
           break
         }
         case "q": case "close": props.api.ui.dialog.clear(); return
         default: {
-          // Bare text in insert mode → treat as send to selected goal
           if (parsed.command && selectedGoal()) {
             const message = parsed.raw
             const r = await bus.execute({ version: 1, requestID: randomUUID(), requestedAt: new Date().toISOString(), command: "send", goalID: selectedGoal()!.id, args: { message } })
-            setStatusText(r.ok ? `sent: ${message.slice(0, 80)}` : `Error: ${r.message}`); if (r.ok) await refresh()
+            setStatusText(r.ok ? `sent: ${message.slice(0, 60)}` : `Error: ${r.message}`); if (r.ok) await refresh()
           } else setStatusText(`Unknown: ${parsed.command}. ? for help`)
         }
       }
@@ -1043,9 +1223,6 @@ export function LoopDashboard(props: Props) {
     returnToNormalMode()
   }
 
-  /** Worker rows for the active tab. Project shows one managed directory
-   * (projectScope); Fleet merges all managed dirs; both hide completed
-   * unless history is on, then apply the text filter. */
   const activeGoals = () => {
     const inScope = (g: Goal) => showCompleted() || g.status !== "complete"
     if (tab() === "fleet") {
@@ -1069,28 +1246,30 @@ export function LoopDashboard(props: Props) {
       : (managedStates()[dir]?.goals ?? [])
     return list.filter(inScope).map((goal) => ({ goal, dir }))
   }
-  /** Row models for the table: filtered, with stable directory+ID keys. */
+
+  const activeFilterQuery = () =>
+    mode() === "insert" && insertKind() === "filter" ? commandInput() : filterText()
+
   const rowModels = (): RowModel[] => {
     const now = clock()
     const rows = activeGoals().map(({ goal, dir }) => toRowModel(goal, dir, runtimeFor(goal.id), now))
-    return filterRows(rows, filterText())
+    return filterRows(rows, activeFilterQuery())
   }
-  /** Actions/coordination take over the panel like the prototype's modal:
-   * while either is open the table and inspector step aside so the panel owns
-   * the viewport instead of getting squeezed into a few rows. */
-  const panelOpen = () => actionsOpen() || coordOpen()
-  /** Display list for the worker tabs: flat rows on Project, directory
-   * group headers + rows on Fleet. Selection addresses rows only.
-   *
-   * Expanded-detail mode (`d`): the table collapses to the selected row only,
-   * so the inspector + technical drawer get the vertical space. j/k still
-   * walks every worker; the visible row follows the selection, and closing
-   * the drawer restores the full table. This mirrors the prototype's
-   * "detail open = one row" rule and avoids a cropped drawer. */
+
+  /** Modal popups take the main body so they behave like real dialogs and
+   * never stretch or clip the dashboard vertically. */
+  const modalPopupOpen = () =>
+    Boolean(pendingRelease()) || sendOpen() || actionsOpen() || coordOpen() || showHelp() || showProjects()
+
+  /** When Details (`d`) is open, collapse the worker table to the 1 selected
+   * row so the Details drawer gets the vertical space without overflowing.
+   * j/k still walks all rows; closing Details restores the full table. */
   const displayItems = (): Array<{ kind: "header"; dir: string; group: DirectoryGroup } | { kind: "row"; row: RowModel; index: number }> => {
     const all = rowModels()
     const rows = detailsOpen() ? all.slice(selected(), selected() + 1) : all
-    if (tab() !== "fleet") return rows.map((row) => ({ kind: "row" as const, row, index: all.indexOf(row) }))
+    if (tab() !== "fleet" || detailsOpen()) {
+      return rows.map((row) => ({ kind: "row" as const, row, index: all.indexOf(row) }))
+    }
     const out: Array<{ kind: "header"; dir: string; group: DirectoryGroup } | { kind: "row"; row: RowModel; index: number }> = []
     for (const group of groupByDirectory(rows, collapsed())) {
       out.push({ kind: "header", dir: group.directory, group })
@@ -1100,7 +1279,7 @@ export function LoopDashboard(props: Props) {
     }
     return out
   }
-  /** Which project a listed goal belongs to (own dir unless found elsewhere). */
+
   const goalDir = (goalID: string): string => {
     if ((state()?.goals ?? []).some((g) => g.id === goalID)) return props.directory
     for (const [dir, st] of Object.entries(managedStates())) {
@@ -1108,30 +1287,20 @@ export function LoopDashboard(props: Props) {
     }
     return props.directory
   }
-  /** Runtime for a listed goal, from its own project's state. */
+
   const runtimeFor = (goalID: string): GoalRuntimeState | undefined =>
     state()?.runtimes.find((r) => r.goalID === goalID)
     ?? Object.values(managedStates()).map((st) => (st.runtimes ?? []).find((r) => r.goalID === goalID)).find(Boolean)
-  /** Recent event lines for a goal's technical drawer. */
+
   const recentTranscriptFor = (goalID: string): string[] =>
     events()
       .filter((e) => (e as { goalID?: string }).goalID === goalID)
-      .slice(-12)
+      .slice(-10)
       .map((e) => {
         const ev = e as { type?: string; summary?: string }
         return `${String(ev.type ?? "event")}${ev.summary ? ` — ${ev.summary}` : ""}`.slice(0, 160)
       })
-  /** State-correct palette verbs for the selected goal. */
-  const paletteVerbs = (): Array<{ key: string; label: string }> => {
-    const g = selectedGoal()
-    if (!g) return []
-    if (g.status === "paused") return [{ key: "r", label: "Resume worker" }]
-    if (g.status === "blocked") return [{ key: "R", label: "Retry worker" }, { key: "p", label: "Pause worker" }]
-    if (g.status === "complete") return [{ key: "x", label: "Clear (removes goal)" }]
-    return [{ key: "p", label: "Pause worker" }, { key: "N", label: "Nudge with full contract" }]
-  }
-  /** Project context for the coordination drawer: fleet follows the
-   * selected row, project tab follows scope, commands tab follows filter. */
+
   const coordDir = () => {
     if (tab() === "fleet") return selectedDir()
     if (tab() === "commands") return cmdScope() === "all" ? props.directory : cmdScope()
@@ -1139,13 +1308,13 @@ export function LoopDashboard(props: Props) {
   }
   const stateForDir = (dir: string): StoreState | null =>
     dir === props.directory ? state() : (managedStates()[dir] ?? null)
-  /** Coordination model built from authoritative store reads only. */
+
   const coordModel = (): CoordinationModel => {
     const dir = coordDir()
     const st = stateForDir(dir)
     const goals = st?.goals ?? []
     const nameOf = (goalID: string | undefined) =>
-      (goalID && goals.find((g) => g.id === goalID)?.name) || (goalID ?? "").slice(0, 8)
+      (goalID && goals.find((g) => g.id === goalID)?.name) || (goalID ?? "").slice(0, 8) || "owner/session"
     const holds = (st?.writeTickets?.holders ?? []).map((h) => ({
       files: h.files ?? [],
       sessionID: h.sessionID ?? "?",
@@ -1168,7 +1337,7 @@ export function LoopDashboard(props: Props) {
     if (op) blockers.push({ kind: "operation", text: `operation ${op.id}`, holder: `session ${op.sessionID}${op.goalID ? ` · ${nameOf(op.goalID)}` : ""}` })
     for (const h of holds) blockers.push({ kind: "ticket", text: `ticket on ${h.files.join(", ").slice(0, 60)}`, holder: `${h.goalName} · held ${h.age}` })
     for (const c of (st?.workspaceCalls ?? []).filter((c) => c.uncontrolled)) {
-      blockers.push({ kind: "uncontrolled", text: "live shell/command (writes unknown)", holder: `session ${(c.sessionID ?? "").slice(0, 12)}…`, age: ageText(c.at, clock()) })
+      blockers.push({ kind: "uncontrolled", text: "live shell/command", holder: `session ${(c.sessionID ?? "").slice(0, 12)}…`, age: ageText(c.at, clock()) })
     }
     for (const c of (st?.workspaceCalls ?? []).filter((c) => (c.paths?.length ?? 0) > 0)) {
       blockers.push({ kind: "legacy", text: `legacy write on ${(c.paths ?? []).join(", ").slice(0, 60)}`, holder: `session ${(c.sessionID ?? "").slice(0, 12)}…`, age: ageText(c.at, clock()) })
@@ -1179,20 +1348,19 @@ export function LoopDashboard(props: Props) {
       holds,
       queue,
       verifyBlockers: blockers,
-      verifyNote: blockers.length === 0 ? "quiet — checks can run" : undefined,
+      verifyNote: blockers.length === 0 ? "Workspace quiet — checks can run" : undefined,
       reservations: (st?.workspaceCalls ?? []).map((c) => ({
         callID: c.callID,
         sessionID: c.sessionID ?? "?",
         goalName: nameOf(c.goalID),
         live: true,
-        releasable: false,
-        reason: "liveness unconfirmed from here — Inspect refreshes from server; release asks the server, refusal names why",
+        releasable: true,
+        reason: "Server verifies ownership and liveness before releasing.",
         age: ageText(c.at, clock()),
       })),
     }
   }
-  /** Cycle the scope picker: project tab rotates projectScope, commands
-   * tab rotates cmdScope (including "all"). Selection resets. */
+
   function cycleScope(dir: 1 | -1) {
     if (tab() === "commands") {
       const opts = ["all", ...managedDirs()]
@@ -1202,49 +1370,47 @@ export function LoopDashboard(props: Props) {
       return
     }
     const dirs = managedDirs()
-    if (dirs.length <= 1) { setStatusText("one project managed — :project lists managed dirs"); return }
+    if (dirs.length <= 1) { setStatusText("1 project managed — :projects lists registry"); return }
     const idx = dirs.indexOf(projectScope())
     setProjectScope(dirs[(idx + dir + dirs.length) % dirs.length]!)
     setSelected(0)
   }
-  /** Compact scope summary for the header: needs-action / working / awaiting.
-   * Completed stay hidden with no giant done count. */
-  const scopeSummaryText = () => {
-    if (tab() === "commands") {
-      const running = ownerCommands().filter((c) => c.status === "running").length
-      return `${running} running · ${ownerCommands().length} shown`
-    }
+
+  const scopeSummaryCounts = () => {
     const entries = activeGoals()
-    const s = summarizeScope(
+    return summarizeScope(
       entries.map((e) => e.goal),
       (i) => {
         const rt = runtimeFor(entries[i]!.goal.id) as (GoalRuntimeState & { activeRunID?: string }) | undefined
         return entries[i]!.goal.interactive === true && !!rt && rt.phase === "idle" && !rt.activeRunID
       },
     )
-    return summaryText(s)
+  }
+
+  const scopeSummaryText = () => {
+    if (tab() === "commands") {
+      const running = ownerCommands().filter((c) => c.status === "running").length
+      return `${running} running · ${ownerCommands().length} shown`
+    }
+    return summaryText(scopeSummaryCounts())
   }
   const fenceCount = () => state()?.workspaceCalls?.length || 0
 
   function handleBugReport() {
     const goal = selectedGoal()
-    const extra = goal ? `Goal: ${goal.name} (${goal.id.slice(0, 8)}) status=${goal.status} objective=${goal.objective.slice(0, 120)}` : "No goal selected"
+    const extra = goal ? `Goal: ${goal.name} (${goal.id.slice(0, 8)}) status=${goal.status}` : "No goal selected"
     const url = bugReportUrl({ runtimeLabel: `opencode-loopd dashboard`, extra })
     const res = openBrowserUrl(url)
-    setStatusText(res.status === "opened" ? "Opening bug report in browser…" : `Could not open browser: ${res.reason} — ${url}`)
+    setStatusText(res.status === "opened" ? "Opening bug report in browser…" : `Bug report: ${url}`)
   }
 
   createEffect(() => {
     const rows = rowModels()
     setSelected(Math.max(0, Math.min(selected(), Math.max(0, rows.length - 1))))
-    setCmdSelected(Math.max(0, Math.min(cmdSelected(), ownerCommands().length - 1)))
-    // Selection follows the filtered row list; resolve back to the goal entry
-    // so inspector/actions never target a hidden or stale row.
+    setCmdSelected(Math.max(0, Math.min(cmdSelected(), Math.max(0, ownerCommands().length - 1))))
     const row = rows[selected()] ?? null
     const entry = row ? activeGoals().find((e) => e.goal.id === row.id && e.dir === row.directory) ?? null : null
     setSelectedGoal(entry ? entry.goal : null)
-    // Keep keyboard selection glued to the same directory+ID row across
-    // refresh/filter/collapse instead of drifting by index.
     const key = entry ? goalSelectionKey(entry.dir, entry.goal.id) : undefined
     if (key !== selectedKey()) {
       const idx = key ? indexForSelectionKey(rows.map((r) => goalSelectionKey(r.directory, r.id)), key) : 0
@@ -1252,394 +1418,771 @@ export function LoopDashboard(props: Props) {
       setSelectedKey(key)
     }
   })
-  /** Project directory of the selected worker row. */
+
   const selectedDir = () => activeGoals()[selected()]?.dir ?? props.directory
 
   function rowIdFor(goalID: string): string {
     return `loopd-goal-${goalID}`
   }
 
+  const rowStateColor = (row: RowModel): string => {
+    if (row.state === "blocked" || row.state === "budget_limited" || row.state === "usage_limited") return PALETTE.rose
+    if (row.state === "active") return row.manual ? PALETTE.amber : PALETTE.sage
+    return PALETTE.muted
+  }
+
+  const coordStripSummary = () => {
+    const cm = coordModel()
+    const projPrefix = tab() === "fleet" ? `${cm.shortName} │ ` : ""
+    const writesPart = `Writes ${cm.holds.length} running${cm.queue.length ? ` · ${cm.queue.length} queued` : ""}`
+    const verifyPart = cm.verifyBlockers.length ? `Verification waiting (${cm.verifyBlockers.length})` : "No verification waits"
+    const resvPart = cm.reservations.length ? ` │ ${cm.reservations.length} reservation${cm.reservations.length === 1 ? "" : "s"}` : ""
+    return `${projPrefix}${writesPart} · ${verifyPart}${resvPart}`
+  }
+
+  const headerModeLabel = () => {
+    if (mode() !== "insert") return "normal"
+    if (insertKind() === "filter") return "filter"
+    if (insertKind() === "send") return "send"
+    return "command"
+  }
+
   return (
-    <box flexDirection="column" width="100%" alignItems="center" padding={1}>
-      <box flexDirection="column" width="90%" border={true} borderColor={theme().border} padding={1}>
-        {/* Header — always visible, vivid (see DashboardHeader: two fixed lines). */}
-        <DashboardHeader
-          theme={theme()}
-          mode={mode()}
-          scopeName={tab() === "fleet" ? "All projects" : tab() === "commands" ? "Command sessions" : (projectScope().split("/").pop() || projectScope())}
-          summary={scopeSummaryText()}
-          tab={tab()}
-          projCount={managedDirs().length}
-          onBugReport={handleBugReport}
-        />
+    <box
+      flexDirection="column"
+      width="100%"
+      border={true}
+      borderColor={PALETTE.rule}
+      backgroundColor={PALETTE.base}
+      flexShrink={0}
+    >
+      {/* 1 & 2. Header + Navigation Tabs */}
+      <DashboardHeader
+        theme={theme()}
+        mode={headerModeLabel()}
+        scopeName={tab() === "fleet" ? "All projects" : tab() === "commands" ? (cmdScope() === "all" ? "All projects" : (cmdScope().split("/").pop() || cmdScope())) : (projectScope().split("/").pop() || projectScope())}
+        summary={scopeSummaryText()}
+        tab={tab()}
+        projCount={managedDirs().length}
+        onBugReport={handleBugReport}
+        onSelectTab={(nextTab) => { setTab(nextTab); setSelected(0) }}
+      />
 
-        {/* Scrollable body — the whole frame scrolls (list is capped), so the
-            inspector and drawer always stay reachable via j/k or wheel. */}
-        <scrollbox ref={(el) => { frameEl = el }} flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0}
-          scrollX={false} scrollY={true} stickyScroll={false}>
-          {/* Help panel — single text to avoid flex overlap */}
-<Show when={showHelp()}>
-              <box flexDirection="column" padding={1} border={true} borderColor="yellow" backgroundColor={theme().background} flexShrink={0} maxHeight={22}>
-                <box flexDirection="column" padding={1} backgroundColor={theme().background} flexShrink={1} minHeight={0} overflow="scroll">
-                  <text>
-                <span style={{ fg: "yellow", bold: true }}>{tab() === "commands" ? "━━━ Commands: ? help  : insert  h history  X kill  R restart  x remove-done  o fullscreen  q close ━━━" : "━━━ Keys: 1/2/3 tabs  j/k move  Enter actions  s send  d details  o session  t coordination  / filter  h history  W release  q close ━━━"}</span>
-                <For each={(tab() === "commands" ? commandTabHelp() : commandHelp()).split("\n")}>{(line) => {
-                  // Modes / Nav — split into label + segments, color keys vs descs
-                  if (line.startsWith("Modes:") || line.startsWith("Nav:")) {
-                    const label = line.startsWith("Modes:") ? "Modes:" : "Nav:"
-                    const rest = line.slice(label.length).trim()
-                    const segments = rest.split(" | ")
-                    return (
-                      <>
-                        {"\n"}
-                        <span style={{ fg: theme().primary, bold: true }}>{label}</span>
-                        <span style={{ fg: theme().textMuted }}> </span>
-                        <For each={segments}>{(seg, idx) => {
-                          const hasArrow = seg.includes("→")
-                          if (hasArrow) {
-                            const [k, d] = seg.split("→").map((s) => s.trim())
-                            return (
-                              <>
-                                {idx() > 0 && <span style={{ fg: theme().textMuted }}> | </span>}
-                                <span style={{ fg: theme().warning, bold: true }}>{k}</span>
-                                <span style={{ fg: theme().textMuted }}> → </span>
-                                <span style={{ fg: theme().text }}>{d}</span>
-                              </>
-                            )
-                          }
-                          const sp = seg.indexOf(" ")
-                          const k = sp > 0 ? seg.slice(0, sp) : seg
-                          const d = sp > 0 ? seg.slice(sp + 1) : ""
-                          return (
-                            <>
-                              {idx() > 0 && <span style={{ fg: theme().textMuted }}> | </span>}
-                              <span style={{ fg: theme().warning, bold: true }}>{k}</span>
-                              {d && <span style={{ fg: theme().text }}> {d}</span>}
-                            </>
-                          )
-                        }}</For>
-                      </>
-                    )
-                  }
-                  // Commands like ":send <message>                           Send instruction..."
-                  if (line.trim().startsWith(":")) {
-                    const m = line.match(/^(\s*)(:\S+(?:\s+\S+)*?)\s{2,}(.*)$/)
-                    const indent = m?.[1] ?? line.match(/^\s*/)?.[0] ?? ""
-                    const key = m?.[2] ?? line.trim().split(/\s{2,}/)[0] ?? line.trim()
-                    const desc = m?.[3] ?? line.split(/\s{2,}/)[1] ?? ""
-                    return (
-                      <>
-                        {"\n"}
-                        <span style={{ fg: theme().textMuted }}>{indent}</span>
-                        <span style={{ fg: theme().warning, bold: true }}>{key}</span>
-                        {desc && <><span style={{ fg: theme().textMuted }}>  </span><span style={{ fg: theme().textMuted }}>{desc}</span></>}
-                      </>
-                    )
-                  }
-                  const isHeader = line.startsWith("Commands")
-                  return (
-                    <>
-                      {"\n"}
-                      <span style={{ fg: isHeader ? theme().primary : theme().textMuted, bold: isHeader }}>{line}</span>
-                    </>
-                  )
-                }}</For>
-                </text>
-              </box>
-              <text style={{ fg: theme().textMuted }}><span style={{ italic: true }}>▼ scroll for more</span></text>
-            </box>
-          </Show>
-
-          {/* Projects panel — :projects lists managed dirs (registry file + env). */}
-          <Show when={showProjects()}>
-            <box flexDirection="column" padding={1} border={true} borderColor={theme().border} flexShrink={0} maxHeight={12}>
-              <text>
-                <span style={{ fg: theme().accent, bold: true }}>⬣ Projects ({managedDirs().length})</span>
-                <span style={{ fg: theme().textMuted }}> — :projects to hide · registry .opencode/loopd/managed.json (+ LOOPD_MANAGED_DIRS)</span>
-                <For each={projectStatuses() ?? managedDirs().map((d) => ({ directory: d, storePath: managedStorePath(d), total: 0, active: 0, blocked: 0, paused: 0, complete: 0, blockedItems: [] as ManagedDirStatus["blockedItems"] }))}>{(p) => (
-                  <>
-                    {"\n"}
-                    <span style={{ fg: theme().text, bold: true }}>{p.directory}</span>
-                    <span style={{ fg: theme().textMuted }}> — {p.total} goals ({p.active} active, {p.blocked} blocked, {p.paused} paused, {p.complete} done)</span>
-                    <For each={p.blockedItems.slice(0, 3)}>{(b) => (
-                      <>
-                        {"\n"}
-                        <span style={{ fg: theme().error }}>  ✖ {b.name}: </span>
-                        <span style={{ fg: theme().textMuted }}>{b.reason.slice(0, 80)}</span>
-                      </>
-                    )}</For>
-                  </>
-                )}</For>
+      {/* 3..5. Main body (sized to content — never flexGrow:1 so it never pushes footer off-screen) */}
+      <box
+        flexDirection="column"
+        paddingLeft={2}
+        paddingRight={2}
+        paddingTop={1}
+        paddingBottom={1}
+        gap={1}
+        flexShrink={0}
+      >
+        {/* ─── MODAL POPUPS (Actions / Send / Coordination / Help / Projects / Release) ─── */}
+        <Show when={pendingRelease()}>
+          <box
+            flexDirection="column"
+            border={true}
+            borderColor={PALETTE.cyan}
+            backgroundColor={PALETTE.inset}
+            paddingLeft={2}
+            paddingRight={2}
+            paddingTop={1}
+            paddingBottom={1}
+            gap={1}
+          >
+            <box flexDirection="row" justifyContent="space-between" height={1}>
+              <text wrapMode="none">
+                <span style={{ fg: PALETTE.cyan, bold: true }}>Release reservation</span>
+              </text>
+              <text wrapMode="none">
+                <span style={{ fg: PALETTE.muted }}>[esc]</span>
               </text>
             </box>
-          </Show>
-
-          {/* Worker tabs: Project (one directory) and Fleet (grouped).
-              Toolbar: scope picker state, filter state, history state. */}
-          <Show when={tab() === "project" || tab() === "fleet"}>
-          <Show when={!panelOpen()}>
-          <Show when={rowModels().length > 0} fallback={
-            <box flexDirection="column" gap={1} padding={1}>
-              <text><span style={{ fg: theme().textMuted }}>No workers{filterText() ? ` matching "${filterText()}"` : ""}.</span><span style={{ fg: theme().accent }}> /goal</span><span style={{ fg: theme().textMuted }}> in parent chat to create one.</span></text>
-              <text style={{ fg: theme().textMuted }}>Scope: {tab() === "fleet" ? "all projects" : projectScope()}/.opencode/loopd</text>
-              <text><span style={{ fg: theme().textMuted }}>Tip: </span><span style={{ fg: theme().warning }}>s</span><span style={{ fg: theme().textMuted }}> send · </span><span style={{ fg: theme().warning }}>o</span><span style={{ fg: theme().textMuted }}> open child · </span><span style={{ fg: theme().warning }}>t</span><span style={{ fg: theme().textMuted }}> coordination · </span><span style={{ fg: theme().warning }}>/</span><span style={{ fg: theme().textMuted }}> filter.</span></text>
-            </box>
-          }>
-            <text>
-              <span style={{ fg: theme().textMuted }}>Scope </span>
-              <span style={{ fg: theme().accent, bold: true }}>{tab() === "fleet" ? `all projects (${managedDirs().length})` : (projectScope().split("/").pop() || projectScope())}</span>
-              {filterText() && <><span style={{ fg: theme().textMuted }}> · filter </span><span style={{ fg: theme().text }}>"{filterText()}"</span></>}
-              <span style={{ fg: theme().textMuted }}> · history {showCompleted() ? "shown" : "hidden"}</span>
-              {detailsOpen() && <span style={{ fg: theme().textMuted }}> · detail open — table collapsed to the selected row</span>}
+            <text wrapMode="word">
+              <span style={{ fg: PALETTE.ink, bold: true }}>{pendingRelease()!.callID}</span>
+              <span style={{ fg: PALETTE.muted }}> in {pendingRelease()!.dir}</span>
             </text>
-            {/* Column header: one line, same fixed geometry as the rows, so a
-                reader scans columns instead of decoding each row. */}
-            <box flexDirection="row" paddingLeft={3} paddingRight={1} height={1} flexShrink={0}>
-              <text wrapMode="none" truncate={true}>
-                <span style={{ fg: theme().textMuted }}>{"WORKER".padEnd(22)}│ {"STATE".padEnd(30)}│ ACTIVITY</span>
+            <text wrapMode="word">
+              <span style={{ fg: PALETTE.muted }}>
+                The server verifies ownership and call liveness before releasing. Live calls from other sessions are never released.
+              </span>
+            </text>
+            <box flexDirection="row" gap={2}>
+              <box border={true} borderColor={PALETTE.cyan} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1}>
+                <text wrapMode="none"><span style={{ fg: PALETTE.cyan, bold: true }}>[y / Enter] Confirm release</span></text>
+              </box>
+              <box border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1}>
+                <text wrapMode="none"><span style={{ fg: PALETTE.muted }}>[n / Esc] Cancel</span></text>
+              </box>
+            </box>
+          </box>
+        </Show>
+
+        <Show when={!pendingRelease() && sendOpen()}>
+          <box
+            flexDirection="column"
+            border={true}
+            borderColor={PALETTE.cyan}
+            backgroundColor={PALETTE.inset}
+            paddingLeft={2}
+            paddingRight={2}
+            paddingTop={1}
+            paddingBottom={1}
+            gap={1}
+          >
+            <box flexDirection="row" justifyContent="space-between" height={1}>
+              <text wrapMode="none">
+                <span style={{ fg: PALETTE.cyan, bold: true }}>
+                  {tab() === "commands" ? "Send stdin" : "Send input"}
+                </span>
+                <span style={{ fg: PALETTE.muted }}>
+                  {" → "}
+                  {tab() === "commands" ? (selectedCommand()?.title ?? "command") : (selectedGoal()?.name ?? "worker")}
+                </span>
+              </text>
+              <box
+                border={true}
+                borderColor={PALETTE.rule}
+                backgroundColor={PALETTE.base}
+                paddingLeft={1}
+                paddingRight={1}
+                {...({ onMouseDown: () => returnToNormalMode() } as any)}
+              >
+                <text wrapMode="none"><span style={{ fg: PALETTE.ink }}>esc</span></text>
+              </box>
+            </box>
+            <text wrapMode="none">
+              <span style={{ fg: PALETTE.muted }}>
+                {tab() === "commands"
+                  ? "Writes a line to the selected process stdin:"
+                  : "Delivers bare words as the worker's own turn (no steering wrapper):"}
+              </span>
+            </text>
+            <box
+              flexDirection="row"
+              border={true}
+              borderColor={PALETTE.amber}
+              backgroundColor={PALETTE.base}
+              paddingLeft={1}
+              paddingRight={1}
+              height={3}
+              alignItems="center"
+            >
+              <text wrapMode="word">
+                <span style={{ fg: PALETTE.amber, bold: true }}>› </span>
+                <span style={{ fg: commandInput() ? PALETTE.ink : PALETTE.muted }}>
+                  {commandInput() || "Give this worker a short directive…"}
+                </span>
+                <span style={{ fg: PALETTE.cyan, bold: true }}>█</span>
               </text>
             </box>
-            <DashboardList count={displayItems().length} selectedID={rowModels()[selected()] ? rowIdFor(rowModels()[selected()]!.id) : undefined}>
-              <For each={displayItems()}>
-                {(item) => {
-                  if (item.kind === "header") {
-                    const g = item.group
-                    return (
-                      <DashboardRow id={`loopd-group-${g.directory}`} backgroundColor={theme().backgroundElement}>
-                        <span style={{ fg: theme().accent, bold: true }}>{collapsed().includes(g.directory) ? "▸" : "▾"} {g.shortName}</span>
-                        <span style={{ fg: theme().textMuted }}> / {g.needsAction > 0 ? `${g.needsAction} needs action · ` : "no intervention needed · "}{g.working} working (:collapse toggles)</span>
-                      </DashboardRow>
-                    )
-                  }
-                  const row = item.row
-                  const isActive = () => item.index === selected()
-                  const stateFg = () => row.state === "blocked" ? theme().error : row.state === "active" ? theme().success : row.state === "paused" ? theme().warning : theme().textMuted
-                  const attnFg = () => row.attention === "blocker" || row.attention === "unreachable" || row.attention === "stale" || row.attention === "error" ? theme().error : theme().warning
-                  // Fixed columns (name / state / activity / updated) keep rows
-                  // aligned no matter how long the underlying values are.
-                  const cols = () => formatRowColumns(row)
+            <box flexDirection="row" justifyContent="space-between" height={1}>
+              <text wrapMode="none">
+                <span style={{ fg: PALETTE.muted }}>Press </span>
+                <span style={{ fg: PALETTE.ink, bold: true }}>Enter</span>
+                <span style={{ fg: PALETTE.muted }}> to send · </span>
+                <span style={{ fg: PALETTE.ink, bold: true }}>Esc</span>
+                <span style={{ fg: PALETTE.muted }}> to cancel</span>
+              </text>
+            </box>
+          </box>
+        </Show>
+
+        <Show when={!pendingRelease() && !sendOpen() && actionsOpen() && selectedGoal()}>
+          <box
+            flexDirection="column"
+            border={true}
+            borderColor={PALETTE.cyan}
+            backgroundColor={PALETTE.inset}
+            paddingLeft={2}
+            paddingRight={2}
+            paddingTop={1}
+            paddingBottom={1}
+            gap={1}
+          >
+            <box flexDirection="row" justifyContent="space-between" height={1}>
+              <text wrapMode="none">
+                <span style={{ fg: PALETTE.cyan, bold: true }}>Actions / {selectedGoal()!.name}</span>
+              </text>
+              <box
+                border={true}
+                borderColor={PALETTE.rule}
+                backgroundColor={PALETTE.base}
+                paddingLeft={1}
+                paddingRight={1}
+                {...({ onMouseDown: () => setActionsOpen(false) } as any)}
+              >
+                <text wrapMode="none"><span style={{ fg: PALETTE.ink }}>esc</span></text>
+              </box>
+            </box>
+            <text wrapMode="none">
+              <span style={{ fg: PALETTE.muted }}>
+                {selectedDir().split("/").pop() || selectedDir()} · j/k move · Enter select · or press key directly
+              </span>
+            </text>
+            <box flexDirection="column" gap={0}>
+              <For each={paletteVerbs()}>
+                {(v, idx) => {
+                  const active = () => idx() === actionIdx()
                   return (
-                    <DashboardRow id={rowIdFor(row.id)} backgroundColor={isActive() ? theme().backgroundElement : undefined}>
-                      {/* Single-line row: name / state / current activity / updated.
-                          Full info lives in the inspector + technical drawer. */}
-                        <span style={{ fg: stateFg(), bold: isActive() }}>{isActive() ? `▶ ${cols().name}` : `  ${cols().name}`}</span>
-                        <span style={{ fg: theme().textMuted }}> │ </span>
-                        <span style={{ fg: stateFg(), bold: true }}>{cols().state}</span>
-                        <span style={{ fg: theme().textMuted }}> │ </span>
-                        <span style={{ fg: row.attention === null ? theme().text : attnFg() }}>{cols().activity}</span>
-                        {row.turnText && <span style={{ fg: theme().textMuted }}> · {row.turnText}</span>}
-                        <span style={{ fg: theme().textMuted }}> · {cols().updated}</span>
-                        {row.attention && row.attentionText && <span style={{ fg: attnFg(), bold: true }}> │ ⚠ {row.attentionText.slice(0, 60)}</span>}
-                    </DashboardRow>
+                    <box
+                      flexDirection="row"
+                      justifyContent="space-between"
+                      backgroundColor={active() ? PALETTE.selectedBg : PALETTE.base}
+                      border={true}
+                      borderColor={active() ? PALETTE.cyan : PALETTE.rule}
+                      paddingLeft={1}
+                      paddingRight={1}
+                      {...({ onMouseDown: () => void runPaletteVerb(v) } as any)}
+                    >
+                      <text wrapMode="none">
+                        <span style={{ fg: active() ? PALETTE.cyan : PALETTE.muted, bold: true }}>
+                          {active() ? "> " : "  "}
+                        </span>
+                        <span style={{ fg: PALETTE.ink, bold: active() }}>{v.label}</span>
+                      </text>
+                      <text wrapMode="none">
+                        <span style={{ fg: PALETTE.cyan }}>[{v.key}]</span>
+                      </text>
+                    </box>
                   )
                 }}
               </For>
-            </DashboardList>
-          </Show>
+            </box>
+          </box>
+        </Show>
 
-          </Show>
-
-          <Show when={!panelOpen() && selectedGoal()}>
-            {(goal) => {
-              const entry = () => activeGoals().find((e) => e.goal.id === goal().id)
-              const dir = () => entry()?.dir ?? props.directory
-              const rt = () => runtimeFor(goal().id)
-              const activity = () => rt() ? workerActivityLabel(rt()!, clock()) : undefined
-              const lp = () => goal().lastProgress
-              const blk = () => goal().blocker
-              const agentName = () => goal().config.agent
-              const meta = () => agentName() ? (agentIndex()[agentName()!] ?? agentIndex()[agentName()!.toLowerCase()]) : undefined
-              const model = () => goal().config.model
-              return (<>
-                <GoalInspector
-                  theme={theme()}
-                  model={{
-                    goal: goal(),
-                    directory: dir(),
-                    activityLine: activity() ? `${activity()!.short} — ${activity()!.hint}` : undefined,
-                    acting: activity()?.acting ?? false,
-                    lastResult: lp()?.summary,
-                    blocked: blk() ? { reason: blk()!.reason, needed: blk()!.needed } : undefined,
-                    lastProgress: lp() ?? undefined,
-                    agentMeta: meta()?.mode,
-                    showFocusProject: tab() === "fleet",
-                  }}
-                  onSend={() => { setCommandInput("send "); if (inputEl) inputEl.value = "send "; setMode("insert"); focusInput() }}
-                  onOpen={() => { if (goal().workerSessionID) { try { props.api.route.navigate("session", { sessionID: goal().workerSessionID }); props.api.ui.dialog.clear() } catch { setStatusText("Navigate unsupported here — read the transcript via agent tools (read_goal_transcript).") } } else setStatusText("No worker session") }}
-                  onActions={() => setActionsOpen(true)}
-                  onDetails={() => setDetailsOpen((v) => !v)}
-                  onFocusProject={() => { setProjectScope(dir()); setTab("project"); setSelected(0); setStatusText(`scope: ${dir()}`) }}
-                />
-                <Show when={detailsOpen()}>
-                  <GoalDetailsDrawer
-                    theme={theme()}
-                    model={{
-                      goal: goal(),
-                      runtime: rt(),
-                      transcript: recentTranscriptFor(goal().id),
-                      progressHistory: lp() ? [{ summary: lp()!.summary, next: lp()!.next, at: lp()!.at }] : [],
-                      agentLabel: agentName() ? `${agentName()!}${meta()?.mode ? ` (${meta()!.mode})` : ""}` : (goal().parentAgent ?? "parent"),
-                      modelLabel: model() ?? goal().parentModel ?? "parent",
-                    }}
-                  />
-                </Show>
-              </>)
+        <Show when={!pendingRelease() && !sendOpen() && !actionsOpen() && coordOpen()}>
+          <CoordinationPanel
+            theme={theme()}
+            model={coordModel()}
+            tab={coordTab()}
+            onTab={(t) => setCoordTab(t)}
+            onInspectReservations={() => void releaseWorkspaceFences({}, coordDir())}
+            onRelease={(callID) => setPendingRelease({ callID, dir: coordDir() })}
+            onOpenSession={() => {
+              const g = selectedGoal()
+              if (g?.workerSessionID) {
+                try {
+                  props.api.route.navigate("session", { sessionID: g.workerSessionID })
+                  props.api.ui.dialog.clear()
+                } catch {
+                  setStatusText("Navigate unsupported here.")
+                }
+              }
             }}
-          </Show>
+            onClose={() => setCoordOpen(false)}
+          />
+        </Show>
 
-          {/* Actions palette — state-correct verbs for the selected goal.
-              The palette lists; existing keys act (no new interaction risk). */}
-          <Show when={actionsOpen() && selectedGoal()}>
-            <box flexDirection="column" border={true} borderColor={theme().accent} padding={1} flexShrink={0} maxHeight={10}>
-              <text>
-                <span style={{ fg: theme().accent, bold: true }}>Actions / {selectedGoal()!.name}</span>
-                <span style={{ fg: theme().textMuted }}> — press the key, Esc closes</span>
-                <For each={paletteVerbs()}>{(v) => (
-                  <><span style={{ fg: theme().warning, bold: true }}>{"\n"}[{v.key}] </span><span style={{ fg: theme().text }}>{v.label}</span></>
-                )}</For>
-                {"\n"}<span style={{ fg: theme().textMuted }}>[s] Send · [o] Open session · [d] Technical details</span>
+        <Show when={!pendingRelease() && !sendOpen() && !actionsOpen() && !coordOpen() && showHelp()}>
+          <box
+            flexDirection="column"
+            border={true}
+            borderColor={PALETTE.cyan}
+            backgroundColor={PALETTE.inset}
+            paddingLeft={2}
+            paddingRight={2}
+            paddingTop={1}
+            paddingBottom={1}
+            gap={1}
+          >
+            <box flexDirection="row" justifyContent="space-between" height={1}>
+              <text wrapMode="none">
+                <span style={{ fg: PALETTE.cyan, bold: true }}>Keyboard shortcuts</span>
               </text>
-            </box>
-          </Show>
-
-          {/* Coordination drawer — project-scoped triage (see coordination-panel.tsx). */}
-          <Show when={coordOpen()}>
-            <CoordinationPanel
-              theme={theme()}
-              model={coordModel()}
-              tab={coordTab()}
-              onTab={(t) => setCoordTab(t)}
-              onInspectReservations={() => void releaseWorkspaceFences({}, coordDir())}
-              onRelease={(callID) => setPendingRelease({ callID, dir: coordDir() })}
-              onOpenSession={() => { const g = selectedGoal(); if (g?.workerSessionID) { try { props.api.route.navigate("session", { sessionID: g.workerSessionID }); props.api.ui.dialog.clear() } catch { setStatusText("Navigate unsupported here.") } } }}
-            />
-          </Show>
-          <Show when={pendingRelease()}>
-            <box flexDirection="column" border={true} borderColor={theme().error} padding={1} flexShrink={0}>
-              <text>
-                <span style={{ fg: theme().error, bold: true }}>Release {pendingRelease()!.callID.slice(0, 12)}… in {pendingRelease()!.dir}?</span>
-                <span style={{ fg: theme().textMuted }}> — server decides; refusal names the reason. </span>
-                <span style={{ fg: theme().warning, bold: true }}>[y] release · [Esc] cancel</span>
-              </text>
-            </box>
-          </Show>
-
-          </Show>
-
-          {/* Commands tab — owner-scoped sessions. `o` opens the fullscreen
-              terminal route; goal controls never apply here. */}
-          <Show when={tab() === "commands"}>
-            <text>
-              <span style={{ fg: theme().textMuted }}>Scope: </span>
-              <span style={{ fg: theme().accent, bold: true }}>{cmdScope() === "all" ? `all projects (${managedDirs().length})` : (cmdScope().split("/").pop() || cmdScope())}</span>
-              <span style={{ fg: theme().textMuted }}> · history: {showCompleted() ? "shown (h to hide)" : "hidden (h to show)"} · :project :history · [ ] cycle scope</span>
-            </text>
-            <Show when={ownerCommands().length > 0} fallback={
-              <box flexDirection="column" gap={1} padding={1}>
-                <text><span style={{ fg: theme().textMuted }}>No live command sessions{hiddenFinishedCommands() > 0 ? ` — ${hiddenFinishedCommands()} finished hidden` : ""}. </span><span style={{ fg: theme().warning }}>:new &lt;command&gt;</span><span style={{ fg: theme().textMuted }}> to start one{hiddenFinishedCommands() > 0 ? ", or " : "; "}</span>{hiddenFinishedCommands() > 0 && <span><span style={{ fg: theme().warning }}>c</span><span style={{ fg: theme().textMuted }}> to show finished.</span></span>}</text>
-                <text><span style={{ fg: theme().textMuted }}>Tip: </span><span style={{ fg: theme().warning }}>o</span><span style={{ fg: theme().textMuted }}> fullscreen · </span><span style={{ fg: theme().warning }}>X kill · R restart · x remove-done</span><span style={{ fg: theme().textMuted }}> · </span><span style={{ fg: theme().warning }}>:interrupt :terminate :remove</span><span style={{ fg: theme().textMuted }}> manage · text + Enter writes stdin.</span></text>
+              <box
+                border={true}
+                borderColor={PALETTE.rule}
+                backgroundColor={PALETTE.base}
+                paddingLeft={1}
+                paddingRight={1}
+                {...({ onMouseDown: () => setShowHelp(false) } as any)}
+              >
+                <text wrapMode="none"><span style={{ fg: PALETTE.ink }}>esc</span></text>
               </box>
-            }>
-              <DashboardList count={ownerCommands().length} selectedID={selectedCommand() ? `loopd-command-${selectedCommand()!.id}` : undefined}>
-                <For each={ownerCommands()}>
-                  {(cmd, i) => {
-                    const isActive = () => i() === cmdSelected()
-                    return (
-                      <DashboardRow id={`loopd-command-${cmd.id}`} backgroundColor={isActive() ? theme().backgroundElement : undefined}>
-                        {/* Single-line row mirrors the Goals row: icon+bold name,
-                            status-colored badge, accent executable, muted args. */}
-                          <span style={{ fg: commandStatusColor(cmd.status, theme()), bold: isActive() }}>{isActive() ? `▶ ${cmd.title}` : `  ${commandStatusIcon(cmd.status)} ${cmd.title}`}</span>
-                          {managedDirs().length > 1 && <><span style={{ fg: theme().textMuted }}> │ </span><span style={{ fg: theme().accent }}>⬣ {commandDir(cmd.id).split("/").pop() ?? commandDir(cmd.id)}</span></>}
-                          <span style={{ fg: theme().textMuted }}> │ </span>
-                          <span style={{ fg: theme().textMuted }}>Cmd </span>
-                          <span style={{ fg: commandStatusColor(cmd.status, theme()), bold: true }}>{commandStatusLabel(cmd.status).short}</span>
-                          <span style={{ fg: theme().textMuted }}> │ </span>
-                          <span style={{ fg: theme().accent, bold: true }}>{cmd.command}</span>
-                          {cmd.args.length > 0 && <span style={{ fg: theme().textMuted }}> {cmd.args.join(" ").slice(0, 40)}</span>}
-                          {cmd.exitCode !== undefined && <span style={{ fg: cmd.exitCode === 0 ? theme().success : theme().error }}> │ exit {cmd.exitCode}</span>}
-                          {cmd.signal && <span style={{ fg: theme().warning }}> │ {cmd.signal}</span>}
-                          <span style={{ fg: theme().textMuted }}> │ {ageLabel(cmd.updatedAt, clock())}</span>
-                          {cmd.truncated && <span style={{ fg: theme().warning, bold: true }}> │ ⚠ truncated</span>}
-                      </DashboardRow>
-                    )
-                  }}
-                </For>
-              </DashboardList>
+            </box>
+            <box border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1}>
+              <text wrapMode="none">
+                <span style={{ fg: PALETTE.cyan }}>1 / 2 / 3   </span><span style={{ fg: PALETTE.ink }}>Project / Fleet / Commands tabs</span>{"\n"}
+                <span style={{ fg: PALETTE.cyan }}>j / k       </span><span style={{ fg: PALETTE.ink }}>Move selection (J / K scrolls open details)</span>{"\n"}
+                <span style={{ fg: PALETTE.cyan }}>Enter       </span><span style={{ fg: PALETTE.ink }}>Worker actions popup</span>{"\n"}
+                <span style={{ fg: PALETTE.cyan }}>s           </span><span style={{ fg: PALETTE.ink }}>Send input popup</span>{"\n"}
+                <span style={{ fg: PALETTE.cyan }}>o           </span><span style={{ fg: PALETTE.ink }}>Open worker session / fullscreen command</span>{"\n"}
+                <span style={{ fg: PALETTE.cyan }}>d           </span><span style={{ fg: PALETTE.ink }}>Toggle technical details (collapses table to 1 row)</span>{"\n"}
+                <span style={{ fg: PALETTE.cyan }}>t           </span><span style={{ fg: PALETTE.ink }}>Inspect project coordination (Writes / Verify / Reservations)</span>{"\n"}
+                <span style={{ fg: PALETTE.cyan }}>/           </span><span style={{ fg: PALETTE.ink }}>Focus filter box in toolbar</span>{"\n"}
+                <span style={{ fg: PALETTE.cyan }}>h           </span><span style={{ fg: PALETTE.ink }}>Show or hide completed history</span>{"\n"}
+                <span style={{ fg: PALETTE.cyan }}>[ / ]       </span><span style={{ fg: PALETTE.ink }}>Cycle project scope</span>{"\n"}
+                <span style={{ fg: PALETTE.cyan }}>Esc         </span><span style={{ fg: PALETTE.ink }}>Close active popup / details / filter, or close dashboard</span>
+              </text>
+            </box>
+          </box>
+        </Show>
+
+        <Show when={!pendingRelease() && !sendOpen() && !actionsOpen() && !coordOpen() && !showHelp() && showProjects()}>
+          <box
+            flexDirection="column"
+            border={true}
+            borderColor={PALETTE.cyan}
+            backgroundColor={PALETTE.inset}
+            paddingLeft={2}
+            paddingRight={2}
+            paddingTop={1}
+            paddingBottom={1}
+          >
+            <box flexDirection="row" justifyContent="space-between" height={1}>
+              <text wrapMode="none">
+                <span style={{ fg: PALETTE.cyan, bold: true }}>Managed projects ({managedDirs().length})</span>
+              </text>
+              <text wrapMode="none"><span style={{ fg: PALETTE.muted }}>[esc] close</span></text>
+            </box>
+            <For each={projectStatuses() ?? managedDirs().map((d) => ({ directory: d, storePath: managedStorePath(d), total: 0, active: 0, blocked: 0, paused: 0, complete: 0, blockedItems: [] as ManagedDirStatus["blockedItems"] }))}>
+              {(p) => (
+                <text wrapMode="none">
+                  <span style={{ fg: PALETTE.ink, bold: true }}>{p.directory}</span>
+                  <span style={{ fg: PALETTE.muted }}> — {p.total} goals ({p.active} active, {p.blocked} blocked, {p.paused} paused)</span>
+                </text>
+              )}
+            </For>
+          </box>
+        </Show>
+
+        {/* ─── NORMAL VIEW (Summary + Toolbar + Table + Inspector + Details) ─── */}
+        <Show when={!modalPopupOpen()}>
+          {/* 3a. Summary line (#summary in web UI) */}
+          <box flexDirection="row" justifyContent="space-between" alignItems="center" height={1} flexShrink={0}>
+            <text wrapMode="none">
+              <Show
+                when={tab() !== "commands"}
+                fallback={
+                  <span style={{ fg: PALETTE.muted }}>
+                    Raw processes / independent from worker lifecycle · <span style={{ fg: PALETTE.amber }}>{scopeSummaryText()}</span>
+                  </span>
+                }
+              >
+                <span style={{ fg: PALETTE.amber, bold: true }}>{scopeSummaryCounts().needsAction}</span>
+                <span style={{ fg: PALETTE.muted }}> needs action · </span>
+                <span style={{ fg: PALETTE.amber, bold: true }}>{scopeSummaryCounts().working}</span>
+                <span style={{ fg: PALETTE.muted }}> working · </span>
+                <span style={{ fg: PALETTE.amber, bold: true }}>{scopeSummaryCounts().awaiting}</span>
+                <span style={{ fg: PALETTE.muted }}> awaiting input</span>
+                <Show when={scopeSummaryCounts().paused > 0}>
+                  <span style={{ fg: PALETTE.muted }}> · </span>
+                  <span style={{ fg: PALETTE.amber, bold: true }}>{scopeSummaryCounts().paused}</span>
+                  <span style={{ fg: PALETTE.muted }}> paused</span>
+                </Show>
+                <Show when={detailsOpen()}>
+                  <span style={{ fg: PALETTE.muted }}> · detail open (1 row)</span>
+                </Show>
+              </Show>
+            </text>
+            <Show when={statusText()}>
+              <text wrapMode="none">
+                <span style={{ fg: PALETTE.cyan }}>{statusText().slice(0, 48)}</span>
+              </text>
+            </Show>
+          </box>
+
+          {/* 3b. Toolbar (#toolbar in web UI: project selector, visible / filter box, [h] history checkbox) */}
+          <box flexDirection="row" justifyContent="space-between" alignItems="center" height={3} flexShrink={0} gap={1}>
+            <box flexDirection="row" gap={1} alignItems="center">
+              <Show when={tab() !== "fleet"}>
+                <box
+                  flexDirection="row"
+                  border={true}
+                  borderColor={PALETTE.rule}
+                  backgroundColor={PALETTE.inset}
+                  paddingLeft={1}
+                  paddingRight={1}
+                  {...({ onMouseDown: () => cycleScope(1) } as any)}
+                >
+                  <text wrapMode="none">
+                    <span style={{ fg: PALETTE.ink }}>
+                      {tab() === "commands"
+                        ? (cmdScope() === "all" ? "All projects" : (cmdScope().split("/").pop() || cmdScope()))
+                        : (projectScope().split("/").pop() || projectScope())}
+                    </span>
+                    <span style={{ fg: PALETTE.muted }}> ▾ [ ]</span>
+                  </text>
+                </box>
+              </Show>
+              <box
+                flexDirection="row"
+                border={true}
+                borderColor={mode() === "insert" && insertKind() === "filter" ? PALETTE.amber : activeFilterQuery() ? PALETTE.cyan : PALETTE.rule}
+                backgroundColor={PALETTE.inset}
+                paddingLeft={1}
+                paddingRight={1}
+                width={38}
+                {...({ onMouseDown: () => openFilterBox() } as any)}
+              >
+                <text wrapMode="none">
+                  <Show
+                    when={mode() === "insert" && insertKind() === "filter"}
+                    fallback={
+                      activeFilterQuery() ? (
+                        <>
+                          <span style={{ fg: PALETTE.cyan }}>/ </span>
+                          <span style={{ fg: PALETTE.ink }}>{activeFilterQuery().slice(0, 26)}</span>
+                          <span style={{ fg: PALETTE.muted }}> (Esc clear)</span>
+                        </>
+                      ) : (
+                        <span style={{ fg: PALETTE.muted }}>/ filter workers or commands</span>
+                      )
+                    }
+                  >
+                    <span style={{ fg: PALETTE.amber, bold: true }}>/ </span>
+                    <span style={{ fg: PALETTE.ink }}>{commandInput()}</span>
+                    <span style={{ fg: PALETTE.cyan, bold: true }}>█</span>
+                  </Show>
+                </text>
+              </box>
+            </box>
+            <box
+              flexDirection="row"
+              border={true}
+              borderColor={showCompleted() ? PALETTE.cyan : PALETTE.rule}
+              backgroundColor={PALETTE.inset}
+              paddingLeft={1}
+              paddingRight={1}
+              {...({ onMouseDown: () => setShowCompleted((v) => !v) } as any)}
+            >
+              <text wrapMode="none">
+                <span style={{ fg: showCompleted() ? PALETTE.cyan : PALETTE.muted }}>
+                  {showCompleted() ? "[✓]" : "[ ]"} history [h]
+                </span>
+              </text>
+            </box>
+          </box>
+
+          {/* 4. Worker Table (Project & Fleet tabs) */}
+          <Show when={tab() === "project" || tab() === "fleet"}>
+            <Show
+              when={rowModels().length > 0}
+              fallback={
+                <box border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.inset} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
+                  <text wrapMode="none">
+                    <span style={{ fg: PALETTE.muted }}>
+                      No matching workers{activeFilterQuery() ? ` for "${activeFilterQuery()}"` : ""}. Use /goal in chat to start one, or press [h] to toggle history.
+                    </span>
+                  </text>
+                </box>
+              }
+            >
+              <box flexDirection="column" flexShrink={0}>
+                {/* Table column headers */}
+                <box flexDirection="row" paddingLeft={1} paddingRight={1} height={1} flexShrink={0}>
+                  <text wrapMode="none">
+                    <span style={{ fg: PALETTE.muted }}>
+                      {"  "}
+                      {"Worker".padEnd(ROW_COLS.name)}
+                      {"  "}
+                      {"State".padEnd(ROW_COLS.state)}
+                      {"  "}
+                      {"Current activity".padEnd(ROW_COLS.activity)}
+                      {"  "}
+                      {"Updated"}
+                    </span>
+                  </text>
+                </box>
+                <box flexDirection="row" paddingLeft={1} paddingRight={1} height={1} flexShrink={0}>
+                  <text wrapMode="none">
+                    <span style={{ fg: PALETTE.rule }}>
+                      {"─".repeat(2 + ROW_COLS.name + 2 + ROW_COLS.state + 2 + ROW_COLS.activity + 2 + ROW_COLS.updated)}
+                    </span>
+                  </text>
+                </box>
+                <DashboardList
+                  count={displayItems().length}
+                  maxRows={detailsOpen() ? 1 : 6}
+                  selectedID={rowModels()[selected()] ? rowIdFor(rowModels()[selected()]!.id) : undefined}
+                >
+                  <For each={displayItems()}>
+                    {(item) => {
+                      if (item.kind === "header") {
+                        const g = item.group
+                        return (
+                          <DashboardRow
+                            id={`loopd-group-${g.directory}`}
+                            backgroundColor={PALETTE.inset}
+                            onClick={() => setCollapsed((list) => toggleCollapsed(list, g.directory))}
+                          >
+                            <span style={{ fg: PALETTE.cyan, bold: true }}>
+                              {collapsed().includes(g.directory) ? "▸" : "▾"} {g.shortName}
+                            </span>
+                            <span style={{ fg: PALETTE.muted }}>
+                              {" / "}
+                              {g.needsAction > 0 ? `${g.needsAction} needs action` : "No intervention needed"}
+                              {" · "}
+                              {g.working} working
+                            </span>
+                          </DashboardRow>
+                        )
+                      }
+                      const row = item.row
+                      const isActive = () => item.index === selected()
+                      const stateFg = () => rowStateColor(row)
+                      const cols = () => formatRowColumns(row)
+                      return (
+                        <DashboardRow
+                          id={rowIdFor(row.id)}
+                          backgroundColor={isActive() ? PALETTE.selectedBg : undefined}
+                          onClick={() => setSelected(item.index)}
+                        >
+                          <span style={{ fg: PALETTE.cyan, bold: true }}>{isActive() ? "> " : "  "}</span>
+                          <span style={{ fg: PALETTE.ink, bold: isActive() }}>{cols().name}</span>
+                          <span style={{ fg: PALETTE.muted }}>{"  "}</span>
+                          <span style={{ fg: stateFg(), bold: isActive() }}>{cols().state}</span>
+                          <span style={{ fg: PALETTE.muted }}>{"  "}</span>
+                          <span style={{ fg: row.state === "blocked" ? PALETTE.rose : PALETTE.ink }}>{cols().activity}</span>
+                          <span style={{ fg: PALETTE.muted }}>{"  "}{cols().updated}</span>
+                        </DashboardRow>
+                      )
+                    }}
+                  </For>
+                </DashboardList>
+              </box>
+            </Show>
+
+            {/* 5. Selected Worker Inspector + optional Technical Details drawer */}
+            <Show when={selectedGoal()}>
+              {(goal) => {
+                const entry = () => activeGoals().find((e) => e.goal.id === goal().id)
+                const dir = () => entry()?.dir ?? props.directory
+                const rt = () => runtimeFor(goal().id)
+                const activity = () => (rt() ? workerActivityLabel(rt()!, clock()) : undefined)
+                const lp = () => goal().lastProgress
+                const blk = () => goal().blocker
+                const agentName = () => goal().config.agent
+                const meta = () => (agentName() ? (agentIndex()[agentName()!] ?? agentIndex()[agentName()!.toLowerCase()]) : undefined)
+                const model = () => goal().config.model
+                return (
+                  <>
+                    <GoalInspector
+                      theme={theme()}
+                      model={{
+                        goal: goal(),
+                        directory: dir(),
+                        activityLine: activity() ? `${activity()!.short} — ${activity()!.hint}` : undefined,
+                        acting: activity()?.acting ?? false,
+                        lastResult: lp()?.summary,
+                        blocked: blk() ? { reason: blk()!.reason, needed: blk()!.needed } : undefined,
+                        lastProgress: lp() ?? undefined,
+                        agentMeta: meta()?.mode,
+                        showFocusProject: tab() === "fleet",
+                        detailsOpen: detailsOpen(),
+                      }}
+                      onSend={() => openSendModal()}
+                      onOpen={() => {
+                        if (goal().workerSessionID) {
+                          try {
+                            props.api.route.navigate("session", { sessionID: goal().workerSessionID })
+                            props.api.ui.dialog.clear()
+                          } catch {
+                            setStatusText("Navigate unsupported here.")
+                          }
+                        } else setStatusText("No worker session")
+                      }}
+                      onActions={() => { setActionIdx(0); setActionsOpen(true) }}
+                      onDetails={() => setDetailsOpen((v) => !v)}
+                      onFocusProject={() => {
+                        setProjectScope(dir())
+                        setTab("project")
+                        setSelected(0)
+                        setStatusText(`scope: ${dir().split("/").pop() || dir()}`)
+                      }}
+                    />
+                    <Show when={detailsOpen()}>
+                      <GoalDetailsDrawer
+                        theme={theme()}
+                        scrollRef={(el) => { detailsScrollEl = el }}
+                        model={{
+                          goal: goal(),
+                          runtime: rt(),
+                          transcript: recentTranscriptFor(goal().id),
+                          progressHistory: lp() ? [{ summary: lp()!.summary, next: lp()!.next, at: lp()!.at }] : [],
+                          agentLabel: agentName() ? `${agentName()!}${meta()?.mode ? ` (${meta()!.mode})` : ""}` : (goal().parentAgent ?? "parent"),
+                          modelLabel: model() ?? goal().parentModel ?? "parent",
+                        }}
+                      />
+                    </Show>
+                  </>
+                )
+              }}
+            </Show>
+          </Show>
+
+          {/* Commands tab */}
+          <Show when={tab() === "commands"}>
+            <Show
+              when={ownerCommands().length > 0}
+              fallback={
+                <box border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.inset} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
+                  <text wrapMode="none">
+                    <span style={{ fg: PALETTE.muted }}>
+                      No live command sessions{hiddenFinishedCommands() > 0 ? ` (${hiddenFinishedCommands()} finished hidden — press [h] to show)` : ""}. Use :new &lt;cmd&gt; to start one.
+                    </span>
+                  </text>
+                </box>
+              }
+            >
+              <box flexDirection="column" flexShrink={0}>
+                <box flexDirection="row" paddingLeft={1} paddingRight={1} height={1} flexShrink={0}>
+                  <text wrapMode="none">
+                    <span style={{ fg: PALETTE.muted }}>
+                      {"  "}{"Title".padEnd(22)}{"  "}{"Status".padEnd(14)}{"  "}{"Command".padEnd(36)}{"  "}{"Updated"}
+                    </span>
+                  </text>
+                </box>
+                <box flexDirection="row" paddingLeft={1} paddingRight={1} height={1} flexShrink={0}>
+                  <text wrapMode="none">
+                    <span style={{ fg: PALETTE.rule }}>{"─".repeat(86)}</span>
+                  </text>
+                </box>
+                <DashboardList
+                  count={ownerCommands().length}
+                  maxRows={6}
+                  selectedID={selectedCommand() ? `loopd-command-${selectedCommand()!.id}` : undefined}
+                >
+                  <For each={ownerCommands()}>
+                    {(cmd, i) => {
+                      const isActive = () => i() === cmdSelected()
+                      const pad = (s: string, w: number) => (s.length > w ? `${s.slice(0, w - 1)}…` : s.padEnd(w))
+                      return (
+                        <DashboardRow
+                          id={`loopd-command-${cmd.id}`}
+                          backgroundColor={isActive() ? PALETTE.selectedBg : undefined}
+                          onClick={() => setCmdSelected(i())}
+                        >
+                          <span style={{ fg: PALETTE.cyan, bold: true }}>{isActive() ? "> " : "  "}</span>
+                          <span style={{ fg: PALETTE.ink, bold: isActive() }}>{pad(cmd.title, 22)}</span>
+                          <span style={{ fg: PALETTE.muted }}>{"  "}</span>
+                          <span style={{ fg: commandStatusColor(cmd.status), bold: isActive() }}>
+                            {pad(`${commandStatusIcon(cmd.status)} ${commandStatusLabel(cmd.status).short}`, 14)}
+                          </span>
+                          <span style={{ fg: PALETTE.muted }}>{"  "}</span>
+                          <span style={{ fg: PALETTE.ink }}>{pad(`${cmd.command} ${cmd.args.join(" ")}`.trim(), 36)}</span>
+                          <span style={{ fg: PALETTE.muted }}>{"  "}{ageText(cmd.updatedAt, clock())}</span>
+                        </DashboardRow>
+                      )
+                    }}
+                  </For>
+                </DashboardList>
+              </box>
             </Show>
             <Show when={selectedCommand()}>
               {(cmd) => (
-                <box flexDirection="column" border={true} borderColor={commandBorderColor(cmd().status, theme())} padding={1} flexShrink={0} maxHeight={8}>
-                  <text>
-                    <span style={{ fg: commandStatusColor(cmd().status, theme()), bold: true }}>{commandStatusIcon(cmd().status)} {cmd().title}</span>
-                    <span style={{ fg: theme().textMuted }}> Cmd </span>
-                    <span style={{ fg: commandStatusColor(cmd().status, theme()) }}>{commandStatusLabel(cmd().status).short} — {commandStatusLabel(cmd().status).hint}</span>
-                    {"\n"}
-                    <span style={{ fg: theme().primary, bold: true }}>⬢ Spawn: </span>
-                    <span style={{ fg: theme().accent, bold: true }}>{cmd().command}</span>
-                    {cmd().args.length > 0 && <span style={{ fg: theme().text }}> {cmd().args.join(" ")}</span>}
-                    {"\n"}
-                    <span style={{ fg: theme().textMuted }}>📁 </span>
-                    <span style={{ fg: theme().accent, bold: true }}>Cwd: </span>
-                    <span style={{ fg: theme().textMuted }}>{cmd().cwd.replace(String(props.directory), ".")}</span>
-                    {cmd().goalID && <><span style={{ fg: theme().textMuted }}> │ 🔗 linked goal </span><span style={{ fg: theme().text }}>{cmd().goalID!.slice(0, 8)}</span></>}
-                    {"\n"}
-                    <span style={{ fg: theme().warning, bold: true }}>💾 </span>
-                    <span style={{ fg: theme().warning, bold: true }}>Output: </span>
-                    <span style={{ fg: theme().text }}>{cmd().outputBytes} bytes</span>
-                    {cmd().truncated && <span style={{ fg: theme().warning, bold: true }}> · ⚠ truncated</span>}
-                    <span style={{ fg: theme().textMuted }}> │ updated {ageLabel(cmd().updatedAt, clock())}</span>
-                    {cmd().lastError && <><span style={{ fg: theme().error, bold: true }}>{"\n"}⚠ Error: </span><span style={{ fg: theme().error }}>{cmd().lastError!.slice(0, 120)}</span></>}
-                    {"\n"}
-                    <span style={{ fg: theme().textMuted }}>o fullscreen · X kill · R restart · x remove-done · :interrupt :terminate :remove · text + Enter writes stdin</span>
+                <box
+                  flexDirection="column"
+                  border={true}
+                  borderColor={PALETTE.rule}
+                  backgroundColor={PALETTE.inset}
+                  paddingLeft={1}
+                  paddingRight={1}
+                  flexShrink={0}
+                >
+                  <box flexDirection="row" justifyContent="space-between" height={1}>
+                    <text wrapMode="none">
+                      <span style={{ fg: PALETTE.cyan, bold: true }}>{cmd().title}</span>
+                      <span style={{ fg: PALETTE.muted }}> / {commandDir(cmd().id).split("/").pop() ?? commandDir(cmd().id)}</span>
+                    </text>
+                    <text wrapMode="none">
+                      <span style={{ fg: commandStatusColor(cmd().status), bold: true }}>
+                        {commandStatusIcon(cmd().status)} {commandStatusLabel(cmd().status).short}
+                      </span>
+                    </text>
+                  </box>
+                  <text wrapMode="none">
+                    <span style={{ fg: PALETTE.muted }}>Command: </span>
+                    <span style={{ fg: PALETTE.ink }}>{cmd().command} {cmd().args.join(" ")}</span>
+                    <span style={{ fg: PALETTE.muted }}> · {cmd().outputBytes}B · updated {ageText(cmd().updatedAt, clock())}</span>
                   </text>
+                  <box flexDirection="row" gap={1}>
+                    <box border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1} {...({ onMouseDown: () => openSendModal() } as any)}>
+                      <text wrapMode="none"><span style={{ fg: PALETTE.ink }}>Send stdin </span><span style={{ fg: PALETTE.cyan }}>[s]</span></text>
+                    </box>
+                    <box border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1}>
+                      <text wrapMode="none"><span style={{ fg: PALETTE.ink }}>Fullscreen </span><span style={{ fg: PALETTE.cyan }}>[o]</span></text>
+                    </box>
+                    <box border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1} {...({ onMouseDown: () => void killSelectedCommand() } as any)}>
+                      <text wrapMode="none"><span style={{ fg: PALETTE.ink }}>Kill </span><span style={{ fg: PALETTE.cyan }}>[X]</span></text>
+                    </box>
+                    <box border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1} {...({ onMouseDown: () => void restartSelectedCommand() } as any)}>
+                      <text wrapMode="none"><span style={{ fg: PALETTE.ink }}>Restart </span><span style={{ fg: PALETTE.cyan }}>[R]</span></text>
+                    </box>
+                  </box>
                 </box>
               )}
             </Show>
           </Show>
+        </Show>
+      </box>
 
-          {/* Logs — bounded, clipped, per-event coloring */}
-          <Show when={showLogs() && events().length > 0}>
-            <box flexDirection="column" border={true} borderColor={theme().border} padding={1} maxHeight={7} flexShrink={0} overflow="hidden">
-              <text>
-                <span style={{ fg: theme().accent, bold: true }}>◈ Recent Events</span><span style={{ fg: theme().textMuted }}> — :logs to hide</span>
-                <For each={events().slice(-10)}>{(ev) => (
-                  <>
-                    {"\n"}
-                    <span style={{ fg: eventColor(String((ev as any).type), theme()), bold: true }}>{String((ev as any).type)}</span>
-                    <span style={{ fg: theme().textMuted }}> {(ev as any).goalID?.slice(0, 8)}</span>
-                    {(ev as any).summary && <span style={{ fg: theme().text }}> — {String((ev as any).summary).slice(0, 60)}</span>}
-                  </>
-                )}</For>
-              </text>
-            </box>
-          </Show>
-        </scrollbox>
-
-        {/* Input — always visible at bottom, vivid mode badge */}
-        <box ref={(el) => { hintBoxEl = el as unknown as { width?: number } }} flexDirection="row" border={true} borderColor={mode() === "insert" ? theme().warning : theme().border} paddingLeft={1} paddingRight={1} flexShrink={0} height={3} gap={1}>
-          <text>
-            <span style={{ fg: mode() === "insert" ? theme().warning : theme().success, bold: true, bg: mode() === "insert" ? (theme().backgroundElement as unknown as string) : undefined }}>{mode() === "insert" ? " INSERT " : " NORMAL "}</span>
+      {/* 6. Coordination strip (#coordstrip in web UI, right above footer) */}
+      <box
+        flexDirection="row"
+        justifyContent="space-between"
+        alignItems="center"
+        backgroundColor={PALETTE.base}
+        paddingLeft={2}
+        paddingRight={2}
+        height={1}
+        flexShrink={0}
+      >
+        <text wrapMode="none">
+          <span style={{ fg: PALETTE.amber }}>{coordStripSummary()}</span>
+        </text>
+        <box
+          flexDirection="row"
+          backgroundColor={PALETTE.inset}
+          paddingLeft={1}
+          paddingRight={1}
+          {...({ onMouseDown: () => setCoordOpen((v) => !v) } as any)}
+        >
+          <text wrapMode="none">
+            <span style={{ fg: PALETTE.cyan }}>[t] Inspect coordination</span>
           </text>
-          <input
-            ref={(el: InputRenderable) => { inputEl = el; focusInput() }}
-            flexGrow={1}
-            placeholder={mode() === "insert" ? ":send hello  or  :filter text  or  :project name  (Ctrl+N: normal)" : statusText() || fitHintBar(FOOT_HINTS, hintCols())}
-            placeholderColor={theme().textMuted}
-            cursorColor={theme().primary}
-            focusedTextColor={theme().text}
-            focusedBackgroundColor={theme().background}
-            onInput={(v: string) => {
-              if (mode() === "insert") setCommandInput(v)
-              else if (inputEl?.value) inputEl.value = ""
-            }}
-            onKeyDown={(evt: ParsedKey) => {
-              // Single source of truth for Enter/Escape/Ctrl+N is the global
-              // useKeyboard handler above; this prop only stops normal-mode
-              // keystrokes from landing in the box as text.
-              if (mode() !== "insert") { if ((evt.name || "").length === 1) prevent(evt); return }
-            }}
-          />
         </box>
+      </box>
+
+      {/* 7. Footer hint bar + hidden focus trap input */}
+      <box
+        ref={(el) => { hintBoxEl = el as unknown as { width?: number } }}
+        flexDirection="row"
+        backgroundColor={PALETTE.inset}
+        paddingLeft={2}
+        paddingRight={2}
+        height={1}
+        flexShrink={0}
+        alignItems="center"
+      >
+        <Show when={mode() === "insert" && insertKind() === "colon"}>
+          <text wrapMode="none">
+            <span style={{ fg: PALETTE.amber, bold: true }}>:</span>
+          </text>
+        </Show>
+        <input
+          ref={(el: InputRenderable) => { inputEl = el; focusInput() }}
+          flexGrow={1}
+          placeholder={
+            mode() === "insert" && insertKind() === "colon"
+              ? "send <msg> | filter <text> | project <name> | release (Esc cancel)"
+              : fitHintBar(FOOT_HINTS, hintCols())
+          }
+          placeholderColor={PALETTE.muted as unknown as any}
+          cursorColor={PALETTE.cyan as unknown as any}
+          focusedTextColor={(mode() === "insert" && insertKind() === "colon" ? PALETTE.ink : PALETTE.inset) as unknown as any}
+          focusedBackgroundColor={PALETTE.inset as unknown as any}
+          onInput={(v: string) => {
+            if (mode() === "insert") setCommandInput(v)
+            else if (inputEl?.value) inputEl.value = ""
+          }}
+          onKeyDown={(evt: ParsedKey) => {
+            if (mode() !== "insert") { if ((evt.name || "").length === 1) prevent(evt); return }
+          }}
+        />
       </box>
     </box>
   )

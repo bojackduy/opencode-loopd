@@ -4,7 +4,7 @@
 /** @jsxImportSource @opentui/solid */
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import type { Plugin as TuiV2 } from "@opencode/plugin/tui"
-import { LoopDashboard } from "./dashboard"
+import { LoopDashboard, tryDismissDashboardSubPopup, getSavedDashboardState, type SavedDashboardState } from "./dashboard"
 import { CommandPanel } from "./command-panel"
 import { TerminalView } from "./terminal-view"
 import { TERMINAL_ROUTE_NAME, currentRouteSessionID, terminalRoutePayload } from "./terminal-route"
@@ -335,7 +335,9 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
   }
 
   let dialogOpen = false
+  let explicitClose = false
   const closeDialog = () => {
+    explicitClose = true
     dialogOpen = false
     ctx.ui.dialog.clear()
   }
@@ -419,48 +421,38 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
     return ok
   }
 
-  const open = () => {
+  const showDashboardDialog = (initialView?: "commands", restoredState?: SavedDashboardState) => {
     const directory = directoryFor()
     const previousFocus = (ctx.renderer as unknown as { currentFocusedRenderable?: { blur(): void } })
       .currentFocusedRenderable
+    explicitClose = false
     dialogOpen = true
     ctx.ui.dialog.show(() => (
       <LoopDashboard
         api={facade}
         directory={directory}
+        initialView={initialView}
+        restoredState={restoredState}
         onOpenCommand={(payload) => {
           openTerminal(payload.commandID, payload.ownerSessionID, payload.returnSessionID)
         }}
       />
     ), () => {
+      if (!explicitClose && tryDismissDashboardSubPopup()) {
+        const snapshot = getSavedDashboardState()
+        queueMicrotask(() => {
+          showDashboardDialog(initialView, snapshot)
+        })
+        return
+      }
       dialogOpen = false
     })
     ctx.ui.dialog.set({ size: "xlarge" })
     previousFocus?.blur()
   }
 
-  const openCommands = () => {
-    const directory = directoryFor()
-    // Same shared dashboard as /loop, focused on Commands.
-    const previousFocus = (ctx.renderer as unknown as { currentFocusedRenderable?: { blur(): void } })
-      .currentFocusedRenderable
-    dialogOpen = true
-    ctx.ui.dialog.show(() => (
-      <LoopDashboard
-        api={facade}
-        directory={directory}
-        initialView="commands"
-        ownerSessionID={undefined}
-        onOpenCommand={(payload) => {
-          openTerminal(payload.commandID, payload.ownerSessionID, payload.returnSessionID)
-        }}
-      />
-    ), () => {
-      dialogOpen = false
-    })
-    ctx.ui.dialog.set({ size: "xlarge" })
-    previousFocus?.blur()
-  }
+  const open = () => showDashboardDialog(undefined)
+  const openCommands = () => showDashboardDialog("commands")
 
   // NOTE: ctx.keymap.layer() must run inside a component — the host resolves
   // the layer against the ambient Keymap provider, so calling it in setup()
@@ -493,6 +485,27 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
     render: () => {
       if (!layerRegistered) {
         layerRegistered = true
+        const escapeCmd = "opencode.loopd.escape"
+        ctx.keymap.layer(() => ({
+          mode: "global",
+          priority: 10000,
+          enabled: () => dialogOpen,
+          commands: [
+            {
+              id: escapeCmd,
+              bind: "escape",
+              run: (_input, event) => {
+                if (tryDismissDashboardSubPopup()) {
+                  event?.preventDefault?.()
+                  event?.stopPropagation?.()
+                  return
+                }
+                closeDialog()
+              },
+            },
+          ],
+          bindings: [escapeCmd],
+        }))
         ctx.keymap.layer(() => ({
           commands: [
             {

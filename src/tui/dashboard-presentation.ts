@@ -32,7 +32,30 @@ export interface ScopeSummary {
   done: number
 }
 
+export const PALETTE = {
+  base: "#222430",
+  inset: "#1b1d27",
+  rule: "#414552",
+  rowRule: "#343744",
+  selectedBg: "#1e2e2c",
+  ink: "#e8e9ee",
+  muted: "#a6a9b7",
+  cyan: "#9bddce",
+  amber: "#e9c982",
+  rose: "#e28d99",
+  sage: "#a8cb99",
+  tabActiveFg: "#14151c",
+} as const
+
 const ATTENTION_STATES = new Set(["blocked", "budget_limited", "usage_limited"])
+
+function stateSymbol(status: Goal["status"], manual: boolean): string {
+  if (status === "blocked" || status === "budget_limited" || status === "usage_limited") return "✖"
+  if (status === "active") return manual ? "◐" : "●"
+  if (status === "paused") return "‖"
+  if (status === "complete") return "✓"
+  return "•"
+}
 
 /** Classify a goal+runtime into a row. Autonomous idle is never "awaiting". */
 export function toRowModel(
@@ -48,7 +71,7 @@ export function toRowModel(
   let attentionText: string | undefined
   if (goal.status === "blocked") {
     attention = "blocker"
-    attentionText = goal.blocker?.reason?.slice(0, 100) ?? "blocked"
+    attentionText = goal.blocker?.reason?.replace(/\s+/g, " ").slice(0, 100) ?? "blocked"
   } else if (ATTENTION_STATES.has(goal.status)) {
     attention = "limit"
     attentionText = stateLabel
@@ -67,10 +90,10 @@ export function toRowModel(
     } else if (rt.phase === "idle" && rt.activeRunID) {
       attention = "stale"
       attentionText = "stale lease — nudge to force a turn"
-    } else if ((rt.consecutiveFailures ?? 0) > 0) {
+    } else if ((rt.consecutiveFailures ?? 0) > 0 && goal.status !== "blocked") {
       attention = "error"
       attentionText = `${rt.consecutiveFailures} failures`
-    } else if ((rt.evaluatorRejectionCount ?? 0) > 0) {
+    } else if ((rt.evaluatorRejectionCount ?? 0) > 0 && goal.status !== "blocked") {
       attention = "error"
       attentionText = `${rt.evaluatorRejectionCount} check rejections`
     }
@@ -79,20 +102,30 @@ export function toRowModel(
   const turnText = runtime
     ? `${runtime.budgetTurnCount}${maxTurns ? `/${maxTurns}` : ""}`
     : undefined
-  // Manual (interactive) workers never get engine-started turns: say so in
-  // words. The ✋ glyph may still appear as an accent elsewhere; the words
-  // carry the meaning (see the legend line in the worker toolbar).
   const manual = goal.interactive === true
-  const label = manual && goal.status === "active"
-    ? "Active, waiting on you (manual)"
-    : stateLabel
+  const rawLabel = manual && goal.status === "active"
+    ? "Awaiting input"
+    : goal.status === "active"
+      ? "Working"
+      : stateLabel
+  const sym = stateSymbol(goal.status, manual)
+  const label = `${sym} ${rawLabel}`
+  const activityLine = goal.status === "blocked" && goal.blocker?.reason
+    ? goal.blocker.reason.replace(/\s+/g, " ")
+    : attentionText
+      ? attentionText
+      : goal.lastProgress?.summary
+        ? goal.lastProgress.summary.replace(/\s+/g, " ")
+        : activity
+          ? `${activity.short} — ${activity.hint}`
+          : "no runtime yet"
   return {
     id: goal.id,
     directory,
     name: goal.name,
     state: goal.status,
     stateLabel: label,
-    activity: activity ? `${activity.short} — ${activity.hint}` : "no runtime yet",
+    activity: activityLine,
     updated: ageText(runtime?.lastProgressAt ?? runtime?.lastRunAt, now),
     attention,
     attentionText,
@@ -102,9 +135,8 @@ export function toRowModel(
 }
 
 /** Fixed worker-table columns so rows align: name / state / activity / updated.
- * Name and state are padded/truncated to fixed widths; activity flexes and
- * truncates; updated is short by construction. Widths are display columns. */
-export const ROW_COLS = { name: 22, state: 30, updated: 9 } as const
+ * Kept compact so the 4 columns fit on one line without mid-row truncation. */
+export const ROW_COLS = { name: 24, state: 17, activity: 34, updated: 8 } as const
 
 function col(text: string, width: number): string {
   const chars = [...text]
@@ -119,7 +151,7 @@ export interface FormattedRow {
   updated: string
 }
 
-export function formatRowColumns(row: RowModel, activityWidth = 24): FormattedRow {
+export function formatRowColumns(row: RowModel, activityWidth = ROW_COLS.activity): FormattedRow {
   return {
     name: col(row.name, ROW_COLS.name),
     state: col(row.stateLabel, ROW_COLS.state),

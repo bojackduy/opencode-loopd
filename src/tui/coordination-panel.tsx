@@ -1,11 +1,12 @@
-// ─── TUI: Coordination Panel (project-scoped triage drawer) ───────────────────
-// Writes / Verification / Reservations for ONE selected project. Numbers come
-// from authoritative store reads passed in as props — this component never
-// infers staleness from age and never mutates tickets.
+// ─── TUI: Coordination Panel (project-scoped triage drawer/popup) ─────────────
+// Mirrors #drawer in docs/superpowers/prototypes/2026-11-01-dashboard.html:
+// header with [esc] close, project subtitle, filled-cyan active sub-tab
+// (Writes / Verification / Reservations), scrollable item list, footer legend.
 
 /** @jsxImportSource @opentui/solid */
-import { For, type JSX } from "solid-js"
+import { For, Show, type JSX } from "solid-js"
 import type { TuiThemeCurrent } from "@opencode-ai/plugin/tui"
+import { PALETTE } from "./dashboard-presentation"
 
 export type CoordinationTab = "writes" | "verify" | "resv"
 
@@ -60,64 +61,231 @@ export function CoordinationPanel(props: {
   onInspectReservations: () => void
   onRelease: (callID: string) => void
   onOpenSession: (goalID: string) => void
+  onClose?: () => void
 }): JSX.Element {
-  const theme = () => props.theme
   const m = () => props.model
-  const tabBtn = (id: CoordinationTab, label: string) => (
-    <span
-      style={{
-        fg: props.tab === id ? (theme().info as unknown as string) : (theme().textMuted as unknown as string),
-        bold: props.tab === id,
-      }}
-    >[{label}] </span>
-  )
+  const tabBtn = (id: CoordinationTab, keyHint: string, label: string) => {
+    const active = () => props.tab === id
+    return (
+      <box
+        flexDirection="row"
+        backgroundColor={active() ? PALETTE.cyan : PALETTE.base}
+        border={true}
+        borderColor={active() ? PALETTE.cyan : PALETTE.rule}
+        paddingLeft={1}
+        paddingRight={1}
+        {...({ onMouseDown: () => props.onTab(id) } as any)}
+      >
+        <text wrapMode="none">
+          <span style={{ fg: active() ? PALETTE.tabActiveFg : PALETTE.muted }}>[{keyHint}] </span>
+          <span style={{ fg: active() ? PALETTE.tabActiveFg : PALETTE.ink, bold: active() }}>{label}</span>
+        </text>
+      </box>
+    )
+  }
   return (
-    <box flexDirection="column" border={true} borderColor={theme().border} padding={1} flexShrink={0} maxHeight={14}>
-      <text>
-        <span style={{ fg: theme().accent, bold: true }}>Coordination / {m().shortName}</span>
-        <span style={{ fg: theme().textMuted }}> — scope = permission · ticket = current write · verification waits for quiet</span>
-        {"\n"}
-        {tabBtn("writes", "Writes")}{tabBtn("verify", "Verification")}{tabBtn("resv", "Reservations")}
-      </text>
-      {/* Scrollable body: long holder/queue/reservation lists scroll instead
-          of clipping. Text wraps; nothing is cut without a way to reach it. */}
-      <scrollbox height={9} scrollX={false} scrollY={true}>
-      {props.tab === "writes" && (
-        <text>
-          <span style={{ fg: theme().textMuted }}>Current write tickets</span>
-          <For each={m().holds} fallback={<span style={{ fg: theme().textMuted }}>{"\n"}no active writes</span>}>{(h) => (
-            <><span style={{ fg: theme().warning, bold: true }}>{"\n"}HOLD </span><span style={{ fg: theme().text }}>{h.files.join(", ").slice(0, 80)}</span><span style={{ fg: theme().textMuted }}> — {h.goalName} · held {h.age}</span></>
-          )}</For>
-          {"\n"}<span style={{ fg: theme().textMuted }}>Queued write requests (scope claims are NOT a queue)</span>
-          <For each={m().queue} fallback={<span style={{ fg: theme().textMuted }}>{"\n"}none queued</span>}>{(q) => (
-            <><span style={{ fg: theme().textMuted }}>{"\n"}WAIT #{q.position} </span><span style={{ fg: theme().text }}>{q.files.join(", ").slice(0, 80)}</span><span style={{ fg: theme().textMuted }}> — {q.goalName} · waits for {q.waitsFor}{q.ownerPriority ? " ★owner" : ""}</span></>
-          )}</For>
+    <box
+      flexDirection="column"
+      border={true}
+      borderColor={PALETTE.cyan}
+      backgroundColor={PALETTE.inset}
+      paddingLeft={2}
+      paddingRight={2}
+      paddingTop={1}
+      paddingBottom={1}
+      flexShrink={0}
+    >
+      <box flexDirection="row" justifyContent="space-between" alignItems="center" height={1} flexShrink={0}>
+        <text wrapMode="none">
+          <span style={{ fg: PALETTE.cyan, bold: true }}>Coordination</span>
+          <span style={{ fg: PALETTE.muted }}> / {m().shortName}</span>
         </text>
-      )}
-      {props.tab === "verify" && (
-        <text>
-          <span style={{ fg: theme().textMuted }}>Verification blockers</span>
-          <For each={m().verifyBlockers} fallback={<span style={{ fg: theme().success }}>{"\n"}quiet — checks can run</span>}>{(b) => (
-            <><span style={{ fg: theme().warning, bold: true }}>{"\n"}WAIT </span><span style={{ fg: theme().text }}>{b.text.slice(0, 120)}</span>{b.holder && <span style={{ fg: theme().textMuted }}> — {b.holder}</span>}{b.age && <span style={{ fg: theme().textMuted }}> · {b.age}</span>}</>
-          )}</For>
-          {m().verifyNote && <><span style={{ fg: theme().textMuted }}>{"\n"}</span><span style={{ fg: theme().textMuted }}>{m().verifyNote}</span></>}
+        <box
+          flexDirection="row"
+          border={true}
+          borderColor={PALETTE.rule}
+          backgroundColor={PALETTE.base}
+          paddingLeft={1}
+          paddingRight={1}
+          {...({ onMouseDown: () => props.onClose?.() } as any)}
+        >
+          <text wrapMode="none">
+            <span style={{ fg: PALETTE.ink }}>esc</span>
+          </text>
+        </box>
+      </box>
+      <box flexDirection="row" height={1} flexShrink={0}>
+        <text wrapMode="none">
+          <span style={{ fg: PALETTE.muted }}>
+            {m().directory} · Tab / ← → switches sub-tab · Esc returns to dashboard
+          </span>
         </text>
-      )}
-      {props.tab === "resv" && (
-        <text>
-          <span style={{ fg: theme().textMuted }}>Write reservations — release targets exactly one entry after confirmation</span>
-          <For each={m().reservations} fallback={<span style={{ fg: theme().textMuted }}>{"\n"}none</span>}>{(r) => (
-            <>
-              <span style={{ fg: r.live ? theme().warning : theme().error, bold: true }}>{"\n"}{r.live ? "● LIVE " : "! ENDED "}</span>
-              <span style={{ fg: theme().text }}>{r.callID.slice(0, 12)}…</span>
-              <span style={{ fg: theme().textMuted }}> — {r.goalName} · {r.age}</span>
-              {"\n"}<span style={{ fg: theme().textMuted }}>  {r.reason}</span>
-              {!r.releasable && <span style={{ fg: theme().error }}> [release unavailable]</span>}
-            </>
-          )}</For>
-        </text>
-      )}
+      </box>
+      <box flexDirection="row" gap={1} flexShrink={0} alignItems="center">
+        {tabBtn("writes", "w", `Writes (${m().holds.length})`)}
+        {tabBtn("verify", "v", `Verification (${m().verifyBlockers.length})`)}
+        {tabBtn("resv", "r", `Reservations (${m().reservations.length})`)}
+      </box>
+      <scrollbox height={10} scrollX={false} scrollY={true} stickyScroll={false}>
+        <Show when={props.tab === "writes"}>
+          <box flexDirection="column" flexShrink={0} gap={1} paddingTop={1}>
+            <text wrapMode="none">
+              <span style={{ fg: PALETTE.muted }}>Current write tickets</span>
+            </text>
+            <For
+              each={m().holds}
+              fallback={
+                <box border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1}>
+                  <text wrapMode="none">
+                    <span style={{ fg: PALETTE.muted }}>No active writes in this project.</span>
+                  </text>
+                </box>
+              }
+            >
+              {(h) => (
+                <box flexDirection="column" border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1}>
+                  <text wrapMode="word">
+                    <span style={{ fg: PALETTE.sage, bold: true }}>● Writing </span>
+                    <span style={{ fg: PALETTE.ink, bold: true }}>{h.files.join(", ")}</span>
+                  </text>
+                  <text wrapMode="none">
+                    <span style={{ fg: PALETTE.muted }}>Holder: {h.goalName} · session {h.sessionID.slice(0, 14)} · held {h.age}</span>
+                  </text>
+                </box>
+              )}
+            </For>
+            <text wrapMode="none">
+              <span style={{ fg: PALETTE.muted }}>Queued write requests (scope claims are NOT a queue)</span>
+            </text>
+            <For
+              each={m().queue}
+              fallback={
+                <box border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1}>
+                  <text wrapMode="none">
+                    <span style={{ fg: PALETTE.muted }}>No queued write requests.</span>
+                  </text>
+                </box>
+              }
+            >
+              {(q) => (
+                <box flexDirection="column" border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1}>
+                  <text wrapMode="word">
+                    <span style={{ fg: PALETTE.amber, bold: true }}>#{q.position} </span>
+                    <span style={{ fg: PALETTE.ink, bold: true }}>{q.goalName}</span>
+                    <Show when={q.ownerPriority}>
+                      <span style={{ fg: PALETTE.cyan }}> ★owner priority</span>
+                    </Show>
+                  </text>
+                  <text wrapMode="word">
+                    <span style={{ fg: PALETTE.ink }}>{q.files.join(", ")}</span>
+                  </text>
+                  <text wrapMode="word">
+                    <span style={{ fg: PALETTE.muted }}>Waits for {q.waitsFor} to finish its write ticket.</span>
+                  </text>
+                </box>
+              )}
+            </For>
+          </box>
+        </Show>
+
+        <Show when={props.tab === "verify"}>
+          <box flexDirection="column" flexShrink={0} gap={1} paddingTop={1}>
+            <For
+              each={m().verifyBlockers}
+              fallback={
+                <box border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1}>
+                  <text wrapMode="none">
+                    <span style={{ fg: PALETTE.sage }}>● Workspace quiet — host checks can run immediately.</span>
+                  </text>
+                </box>
+              }
+            >
+              {(b) => (
+                <box flexDirection="column" border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1}>
+                  <text wrapMode="word">
+                    <span style={{ fg: PALETTE.amber, bold: true }}>● Host checks waiting: </span>
+                    <span style={{ fg: PALETTE.ink }}>{b.text}</span>
+                  </text>
+                  <text wrapMode="word">
+                    <span style={{ fg: PALETTE.muted }}>
+                      {b.holder ?? "unknown holder"}{b.age ? ` · ${b.age}` : ""} — checks resume after the workspace is quiet.
+                    </span>
+                  </text>
+                </box>
+              )}
+            </For>
+            <box
+              flexDirection="row"
+              border={true}
+              borderColor={PALETTE.rule}
+              backgroundColor={PALETTE.base}
+              paddingLeft={1}
+              paddingRight={1}
+              {...({ onMouseDown: () => props.onTab("resv") } as any)}
+            >
+              <text wrapMode="none">
+                <span style={{ fg: PALETTE.cyan }}>[r] Inspect reservations →</span>
+              </text>
+            </box>
+          </box>
+        </Show>
+
+        <Show when={props.tab === "resv"}>
+          <box flexDirection="column" flexShrink={0} gap={1} paddingTop={1}>
+            <For
+              each={m().reservations}
+              fallback={
+                <box border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1}>
+                  <text wrapMode="none">
+                    <span style={{ fg: PALETTE.muted }}>No active or stale reservations in this project.</span>
+                  </text>
+                </box>
+              }
+            >
+              {(r) => (
+                <box flexDirection="column" border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1}>
+                  <text wrapMode="word">
+                    <span style={{ fg: r.live ? PALETTE.sage : PALETTE.rose, bold: true }}>
+                      {r.live ? "● Live / tracked reservation " : "! Ended reservation "}
+                    </span>
+                    <span style={{ fg: PALETTE.ink, bold: true }}>{r.callID.slice(0, 18)}</span>
+                  </text>
+                  <text wrapMode="word">
+                    <span style={{ fg: PALETTE.muted }}>
+                      {r.goalName} · session {r.sessionID.slice(0, 14)} · {r.age}
+                    </span>
+                  </text>
+                  <text wrapMode="word">
+                    <span style={{ fg: PALETTE.muted }}>{r.reason}</span>
+                  </text>
+                  <box flexDirection="row" gap={1}>
+                    <box
+                      flexDirection="row"
+                      border={true}
+                      borderColor={PALETTE.cyan}
+                      backgroundColor={PALETTE.inset}
+                      paddingLeft={1}
+                      paddingRight={1}
+                      {...({ onMouseDown: () => props.onRelease(r.callID) } as any)}
+                    >
+                      <text wrapMode="none">
+                        <span style={{ fg: PALETTE.cyan }}>Release reservation… [W]</span>
+                      </text>
+                    </box>
+                  </box>
+                </box>
+              )}
+            </For>
+          </box>
+        </Show>
       </scrollbox>
+      <box flexDirection="row" height={1} flexShrink={0}>
+        <text wrapMode="none">
+          <span style={{ fg: PALETTE.muted }}>
+            Scope = permission · Ticket = current write · Verification waits for quiet · [W] release · [Esc] close
+          </span>
+        </text>
+      </box>
     </box>
   )
 }
