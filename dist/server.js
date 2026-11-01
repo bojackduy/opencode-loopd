@@ -2227,7 +2227,7 @@ async function releaseAbsentSessionWorkspaceCalls(directory, host) {
   if (!host.sessionKnown)
     return 0;
   const snapshot = await readState(directory);
-  const orphaned = (snapshot.workspaceCalls ?? []).filter((call) => Boolean(call.goalID) && !snapshot.goals.some((goal) => goal.id === call.goalID && !isTerminal(goal.status)));
+  const orphaned = (snapshot.workspaceCalls ?? []).filter((call) => !call.goalID || !snapshot.goals.some((goal) => goal.id === call.goalID && !isTerminal(goal.status)));
   if (!orphaned.length)
     return 0;
   const sessions = [...new Set(orphaned.map((call) => call.sessionID))];
@@ -2245,9 +2245,9 @@ async function releaseAbsentSessionWorkspaceCalls(directory, host) {
   let released = 0;
   await mutateState(directory, "workspace.absent-session", async (state) => {
     state.workspaceCalls = (state.workspaceCalls ?? []).filter((call) => {
-      if (!call.goalID || !gone.has(call.sessionID))
+      if (!gone.has(call.sessionID))
         return true;
-      if (state.goals.some((goal) => goal.id === call.goalID && !isTerminal(goal.status)))
+      if (call.goalID && state.goals.some((goal) => goal.id === call.goalID && !isTerminal(goal.status)))
         return true;
       released += 1;
       return false;

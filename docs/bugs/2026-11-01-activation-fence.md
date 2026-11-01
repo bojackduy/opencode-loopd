@@ -41,6 +41,9 @@ Fixes (this change):
 - Activation denial names each uncontrolled call (callID, session, age) and
   points at `loopd_release_workspace` + the worker-only limit of
   `await_quiescence`.
+- `releaseAbsentSessionWorkspaceCalls` now also releases goal-less calls whose
+  session is positively absent (a gone session runs nothing; live-session
+  goal-less calls still go through the explicit owner release path).
 - `await_quiescence` is labeled worker-only in description and denial.
 
 Verification: `bun run typecheck`, `bun run build`, `git diff --check`,

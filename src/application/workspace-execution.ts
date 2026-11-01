@@ -792,24 +792,26 @@ export async function reconcileTerminalWorkspaceCalls(directory: string, host: L
 }
 
 /**
- * Release goal-owned reservations whose owning session the host positively
- * cannot resolve AND whose goal is terminal or already gone.
+ * Release reservations whose owning session the host positively cannot
+ * resolve: a gone session can never finish anything, so its reservations —
+ * goal-owned or goal-less — are leaks, not live work.
  *
- * Both conditions are required, deliberately:
- * (a) Goal deletion alone is not proof that a write finished — a retired
- *     worker can still be mid-write, so tombstones keep their fences.
- * (b) An unproven probe is never absence. Only a definitive `false` releases;
- *     a timeout, an auth error or a missing capability leaves the fence.
+ * Goal-owned calls additionally require a terminal or already-gone goal,
+ * deliberately: goal deletion alone is not proof that a write finished — a
+ * retired worker can still be mid-write, so tombstones keep their fences.
+ * Goal-less calls need no goal condition: with the owner session positively
+ * absent there is no execution left to protect.
  *
- * Owner-session (goal-less) reservations are never auto-released: a long
- * owner build is indistinguishable from a leaked one, so that case is left to
- * the explicit owner release path.
+ * An unproven probe is never absence. Only a definitive `false` releases;
+ * a timeout, an auth error or a missing capability leaves the fence.
  */
 export async function releaseAbsentSessionWorkspaceCalls(directory: string, host: LoopHost): Promise<number> {
   if (!host.sessionKnown) return 0
   const snapshot = await readState(directory)
+  // Goal-owned calls qualify only with a terminal/gone goal; goal-less calls
+  // qualify on session absence alone (a gone session runs nothing).
   const orphaned = (snapshot.workspaceCalls ?? []).filter((call) =>
-    Boolean(call.goalID) &&
+    !call.goalID ||
     !snapshot.goals.some((goal) => goal.id === call.goalID && !isTerminal(goal.status)),
   )
   if (!orphaned.length) return 0
@@ -824,8 +826,8 @@ export async function releaseAbsentSessionWorkspaceCalls(directory: string, host
   let released = 0
   await mutateState(directory, "workspace.absent-session", async (state) => {
     state.workspaceCalls = (state.workspaceCalls ?? []).filter((call) => {
-      if (!call.goalID || !gone.has(call.sessionID)) return true
-      if (state.goals.some((goal) => goal.id === call.goalID && !isTerminal(goal.status))) return true
+      if (!gone.has(call.sessionID)) return true
+      if (call.goalID && state.goals.some((goal) => goal.id === call.goalID && !isTerminal(goal.status))) return true
       released += 1
       return false
     })
