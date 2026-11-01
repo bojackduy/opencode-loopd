@@ -180,20 +180,14 @@ export function isAwaitingInput(
   return confirmedIdle
 }
 
-/** Footer hints in priority order, most important first. Dropped from the
- * tail when the bar is narrow. */
+/** Footer hints: global navigation only. Contextual keys (s/o/d/Enter, t,
+ * /, h, P) already appear on the inspector buttons, coord strip, and toolbar,
+ * so repeating them here only overflows small screens. */
 export const FOOT_HINTS = [
   "1/2/3 tabs",
   "j/k move",
-  "Enter actions",
-  "s send",
-  "d details",
-  "o session",
-  "t coordination",
-  "/ filter",
-  "h history",
-  "P projects",
   "? help",
+  "Esc close",
 ] as const
 
 /** Fit hints into maxWidth display columns. Keeps the longest leading run

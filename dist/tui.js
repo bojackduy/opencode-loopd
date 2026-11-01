@@ -1162,15 +1162,8 @@ function formatRowColumns(row, activityWidth = ROW_COLS.activity) {
 var FOOT_HINTS = [
   "1/2/3 tabs",
   "j/k move",
-  "Enter actions",
-  "s send",
-  "d details",
-  "o session",
-  "t coordination",
-  "/ filter",
-  "h history",
-  "P projects",
-  "? help"
+  "? help",
+  "Esc close"
 ];
 function fitHintBar(hints, maxWidth) {
   if (maxWidth <= 1)
