@@ -1243,26 +1243,35 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       if (host.readExecution) {
         if (runtime.phase === "running") await reconcileNativeExecution(goal, undefined, true)
         else if (!manual && runtime.phase === "idle" && goal.workerSessionID && (await host.readExecution(goal.workerSessionID))?.status === "idle") await continueGoal(goal.id)
-        // Foreign-prompt watchdog: the native reconcile's verdict can be terminal
-        // for this turn (the worker session's latest message is not our prompt —
-        // e.g. a mid-turn model switch) while every legacy watchdog below is
-        // bypassed by the `continue`. Without this, the goal stalls silently
-        // forever: the lease expires, nobody re-prompts, nobody is told.
-        // Notify-only, mirroring run.stuck: a nudge re-prompts with a fresh ID.
+        // Reconcile-stuck watchdog: some native reconcile verdicts are terminal
+        // for this turn (foreign prompt superseded ours, owner inbox never
+        // delivered, missing run anchor, unprovable timestamp) while every
+        // legacy watchdog below is bypassed by the `continue`. Without this,
+        // the goal stalls silently forever: the lease expires, nobody
+        // re-prompts, nobody is told. Notify-only, mirroring run.stuck: a
+        // nudge re-prompts with a fresh turn (pending inbox rides along).
+        // Transient states are excluded: host-not-idle (worker may be alive),
+        // workspace-operation/workspace-call (real fences that resolve on
+        // their own), missing-outcome (has its own outputless recovery).
         if (runtime.phase === "running" && runtime.activeRunID) {
           const fresh = await readState(directory)
           const rt = fresh.runtimes.find((r) => r.goalID === goal.id)
+          const stuckReason = rt?.nativeReconcileBlocked?.reason
+          const isTerminalBlock = stuckReason === "foreign-prompt"
+            || stuckReason === "undelivered-inbox"
+            || stuckReason === "missing-run-anchor"
+            || stuckReason === "invalid-terminal-time"
           if (rt && rt.phase === "running" && rt.activeRunID === runtime.activeRunID
-            && rt.nativeReconcileBlocked?.reason === "foreign-prompt"
-            && rt.foreignPromptNotifiedRunID !== rt.activeRunID) {
+            && isTerminalBlock
+            && rt.reconcileStuckNotifiedRunID !== rt.activeRunID) {
             const leaseExpired = !rt.leaseExpiresAt || Date.now() >= Date.parse(rt.leaseExpiresAt)
             const lastActive = rt.lastActivityAt ? Date.parse(rt.lastActivityAt) : 0
             if (leaseExpired && Date.now() - lastActive > stuckRunningMs) {
               const stuckSeconds = Math.floor((Date.now() - lastActive) / 1000)
-              const marked = await mutateState(directory, `maintenance.foreign-prompt:${goal.id}`, async (s) => {
+              const marked = await mutateState(directory, `maintenance.reconcile-stuck:${goal.id}`, async (s) => {
                 const r = s.runtimes.find((x) => x.goalID === goal.id)
                 if (!r || r.activeRunID !== runtime.activeRunID) return s
-                r.foreignPromptNotifiedRunID = r.activeRunID
+                r.reconcileStuckNotifiedRunID = r.activeRunID
                 r.updatedAt = new Date().toISOString()
                 return s
               })
@@ -1276,14 +1285,20 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
                 timestamp: new Date().toISOString(),
                 revision: marked.revision,
               } satisfies LoopEvent)
-              await logServerEvent(directory, "maintenance.foreign-prompt-stuck", {
+              await logServerEvent(directory, "maintenance.reconcile-stuck", {
                 goalID: goal.id,
                 runID: runtime.activeRunID,
+                reason: stuckReason,
                 stuckSeconds,
               })
+              const reasonNote = stuckReason === "foreign-prompt"
+                ? "its worker session's latest message is not this turn's prompt (e.g. a mid-turn model switch superseded it)"
+                : stuckReason === "undelivered-inbox"
+                  ? "its queued owner input was never delivered to the worker, so the turn cannot finalize on its own"
+                  : "its run bookkeeping cannot prove a terminal turn"
               await host.notifyOwner(
                 goal.ownerSessionID,
-                `Loop goal "${goal.name}" is stalled: its worker session's latest message is not this turn's prompt (e.g. a mid-turn model switch superseded it), so the engine will not re-prompt on its own. Use inspect_background_goal to look, nudge_goal to re-prompt with a fresh turn, or pause_goal to stop it.`,
+                `Loop goal "${goal.name}" is stalled (${stuckReason}): ${reasonNote}. The engine will not re-prompt on its own. Use nudge_goal to force a fresh turn, or pause_goal to stop it.`,
                 (goal as any).parentAgent,
               )
             }

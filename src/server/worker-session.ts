@@ -129,10 +129,10 @@ function buildContinuationSteering(goal: Goal, runtime: GoalRuntimeState, contex
     `Explore with reads/search → claim_goal_scope({ paths, runGeneration from get_goal }) → structured edit/write/apply_patch → run_goal_checks → report progress or complete_goal.`,
     `Claim only the minimum files needed. Request expansion BEFORE editing new paths; rename requires both endpoints. No globs.`,
     `Conflicts identify owning goal/session/path. Initial and expansion conflicts fail immediately with no partial claim and no automatic queue. Coordinate with the owner, then retry once; never sleep, poll claims, or repeatedly prompt waiting workers.`,
-    `Arbitrary shell is allowed but prompt-awareness only: shell calls are recorded as uncontrolled, never fenced, and checks wait for quiescence. loopd_command_start/write, custom tools, batch, and subagent writes are denied. Configured checks are trusted commands under a workspace-wide operation lock, not an OS sandbox.`,
+    `Arbitrary shell is allowed but prompt-awareness only: shell calls are recorded as uncontrolled, never fenced, and checks wait for quiescence. Do not use shell to write, edit, or delete files outside write_scope — shell writes bypass tickets and violate scope. Use structured edit/write/apply_patch with claimed scope only. loopd_command_start/write, custom tools, batch, and subagent writes are denied. Configured checks are trusted commands under a workspace-wide operation lock, not an OS sandbox.`,
     `Output-location exceptions do not grant extra source files. Only this goal's artifact directory is writable without source claims.`,
   ] : goal.config.workspaceWrite === false ? [
-    ``, `## READ-ONLY OWNERSHIP`, `Shared source writes and arbitrary custom/subagent tools are denied. Shell is allowed but prompt-awareness only: recorded as uncontrolled, never fenced, and checks wait for quiescence. Write artifacts only under this goal's artifact directory. Use run_goal_checks for trusted configured verification.`,
+    ``, `## READ-ONLY OWNERSHIP`, `You are a loopd goal worker on a read-only goal: you are not allowed to write source files, only shell reads plus artifact writes. Shared source writes and arbitrary custom/subagent tools are denied. Shell is allowed but prompt-awareness only: recorded as uncontrolled, never fenced, and checks wait for quiescence. Do not use shell to write, edit, or delete source files — shell writes bypass scope and violate read-only. Write artifacts only under this goal's artifact directory. Use run_goal_checks for trusted configured verification.`,
   ] : []
 
   const approvedInstructions = goal.config.approvedCommands?.length ? [
@@ -285,7 +285,10 @@ function buildContinuationSteering(goal: Goal, runtime: GoalRuntimeState, contex
     }
   }
 
-  parts.push(...scopeInstructions)
+  // Scope + approved-commands are stated on the initial prompt and on nudged
+  // turns carrying owner inbox — not injected every turn, per owner rule.
+  // Later turns re-read authoritative scope via get_goal.
+  if (runtime.runCount <= 1 || (context?.inboxMessages?.length ?? 0) > 0) parts.push(...scopeInstructions)
   parts.push(...approvedInstructions)
   return parts.join("\n")
 }
