@@ -292,6 +292,13 @@
         .close .actions { margin-top:0; }
         .footer { align-items:flex-start; flex-direction:column; }
       }
+      @media (max-width:700px) {
+        .story { display:grid; grid-template-columns:minmax(0,1fr); gap:0; }
+        .story-visual { position:static; height:24rem; min-height:22rem; max-height:24rem; margin:0 0 1rem; z-index:auto; }
+        .story-copy { padding:0; }
+        .story-step { min-height:0; opacity:1; transform:none; padding:1.5rem 0; }
+        .story-orbit { inset:12% 8% 12%; }
+      }
       @media (prefers-reduced-motion: reduce) {
         *, *::before, *::after { scroll-behavior:auto !important; animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; }
         .story-step, .scene { opacity:1; transform:none; }
