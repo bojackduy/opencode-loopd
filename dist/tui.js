@@ -2864,10 +2864,14 @@ function LoopDashboard(props) {
     focusTimer = setTimeout(() => {
       if (disposed)
         return;
-      const current = props.api.renderer.currentFocusedRenderable;
-      if (current && current !== inputEl)
-        current.blur();
-      inputEl?.focus();
+      if (mode() === "insert") {
+        const current = props.api.renderer.currentFocusedRenderable;
+        if (current && current !== inputEl)
+          current.blur();
+        inputEl?.focus();
+      } else {
+        inputEl?.blur();
+      }
     }, 10);
   }
   function enterInsertMode(kind, initialValue = "") {
@@ -4407,9 +4411,9 @@ function LoopDashboard(props) {
     _$setProp3(_el$29, "flexDirection", "column");
     _$setProp3(_el$29, "paddingLeft", 2);
     _$setProp3(_el$29, "paddingRight", 2);
-    _$setProp3(_el$29, "paddingTop", 1);
-    _$setProp3(_el$29, "paddingBottom", 1);
-    _$setProp3(_el$29, "gap", 1);
+    _$setProp3(_el$29, "paddingTop", 0);
+    _$setProp3(_el$29, "paddingBottom", 0);
+    _$setProp3(_el$29, "gap", 0);
     _$setProp3(_el$29, "flexShrink", 0);
     _$insert3(_el$29, _$createComponent3(Show3, {
       get when() {

@@ -475,9 +475,15 @@ export function LoopDashboard(props: Props) {
     if (focusTimer) clearTimeout(focusTimer)
     focusTimer = setTimeout(() => {
       if (disposed) return
-      const current = props.api.renderer.currentFocusedRenderable
-      if (current && current !== inputEl) current.blur()
-      inputEl?.focus()
+      // Insert mode owns the cursor: focus so keystrokes land in the box.
+      // Normal mode blurs it so no stray block cursor blinks at the corner.
+      if (mode() === "insert") {
+        const current = props.api.renderer.currentFocusedRenderable
+        if (current && current !== inputEl) current.blur()
+        inputEl?.focus()
+      } else {
+        inputEl?.blur()
+      }
     }, 10)
   }
 
@@ -1501,14 +1507,16 @@ export function LoopDashboard(props: Props) {
         onSelectTab={(nextTab) => { setTab(nextTab); setSelected(0) }}
       />
 
-      {/* 3..5. Main body (sized to content — never flexGrow:1 so it never pushes footer off-screen) */}
+      {/* 3..5. Main body: tight vertical rhythm (gap 0) so sections read as
+          one dashboard instead of separated islands. Sized to content — never
+          flexGrow:1 so it never pushes footer off-screen. */}
       <box
         flexDirection="column"
         paddingLeft={2}
         paddingRight={2}
-        paddingTop={1}
-        paddingBottom={1}
-        gap={1}
+        paddingTop={0}
+        paddingBottom={0}
+        gap={0}
         flexShrink={0}
       >
         {/* ─── MODAL POPUPS (Actions / Send / Coordination / Help / Projects / Release) ─── */}
