@@ -1003,6 +1003,12 @@ export function createGoalService(host: LoopHost): GoalService {
     if (!goal.config.progressFile) goal.config.progressFile = path.join(artifactDir, "progress.md")
     await ensureGoalArtifactDir(directory, id)
 
+    // Pre-goal evidence sweep (outside the lock): terminal/idle proof may
+    // have arrived without its after-hook (crash, restart, missed hook).
+    // Reconcile first so stale reservations cannot veto the launch; the
+    // create transaction below re-fences atomically on what genuinely remains.
+    try { await reconcileTerminalWorkspaceCalls(directory, host) } catch { /* fail-open to the existing fence */ }
+
     // Atomically persist goal and set queued phase
     const state1 = await mutateState(directory, `goal.create:${id}`, async (state) => {
       assertWorkspaceWriteAvailable(state, goal, goal.ownerSessionID)

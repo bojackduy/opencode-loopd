@@ -315,7 +315,20 @@ export function assertScopeAvailable(state: StoreState, goal: Goal): void {
   if (goal.config.write_scope !== undefined) {
     const orphan = [...(state.orphanedCommandProcesses || []), ...(state.commands || []).filter((command) => command.status === "missing").map((command) => ({ commandID: command.id, pid: command.pid, command: command.command }))].find((process) => orphanBlocks(process))
     if (orphan) throw new Error(`Protected activation denied: command ${orphan.commandID} lost its handle and process exit is unproved. Stop it with loopd_command_terminate (works on missing commands), verify exit externally, then loopd_command_remove to clear the fence. Removing the record alone never clears a live process's fence.`)
-    if (state.workspaceCalls?.some((call) => call.uncontrolled)) throw new Error("Protected goal activation denied: an uncontrolled tool/shell is still executing. Wait for its exit event, do not poll claims.")
+    const uncontrolled = (state.workspaceCalls ?? []).filter((call) => call.uncontrolled)
+    if (uncontrolled.length) {
+      // Fence honesty: name the exact reservations so the owner can inspect
+      // or release the right one instead of guessing. Ages derive from
+      // reservation timestamps; entries without one report age unknown.
+      const ageOf = (at?: string) => {
+        if (!at) return "age unknown"
+        const ms = Date.now() - Date.parse(at)
+        return Number.isFinite(ms) && ms >= 0 ? `age ${Math.floor(ms / 1000)}s` : "age unknown"
+      }
+      const listed = uncontrolled.slice(0, 5).map((call) => `call ${call.callID} by session ${call.sessionID} (${ageOf(call.at)})`).join("; ")
+      const more = uncontrolled.length > 5 ? ` (+${uncontrolled.length - 5} more)` : ""
+      throw new Error(`Protected goal activation denied: ${uncontrolled.length} uncontrolled shell call(s) still reserved — ${listed}${more}. Inspect with loopd_release_workspace (no filters) and release only calls you own, orphaned calls, or calls whose goal is gone; never release another live session's call. await_quiescence cannot help before a goal exists — it needs an active worker session.`)
+    }
     const running = state.commands?.find((command) => command.status === "running")
     if (running) throw new Error(`Protected goal activation denied: uncontrolled command ${running.id} is still running. Terminate it before starting scoped/read-only work.`)
   }
@@ -417,7 +430,11 @@ export async function beforeWorkspaceTool(
     const held = heldGoals(state)
     const protectedGoals = held.filter((item) => item.config.workspaceWrite !== false && item.config.write_scope !== undefined)
     // Preserve legacy operation when no scoped/read-only contract is present.
-    if (!goal && ownerTools.has(input.tool) && (!protectedGoals.length || state.goals.some((item) => item.ownerSessionID === input.sessionID))) return state
+    // Owner control verbs (goal create/steer/lifecycle) never touch workspace
+    // files; their service methods fence atomically themselves. Recording them
+    // as uncontrolled reservations served no purpose except self-fencing: the
+    // create-goal call itself would then veto its own scoped activation.
+    if (!goal && ownerTools.has(input.tool)) return state
     // Trusted owner/main authority. A persisted owner session, or a session the
     // host proves is a root session, may run ordinary tools even while protected
     // goals exist. Scoped-worker restrictions win: `goal` is only set for the
@@ -536,7 +553,7 @@ export async function beforeWorkspaceTool(
     return state
   })
   if (wasQueued) {
-    throw new Error(`Write ticket queued for ${queuedFiles.join(", ")} — position ${queuedPos} in queue. Current holder is writing overlapping files. You will be woken when your ticket is granted; do not retry manually. While waiting, use read tools or prepare the next patch.`)
+    throw new Error(`Write ticket busy for ${queuedFiles.join(", ")} — position ${queuedPos} in queue. Current holder is writing overlapping files. The queue does not auto-run your call: wait for the holder's exit event (or a fence wake if you parked), then retry with a new call (coordinate_then_retry). While waiting, use read tools or prepare the next patch.`)
   }
 }
 
@@ -557,6 +574,18 @@ export async function afterWorkspaceTool(directory: string, sessionID: string, c
       // Try to grant in queue order, but allow disjoint files to be granted together.
       const remaining: typeof state.writeTickets.queue = []
       for (const waiter of state.writeTickets.queue) {
+        // A denied execution never started (its before-hook threw before the
+        // executor ran), so no wake can ever resume it. Promoting it would
+        // mint a phantom holder that fences checks forever: drop it and let
+        // the worker retry with a new call. Only a waiter with a live
+        // execution (a workspace reservation or a runtime-tracked tool) keeps
+        // its place.
+        const liveExecution = (state.workspaceCalls ?? []).some((call) => call.sessionID === waiter.sessionID && provesSameCall(call.callID, waiter.callID)) ||
+          state.runtimes.some((rt) => rt.activeToolCallIDs?.some((id) => provesSameCall(id, waiter.callID)))
+        if (!liveExecution) {
+          await logServerEvent(directory, "ticket.waiter-dropped", { callID: waiter.callID, sessionID: waiter.sessionID, files: waiter.files }).catch(() => {})
+          continue
+        }
         if (canGrantTicket(state, waiter.files)) {
           state.writeTickets.holders.push({
             ticketID: randomUUID(),
@@ -614,6 +643,7 @@ export async function releaseTerminalWorkspaceCalls(directory: string, evidence:
     snapshot.goals.some((goal) => goal.workerSessionID === proof.sessionID && snapshot.runtimes.some((rt) => rt.goalID === goal.id && rt.activeToolCallIDs?.some((id) => provesSameCall(id, proof.callID)))))
   if (!relevant) return 0
   let released = 0
+  const releasedPairs: Array<{ sessionID: string; callID: string }> = []
   await mutateState(directory, "workspace.terminal-evidence", async (state) => {
     state.workspaceCalls = (state.workspaceCalls ?? []).filter((call) => {
       const proof = evidence.find((item) => item.sessionID === call.sessionID && provesSameCall(call.callID, item.callID) &&
@@ -621,6 +651,7 @@ export async function releaseTerminalWorkspaceCalls(directory: string, evidence:
         typeof call.at === "string" && Number.isFinite(Date.parse(call.at)) && item.endedAt >= Date.parse(call.at))
       if (!proof) return true
       released += 1
+      releasedPairs.push({ sessionID: call.sessionID, callID: call.callID })
       const goal = state.goals.find((item) => item.id === call.goalID && item.workerSessionID === call.sessionID)
       const rt = goal && state.runtimes.find((item) => item.goalID === goal.id)
       if (rt && (call.generation === undefined || rt.runGeneration === call.generation)) {
@@ -644,9 +675,95 @@ export async function releaseTerminalWorkspaceCalls(directory: string, evidence:
           (item.status === "completed" || item.status === "error") && Number.isFinite(item.endedAt) && item.endedAt >= started)
       })
     }
+    // Ticket entries keyed to released calls are phantoms: the execution is
+    // proved settled, so a surviving holder would fence checks forever and a
+    // surviving waiter could never be woken. Drop them with the call.
+    if (state.writeTickets && releasedPairs.length) {
+      state.writeTickets.holders = state.writeTickets.holders.filter((h) =>
+        !releasedPairs.some((p) => h.sessionID === p.sessionID && provesSameCall(h.callID, p.callID)))
+      state.writeTickets.queue = state.writeTickets.queue.filter((w) =>
+        !releasedPairs.some((p) => w.sessionID === p.sessionID && provesSameCall(w.callID, p.callID)))
+    }
     return state
   })
   if (released) await logServerEvent(directory, "workspace.terminal-evidence-released", { released }).catch(() => {})
+  if (released) await fireFenceAwaits(directory).catch(() => {})
+  return released
+}
+
+/**
+ * Idle-session proof: a session the host proves idle has settled every tool
+ * call — a still-running call would keep it busy. This releases reservations
+ * whose after-hook never ran (crash, restart, missed hook) with no age/TTL
+ * inference: only a positive idle status plus a reservation timestamp
+ * predating the observation counts. Fail-closed: unknown status, missing
+ * timestamps, runtime-tracked in-flight tools, and non-idle sessions stay
+ * fenced. Ticket entries keyed to released calls, and dead waiters from idle
+ * sessions, are pruned in the same transaction so they cannot wedge checks.
+ */
+async function reconcileIdleSessionCalls(directory: string, host: LoopHost): Promise<number> {
+  const snapshot = await readState(directory)
+  const calls = snapshot.workspaceCalls ?? []
+  const waiters = snapshot.writeTickets?.queue ?? []
+  if (!calls.length && !waiters.length) return 0
+  const sessions = [...new Set([...calls.map((c) => c.sessionID), ...waiters.map((w) => w.sessionID)])]
+  const idleAt = new Map<string, number>()
+  for (const sessionID of sessions) {
+    const observed = Date.now()
+    let status: string | undefined
+    try { status = await host.sessionStatus(sessionID) } catch { status = undefined }
+    if (status === "idle") idleAt.set(sessionID, observed)
+  }
+  if (!idleAt.size) return 0
+  // Runtime-tracked tools captured before the observation: only these IDs may
+  // be filtered below, so a tool started after the idle proof stays fenced.
+  const tracked = new Set<string>()
+  for (const rt of snapshot.runtimes) for (const id of rt.activeToolCallIDs ?? []) tracked.add(id)
+  let released = 0
+  await mutateState(directory, "workspace.idle-session", async (state) => {
+    const live = new Set<string>()
+    for (const rt of state.runtimes) for (const id of rt.activeToolCallIDs ?? []) live.add(id)
+    const liveRef = (callID: string) => [...live].some((id) => id === callID || provesSameCall(id, callID) || provesSameCall(callID, id))
+    state.workspaceCalls = (state.workspaceCalls ?? []).filter((call) => {
+      const t0 = idleAt.get(call.sessionID)
+      if (t0 === undefined) return true
+      if (liveRef(call.callID)) return true
+      const at = typeof call.at === "string" ? Date.parse(call.at) : NaN
+      if (!Number.isFinite(at) || at >= t0) return true
+      released += 1
+      return false
+    })
+    for (const goal of state.goals) {
+      if (!goal.workerSessionID || idleAt.get(goal.workerSessionID) === undefined) continue
+      const rt = state.runtimes.find((r) => r.goalID === goal.id)
+      if (!rt?.activeToolCallIDs?.length) continue
+      const before = rt.activeToolCallIDs.length
+      rt.activeToolCallIDs = rt.activeToolCallIDs.filter((id) => {
+        if (!tracked.has(id)) return true
+        return (state.workspaceCalls ?? []).some((call) => call.sessionID === goal.workerSessionID && (id === call.callID || provesSameCall(id, call.callID) || provesSameCall(call.callID, id)))
+      })
+      released += before - rt.activeToolCallIDs.length
+    }
+    if (state.writeTickets) {
+      const holders = state.writeTickets.holders.length
+      state.writeTickets.holders = state.writeTickets.holders.filter((h) => {
+        if (idleAt.get(h.sessionID) === undefined) return true
+        return (state.workspaceCalls ?? []).some((call) => call.sessionID === h.sessionID && (h.callID === call.callID || provesSameCall(h.callID, call.callID) || provesSameCall(call.callID, h.callID)))
+      })
+      released += holders - state.writeTickets.holders.length
+      // Waiters never hold a reservation: their execution was denied before it
+      // started, so an idle owner session proves them dead. Drop them; the
+      // worker retries with a new call.
+      const queued = state.writeTickets.queue.length
+      state.writeTickets.queue = state.writeTickets.queue.filter((w) => idleAt.get(w.sessionID) === undefined)
+      released += queued - state.writeTickets.queue.length
+    }
+    return state
+  })
+  if (released) {
+    await logServerEvent(directory, "workspace.idle-session-released", { released }).catch(() => {})
+    await fireFenceAwaits(directory).catch(() => {})
+  }
   return released
 }
 
@@ -665,6 +782,10 @@ export async function reconcileTerminalWorkspaceCalls(directory: string, host: L
       await releaseTerminalWorkspaceCalls(directory, proof.flat())
     }
   }
+  // Idle-session proof: a session the host proves idle has settled its
+  // calls (a running call would keep it busy). Releases reservations whose
+  // after-hook never ran, with no age inference.
+  await reconcileIdleSessionCalls(directory, host)
   // Second, independent proof: a session the host positively cannot resolve
   // can never finish its write, so its goal-owned reservations are released.
   await releaseAbsentSessionWorkspaceCalls(directory, host)
@@ -830,7 +951,7 @@ export async function withWorkspaceOperation<T>(
       for (const c of calls.filter((c) => (c.paths?.length ?? 0) > 0)) {
         parts.push(`legacy write call ${c.callID} by session ${c.sessionID} on ${c.paths.join(", ")} (${ageOf(c.at)})`)
       }
-      throw new Error(`Workspace is busy — held by: ${parts.join("; ")}. Verification denied until quiescent; do not poll or retry checks (each attempt burns evaluator budget). Park with await_quiescence, report progress, and end the turn — the wake carries retry evidence. Or wait for the holder's exit event, or release it with loopd_release_workspace if it is yours, orphaned, or its goal is gone.`)
+      throw new Error(`Workspace is busy — held by: ${parts.join("; ")}. Verification denied until quiescent; a denied check burns no evaluator rejection, so do not spin on it. Worker with a goal: park with await_quiescence, report progress, and end the turn — the wake carries retry evidence. Without a goal: wait for the holder's exit event, or release it with loopd_release_workspace if it is yours, orphaned, or its goal is gone.`)
     }
     state.workspaceOperation = { id, goalID, sessionID }
     return state

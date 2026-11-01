@@ -348,12 +348,12 @@ export function goalTools(
     }),
 
     await_quiescence: tool({
-      description: "Park until the workspace is quiescent (no operation, ticket, uncontrolled or legacy-write holder). Call when run_goal_checks or complete_goal is denied by a named fence holder instead of retrying: parking never burns evaluator rejections or no-progress turns. Report progress and end the turn after parking; the wake (inbox evidence + engine idle continuation) tells you to retry. Fires immediately when already quiescent.",
+      description: "Worker-only. Park until the workspace is quiescent (no operation, ticket, uncontrolled or legacy-write holder). Call when run_goal_checks or complete_goal is denied by a named fence holder instead of retrying: parking never burns evaluator rejections or no-progress turns. Report progress and end the turn after parking; the wake (inbox evidence + engine idle continuation) tells you to retry. Fires immediately when already quiescent.",
       args: {},
       execute: async (_args, context) => {
         const workerID = context?.sessionID || hostSessionID
         const goal = findGoalByWorkerSession(await readState(dir), workerID)
-        if (!goal || !workerID || goal.status !== "active") return { title: "Park denied", output: JSON.stringify({ ok: false, message: "An active exact worker session is required." }) }
+        if (!goal || !workerID || goal.status !== "active") return { title: "Park denied", output: JSON.stringify({ ok: false, message: "Worker-only: an active exact worker session is required. Before any goal exists there is nothing to park — inspect/release stale fences with loopd_release_workspace (no filters)." }) }
         // Identity is proven by the worker-session match above; the owner ID
         // is filled server-side so ownership checks pass without trusting input.
         const result = await requestFenceAwait(dir, { goalID: goal.id, ownerSessionID: goal.ownerSessionID })

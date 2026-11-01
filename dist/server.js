@@ -1836,8 +1836,18 @@ function assertScopeAvailable(state, goal) {
     const orphan = [...state.orphanedCommandProcesses || [], ...(state.commands || []).filter((command) => command.status === "missing").map((command) => ({ commandID: command.id, pid: command.pid, command: command.command }))].find((process2) => orphanBlocks(process2));
     if (orphan)
       throw new Error(`Protected activation denied: command ${orphan.commandID} lost its handle and process exit is unproved. Stop it with loopd_command_terminate (works on missing commands), verify exit externally, then loopd_command_remove to clear the fence. Removing the record alone never clears a live process's fence.`);
-    if (state.workspaceCalls?.some((call) => call.uncontrolled))
-      throw new Error("Protected goal activation denied: an uncontrolled tool/shell is still executing. Wait for its exit event, do not poll claims.");
+    const uncontrolled = (state.workspaceCalls ?? []).filter((call) => call.uncontrolled);
+    if (uncontrolled.length) {
+      const ageOf = (at) => {
+        if (!at)
+          return "age unknown";
+        const ms = Date.now() - Date.parse(at);
+        return Number.isFinite(ms) && ms >= 0 ? `age ${Math.floor(ms / 1000)}s` : "age unknown";
+      };
+      const listed = uncontrolled.slice(0, 5).map((call) => `call ${call.callID} by session ${call.sessionID} (${ageOf(call.at)})`).join("; ");
+      const more = uncontrolled.length > 5 ? ` (+${uncontrolled.length - 5} more)` : "";
+      throw new Error(`Protected goal activation denied: ${uncontrolled.length} uncontrolled shell call(s) still reserved \u2014 ${listed}${more}. Inspect with loopd_release_workspace (no filters) and release only calls you own, orphaned calls, or calls whose goal is gone; never release another live session's call. await_quiescence cannot help before a goal exists \u2014 it needs an active worker session.`);
+    }
     const running = state.commands?.find((command) => command.status === "running");
     if (running)
       throw new Error(`Protected goal activation denied: uncontrolled command ${running.id} is still running. Terminate it before starting scoped/read-only work.`);
@@ -1907,7 +1917,7 @@ async function beforeWorkspaceTool(directory, input, args, identity = {}) {
     }
     const held = heldGoals(state);
     const protectedGoals = held.filter((item) => item.config.workspaceWrite !== false && item.config.write_scope !== undefined);
-    if (!goal && ownerTools.has(input.tool) && (!protectedGoals.length || state.goals.some((item) => item.ownerSessionID === input.sessionID)))
+    if (!goal && ownerTools.has(input.tool))
       return state;
     const isOwner = !goal && (state.goals.some((item) => item.ownerSessionID === input.sessionID) || hostMain);
     if (!state.workspaceOperation && !protectedGoals.length && (!goal || goal.config.write_scope === undefined)) {
@@ -2010,7 +2020,7 @@ async function beforeWorkspaceTool(directory, input, args, identity = {}) {
     return state;
   });
   if (wasQueued) {
-    throw new Error(`Write ticket queued for ${queuedFiles.join(", ")} \u2014 position ${queuedPos} in queue. Current holder is writing overlapping files. You will be woken when your ticket is granted; do not retry manually. While waiting, use read tools or prepare the next patch.`);
+    throw new Error(`Write ticket busy for ${queuedFiles.join(", ")} \u2014 position ${queuedPos} in queue. Current holder is writing overlapping files. The queue does not auto-run your call: wait for the holder's exit event (or a fence wake if you parked), then retry with a new call (coordinate_then_retry). While waiting, use read tools or prepare the next patch.`);
   }
 }
 async function afterWorkspaceTool(directory, sessionID, callID, tool) {
@@ -2028,6 +2038,11 @@ async function afterWorkspaceTool(directory, sessionID, callID, tool) {
       state.writeTickets.queue = state.writeTickets.queue.filter((w) => w.callID !== callID);
       const remaining = [];
       for (const waiter of state.writeTickets.queue) {
+        const liveExecution = (state.workspaceCalls ?? []).some((call) => call.sessionID === waiter.sessionID && provesSameCall(call.callID, waiter.callID)) || state.runtimes.some((rt) => rt.activeToolCallIDs?.some((id) => provesSameCall(id, waiter.callID)));
+        if (!liveExecution) {
+          await logServerEvent(directory, "ticket.waiter-dropped", { callID: waiter.callID, sessionID: waiter.sessionID, files: waiter.files }).catch(() => {});
+          continue;
+        }
         if (canGrantTicket(state, waiter.files)) {
           state.writeTickets.holders.push({
             ticketID: randomUUID3(),
@@ -2071,12 +2086,14 @@ async function releaseTerminalWorkspaceCalls(directory, evidence) {
   if (!relevant)
     return 0;
   let released = 0;
+  const releasedPairs = [];
   await mutateState(directory, "workspace.terminal-evidence", async (state) => {
     state.workspaceCalls = (state.workspaceCalls ?? []).filter((call) => {
       const proof = evidence.find((item) => item.sessionID === call.sessionID && provesSameCall(call.callID, item.callID) && (item.status === "completed" || item.status === "error") && Number.isFinite(item.endedAt) && typeof call.at === "string" && Number.isFinite(Date.parse(call.at)) && item.endedAt >= Date.parse(call.at));
       if (!proof)
         return true;
       released += 1;
+      releasedPairs.push({ sessionID: call.sessionID, callID: call.callID });
       const goal = state.goals.find((item) => item.id === call.goalID && item.workerSessionID === call.sessionID);
       const rt = goal && state.runtimes.find((item) => item.goalID === goal.id);
       if (rt && (call.generation === undefined || rt.runGeneration === call.generation)) {
@@ -2095,10 +2112,94 @@ async function releaseTerminalWorkspaceCalls(directory, evidence) {
         return !evidence.some((item) => item.sessionID === goal.workerSessionID && provesSameCall(callID, item.callID) && (item.status === "completed" || item.status === "error") && Number.isFinite(item.endedAt) && item.endedAt >= started);
       });
     }
+    if (state.writeTickets && releasedPairs.length) {
+      state.writeTickets.holders = state.writeTickets.holders.filter((h) => !releasedPairs.some((p) => h.sessionID === p.sessionID && provesSameCall(h.callID, p.callID)));
+      state.writeTickets.queue = state.writeTickets.queue.filter((w) => !releasedPairs.some((p) => w.sessionID === p.sessionID && provesSameCall(w.callID, p.callID)));
+    }
     return state;
   });
   if (released)
     await logServerEvent(directory, "workspace.terminal-evidence-released", { released }).catch(() => {});
+  if (released)
+    await fireFenceAwaits(directory).catch(() => {});
+  return released;
+}
+async function reconcileIdleSessionCalls(directory, host) {
+  const snapshot = await readState(directory);
+  const calls = snapshot.workspaceCalls ?? [];
+  const waiters = snapshot.writeTickets?.queue ?? [];
+  if (!calls.length && !waiters.length)
+    return 0;
+  const sessions = [...new Set([...calls.map((c) => c.sessionID), ...waiters.map((w) => w.sessionID)])];
+  const idleAt = new Map;
+  for (const sessionID of sessions) {
+    const observed = Date.now();
+    let status;
+    try {
+      status = await host.sessionStatus(sessionID);
+    } catch {
+      status = undefined;
+    }
+    if (status === "idle")
+      idleAt.set(sessionID, observed);
+  }
+  if (!idleAt.size)
+    return 0;
+  const tracked = new Set;
+  for (const rt of snapshot.runtimes)
+    for (const id of rt.activeToolCallIDs ?? [])
+      tracked.add(id);
+  let released = 0;
+  await mutateState(directory, "workspace.idle-session", async (state) => {
+    const live = new Set;
+    for (const rt of state.runtimes)
+      for (const id of rt.activeToolCallIDs ?? [])
+        live.add(id);
+    const liveRef = (callID) => [...live].some((id) => id === callID || provesSameCall(id, callID) || provesSameCall(callID, id));
+    state.workspaceCalls = (state.workspaceCalls ?? []).filter((call) => {
+      const t0 = idleAt.get(call.sessionID);
+      if (t0 === undefined)
+        return true;
+      if (liveRef(call.callID))
+        return true;
+      const at = typeof call.at === "string" ? Date.parse(call.at) : NaN;
+      if (!Number.isFinite(at) || at >= t0)
+        return true;
+      released += 1;
+      return false;
+    });
+    for (const goal of state.goals) {
+      if (!goal.workerSessionID || idleAt.get(goal.workerSessionID) === undefined)
+        continue;
+      const rt = state.runtimes.find((r) => r.goalID === goal.id);
+      if (!rt?.activeToolCallIDs?.length)
+        continue;
+      const before = rt.activeToolCallIDs.length;
+      rt.activeToolCallIDs = rt.activeToolCallIDs.filter((id) => {
+        if (!tracked.has(id))
+          return true;
+        return (state.workspaceCalls ?? []).some((call) => call.sessionID === goal.workerSessionID && (id === call.callID || provesSameCall(id, call.callID) || provesSameCall(call.callID, id)));
+      });
+      released += before - rt.activeToolCallIDs.length;
+    }
+    if (state.writeTickets) {
+      const holders = state.writeTickets.holders.length;
+      state.writeTickets.holders = state.writeTickets.holders.filter((h) => {
+        if (idleAt.get(h.sessionID) === undefined)
+          return true;
+        return (state.workspaceCalls ?? []).some((call) => call.sessionID === h.sessionID && (h.callID === call.callID || provesSameCall(h.callID, call.callID) || provesSameCall(call.callID, h.callID)));
+      });
+      released += holders - state.writeTickets.holders.length;
+      const queued = state.writeTickets.queue.length;
+      state.writeTickets.queue = state.writeTickets.queue.filter((w) => idleAt.get(w.sessionID) === undefined);
+      released += queued - state.writeTickets.queue.length;
+    }
+    return state;
+  });
+  if (released) {
+    await logServerEvent(directory, "workspace.idle-session-released", { released }).catch(() => {});
+    await fireFenceAwaits(directory).catch(() => {});
+  }
   return released;
 }
 async function reconcileTerminalWorkspaceCalls(directory, host) {
@@ -2119,6 +2220,7 @@ async function reconcileTerminalWorkspaceCalls(directory, host) {
       await releaseTerminalWorkspaceCalls(directory, proof.flat());
     }
   }
+  await reconcileIdleSessionCalls(directory, host);
   await releaseAbsentSessionWorkspaceCalls(directory, host);
 }
 async function releaseAbsentSessionWorkspaceCalls(directory, host) {
@@ -2252,7 +2354,7 @@ async function withWorkspaceOperation(directory, goalID, sessionID, run, opts) {
       for (const c of calls.filter((c) => (c.paths?.length ?? 0) > 0)) {
         parts.push(`legacy write call ${c.callID} by session ${c.sessionID} on ${c.paths.join(", ")} (${ageOf(c.at)})`);
       }
-      throw new Error(`Workspace is busy \u2014 held by: ${parts.join("; ")}. Verification denied until quiescent; do not poll or retry checks (each attempt burns evaluator budget). Park with await_quiescence, report progress, and end the turn \u2014 the wake carries retry evidence. Or wait for the holder's exit event, or release it with loopd_release_workspace if it is yours, orphaned, or its goal is gone.`);
+      throw new Error(`Workspace is busy \u2014 held by: ${parts.join("; ")}. Verification denied until quiescent; a denied check burns no evaluator rejection, so do not spin on it. Worker with a goal: park with await_quiescence, report progress, and end the turn \u2014 the wake carries retry evidence. Without a goal: wait for the holder's exit event, or release it with loopd_release_workspace if it is yours, orphaned, or its goal is gone.`);
     }
     state.workspaceOperation = { id, goalID, sessionID };
     return state;
@@ -8513,6 +8615,9 @@ function createGoalService(host) {
     if (!goal.config.progressFile)
       goal.config.progressFile = path7.join(artifactDir, "progress.md");
     await ensureGoalArtifactDir(directory, id);
+    try {
+      await reconcileTerminalWorkspaceCalls(directory, host);
+    } catch {}
     const state1 = await mutateState(directory, `goal.create:${id}`, async (state) => {
       assertWorkspaceWriteAvailable(state, goal, goal.ownerSessionID);
       state.goals.push(goal);
@@ -11097,13 +11202,13 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
       }
     }),
     await_quiescence: tool({
-      description: "Park until the workspace is quiescent (no operation, ticket, uncontrolled or legacy-write holder). Call when run_goal_checks or complete_goal is denied by a named fence holder instead of retrying: parking never burns evaluator rejections or no-progress turns. Report progress and end the turn after parking; the wake (inbox evidence + engine idle continuation) tells you to retry. Fires immediately when already quiescent.",
+      description: "Worker-only. Park until the workspace is quiescent (no operation, ticket, uncontrolled or legacy-write holder). Call when run_goal_checks or complete_goal is denied by a named fence holder instead of retrying: parking never burns evaluator rejections or no-progress turns. Report progress and end the turn after parking; the wake (inbox evidence + engine idle continuation) tells you to retry. Fires immediately when already quiescent.",
       args: {},
       execute: async (_args, context) => {
         const workerID = context?.sessionID || hostSessionID;
         const goal = findGoalByWorkerSession(await readState(dir), workerID);
         if (!goal || !workerID || goal.status !== "active")
-          return { title: "Park denied", output: JSON.stringify({ ok: false, message: "An active exact worker session is required." }) };
+          return { title: "Park denied", output: JSON.stringify({ ok: false, message: "Worker-only: an active exact worker session is required. Before any goal exists there is nothing to park \u2014 inspect/release stale fences with loopd_release_workspace (no filters)." }) };
         const result = await requestFenceAwait(dir, { goalID: goal.id, ownerSessionID: goal.ownerSessionID });
         return { title: result.fired ? "Already quiescent" : result.parked ? "Parked" : "Park refused", output: JSON.stringify({ ...result, goalID: goal.id }) };
       }
