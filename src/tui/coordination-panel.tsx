@@ -122,7 +122,7 @@ export function CoordinationPanel(props: {
       <box flexDirection="row" height={1} flexShrink={0}>
         <text wrapMode="none">
           <span style={{ fg: PALETTE.muted }}>
-            {m().directory} · j / k scrolls · w / v / r or Tab switches tab · Esc closes
+            {m().directory} · j / k scrolls · Tab / Shift+Tab switches tab · w / v / r selects · Esc closes
           </span>
         </text>
       </box>

@@ -4,7 +4,7 @@
 /** @jsxImportSource @opentui/solid */
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import type { Plugin as TuiV2 } from "@opencode/plugin/tui"
-import { LoopDashboard, tryDismissDashboardSubPopup, isDashboardProjectPickerOpen, getSavedDashboardState, type SavedDashboardState } from "./dashboard"
+import { LoopDashboard, tryDismissDashboardSubPopup, isDashboardProjectPickerOpen, isDashboardPopupKeyboardOpen, dispatchDashboardPopupKey, getSavedDashboardState, type SavedDashboardState } from "./dashboard"
 import { CommandPanel } from "./command-panel"
 import { TerminalView } from "./terminal-view"
 import { TERMINAL_ROUTE_NAME, currentRouteSessionID, terminalRoutePayload } from "./terminal-route"
@@ -489,7 +489,7 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
         ctx.keymap.layer(() => ({
           mode: "global",
           priority: 10000,
-          enabled: () => dialogOpen || isDashboardProjectPickerOpen(),
+          enabled: () => dialogOpen || isDashboardProjectPickerOpen() || isDashboardPopupKeyboardOpen(),
           commands: [
             {
               id: escapeCmd,
@@ -506,6 +506,17 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
             },
           ],
           bindings: [escapeCmd],
+        }))
+        ctx.keymap.layer(() => ({
+          mode: "global",
+          priority: 10001,
+          enabled: isDashboardPopupKeyboardOpen,
+          commands: ["tab", "shift+tab", "j", "k", "up", "down", "pageup", "pagedown"].map((bind) => ({
+            bind,
+            run: (_input, event) => {
+              if (event && !event.defaultPrevented) dispatchDashboardPopupKey(event)
+            },
+          })),
         }))
         ctx.keymap.layer(() => ({
           commands: [

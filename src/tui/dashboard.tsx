@@ -83,10 +83,20 @@ export interface SavedDashboardState {
 
 let activeSubPopupDismiss: (() => boolean) | undefined
 let activeProjectPickerOpen: (() => boolean) | undefined
+let activePopupKeyboardOpen: (() => boolean) | undefined
+let activePopupKeyboard: ((event: ParsedKey) => void) | undefined
 let lastDashboardState: SavedDashboardState | undefined
 
 export function isDashboardProjectPickerOpen(): boolean {
   return activeProjectPickerOpen?.() === true
+}
+
+export function isDashboardPopupKeyboardOpen(): boolean {
+  return activePopupKeyboardOpen?.() === true
+}
+
+export function dispatchDashboardPopupKey(event: ParsedKey): void {
+  activePopupKeyboard?.(event)
 }
 
 export function tryDismissDashboardSubPopup(): boolean {
@@ -436,6 +446,8 @@ export function LoopDashboard(props: Props) {
   const [projectIdx, setProjectIdx] = createSignal(0)
   const [projectBounds, setProjectBounds] = createSignal({ width: 32, rows: 6, top: 3 })
   let projectAnchor: BoxRenderable | undefined
+  let actionsAnchor: BoxRenderable | undefined
+  const [actionsBounds, setActionsBounds] = createSignal({ width: 32, rows: 6, top: 3 })
   const projectOptions = () => tab() === "commands" ? ["all", ...managedDirs()] : managedDirs()
   const projectCurrentScope = () => tab() === "commands" ? cmdScope() : projectScope()
   const projectLabel = (dir: string) => dir === "all" ? "All projects" : dir.split("/").pop() || dir
@@ -455,6 +467,30 @@ export function LoopDashboard(props: Props) {
     if (next.width !== projectBounds().width || next.rows !== projectBounds().rows || next.top !== projectBounds().top) setProjectBounds(next)
   }
 
+  function updateActionsBounds() {
+    if (!actionsOpen() || !actionsAnchor) return
+    const { width, height } = terminal()
+    const below = height - actionsAnchor.y - actionsAnchor.height - 1
+    const available = below >= 3 ? below : actionsAnchor.y - 1
+    const rows = Math.max(1, Math.min(6, available - 2))
+    const next = {
+      width: Math.max(1, Math.min(36, width - actionsAnchor.x - 2)),
+      rows,
+      top: below >= 3 ? actionsAnchor.height : -(Math.min(paletteVerbs().length, rows) + 2),
+    }
+    const old = actionsBounds()
+    if (next.width !== old.width || next.rows !== old.rows || next.top !== old.top) setActionsBounds(next)
+  }
+
+  function openActions() {
+    if (!selectedGoal()) return
+    closeProjectsPicker()
+    setActionIdx(0)
+    setActionsOpen(true)
+    inputEl?.blur()
+    updateActionsBounds()
+  }
+
   // Persist view state so an Escape-intercepted remount restores seamlessly.
   createEffect(() => {
     lastDashboardState = {
@@ -470,7 +506,7 @@ export function LoopDashboard(props: Props) {
   })
 
   function openProjectsPicker() {
-    if (tab() === "fleet" || modalPopupOpen()) return
+    if (tab() === "fleet" || modalPopupOpen() || actionsOpen()) return
     setProjectIdx(Math.max(0, projectOptions().indexOf(projectCurrentScope())))
     setShowProjects(true)
     inputEl?.blur()
@@ -666,7 +702,7 @@ export function LoopDashboard(props: Props) {
     await executeCommand(item.cmd)
   }
 
-  useKeyboard((evt: ParsedKey) => {
+  const handleDashboardKey = (evt: ParsedKey) => {
     if ((evt as ParsedKey & { defaultPrevented?: boolean }).defaultPrevented) return
     const name = evt.name || ""
     const seq = (evt as unknown as { sequence?: string }).sequence || ""
@@ -748,7 +784,7 @@ export function LoopDashboard(props: Props) {
       return
     }
 
-    // 2. Actions popup modal (j/k + Enter + hotkeys + Esc)
+    // 2. Actions dropdown (j/k + Enter + hotkeys + Esc)
     if (actionsOpen()) {
       const verbs = paletteVerbs()
       if (isEscapeKey(evt)) { prevent(evt); setActionsOpen(false); return }
@@ -800,12 +836,12 @@ export function LoopDashboard(props: Props) {
       if (key === "w" || key === "1") { prevent(evt); setCoordTab("writes"); return }
       if (key === "v" || key === "2") { prevent(evt); setCoordTab("verify"); return }
       if (key === "r" || key === "3") { prevent(evt); setCoordTab("resv"); return }
-      if (name === "tab" || name === "right") {
+      if ((name === "tab" && !evt.shift) || name === "right") {
         prevent(evt)
         setCoordTab((t) => (t === "writes" ? "verify" : t === "verify" ? "resv" : "writes"))
         return
       }
-      if (name === "left") {
+      if (name === "left" || (name === "tab" && evt.shift)) {
         prevent(evt)
         setCoordTab((t) => (t === "resv" ? "verify" : t === "verify" ? "writes" : "resv"))
         return
@@ -829,12 +865,12 @@ export function LoopDashboard(props: Props) {
       }
       if (name === "down" || key === "j" || key === "J" || name === "pagedown") {
         prevent(evt)
-        detailsScrollEl?.scrollBy({ x: 0, y: 2 })
+        detailsScrollEl?.scrollBy(name === "pagedown" || key === "J" ? 1 : { x: 0, y: 1 }, name === "pagedown" || key === "J" ? "viewport" : "absolute")
         return
       }
       if (name === "up" || key === "k" || key === "K" || name === "pageup") {
         prevent(evt)
-        detailsScrollEl?.scrollBy({ x: 0, y: -2 })
+        detailsScrollEl?.scrollBy(name === "pageup" || key === "K" ? -1 : { x: 0, y: -1 }, name === "pageup" || key === "K" ? "viewport" : "absolute")
         return
       }
       if (key === "g") { prevent(evt); detailsScrollEl?.scrollTo(0); return }
@@ -977,8 +1013,7 @@ export function LoopDashboard(props: Props) {
         openSendModal()
         return
       }
-      setActionIdx(0)
-      setActionsOpen(true)
+      openActions()
       return
     }
     if (key === "[") { prevent(evt); cycleScope(-1); return }
@@ -1033,6 +1068,17 @@ export function LoopDashboard(props: Props) {
     }
     if (key === "B") { prevent(evt); handleBugReport(); return }
     if (key === "q") { prevent(evt); props.api.ui.dialog.clear(); return }
+  }
+  useKeyboard(handleDashboardKey)
+  const popupKeyboardOpen = () =>
+    (actionsOpen() || coordOpen() || detailsOpen()) && (props.isActive?.() ?? props.api.ui.dialog.open)
+  activePopupKeyboardOpen = popupKeyboardOpen
+  activePopupKeyboard = handleDashboardKey
+  onCleanup(() => {
+    if (activePopupKeyboard === handleDashboardKey) {
+      activePopupKeyboard = undefined
+      activePopupKeyboardOpen = undefined
+    }
   })
 
   async function executeCommandRaw(command: string, args: Record<string, unknown>, commandID?: string) {
@@ -1359,7 +1405,7 @@ export function LoopDashboard(props: Props) {
    * never stretch or clip the dashboard vertically. Details (`d`) is also a
    * full popup view now so the worker table never has to collapse to 1 row. */
   const modalPopupOpen = () =>
-    Boolean(pendingRelease()) || sendOpen() || actionsOpen() || coordOpen() || detailsOpen() || showHelp()
+    Boolean(pendingRelease()) || sendOpen() || coordOpen() || detailsOpen() || showHelp()
 
   createEffect(() => {
     if (showProjects() && (tab() === "fleet" || modalPopupOpen())) closeProjectsPicker()
@@ -1697,69 +1743,6 @@ export function LoopDashboard(props: Props) {
                 <span style={{ fg: PALETTE.ink, bold: true }}>Esc</span>
                 <span style={{ fg: PALETTE.muted }}> to cancel</span>
               </text>
-            </box>
-          </box>
-        </Show>
-
-        <Show when={!pendingRelease() && !sendOpen() && actionsOpen() && selectedGoal()}>
-          <box
-            flexDirection="column"
-            border={true}
-            borderColor={PALETTE.cyan}
-            backgroundColor={PALETTE.inset}
-            paddingLeft={2}
-            paddingRight={2}
-            paddingTop={1}
-            paddingBottom={1}
-            gap={1}
-          >
-            <box flexDirection="row" justifyContent="space-between" height={1}>
-              <text wrapMode="none">
-                <span style={{ fg: PALETTE.cyan, bold: true }}>Actions / {selectedGoal()!.name}</span>
-              </text>
-              <box
-                backgroundColor={PALETTE.base}
-                paddingLeft={1}
-                paddingRight={1}
-                height={1}
-                {...({ onMouseDown: () => setActionsOpen(false) } as any)}
-              >
-                <text wrapMode="none"><span style={{ fg: PALETTE.amber, bold: true }}>[esc]</span></text>
-              </box>
-            </box>
-            <text wrapMode="none">
-              <span style={{ fg: PALETTE.muted }}>
-                {selectedDir().split("/").pop() || selectedDir()} · j/k move · Enter select · or press key directly
-              </span>
-            </text>
-            <box flexDirection="column" gap={0}>
-              <For each={paletteVerbs()}>
-                {(v, idx) => {
-                  const active = () => idx() === actionIdx()
-                  return (
-                    <box
-                      flexDirection="row"
-                      justifyContent="space-between"
-                      backgroundColor={active() ? PALETTE.selectedBg : PALETTE.base}
-                      border={true}
-                      borderColor={active() ? PALETTE.cyan : PALETTE.rule}
-                      paddingLeft={1}
-                      paddingRight={1}
-                      {...({ onMouseDown: () => void runPaletteVerb(v) } as any)}
-                    >
-                      <text wrapMode="none">
-                        <span style={{ fg: active() ? PALETTE.cyan : PALETTE.muted, bold: true }}>
-                          {active() ? "> " : "  "}
-                        </span>
-                        <span style={{ fg: PALETTE.ink, bold: active() }}>{v.label}</span>
-                      </text>
-                      <text wrapMode="none">
-                        <span style={{ fg: PALETTE.cyan }}>[{v.key}]</span>
-                      </text>
-                    </box>
-                  )
-                }}
-              </For>
             </box>
           </box>
         </Show>
@@ -2141,7 +2124,44 @@ export function LoopDashboard(props: Props) {
                         }
                       } else setStatusText("No worker session")
                     }}
-                    onActions={() => { setActionIdx(0); setActionsOpen(true) }}
+                     onActions={() => actionsOpen() ? setActionsOpen(false) : openActions()}
+                     actionsOpen={actionsOpen()}
+                     actionsAnchor={(el) => { actionsAnchor = el }}
+                     onActionsLayout={updateActionsBounds}
+                     actionsMenu={
+                       <Show when={actionsOpen()}>
+                         <box
+                           position="absolute"
+                           left={0}
+                           top={actionsBounds().top}
+                           zIndex={1}
+                           width={actionsBounds().width}
+                           height={Math.min(paletteVerbs().length, actionsBounds().rows) + 2}
+                           flexDirection="column"
+                           border={true}
+                           borderColor={theme().borderActive}
+                           backgroundColor={theme().backgroundMenu}
+                           onMouseDown={(event) => event.stopPropagation()}
+                         >
+                           <DashboardList count={paletteVerbs().length} maxRows={actionsBounds().rows} selectedID={`loopd-action-option-${actionIdx()}`}>
+                             <For each={paletteVerbs()}>
+                               {(verb, idx) => (
+                                 <DashboardRow
+                                   id={`loopd-action-option-${idx()}`}
+                                   backgroundColor={idx() === actionIdx() ? PALETTE.selectedBg : undefined}
+                                   onClick={() => void runPaletteVerb(verb)}
+                                 >
+                                   <span style={{ fg: idx() === actionIdx() ? PALETTE.cyan : PALETTE.ink }}>
+                                     {`${idx() === actionIdx() ? "> " : "  "}${verb.label}`.slice(0, Math.max(1, actionsBounds().width - verb.key.length - 7))}
+                                   </span>
+                                   <span style={{ fg: PALETTE.cyan }}> [{verb.key}]</span>
+                                 </DashboardRow>
+                               )}
+                             </For>
+                           </DashboardList>
+                         </box>
+                       </Show>
+                     }
                     onDetails={() => setDetailsOpen(true)}
                     onFocusProject={() => {
                       setProjectScope(dir())

@@ -54,6 +54,10 @@ export function GoalInspector(props: {
   onSend: () => void
   onOpen: () => void
   onActions: () => void
+  actionsMenu?: JSX.Element
+  actionsAnchor?: (el: import("@opentui/core").BoxRenderable) => void
+  onActionsLayout?: () => void
+  actionsOpen?: boolean
   onDetails: () => void
   onFocusProject?: () => void
 }): JSX.Element {
@@ -88,6 +92,7 @@ export function GoalInspector(props: {
       paddingTop={0}
       paddingBottom={0}
       flexShrink={0}
+      zIndex={props.actionsOpen ? 10 : 0}
     >
       <box flexDirection="row" justifyContent="space-between" alignItems="center" height={1} flexShrink={0}>
         <text wrapMode="none">
@@ -123,7 +128,10 @@ export function GoalInspector(props: {
       <box flexDirection="row" gap={1} flexShrink={0} alignItems="center">
         {btn("Send", "s", props.onSend)}
         {btn("Open session", "o", props.onOpen)}
-        {btn("Actions", "Enter", props.onActions)}
+        <box position="relative" ref={(el) => props.actionsAnchor?.(el)} renderAfter={props.onActionsLayout}>
+          {btn("Actions", "Enter", props.onActions)}
+          {props.actionsMenu}
+        </box>
         {btn("Details", "d", props.onDetails, Boolean(m().detailsOpen))}
         <Show when={m().showFocusProject && props.onFocusProject}>
           {btn("Focus project", "f", () => props.onFocusProject?.())}
@@ -213,7 +221,7 @@ export function GoalDetailsDrawer(props: {
       <box flexDirection="row" height={1} flexShrink={0}>
         <text wrapMode="none">
           <span style={{ fg: PALETTE.muted }}>
-            j / k scrolls details · n / p switches worker · d or Esc returns to table
+            j / k scrolls · PgUp / PgDn pages · n / p switches worker · d or Esc returns to table
           </span>
         </text>
       </box>
