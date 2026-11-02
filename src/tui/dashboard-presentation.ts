@@ -142,11 +142,7 @@ export function toRowModel(
     ? `${runtime.budgetTurnCount}${maxTurns ? `/${maxTurns}` : ""}`
     : undefined
   const manual = goal.interactive === true
-  const rawLabel = manual && goal.status === "active"
-    ? "Awaiting input"
-    : goal.status === "active"
-      ? "Working"
-      : stateLabel
+  const rawLabel = goal.status === "active" ? activeGoalLabel(goal, runtime, opts) : stateLabel
   const sym = stateSymbol(goal.status, manual)
   const label = `${sym} ${rawLabel}`
   const activityLine = goal.status === "blocked" && goal.blocker?.reason
@@ -209,12 +205,30 @@ export function isAwaitingInput(
   confirmedIdle: boolean,
   queuedInput: boolean,
 ): boolean {
+  if (goal.status !== "active") return false
   if (goal.interactive !== true) return false
   if (!runtime || runtime.phase !== "idle") return false
   const rt = runtime as GoalRuntimeState & { activeRunID?: string }
   if (rt.activeRunID) return false
   if (queuedInput) return false
   return confirmedIdle
+}
+
+/** Manual is a scheduling policy, not evidence that a worker is waiting. */
+export function activeGoalLabel(
+  goal: Goal,
+  runtime?: GoalRuntimeState,
+  opts?: { confirmedIdle?: boolean; queuedInput?: boolean },
+): string {
+  if (!goal.interactive) return "Working"
+  const queuedInput = opts?.queuedInput ?? Boolean(runtime?.nativeInboxMessageIDs?.length)
+  const confirmedIdle = opts?.confirmedIdle ?? (runtime?.executionSource === "native"
+    ? runtime.nativeExecutionStatus === "idle"
+    : runtime?.lastWorkerStatus === "idle")
+  if (isAwaitingInput(goal, runtime, confirmedIdle, queuedInput)) return "Awaiting input"
+  if (runtime?.phase === "running" || runtime?.activeRunID || runtime?.nativeExecutionStatus === "busy") return "Working"
+  if (queuedInput) return "Input queued"
+  return "Manual"
 }
 
 /** Footer hints: global navigation only. Contextual keys (s/o/d/Enter, t,

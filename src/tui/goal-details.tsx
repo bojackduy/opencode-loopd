@@ -10,11 +10,12 @@ import type { ScrollBoxRenderable } from "@opentui/core"
 import type { Goal } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
 import { formatCost, formatTokens, formatDuration } from "./dashboard"
-import { PALETTE, paletteFor, goalStatusShort } from "./dashboard-presentation"
+import { PALETTE, paletteFor, goalStatusShort, activeGoalLabel } from "./dashboard-presentation"
 
 export interface InspectorModel {
   goal: Goal
   directory: string
+  runtime?: GoalRuntimeState
   activityLine?: string
   acting: boolean
   lastResult?: string
@@ -25,7 +26,7 @@ export interface InspectorModel {
   detailsOpen?: boolean
 }
 
-export function stateBadge(goal: Goal): { text: string; fg: string; nameFg: string } {
+export function stateBadge(goal: Goal, runtime?: GoalRuntimeState): { text: string; fg: string; nameFg: string } {
   if (goal.status === "blocked") {
     return { text: "✖ Blocked", fg: PALETTE.rose, nameFg: PALETTE.rose }
   }
@@ -33,8 +34,9 @@ export function stateBadge(goal: Goal): { text: string; fg: string; nameFg: stri
     return { text: `! ${goalStatusShort(goal.status)}`, fg: PALETTE.rose, nameFg: PALETTE.rose }
   }
   if (goal.status === "active") {
-    return goal.interactive === true
-      ? { text: "◐ Awaiting input", fg: PALETTE.amber, nameFg: PALETTE.amber }
+    const label = activeGoalLabel(goal, runtime)
+    return label !== "Working"
+      ? { text: `◐ ${label}`, fg: PALETTE.amber, nameFg: PALETTE.amber }
       : { text: "● Working", fg: PALETTE.sage, nameFg: PALETTE.sage }
   }
   if (goal.status === "paused") {
@@ -57,7 +59,7 @@ export function GoalInspector(props: {
 }): JSX.Element {
   const PALETTE = paletteFor(props.theme)
   const m = () => props.model
-  const badge = () => stateBadge(m().goal)
+  const badge = () => stateBadge(m().goal, m().runtime)
   const proj = () => m().directory.split("/").pop() ?? m().directory
   const btn = (label: string, keyHint: string, onClick: () => void, active = false) => (
     <box
@@ -150,7 +152,7 @@ export function GoalDetailsDrawer(props: {
   const PALETTE = paletteFor(props.theme)
   const m = () => props.model
   const g = () => m().goal
-  const badge = () => stateBadge(g())
+  const badge = () => stateBadge(g(), m().runtime)
   const proj = () => (m().directory ? (m().directory!.split("/").pop() ?? m().directory!) : "")
   const maxTurns = () => (g().config as { maxTurns?: number } | undefined)?.maxTurns
   const turnsLabel = () => {

@@ -4,7 +4,7 @@
 /** @jsxImportSource @opentui/solid */
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import type { Plugin as TuiV2 } from "@opencode/plugin/tui"
-import { LoopDashboard, tryDismissDashboardSubPopup, getSavedDashboardState, type SavedDashboardState } from "./dashboard"
+import { LoopDashboard, tryDismissDashboardSubPopup, isDashboardProjectPickerOpen, getSavedDashboardState, type SavedDashboardState } from "./dashboard"
 import { CommandPanel } from "./command-panel"
 import { TerminalView } from "./terminal-view"
 import { TERMINAL_ROUTE_NAME, currentRouteSessionID, terminalRoutePayload } from "./terminal-route"
@@ -489,12 +489,13 @@ const v2setup: TuiV2.Definition["setup"] = (ctx) => {
         ctx.keymap.layer(() => ({
           mode: "global",
           priority: 10000,
-          enabled: () => dialogOpen,
+          enabled: () => dialogOpen || isDashboardProjectPickerOpen(),
           commands: [
             {
               id: escapeCmd,
               bind: "escape",
               run: (_input, event) => {
+                if (event?.defaultPrevented) return
                 if (tryDismissDashboardSubPopup()) {
                   event?.preventDefault?.()
                   event?.stopPropagation?.()

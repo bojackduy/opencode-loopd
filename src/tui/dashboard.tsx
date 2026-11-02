@@ -12,9 +12,9 @@
 
 /** @jsxImportSource @opentui/solid */
 import { batch, createSignal, For, Show, onCleanup, onMount, createEffect, type JSX } from "solid-js"
-import { useKeyboard } from "@opentui/solid"
+import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import type { TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
-import type { InputRenderable, ParsedKey, ScrollBoxRenderable, TextRenderable } from "@opentui/core"
+import type { BoxRenderable, InputRenderable, ParsedKey, ScrollBoxRenderable, TextRenderable } from "@opentui/core"
 import { readState } from "../infrastructure/state-repository"
 import { createControlClient } from "../infrastructure/control-client"
 import type { StoreState } from "../infrastructure/state-repository"
@@ -40,7 +40,7 @@ import { TERMINAL_ROUTE_NAME, currentRouteSessionID, terminalRoutePayload } from
 import type { CommandSession } from "../domain/command-session"
 import { randomUUID } from "crypto"
 import { createDashboardRefresh } from "./dashboard-refresh"
-import { managedStorePath, resolveManagedDirs, statusAll, type ManagedDirStatus } from "../server/managed-status"
+import { managedStorePath, resolveManagedDirs } from "../server/managed-status"
 import {
   PALETTE,
   paletteFor,
@@ -82,7 +82,12 @@ export interface SavedDashboardState {
 }
 
 let activeSubPopupDismiss: (() => boolean) | undefined
+let activeProjectPickerOpen: (() => boolean) | undefined
 let lastDashboardState: SavedDashboardState | undefined
+
+export function isDashboardProjectPickerOpen(): boolean {
+  return activeProjectPickerOpen?.() === true
+}
 
 export function tryDismissDashboardSubPopup(): boolean {
   try {
@@ -214,6 +219,7 @@ function DashboardList(props: { count: number; maxRows?: number; selectedID?: st
   createEffect(() => {
     props.count
     props.selectedID
+    props.maxRows
     followPending = true
     scroll?.requestRender()
   })
@@ -349,6 +355,7 @@ export function DashboardHeader(props: {
 export function LoopDashboard(props: Props) {
   const theme = () => props.api.theme.current
   const PALETTE = paletteFor(props.api.theme.current)
+  const terminal = useTerminalDimensions()
   const initial = props.restoredState
   const [mode, setMode] = createSignal<Mode>("normal")
   const [insertKind, setInsertKind] = createSignal<InsertKind>("colon")
@@ -425,10 +432,28 @@ export function LoopDashboard(props: Props) {
   const [agentIndex, setAgentIndex] = createSignal<Record<string, AgentMeta>>({})
   const [managedDirList, setManagedDirList] = createSignal<string[]>([props.directory])
   const managedDirs = () => managedDirList()
-  const [projectStatuses, setProjectStatuses] = createSignal<ManagedDirStatus[] | null>(null)
   const [showProjects, setShowProjects] = createSignal(false)
   const [projectIdx, setProjectIdx] = createSignal(0)
+  const [projectBounds, setProjectBounds] = createSignal({ width: 32, rows: 6, top: 3 })
+  let projectAnchor: BoxRenderable | undefined
+  const projectOptions = () => tab() === "commands" ? ["all", ...managedDirs()] : managedDirs()
+  const projectCurrentScope = () => tab() === "commands" ? cmdScope() : projectScope()
+  const projectLabel = (dir: string) => dir === "all" ? "All projects" : dir.split("/").pop() || dir
   const [managedStates, setManagedStates] = createSignal<Record<string, StoreState>>({})
+
+  function updateProjectBounds() {
+    if (!showProjects() || !projectAnchor) return
+    const { width, height } = terminal()
+    const below = height - projectAnchor.y - projectAnchor.height - 1
+    const available = below >= 3 ? below : projectAnchor.y - 1
+    const rows = Math.max(1, Math.min(6, available - 2))
+    const next = {
+      width: Math.max(1, Math.min(40, width - projectAnchor.x - 2)),
+      rows,
+      top: below >= 3 ? projectAnchor.height : -(Math.min(projectOptions().length, rows) + 2),
+    }
+    if (next.width !== projectBounds().width || next.rows !== projectBounds().rows || next.top !== projectBounds().top) setProjectBounds(next)
+  }
 
   // Persist view state so an Escape-intercepted remount restores seamlessly.
   createEffect(() => {
@@ -444,27 +469,32 @@ export function LoopDashboard(props: Props) {
     }
   })
 
-  async function openProjectsPicker() {
-    setActionsOpen(false)
-    setCoordOpen(false)
-    setSendOpen(false)
-    setProjectIdx(Math.max(0, managedDirs().indexOf(tab() === "commands" ? cmdScope() === "all" ? props.directory : cmdScope() : projectScope())))
+  function openProjectsPicker() {
+    if (tab() === "fleet" || modalPopupOpen()) return
+    setProjectIdx(Math.max(0, projectOptions().indexOf(projectCurrentScope())))
     setShowProjects(true)
-    await refreshProjects()
+    inputEl?.blur()
+    updateProjectBounds()
+  }
+
+  function closeProjectsPicker() {
+    setShowProjects(false)
+    focusInput()
   }
 
   function applyProjectChoice(dir: string) {
-    if (tab() === "commands") setCmdScope(dir)
-    else setProjectScope(dir)
-    setSelected(0)
-    setCmdSelected(0)
-    setShowProjects(false)
-    setStatusText(`scope: ${dir.split("/").pop() || dir}`)
+    batch(() => {
+      if (dir !== projectCurrentScope()) {
+        if (tab() === "commands") { setCmdScope(dir); setCmdSelected(0) }
+        else { setProjectScope(dir); setSelected(0) }
+      }
+      closeProjectsPicker()
+      setStatusText(`scope: ${projectLabel(dir)}`)
+    })
   }
   async function refreshProjects() {
     try {
       setManagedDirList(await resolveManagedDirs(props.directory))
-      setProjectStatuses(await statusAll(managedDirs()))
       const states: Record<string, StoreState> = {}
       for (const dir of managedDirs()) {
         if (dir === props.directory) continue
@@ -547,12 +577,12 @@ export function LoopDashboard(props: Props) {
   /** Dismiss the topmost child popup/drawer/input. Returns true if something
    * was closed, false when the dashboard is already at the base view. */
   function dismissTopSubPopup(): boolean {
+    if (showProjects()) { closeProjectsPicker(); return true }
     if (pendingRelease()) { setPendingRelease(null); return true }
     if (sendOpen()) { returnToNormalMode(); return true }
     if (actionsOpen()) { setActionsOpen(false); return true }
     if (coordOpen()) { setCoordOpen(false); focusInput(); return true }
     if (showHelp()) { setShowHelp(false); return true }
-    if (showProjects()) { setShowProjects(false); return true }
     if (mode() === "insert") {
       if (insertKind() === "filter") setFilterText("")
       returnToNormalMode()
@@ -564,6 +594,8 @@ export function LoopDashboard(props: Props) {
   }
 
   activeSubPopupDismiss = dismissTopSubPopup
+  const projectPickerActive = () => showProjects() && (props.isActive?.() ?? props.api.ui.dialog.open)
+  activeProjectPickerOpen = projectPickerActive
 
   const refreshQueue = createDashboardRefresh(client, (s, logs) => {
     batch(() => { setState(s); setEvents(logs) })
@@ -592,6 +624,7 @@ export function LoopDashboard(props: Props) {
   onCleanup(() => {
     disposed = true
     if (activeSubPopupDismiss === dismissTopSubPopup) activeSubPopupDismiss = undefined
+    if (activeProjectPickerOpen === projectPickerActive) activeProjectPickerOpen = undefined
     refreshQueue.dispose()
     popMode()
     if (focusTimer) clearTimeout(focusTimer)
@@ -634,6 +667,7 @@ export function LoopDashboard(props: Props) {
   }
 
   useKeyboard((evt: ParsedKey) => {
+    if ((evt as ParsedKey & { defaultPrevented?: boolean }).defaultPrevented) return
     const name = evt.name || ""
     const seq = (evt as unknown as { sequence?: string }).sequence || ""
     const raw = (evt as unknown as { raw?: string }).raw || ""
@@ -647,6 +681,19 @@ export function LoopDashboard(props: Props) {
     if (!active) return
     const isColon = name === ":" || seq === ":" || raw === ":" || name === "colon"
     const isQuestion = name === "?" || seq === "?" || raw === "?"
+
+    // The overlay owns keys without changing the filter or table underneath.
+    if (showProjects()) {
+      prevent(evt)
+      if (isEscapeKey(evt) || name === "q") closeProjectsPicker()
+      else if (name === "down" || name === "j") setProjectIdx((i) => Math.min(projectOptions().length - 1, i + 1))
+      else if (name === "up" || name === "k") setProjectIdx((i) => Math.max(0, i - 1))
+      else if (isEnterKey(evt)) {
+        const dir = projectOptions()[projectIdx()]
+        if (dir) applyProjectChoice(dir)
+      }
+      return
+    }
 
     // Insert mode (Send modal, Filter box, or :command bar)
     if (mode() === "insert") {
@@ -806,35 +853,11 @@ export function LoopDashboard(props: Props) {
       return
     }
 
-    // 5. Help or Projects popup
+    // 5. Help popup
     if (showHelp()) {
       if (isEscapeKey(evt) || isQuestion || key === "q") {
         prevent(evt)
         setShowHelp(false)
-        return
-      }
-      return
-    }
-    if (showProjects()) {
-      if (isEscapeKey(evt) || key === "q") {
-        prevent(evt)
-        setShowProjects(false)
-        return
-      }
-      if (name === "down" || key === "j") {
-        prevent(evt)
-        setProjectIdx((i) => Math.min(managedDirs().length - 1, i + 1))
-        return
-      }
-      if (name === "up" || key === "k") {
-        prevent(evt)
-        setProjectIdx((i) => Math.max(0, i - 1))
-        return
-      }
-      if (isEnterKey(evt)) {
-        prevent(evt)
-        const dir = managedDirs()[projectIdx()]
-        if (dir) applyProjectChoice(dir)
         return
       }
       return
@@ -1336,7 +1359,11 @@ export function LoopDashboard(props: Props) {
    * never stretch or clip the dashboard vertically. Details (`d`) is also a
    * full popup view now so the worker table never has to collapse to 1 row. */
   const modalPopupOpen = () =>
-    Boolean(pendingRelease()) || sendOpen() || actionsOpen() || coordOpen() || detailsOpen() || showHelp() || showProjects()
+    Boolean(pendingRelease()) || sendOpen() || actionsOpen() || coordOpen() || detailsOpen() || showHelp()
+
+  createEffect(() => {
+    if (showProjects() && (tab() === "fleet" || modalPopupOpen())) closeProjectsPicker()
+  })
 
   const displayItems = (): Array<{ kind: "header"; dir: string; group: DirectoryGroup } | { kind: "row"; row: RowModel; index: number }> => {
     const rows = rowModels()
@@ -1549,7 +1576,7 @@ export function LoopDashboard(props: Props) {
         tab={tab()}
         projCount={managedDirs().length}
         onBugReport={handleBugReport}
-        onSelectTab={(nextTab) => { setTab(nextTab); setSelected(0) }}
+        onSelectTab={(nextTab) => { if (showProjects()) closeProjectsPicker(); setTab(nextTab); setSelected(0) }}
       />
 
       {/* 3..5. Main body: tight vertical rhythm (gap 0) so sections read as
@@ -1834,55 +1861,6 @@ export function LoopDashboard(props: Props) {
           </box>
         </Show>
 
-        <Show when={!pendingRelease() && !sendOpen() && !actionsOpen() && !coordOpen() && !detailsOpen() && !showHelp() && showProjects()}>
-          <box
-            flexDirection="column"
-            border={true}
-            borderColor={PALETTE.cyan}
-            backgroundColor={PALETTE.inset}
-            paddingLeft={2}
-            paddingRight={2}
-            paddingTop={1}
-            paddingBottom={1}
-          >
-            <box flexDirection="row" justifyContent="space-between" height={1}>
-              <text wrapMode="none">
-                <span style={{ fg: PALETTE.cyan, bold: true }}>Projects ({managedDirs().length})</span>
-                <span style={{ fg: PALETTE.muted }}> · j/k move · Enter applies scope</span>
-              </text>
-              <text wrapMode="none"><span style={{ fg: PALETTE.muted }}>[esc] close</span></text>
-            </box>
-            <For each={managedDirs()}>
-              {(d, i) => {
-                const active = () => i() === projectIdx()
-                const st = () => projectStatuses()?.find((p) => p.directory === d)
-                return (
-                  <box
-                    flexDirection="row"
-                    backgroundColor={active() ? PALETTE.selectedBg : undefined}
-                    paddingLeft={1}
-                    paddingRight={1}
-                    {...({ onMouseDown: () => applyProjectChoice(d) } as any)}
-                  >
-                    <text wrapMode="none">
-                      <span style={{ fg: active() ? PALETTE.cyan : PALETTE.muted, bold: true }}>
-                        {active() ? "> " : "  "}
-                      </span>
-                      <span style={{ fg: active() ? PALETTE.cyan : PALETTE.ink, bold: active() }}>
-                        {d.split("/").pop() || d}
-                      </span>
-                      <span style={{ fg: PALETTE.muted }}>
-                        {" — "}
-                        {st() ? `${st()!.total} goals (${st()!.active} active, ${st()!.blocked} blocked, ${st()!.paused} paused)` : d}
-                      </span>
-                    </text>
-                  </box>
-                )
-              }}
-            </For>
-          </box>
-        </Show>
-
         {/* ─── NORMAL VIEW (Summary + Toolbar + Table + Inspector + Details) ─── */}
         <Show when={!modalPopupOpen()}>
           {/* 3a. Summary line (#summary in web UI) */}
@@ -1920,26 +1898,70 @@ export function LoopDashboard(props: Props) {
           </box>
 
           {/* 3b. Toolbar (#toolbar in web UI: project selector, visible / filter box, [h] history checkbox) */}
-          <box flexDirection="row" justifyContent="space-between" alignItems="center" height={3} flexShrink={0} gap={1}>
+          <box flexDirection="row" justifyContent="space-between" alignItems="center" height={3} flexShrink={0} gap={1} zIndex={showProjects() ? 10 : 0}>
             <box flexDirection="row" gap={1} alignItems="center">
               <Show when={tab() !== "fleet"}>
                 <box
-                  flexDirection="row"
-                  border={true}
-                  borderColor={PALETTE.rule}
-                  backgroundColor={PALETTE.inset}
-                  paddingLeft={1}
-                  paddingRight={1}
-                  {...({ onMouseDown: () => cycleScope(1) } as any)}
+                  ref={(el) => { projectAnchor = el }}
+                  position="relative"
+                  maxWidth="100%"
+                  renderAfter={updateProjectBounds}
                 >
-                  <text wrapMode="none">
-                    <span style={{ fg: PALETTE.ink }}>
-                      {tab() === "commands"
-                        ? (cmdScope() === "all" ? "All projects" : (cmdScope().split("/").pop() || cmdScope()))
-                        : (projectScope().split("/").pop() || projectScope())}
-                    </span>
-                    <span style={{ fg: PALETTE.muted }}> ▾ [P]</span>
-                  </text>
+                  <box
+                    flexDirection="row"
+                    border={true}
+                    borderColor={PALETTE.rule}
+                    backgroundColor={PALETTE.inset}
+                    paddingLeft={1}
+                    paddingRight={1}
+                    {...({ onMouseDown: () => showProjects() ? closeProjectsPicker() : openProjectsPicker() } as any)}
+                  >
+                    <text wrapMode="none">
+                      <span style={{ fg: PALETTE.ink }}>{projectLabel(projectCurrentScope())}</span>
+                      <span style={{ fg: PALETTE.muted }}> ▾ [P]</span>
+                    </text>
+                  </box>
+                  <Show when={showProjects()}>
+                    <box
+                      position="absolute"
+                      left={0}
+                      top={projectBounds().top}
+                      zIndex={1}
+                      width={projectBounds().width}
+                      height={Math.min(projectOptions().length, projectBounds().rows) + 2}
+                      flexDirection="column"
+                      border={true}
+                      borderColor={theme().borderActive}
+                      backgroundColor={theme().backgroundMenu}
+                      onMouseDown={(event) => event.stopPropagation()}
+                    >
+                      <DashboardList
+                        count={projectOptions().length}
+                        maxRows={projectBounds().rows}
+                        selectedID={`loopd-project-option-${projectIdx()}`}
+                      >
+                        <For each={projectOptions()}>
+                          {(dir, i) => {
+                            const highlighted = () => i() === projectIdx()
+                            return (
+                              <DashboardRow
+                                id={`loopd-project-option-${i()}`}
+                                backgroundColor={highlighted() ? PALETTE.selectedBg : undefined}
+                                onClick={() => applyProjectChoice(dir)}
+                              >
+                                <span style={{ fg: highlighted() ? PALETTE.cyan : PALETTE.muted }}>
+                                  {dir === projectCurrentScope() ? "✓ " : "  "}
+                                </span>
+                                <span style={{ fg: highlighted() ? PALETTE.cyan : PALETTE.ink, bold: highlighted() }}>
+                                  {projectLabel(dir).slice(0, Math.max(1, projectBounds().width - 6))}
+                                </span>
+                              </DashboardRow>
+                            )
+                          }}
+                        </For>
+                      </DashboardList>
+                    </box>
+                  </Show>
                 </box>
               </Show>
               <box
@@ -2098,6 +2120,7 @@ export function LoopDashboard(props: Props) {
                     model={{
                       goal: goal(),
                       directory: dir(),
+                      runtime: rt(),
                       activityLine: activity() ? `${activity()!.short} — ${activity()!.hint}` : undefined,
                       acting: activity()?.acting ?? false,
                       lastResult: lp()?.summary,
