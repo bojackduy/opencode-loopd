@@ -300,6 +300,16 @@ Protected (scoped or read-only) goals fence the workspace for their **workers**,
 
 All are filtered by `ownerSessionID` (only the session that created the goal sees it). They are the **parity surface** for TUI — every TUI action has an equivalent tool here, enforced by the interaction registry.
 
+### Goals in another workspace (lane, worktree, monorepo package)
+
+Owner tools act on the state root of the server process they run in. A goal created in another directory lives in THAT directory's `.opencode/loopd/state.json`, so it is invisible here until you name the directory.
+
+- **Discovery: the dashboard Fleet tab.** It merges every registered directory and routes each action (pause, nudge, model switch) to that directory's own server. This is the intended multi-project surface.
+- **Registration.** Add paths to `<workspace>/.opencode/loopd/managed.json` — `{"version":1,"dirs":["/abs/a","/abs/b"]}` — or set `LOOPD_MANAGED_DIRS=/abs/a:/abs/b`. Unregistered directories never appear in Fleet, so a lane goal looks "missing" until registered.
+- **A live instance per directory.** Mutations need that directory's loopd server; open the project once so it exists.
+- **From an agent tool, pass the path.** `inspect_background_goal({ goal_id, directory })`, `switch_goal_identity({ goal_id, model, directory })`, `nudge_goal({ goal_id, directory })`, `clear_goal({ goal_id, directory })`, and the rest accept an absolute `directory`. Results name the directory searched when the goal is not found.
+- **Never hand-edit another workspace's `state.json`.** The running server owns that file and rewrites it on the next mutation; the edit also skips model validation, deferred-switch handling and rollback.
+
 ### list_background_goals
 
 Lists all `active` goals owned by this session (name, status, phase, turn, last progress, blocker).

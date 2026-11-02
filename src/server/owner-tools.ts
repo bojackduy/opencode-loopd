@@ -59,7 +59,7 @@ export function ownerTools(options: OwnerToolsOptions) {
     }),
 
     switch_goal_identity: tool({
-      description: "Switch an EXISTING owned goal's model, agent, or both atomically, preserving the same worker/session, transcript, progress, inbox, checks, budgets and topology. At least one of model or agent is required. Discover identities with loopd_list_models first. Busy workers defer until the next permitted idle turn; legacy hosts apply on the next prompt. No implicit unpause or interactive wake. resume=true explicitly resumes only a blocked goal after a safe switch (model-only requires a provider-limit blocker); busy requests remain blocked until explicitly retried/resumed when idle. Combined host failures roll back successful changes; rollback failure requires inspecting the existing session.",
+      description: "Switch an EXISTING owned goal's model, agent, or both atomically, preserving the same worker/session, transcript, progress, inbox, checks, budgets and topology. At least one of model or agent is required. Discover identities with loopd_list_models first. Busy workers defer until the next permitted idle turn; legacy hosts apply on the next prompt. No implicit unpause or interactive wake. resume=true explicitly resumes only a blocked goal after a safe switch (model-only requires a provider-limit blocker); busy requests remain blocked until explicitly retried/resumed when idle. Combined host failures roll back successful changes; rollback failure requires inspecting the existing session. For a goal living in another workspace (lane worktree, monorepo package, other project) pass that absolute path as `directory`; otherwise the lookup fails because state is per-directory. Prefer this over editing state.json.",
       args: {
         goal_id: tool.schema.string().describe("Existing owned goal ID."),
         agent: tool.schema.string().optional().describe("Available agent name from loopd_list_models."),
@@ -91,7 +91,7 @@ export function ownerTools(options: OwnerToolsOptions) {
 
     list_background_goals: tool({
       description:
-        "List all active background goals owned by this session. Shows contract (name, status, phase, turn, last progress, blocker) — only goals with your ownerSessionID appear.",
+        "List all active background goals owned by this session. Shows contract (name, status, phase, turn, last progress, blocker) — only goals with your ownerSessionID appear. Scope caveat: this reads only the server's own workspace state. A goal created in another directory (lane worktree, monorepo package, other project) is invisible here — pass that absolute path as `directory`, or use the dashboard Fleet tab, which merges every directory registered in `.opencode/loopd/managed.json` (or LOOPD_MANAGED_DIRS) and routes each action to that directory's server. Never hand-edit another workspace's state.json.",
       args: {
         directory: tool.schema.string().optional().describe("Project directory override. Omit to use the instance directory."),
       },
