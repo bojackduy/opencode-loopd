@@ -65,16 +65,18 @@ export function ownerTools(options: OwnerToolsOptions) {
         agent: tool.schema.string().optional().describe("Available agent name from loopd_list_models."),
         model: tool.schema.string().optional().describe("Available providerID/modelID from loopd_list_models. Provide model, agent, or both."),
         resume: tool.schema.boolean().optional().describe("Explicitly resume a blocked goal after a safe switch. Default false."),
+        directory: tool.schema.string().optional().describe("Project directory override. Omit to use the instance directory. Required when the goal lives in another workspace/lane."),
       },
       execute: async (args, context) => {
         if (!context?.sessionID) return { title: "No session", output: JSON.stringify({ ok: false, message: "No session context available." }) }
         if (args.model === undefined && args.agent === undefined) return { title: "Identity switch failed", output: JSON.stringify({ ok: false, message: "At least one of model or agent is required." }) }
-        const state = await readState(directory)
+        const target = resolveTargetDir(directory, args.directory)
+        const state = await readState(target)
         if (!state.goals.some((g) => g.id === args.goal_id && g.ownerSessionID === context.sessionID)) {
-          return { title: "Switch denied", output: JSON.stringify({ ok: false, message: "Goal not found or not owned by this session." }) }
+          return { title: "Switch denied", output: JSON.stringify({ ok: false, message: `Goal not found or not owned by this session in ${target}. If the goal lives in another workspace (e.g. a lane worktree), pass its absolute path as directory.` }) }
         }
         try {
-          const result = await goalService.switchIdentity(directory, args.goal_id as GoalID, context.sessionID, args)
+          const result = await goalService.switchIdentity(target, args.goal_id as GoalID, context.sessionID, args)
           return { title: `Identity switch: ${result.outcome}`, output: JSON.stringify({ ok: result.outcome !== "unsupported", ...result, goalID: args.goal_id, message: "Same goal and worker retained. Deferred requests require the next permitted idle turn; no automatic interactive wake." }) }
         } catch (error) {
           // Don't leak host internals (e.g. SUPER-SECRET) — log details server-side, return single-thing message.
