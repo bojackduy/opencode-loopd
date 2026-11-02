@@ -65,7 +65,10 @@ export function GoalInspector(props: {
   const m = () => props.model
   const badge = () => stateBadge(m().goal, m().runtime)
   const proj = () => m().directory.split("/").pop() ?? m().directory
-  const btn = (label: string, keyHint: string, onClick: () => void, active = false) => (
+  // Key-hint color grammar (one hue per verb; cyan stays reserved for
+  // selection/active state and landmark titles): Send sage, Open sky,
+  // Actions amber, Details violet, Focus cyan.
+  const btn = (label: string, keyHint: string, onClick: () => void, active = false, hintColor: string = PALETTE.cyan) => (
     <box
       flexDirection="row"
       backgroundColor={active ? PALETTE.cyan : PALETTE.base}
@@ -77,7 +80,7 @@ export function GoalInspector(props: {
     >
       <text wrapMode="none">
         <span style={{ fg: active ? PALETTE.tabActiveFg : PALETTE.ink, bold: active }}>{label} </span>
-        <span style={{ fg: active ? PALETTE.tabActiveFg : PALETTE.cyan, bold: true }}>[{keyHint}]</span>
+        <span style={{ fg: active ? PALETTE.tabActiveFg : hintColor, bold: true }}>[{keyHint}]</span>
       </text>
     </box>
   )
@@ -126,13 +129,13 @@ export function GoalInspector(props: {
         )}
       </box>
       <box flexDirection="row" gap={1} flexShrink={0} alignItems="center">
-        {btn("Send", "s", props.onSend)}
-        {btn("Open session", "o", props.onOpen)}
+        {btn("Send", "s", props.onSend, false, PALETTE.sage)}
+        {btn("Open session", "o", props.onOpen, false, PALETTE.sky)}
         <box position="relative" ref={(el) => props.actionsAnchor?.(el)} renderAfter={props.onActionsLayout}>
-          {btn("Actions", "Enter", props.onActions)}
+          {btn("Actions", "Enter", props.onActions, false, PALETTE.amber)}
           {props.actionsMenu}
         </box>
-        {btn("Details", "d", props.onDetails, Boolean(m().detailsOpen))}
+        {btn("Details", "d", props.onDetails, Boolean(m().detailsOpen), PALETTE.violet)}
         <Show when={m().showFocusProject && props.onFocusProject}>
           {btn("Focus project", "f", () => props.onFocusProject?.())}
         </Show>

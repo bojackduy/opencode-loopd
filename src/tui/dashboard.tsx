@@ -314,7 +314,7 @@ export function DashboardHeader(props: {
         flexShrink={0}
       >
         <text wrapMode="none">
-          <span style={{ fg: PALETTE.cyan, bold: true }}>LOOPD</span>
+          <span style={{ fg: PALETTE.violet, bold: true }}>LOOPD</span>
           <span style={{ fg: PALETTE.muted }}>   </span>
           <span style={{ fg: PALETTE.ink }}>{props.scopeName}</span>
           <span style={{ fg: PALETTE.muted }}>   [{props.projCount} project{props.projCount === 1 ? "" : "s"}]</span>
@@ -692,6 +692,17 @@ export function LoopDashboard(props: Props) {
     list.push({ key: "m", cmd: "interactive", label: g.interactive ? "Switch to autonomous turns" : "Switch to manual (await input)" })
     list.push({ key: "Esc", cmd: "__cancel__", label: "Cancel" })
     return list
+  }
+
+  // Menu key-hint colors mirror the inspector grammar: destructive rose,
+  // pause/restart amber, drive-forward sage, open sky, mode violet, cancel muted.
+  const verbKeyColor = (cmd: string): string => {
+    if (cmd === "abort") return PALETTE.rose
+    if (cmd === "pause" || cmd === "__cancel__") return PALETTE.amber
+    if (cmd === "nudge" || cmd === "__send__") return PALETTE.sage
+    if (cmd === "open") return PALETTE.sky
+    if (cmd === "interactive") return PALETTE.violet
+    return PALETTE.muted
   }
 
   async function runPaletteVerb(item: { key: string; cmd: string; label: string }) {
@@ -1817,18 +1828,18 @@ export function LoopDashboard(props: Props) {
             </box>
             <box border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1}>
               <text wrapMode="none">
-                <span style={{ fg: PALETTE.cyan }}>1 / 2 / 3   </span><span style={{ fg: PALETTE.ink }}>Project / Fleet / Commands tabs</span>{"\n"}
-                <span style={{ fg: PALETTE.cyan }}>j / k       </span><span style={{ fg: PALETTE.ink }}>Move selection (or scroll inside Details / Coordination)</span>{"\n"}
-                <span style={{ fg: PALETTE.cyan }}>Enter       </span><span style={{ fg: PALETTE.ink }}>Worker actions popup</span>{"\n"}
-                <span style={{ fg: PALETTE.cyan }}>s           </span><span style={{ fg: PALETTE.ink }}>Send input popup</span>{"\n"}
-                <span style={{ fg: PALETTE.cyan }}>o           </span><span style={{ fg: PALETTE.ink }}>Open worker session / fullscreen command</span>{"\n"}
-                <span style={{ fg: PALETTE.cyan }}>d           </span><span style={{ fg: PALETTE.ink }}>Technical details popup (j/k scrolls, n/p switches worker)</span>{"\n"}
+                <span style={{ fg: PALETTE.muted }}>1 / 2 / 3   </span><span style={{ fg: PALETTE.ink }}>Project / Fleet / Commands tabs</span>{"\n"}
+                <span style={{ fg: PALETTE.muted }}>j / k       </span><span style={{ fg: PALETTE.ink }}>Move selection (or scroll inside Details / Coordination)</span>{"\n"}
+                <span style={{ fg: PALETTE.amber }}>Enter       </span><span style={{ fg: PALETTE.ink }}>Worker actions popup</span>{"\n"}
+                <span style={{ fg: PALETTE.sage }}>s           </span><span style={{ fg: PALETTE.ink }}>Send input popup</span>{"\n"}
+                <span style={{ fg: PALETTE.sky }}>o           </span><span style={{ fg: PALETTE.ink }}>Open worker session / fullscreen command</span>{"\n"}
+                <span style={{ fg: PALETTE.violet }}>d           </span><span style={{ fg: PALETTE.ink }}>Technical details popup (j/k scrolls, n/p switches worker)</span>{"\n"}
                 <span style={{ fg: PALETTE.cyan }}>t           </span><span style={{ fg: PALETTE.ink }}>Project coordination popup (j/k scrolls, w/v/r switches tab)</span>{"\n"}
-                <span style={{ fg: PALETTE.cyan }}>/           </span><span style={{ fg: PALETTE.ink }}>Focus filter box in toolbar</span>{"\n"}
-                <span style={{ fg: PALETTE.cyan }}>h           </span><span style={{ fg: PALETTE.ink }}>Show or hide completed history</span>{"\n"}
-                <span style={{ fg: PALETTE.cyan }}>P           </span><span style={{ fg: PALETTE.ink }}>Pick project scope (j/k + Enter)</span>{"\n"}
-                <span style={{ fg: PALETTE.cyan }}>[ / ]       </span><span style={{ fg: PALETTE.ink }}>Cycle project scope</span>{"\n"}
-                <span style={{ fg: PALETTE.cyan }}>Esc         </span><span style={{ fg: PALETTE.ink }}>Close active popup / filter, or close dashboard</span>
+                <span style={{ fg: PALETTE.muted }}>/           </span><span style={{ fg: PALETTE.ink }}>Focus filter box in toolbar</span>{"\n"}
+                <span style={{ fg: PALETTE.muted }}>h           </span><span style={{ fg: PALETTE.ink }}>Show or hide completed history</span>{"\n"}
+                <span style={{ fg: PALETTE.violet }}>P           </span><span style={{ fg: PALETTE.ink }}>Pick project scope (j/k + Enter)</span>{"\n"}
+                <span style={{ fg: PALETTE.muted }}>[ / ]       </span><span style={{ fg: PALETTE.ink }}>Cycle project scope</span>{"\n"}
+                <span style={{ fg: PALETTE.amber }}>Esc         </span><span style={{ fg: PALETTE.ink }}>Close active popup / filter, or close dashboard</span>
               </text>
             </box>
           </box>
@@ -2143,7 +2154,7 @@ export function LoopDashboard(props: Props) {
                                    <span style={{ fg: idx() === actionIdx() ? PALETTE.cyan : PALETTE.ink }}>
                                      {`${idx() === actionIdx() ? "> " : "  "}${verb.label}`.slice(0, Math.max(1, actionsBounds().width - verb.key.length - 7))}
                                    </span>
-                                   <span style={{ fg: PALETTE.cyan }}> [{verb.key}]</span>
+                                   <span style={{ fg: verbKeyColor(verb.cmd) }}> [{verb.key}]</span>
                                  </DashboardRow>
                                )}
                              </For>
@@ -2251,16 +2262,16 @@ export function LoopDashboard(props: Props) {
                   </text>
                   <box flexDirection="row" gap={1}>
                     <box border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1} {...({ onMouseDown: () => openSendModal() } as any)}>
-                      <text wrapMode="none"><span style={{ fg: PALETTE.ink }}>Send stdin </span><span style={{ fg: PALETTE.cyan }}>[s]</span></text>
+                      <text wrapMode="none"><span style={{ fg: PALETTE.ink }}>Send stdin </span><span style={{ fg: PALETTE.sage }}>[s]</span></text>
                     </box>
                     <box border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1}>
-                      <text wrapMode="none"><span style={{ fg: PALETTE.ink }}>Fullscreen </span><span style={{ fg: PALETTE.cyan }}>[o]</span></text>
+                      <text wrapMode="none"><span style={{ fg: PALETTE.ink }}>Fullscreen </span><span style={{ fg: PALETTE.sky }}>[o]</span></text>
                     </box>
                     <box border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1} {...({ onMouseDown: () => void killSelectedCommand() } as any)}>
-                      <text wrapMode="none"><span style={{ fg: PALETTE.ink }}>Kill </span><span style={{ fg: PALETTE.cyan }}>[X]</span></text>
+                      <text wrapMode="none"><span style={{ fg: PALETTE.ink }}>Kill </span><span style={{ fg: PALETTE.rose }}>[X]</span></text>
                     </box>
                     <box border={true} borderColor={PALETTE.rule} backgroundColor={PALETTE.base} paddingLeft={1} paddingRight={1} {...({ onMouseDown: () => void restartSelectedCommand() } as any)}>
-                      <text wrapMode="none"><span style={{ fg: PALETTE.ink }}>Restart </span><span style={{ fg: PALETTE.cyan }}>[R]</span></text>
+                      <text wrapMode="none"><span style={{ fg: PALETTE.ink }}>Restart </span><span style={{ fg: PALETTE.amber }}>[R]</span></text>
                     </box>
                   </box>
                 </box>

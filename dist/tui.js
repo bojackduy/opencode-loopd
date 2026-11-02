@@ -1321,7 +1321,7 @@ function GoalInspector(props) {
   const m = () => props.model;
   const badge = () => stateBadge(m().goal, m().runtime);
   const proj = () => m().directory.split("/").pop() ?? m().directory;
-  const btn = (label, keyHint, onClick, active = false) => (() => {
+  const btn = (label, keyHint, onClick, active = false, hintColor = PALETTE2.cyan) => (() => {
     var _el$ = _$createElement("box"), _el$2 = _$createElement("text"), _el$3 = _$createElement("span"), _el$4 = _$createTextNode(` `), _el$5 = _$createElement("span"), _el$6 = _$createTextNode(`[`), _el$7 = _$createTextNode(`]`);
     _$insertNode(_el$, _el$2);
     _$setProp(_el$, "flexDirection", "row");
@@ -1351,7 +1351,7 @@ function GoalInspector(props) {
         fg: active ? PALETTE2.tabActiveFg : PALETTE2.ink,
         bold: active
       }, _v$2 = {
-        fg: active ? PALETTE2.tabActiveFg : PALETTE2.cyan,
+        fg: active ? PALETTE2.tabActiveFg : hintColor,
         bold: true
       };
       _v$ !== _p$.e && (_p$.e = _$setProp(_el$3, "style", _v$, _p$.e));
@@ -1451,13 +1451,13 @@ function GoalInspector(props) {
     _$setProp(_el$21, "gap", 1);
     _$setProp(_el$21, "flexShrink", 0);
     _$setProp(_el$21, "alignItems", "center");
-    _$insert(_el$21, () => btn("Send", "s", props.onSend), _el$22);
-    _$insert(_el$21, () => btn("Open session", "o", props.onOpen), _el$22);
+    _$insert(_el$21, () => btn("Send", "s", props.onSend, false, PALETTE2.sage), _el$22);
+    _$insert(_el$21, () => btn("Open session", "o", props.onOpen, false, PALETTE2.sky), _el$22);
     _$use((el) => props.actionsAnchor?.(el), _el$22);
     _$setProp(_el$22, "position", "relative");
-    _$insert(_el$22, () => btn("Actions", "Enter", props.onActions), null);
+    _$insert(_el$22, () => btn("Actions", "Enter", props.onActions, false, PALETTE2.amber), null);
     _$insert(_el$22, () => props.actionsMenu, null);
-    _$insert(_el$21, () => btn("Details", "d", props.onDetails, Boolean(m().detailsOpen)), null);
+    _$insert(_el$21, () => btn("Details", "d", props.onDetails, Boolean(m().detailsOpen), PALETTE2.violet), null);
     _$insert(_el$21, _$createComponent(Show, {
       get when() {
         return _$memo(() => !!m().showFocusProject)() && props.onFocusProject;
@@ -2710,7 +2710,7 @@ function DashboardHeader(props) {
     _$insert3(_el$27, () => props.mode.toUpperCase());
     _$effect3((_p$) => {
       var _v$3 = PALETTE2.inset, _v$4 = {
-        fg: PALETTE2.cyan,
+        fg: PALETTE2.violet,
         bold: true
       }, _v$5 = {
         fg: PALETTE2.muted
@@ -3172,6 +3172,19 @@ function LoopDashboard(props) {
       label: "Cancel"
     });
     return list;
+  };
+  const verbKeyColor = (cmd) => {
+    if (cmd === "abort")
+      return PALETTE2.rose;
+    if (cmd === "pause" || cmd === "__cancel__")
+      return PALETTE2.amber;
+    if (cmd === "nudge" || cmd === "__send__")
+      return PALETTE2.sage;
+    if (cmd === "open")
+      return PALETTE2.sky;
+    if (cmd === "interactive")
+      return PALETTE2.violet;
+    return PALETTE2.muted;
   };
   async function runPaletteVerb(item) {
     setActionsOpen(false);
@@ -5006,27 +5019,27 @@ function LoopDashboard(props) {
             fg: PALETTE2.amber,
             bold: true
           }, { rule: _v$41, base: _v$42 } = PALETTE2, _v$43 = {
-            fg: PALETTE2.cyan
+            fg: PALETTE2.muted
           }, _v$44 = {
             fg: PALETTE2.ink
           }, _v$45 = {
-            fg: PALETTE2.cyan
+            fg: PALETTE2.muted
           }, _v$46 = {
             fg: PALETTE2.ink
           }, _v$47 = {
-            fg: PALETTE2.cyan
+            fg: PALETTE2.amber
           }, _v$48 = {
             fg: PALETTE2.ink
           }, _v$49 = {
-            fg: PALETTE2.cyan
+            fg: PALETTE2.sage
           }, _v$50 = {
             fg: PALETTE2.ink
           }, _v$51 = {
-            fg: PALETTE2.cyan
+            fg: PALETTE2.sky
           }, _v$52 = {
             fg: PALETTE2.ink
           }, _v$53 = {
-            fg: PALETTE2.cyan
+            fg: PALETTE2.violet
           }, _v$54 = {
             fg: PALETTE2.ink
           }, _v$55 = {
@@ -5034,23 +5047,23 @@ function LoopDashboard(props) {
           }, _v$56 = {
             fg: PALETTE2.ink
           }, _v$57 = {
-            fg: PALETTE2.cyan
+            fg: PALETTE2.muted
           }, _v$58 = {
             fg: PALETTE2.ink
           }, _v$59 = {
-            fg: PALETTE2.cyan
+            fg: PALETTE2.muted
           }, _v$60 = {
             fg: PALETTE2.ink
           }, _v$61 = {
-            fg: PALETTE2.cyan
+            fg: PALETTE2.violet
           }, _v$62 = {
             fg: PALETTE2.ink
           }, _v$63 = {
-            fg: PALETTE2.cyan
+            fg: PALETTE2.muted
           }, _v$64 = {
             fg: PALETTE2.ink
           }, _v$65 = {
-            fg: PALETTE2.cyan
+            fg: PALETTE2.amber
           }, _v$66 = {
             fg: PALETTE2.ink
           };
@@ -5835,7 +5848,7 @@ function LoopDashboard(props) {
                                     _$insertNode3(_el$270, _el$272);
                                     _$insert3(_el$270, () => verb.key, _el$272);
                                     _$effect3((_$p) => _$setProp3(_el$270, "style", {
-                                      fg: PALETTE2.cyan
+                                      fg: verbKeyColor(verb.cmd)
                                     }, _$p));
                                     return _el$270;
                                   })()];
@@ -6172,19 +6185,19 @@ function LoopDashboard(props) {
                   }, _v$112 = {
                     fg: PALETTE2.ink
                   }, _v$113 = {
-                    fg: PALETTE2.cyan
+                    fg: PALETTE2.sage
                   }, { rule: _v$114, base: _v$115 } = PALETTE2, _v$116 = {
                     fg: PALETTE2.ink
                   }, _v$117 = {
-                    fg: PALETTE2.cyan
+                    fg: PALETTE2.sky
                   }, _v$118 = {
                     fg: PALETTE2.ink
                   }, _v$119 = {
-                    fg: PALETTE2.cyan
+                    fg: PALETTE2.rose
                   }, _v$120 = {
                     fg: PALETTE2.ink
                   }, _v$121 = {
-                    fg: PALETTE2.cyan
+                    fg: PALETTE2.amber
                   };
                   _v$104 !== _p$.e && (_p$.e = _$setProp3(_el$288, "borderColor", _v$104, _p$.e));
                   _v$105 !== _p$.t && (_p$.t = _$setProp3(_el$288, "backgroundColor", _v$105, _p$.t));
