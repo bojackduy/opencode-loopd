@@ -358,13 +358,14 @@ export function goalTools(
 
     report_goal_progress: tool({
       description:
-        "ARGS: summary (required) + next (required) + evidence (optional). Worker-only: call ONLY from inside the worker session of an active goal — never from a parent/owner chat. Parent sessions must NOT call this (steer with send_goal_input/nudge, or just reply to the user). Report meaningful progress (resets consecutiveFailures/noProgressCount). Call after durable state changes (file writes, verifications) — not after thinking. The engine uses this to avoid force-finish.",
+        "ARGS: summary (required) + next (recommended; omit instead of guessing) + evidence (optional). Worker-only: call ONLY from inside the worker session of an active goal — never from a parent/owner chat. Parent sessions must NOT call this (steer with send_goal_input/nudge, or just reply to the user). Report meaningful progress (resets consecutiveFailures/noProgressCount). Call after durable state changes (file writes, verifications) — not after thinking. The engine uses this to avoid force-finish.",
       args: {
         summary: tool.schema.string().describe("What was accomplished. Required."),
-        next: tool.schema.string().describe("The next concrete step. Required."),
+        next: tool.schema.string().optional().describe("The next concrete step. Strongly recommended; omission is recorded as an explicit unspecified step instead of failing the call."),
         evidence: tool.schema.string().optional().describe("Optional concrete evidence (test output, file paths). May be omitted."),
       },
-      execute: async (args, context) => {
+      execute: async (argsInput, context) => {
+        const args = { ...argsInput, next: argsInput.next?.trim() || "(unspecified — continue toward the objective)" }
         const state = await readState(dir)
         const workerID = context?.sessionID || hostSessionID
         const goal = findGoalByWorkerSession(state, workerID)
