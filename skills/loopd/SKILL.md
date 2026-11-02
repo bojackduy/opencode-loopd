@@ -18,7 +18,7 @@ Loopd gives OpenCode two independent background primitives that share one dashbo
 | Created with | `loopd_create_goal` | `loopd_command_start` |
 | Finishes via | `complete_goal` after deterministic `checks` pass | Process exits, or `loopd_command_terminate` |
 | Has | objective, checks, agent, model, budgets, turns | argv, cwd, stdin/stdout, exit code |
-| Monitor in | `/loop` dashboard, **Goals** tab | `/loop` or `/commands`, **Commands** tab → `o` for fullscreen terminal |
+| Monitor in | `/loop` dashboard, **Project** tab | `/loop` or `/commands`, **Commands** tab → `o` for fullscreen terminal |
 | Link between them | — | optional `goal_id` (display only) + `loopd_command_await` (explicit wake) |
 
 **Pick a Goal** when the user wants something *figured out or built* across many turns with a definition of done.
@@ -135,7 +135,7 @@ switch_goal_identity({goal_id:"existing-goal", agent:"researcher", resume:true})
 
 Agent switching is owner-only and validates the exact available name. It retains goal ID, worker session, transcript, progress, inbox, checks, budgets, counters, interactive mode and topology. Busy/unknown workers queue a persisted request until the next permitted confirmed-idle turn. v2 switches the idle session via `session.switchAgent`; v1 uses that SDK API if present, otherwise reports `deferred` and sends the assignment on the next prompt. Switching alone never wakes an interactive goal, unpauses or resumes. `resume:true` is valid only for blocked goals; if still busy, it remains deferred and blocked until an explicit retry/resume when safe. Completed goals cannot switch. Pending failures block once without creating a replacement worker.
 
-On the dashboard **Goals tab**, `:agents` lists names/modes and `:agent <name>` changes the selected goal's agent. Both are refused on the Commands tab (never forwarded as process stdin). Goal rows display `🤖 agent-name` alongside the model.
+On the dashboard **Project tab**, `:agents` lists names/modes and `:agent <name>` changes the selected goal's agent. Both are refused on the Commands tab (never forwarded as process stdin). Goal rows display `🤖 agent-name` alongside the model.
 
 Use agent tools, not a new goal or a human dashboard action, to change a worker's provider/model:
 
@@ -417,27 +417,15 @@ running → terminated  (timeout_seconds deadline; endReason: timeout — always
 running → missing     (plugin restart found no live execution — log retained; endReason: missing)
 ```
 
-- **Detach ≠ terminate.** Closing the fullscreen terminal page, switching tabs, or the TUI restarting never stops the process. Only `loopd_command_terminate` (or the process exiting on its own) does.
+- **Detach ≠ terminate.** Closing the terminal view or restarting the TUI never stops the process. Only `loopd_command_terminate` (or the process exiting on its own) does.
 - **`terminate ≠ remove`.** `remove` deletes the record + log and refuses while `running`.
 - **Orphan commands (`missing`).** A restart that finds no live handle marks the record `missing` (log retained) and fences protected-goal activation until the process exit is proved. `loopd_command_terminate`/`kill`/`interrupt` also work on `missing` records — they signal the pid directly when it is provably still ours. `remove` clears the fence once the process is provably dead (or pid-less), and refuses while the pid is provably alive — terminate first. A pid recycled by the OS to an unrelated executable never fences (identity-checked).
-- **Commands and protected goals are mutually exclusive.** While a protected goal is active, any running command freezes all writes/shells/checks, and a new protected goal cannot start while any command runs. To keep a dev server up beside scoped work, use a managed server (approved `kind: "server"`, auto-stopped with the goal) — never a plain command.
+- **Commands and goals coexist.** A running command does not fence writes, shells, or checks — spawning it is a short uncontrolled call that ends when `loopd_command_start` returns. Only a command whose process exit is unproved (`missing` handle, orphaned pid) fences protected-goal activation and completion checks until you prove exit and remove the record. For a server that should live and die with the goal, use a managed server (approved `kind: "server"`) instead of a plain command.
 - Every response carries the active backend's `capabilities` so you never have to guess (`terminalEmulation` is always `false` — the host captures a byte stream; the TUI's terminal page emulates a screen client-side from it).
 
-### Monitoring in the Dashboard
+### Monitoring a command (agent path)
 
-`/loop` and `/commands` open the **same** shared dashboard — `/loop` focuses the Goals tab, `/commands` focuses Commands. Switch with `Tab` (toggle) or directionally `h` (Goals) / `l` (Commands); `j`/`k`/`g`/`G` select within the active tab. The Commands tab is owner-scoped (only the current session's commands).
-
-On the Commands tab, `o` **never** opens a chat session or a dialog — it closes the popup and navigates to a dedicated fullscreen terminal page inside OpenCode (route `opencode.loopd.terminal`). There:
-
-- Keystrokes forward immediately as raw input — no line-submit box.
-- `Ctrl+C` is interrupt input to the *process* (never closes OpenCode).
-- `Ctrl+]` detaches back to where you came from — the process keeps running.
-- Paste forwards raw bytes immediately.
-- The viewport is measured and resizes both the emulator and the real PTY.
-- Scrollback: the emulator keeps 1000 lines. Mouse wheel or `Shift+PgUp/PgDn` scrolls history (`↑N` in the footer); new output pins your position until you return to the bottom. Refused on alt-screen apps (vim/less/htop).
-- Detached servers (survived a host restart, marked `detached`) show a banner: output is frozen at the detach point and typing cannot reach them, but terminate/kill/interrupt still stop the pid.
-
-Single-key helpers on the Commands tab: `X` force-kill (SIGKILL now, no grace — for hung processes), `R` restart with the same spec (new ID, old record kept; env values are never persisted so restarted env commands lose their env), `x` remove finished (running commands get a hint, never a kill). Colon commands (before opening fullscreen): `:new <command> [args...]` (quoted args preserved, e.g. `:new bash -c "echo hi"`), `:interrupt`, `:terminate`, `:kill`, `:restart`, `:remove`, `:await <goalID>`, and bare text + Enter writes stdin to the selected command. Goal-only keys (`p`/`r`/`A`/`N`) never fire on the Commands tab; `R`/`x` are tab-scoped (retry/clear on Goals, restart/remove-done on Commands).
+Read with `loopd_command_get` (bounded pages, `pattern` filter) or `loopd_command_list` for summaries. Prefer `watch_until`/`watch_filter` at spawn plus the automatic owner notification over repeated reads. The dashboard (`/loop`, `/commands`) is the human view; agents do not drive it.
 
 ### Example: Watching a Dev Server
 
@@ -516,85 +504,9 @@ loopd_command_await({ command_id: "abc123", goal_id: <this goal's id> })
 # finishes, with exit code + last 4KB of output as evidence — no polling.
 ```
 
-## Dashboard Commands
+## Dashboard (human UI — not an agent surface)
 
-Open the shared dashboard with `/loop` (or `<leader>o`) — focuses the **Goals** tab — or `/commands` — focuses the **Commands** tab. Same popup, same component, two entry points.
-
-### Switching Tabs
-
-| Key | Action |
-|-----|--------|
-| `Tab` | Toggle Goals ↔ Commands |
-| `h` | Select Goals directionally |
-| `l` | Select Commands directionally |
-
-`j`/`k`/`g`/`G` select within whichever tab is active. Goal controls (`p`/`r`/`A`/`N`) only fire on the Goals tab and are refused with a hint on Commands; `R`/`x` are tab-scoped (retry/clear on Goals, restart/remove-done on Commands).
-
-### Commands Tab — Keyboard Shortcuts
-
-| Key | Action |
-|-----|--------|
-| `X` | Force-kill selected command (SIGKILL now, no grace) |
-| `R` | Restart selected command with the same spec (new ID) |
-| `x` | Remove selected command — finished only (running gets a hint) |
-| `o` | Open fullscreen terminal page |
-| `Ctrl+C` | Interrupt selected command (SIGINT delivery, never a kill) |
-
-### Goals Tab — Keyboard Shortcuts (Normal Mode)
-
-| Key | Action | Agent equivalent |
-|-----|--------|-----------------|
-| `j` / `k` | Move selection down / up | — (UI only) |
-| `g` / `G` | Jump to top / bottom | — |
-| `o` | Open the selected goal's native worker session | `read_goal_transcript` / `inspect_background_goal` |
-| `L` | Toggle log view | — |
-| `?` | Toggle help | — |
-| `c` | Toggle done (show/hide completed) | — |
-| `p` / `r` / `R` / `x` | Pause / resume / retry / clear | `pause_goal` / `resume_goal` / `clear_goal` |
-| `A` | Abort worker only (N / :abort) | `abort_goal_worker` |
-| `N` | Nudge with full steering | `nudge_goal` |
-| `Ctrl+N` | Switch to normal mode | — |
-| `:` | Enter command mode | — |
-
-### Goals Tab — Command Mode (`:` prefix)
-
-| Command | Description | Agent equivalent |
-|---------|-------------|-----------------|
-| `:send <message>` | Send bare words now as their own turn (no steering) | `send_goal_input` |
-| `:nudge` | Force re-prompt now with full steering | `nudge_goal` |
-| `:open` | Open the selected goal's child session | — |
-| `:force <summary> --evidence <text>` | Force-complete (bypass verification checks) | `force_complete_goal` |
-| `:block <reason> --needed <text>` | Force-block the selected goal | `force_block_goal` |
-| `:abort` | Abort worker session now (status unchanged; A) | `abort_goal_worker` |
-| `:pause` / `:resume` / `:retry` / `:clear` | Quick controls (also p/r/R/x) | `pause_goal` / `resume_goal` / `clear_goal` |
-| `:interactive` | Toggle manual mode (engine never starts turns) | `interactive: true` at creation |
-| `:model <provider/model>` | Switch this goal's model (same worker/session) | `switch_goal_identity` |
-| `:models` | Show provider/model inventory + quota status | `loopd_list_models` |
-| `:agent <name>` | Switch this goal's agent (same worker/session; Goals tab only) | `switch_goal_identity` |
-| `:agents` | List available agent names/modes and host capabilities (Goals tab only) | `loopd_list_models` |
-| `:logs` / `:help` / `:q` | Toggle logs / help / close | — |
-
-> Goal creation (`:goal start`) was removed from the dashboard — create goals via `/goal` in the parent chat so the agent can clarify the objective first.
-
-### Commands Tab — Keyboard & Command Mode
-
-| Key / Command | Action | Agent equivalent |
-|-----|--------|-----------------|
-| `j` / `k` / `g` / `G` | Select a command session | — |
-| `o` | Close the popup, open the selected command in the **fullscreen terminal page** | — |
-| `Ctrl+C` | Interrupt (SIGINT) the selected command | `loopd_command_interrupt` |
-| `:new <command> [args...]` | Start a new command (quoted args preserved) | `loopd_command_start` |
-| `:interrupt` | SIGINT the selected command | `loopd_command_interrupt` |
-| `:terminate` | SIGTERM→SIGKILL the selected command | `loopd_command_terminate` |
-| `:kill` | SIGKILL now, no grace (same as `X`) | — (no agent equivalent; agents use `loopd_command_terminate`) |
-| `:restart` | Stop + respawn same spec, new ID (same as `R`) | — (no agent equivalent) |
-| `:remove` | Delete a finished command's record + log | `loopd_command_remove` |
-| bare text + Enter | Write that line as stdin to the selected command | `loopd_command_write` |
-| `q` | Detach (view closes; command keeps running) | — |
-
-Inside the **fullscreen terminal page** (reached via `o`): every keystroke forwards immediately as raw input (no line-submit box), `Ctrl+C` is interrupt input to the process, `Ctrl+]` detaches back to where you came from without stopping the process. Press `?` on the Commands tab to see force-kill, restart, and removal shortcuts before opening the terminal.
-
-**Scrolling:** both lists are a `<scrollbox>` capped at 10 rows — short lists sit compact with no gap, long lists scroll and follow `j`/`k`/`g`/`G` via `scrollChildIntoView`. Detail + input stay pinned below in both cases. Empty list shows the fallback tip.
+`/loop` and `/commands` open the dashboard for the human. Agents never drive it: use the owner tools (`list_background_goals`, `inspect_background_goal`, `read_goal_transcript`, `send_goal_input`, `nudge_goal`, `pause_goal`, `resume_goal`, `clear_goal`, `abort_goal_worker`, `force_complete_goal`, `force_block_goal`) instead.
 
 ## Safety Patterns
 
