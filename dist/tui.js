@@ -2391,17 +2391,9 @@ function CoordinationPanel(props) {
 // src/tui/dashboard.tsx
 var activeSubPopupDismiss;
 var activeProjectPickerOpen;
-var activePopupKeyboardOpen;
-var activePopupKeyboard;
 var lastDashboardState;
 function isDashboardProjectPickerOpen() {
   return activeProjectPickerOpen?.() === true;
-}
-function isDashboardPopupKeyboardOpen() {
-  return activePopupKeyboardOpen?.() === true;
-}
-function dispatchDashboardPopupKey(event) {
-  activePopupKeyboard?.(event);
 }
 function tryDismissDashboardSubPopup() {
   try {
@@ -2415,6 +2407,9 @@ function getSavedDashboardState() {
 }
 function prevent(evt) {
   const e = evt;
+  try {
+    e.defaultPrevented = true;
+  } catch {}
   e.preventDefault?.();
   e.stopPropagation?.();
 }
@@ -3673,15 +3668,6 @@ function LoopDashboard(props) {
     }
   };
   useKeyboard(handleDashboardKey);
-  const popupKeyboardOpen = () => (actionsOpen() || coordOpen() || detailsOpen()) && (props.isActive?.() ?? props.api.ui.dialog.open);
-  activePopupKeyboardOpen = popupKeyboardOpen;
-  activePopupKeyboard = handleDashboardKey;
-  onCleanup(() => {
-    if (activePopupKeyboard === handleDashboardKey) {
-      activePopupKeyboard = undefined;
-      activePopupKeyboardOpen = undefined;
-    }
-  });
   async function executeCommandRaw(command, args, commandID) {
     const owner = ownerSessionID();
     if (!owner) {
@@ -10119,7 +10105,7 @@ var v2setup = (ctx) => {
         ctx.keymap.layer(() => ({
           mode: "global",
           priority: 1e4,
-          enabled: () => dialogOpen || isDashboardProjectPickerOpen() || isDashboardPopupKeyboardOpen(),
+          enabled: () => dialogOpen || isDashboardProjectPickerOpen(),
           commands: [{
             id: escapeCmd,
             bind: "escape",
@@ -10135,18 +10121,6 @@ var v2setup = (ctx) => {
             }
           }],
           bindings: [escapeCmd]
-        }));
-        ctx.keymap.layer(() => ({
-          mode: "global",
-          priority: 10001,
-          enabled: isDashboardPopupKeyboardOpen,
-          commands: ["tab", "shift+tab", "j", "k", "up", "down", "pageup", "pagedown"].map((bind) => ({
-            bind,
-            run: (_input, event) => {
-              if (event && !event.defaultPrevented)
-                dispatchDashboardPopupKey(event);
-            }
-          }))
         }));
         ctx.keymap.layer(() => ({
           commands: [{

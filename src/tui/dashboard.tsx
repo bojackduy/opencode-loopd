@@ -83,20 +83,10 @@ export interface SavedDashboardState {
 
 let activeSubPopupDismiss: (() => boolean) | undefined
 let activeProjectPickerOpen: (() => boolean) | undefined
-let activePopupKeyboardOpen: (() => boolean) | undefined
-let activePopupKeyboard: ((event: ParsedKey) => void) | undefined
 let lastDashboardState: SavedDashboardState | undefined
 
 export function isDashboardProjectPickerOpen(): boolean {
   return activeProjectPickerOpen?.() === true
-}
-
-export function isDashboardPopupKeyboardOpen(): boolean {
-  return activePopupKeyboardOpen?.() === true
-}
-
-export function dispatchDashboardPopupKey(event: ParsedKey): void {
-  activePopupKeyboard?.(event)
 }
 
 export function tryDismissDashboardSubPopup(): boolean {
@@ -112,7 +102,10 @@ export function getSavedDashboardState(): SavedDashboardState | undefined {
 }
 
 function prevent(evt: ParsedKey) {
-  const e = evt as ParsedKey & { preventDefault?: () => void; stopPropagation?: () => void }
+  const e = evt as ParsedKey & { defaultPrevented?: boolean; preventDefault?: () => void; stopPropagation?: () => void }
+  try {
+    e.defaultPrevented = true
+  } catch {}
   e.preventDefault?.()
   e.stopPropagation?.()
 }
@@ -1070,16 +1063,6 @@ export function LoopDashboard(props: Props) {
     if (key === "q") { prevent(evt); props.api.ui.dialog.clear(); return }
   }
   useKeyboard(handleDashboardKey)
-  const popupKeyboardOpen = () =>
-    (actionsOpen() || coordOpen() || detailsOpen()) && (props.isActive?.() ?? props.api.ui.dialog.open)
-  activePopupKeyboardOpen = popupKeyboardOpen
-  activePopupKeyboard = handleDashboardKey
-  onCleanup(() => {
-    if (activePopupKeyboard === handleDashboardKey) {
-      activePopupKeyboard = undefined
-      activePopupKeyboardOpen = undefined
-    }
-  })
 
   async function executeCommandRaw(command: string, args: Record<string, unknown>, commandID?: string) {
     const owner = ownerSessionID()

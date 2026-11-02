@@ -491,7 +491,24 @@ export async function beforeWorkspaceTool(
     if (!goal && !isOwner) {
       throw new Error(`Scope denied: unrecognized session/child "${input.sessionID}". Subagent writes are unsupported — make file writes from the worker session (or the owning main session), not from a nested subagent.`)
     }
-    const paths = await Promise.all(writes.map((file) => canonicalScopePath(directory, file)))
+    let paths: string[]
+    try {
+      paths = await Promise.all(writes.map((file) => canonicalScopePath(directory, file)))
+    } catch (error) {
+      // Outside-workspace paths are not loopd's jurisdiction: no ticket can
+      // represent them, so fencing them buys no safety. Proven owners may
+      // edit them (recorded uncontrolled, like the no-protected-goals branch
+      // and shells — checks still wait for quiescence). Workers, strangers,
+      // and malformed in-workspace paths stay denied.
+      if (!goal && isOwner && String((error as Error)?.message ?? "").startsWith("Scope path is outside the workspace")) {
+        state.workspaceCalls ??= []
+        if (!state.workspaceCalls.some((call) => call.callID === input.callID && call.sessionID === input.sessionID)) {
+          state.workspaceCalls.push({ callID: input.callID, sessionID: input.sessionID, paths: [], uncontrolled: true, at: new Date().toISOString() })
+        }
+        return state
+      }
+      throw error
+    }
     const artifact = goal?.config.artifactDir ? path.relative(directory, goal.config.artifactDir).split(path.sep).join("/") : undefined
     for (const file of paths) {
       const inArtifact = artifact && file.startsWith(`${artifact}/`)

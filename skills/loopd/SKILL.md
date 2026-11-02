@@ -377,15 +377,18 @@ Agent: loopd_command_start({ title: "npm install", command: "npm", args: ["insta
 
 ### Calling convention (read before every start)
 
-`command` is the executable **only** — never a shell string. Script/flags go in `args` (one element each). Directory goes in `cwd` (the only directory field).
+`title` is required (there is no `description` field). `command` is the executable **only** — never a shell string. Script/flags go in `args` (one element each). Directory goes in `cwd`; `workdir` is a deprecated alias that still works — prefer `cwd` for new calls. Shell syntax (pipes, redirects, `&&`, globs) needs explicit `shell:true` instead of argv splitting.
 
 ```
-# WRONG — two errors: "bash pull2.sh" is not an executable, and `workdir` is not a parameter:
-loopd_command_start({ title: "pull", command: "bash pull2.sh", workdir: "/Users/duytrinh/Archives/staging" })
+# WRONG — two errors: "bash pull2.sh" is not an executable, and `description` is not a field:
+loopd_command_start({ command: "bash pull2.sh", description: "pull" })
 # RIGHT:
 loopd_command_start({ title: "pull", command: "bash", args: ["pull2.sh"], cwd: "/Users/duytrinh/Archives/staging" })
 # Shell syntax (pipes, redirects, &&, globs) needs shell:true instead of argv splitting:
 loopd_command_start({ title: "tail", command: "tail -f app.log | grep ERROR", shell: true })
+# Canonical event-driven wait: `watch_until` defaults to `watch_until_action: "stop"`
+# (terminate on first match); `"keep"` notifies and lets the process exit naturally:
+loopd_command_start({ title: "loopd test: 5 ticks", command: "bash", args: ["-lc", "for i in 1 2 3 4 5; do echo tick $i; sleep 1; done; echo DONE"], watch_until: "^DONE$", watch_until_action: "keep" })
 ```
 
 ### Agent Tools
