@@ -4494,9 +4494,7 @@ function LoopDashboard(props) {
       return PALETTE2.sky;
     return PALETTE2.muted;
   };
-  const rowNameColor = (row, active) => {
-    if (active)
-      return PALETTE2.cyan;
+  const rowNameColor = (row) => {
     if (row.state === "blocked" || row.state === "budget_limited" || row.state === "usage_limited")
       return PALETTE2.rose;
     if (row.state === "active")
@@ -5658,7 +5656,7 @@ function LoopDashboard(props) {
                         const row = item.row;
                         const isActive = () => item.index === selected();
                         const stateFg = () => rowStateColor(row);
-                        const nameFg = () => rowNameColor(row, isActive());
+                        const nameFg = () => rowNameColor(row);
                         const cols = () => formatRowColumns(row);
                         return _$createComponent3(DashboardRow, {
                           get id() {
@@ -5673,7 +5671,7 @@ function LoopDashboard(props) {
                               var _el$258 = _$createElement3("span");
                               _$insert3(_el$258, () => isActive() ? "> " : "  ");
                               _$effect3((_$p) => _$setProp3(_el$258, "style", {
-                                fg: PALETTE2.cyan,
+                                fg: PALETTE2.muted,
                                 bold: true
                               }, _$p));
                               return _el$258;
@@ -5982,7 +5980,7 @@ function LoopDashboard(props) {
                               var _el$278 = _$createElement3("span");
                               _$insert3(_el$278, () => isActive() ? "> " : "  ");
                               _$effect3((_$p) => _$setProp3(_el$278, "style", {
-                                fg: PALETTE2.cyan,
+                                fg: PALETTE2.muted,
                                 bold: true
                               }, _$p));
                               return _el$278;

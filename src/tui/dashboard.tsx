@@ -1580,8 +1580,7 @@ export function LoopDashboard(props: Props) {
     return PALETTE.muted
   }
 
-  const rowNameColor = (row: RowModel, active: boolean): string => {
-    if (active) return PALETTE.cyan
+  const rowNameColor = (row: RowModel): string => {
     if (row.state === "blocked" || row.state === "budget_limited" || row.state === "usage_limited") return PALETTE.rose
     if (row.state === "active") return row.manual ? PALETTE.amber : PALETTE.sage
     if (row.state === "paused") return PALETTE.violet
@@ -2064,7 +2063,7 @@ export function LoopDashboard(props: Props) {
                       const row = item.row
                       const isActive = () => item.index === selected()
                       const stateFg = () => rowStateColor(row)
-                      const nameFg = () => rowNameColor(row, isActive())
+                      const nameFg = () => rowNameColor(row)
                       const cols = () => formatRowColumns(row)
                       return (
                         <DashboardRow
@@ -2072,7 +2071,7 @@ export function LoopDashboard(props: Props) {
                           backgroundColor={isActive() ? PALETTE.selectedBg : undefined}
                           onClick={() => setSelected(item.index)}
                         >
-                          <span style={{ fg: PALETTE.cyan, bold: true }}>{isActive() ? "> " : "  "}</span>
+                          <span style={{ fg: PALETTE.muted, bold: true }}>{isActive() ? "> " : "  "}</span>
                           <span style={{ fg: nameFg(), bold: true }}>{cols().name}</span>
                           <span style={{ fg: PALETTE.muted }}>{"  "}</span>
                           <span style={{ fg: stateFg(), bold: true }}>{cols().state}</span>
@@ -2217,7 +2216,7 @@ export function LoopDashboard(props: Props) {
                           backgroundColor={isActive() ? PALETTE.selectedBg : undefined}
                           onClick={() => setCmdSelected(i())}
                         >
-                          <span style={{ fg: PALETTE.cyan, bold: true }}>{isActive() ? "> " : "  "}</span>
+                          <span style={{ fg: PALETTE.muted, bold: true }}>{isActive() ? "> " : "  "}</span>
                           <span style={{ fg: PALETTE.ink, bold: isActive() }}>{pad(cmd.title, 22)}</span>
                           <span style={{ fg: PALETTE.muted }}>{"  "}</span>
                           <span style={{ fg: commandStatusColor(cmd.status), bold: isActive() }}>
