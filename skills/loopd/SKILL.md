@@ -52,7 +52,7 @@ created → active → complete
 
 Only `active` goals own live worker runs. `blocked`/`paused`/`budget_limited` wait for an explicit owner transition (`resume`/`retry`/`nudge`). The loop is engine-driven, not parent-driven.
 
-**Manual (`interactive`) mode:** pass `interactive: true` to `loopd_create_goal` (or `:interactive` on the dashboard) for tasks where the worker stops and waits for the next input — the engine then never starts turns on its own (no idle recovery, no retry-due turns). Every turn comes from explicit steering (`:send`, nudge, resume, retry). Budget enforcement still runs. Dashboard shows `✋ MANUAL`. Toggle back with `:interactive` to re-enable auto.
+**Manual (`interactive`) mode:** autonomous turns are the default, including when `directory` is supplied. Pass `interactive: true` only for owner-driven manual turns (or toggle `:interactive` on the dashboard). The engine then never starts turns on its own (no idle recovery, no retry-due turns). Explicit steering (`:send`, nudge, resume, retry) still starts work. Manual mode does not mean the worker is idle or awaiting input. Budget enforcement still runs. Toggle back with `:interactive` to re-enable auto.
 
 `abort_goal_worker` (TUI `A` / `abort_goal_worker` tool) aborts the worker *session only* — status stays the same, transcript remains browsable, the next active turn reuses the same session. Use it for compaction-spin or stuck runs that keep burning tokens without progress.
 
@@ -96,7 +96,8 @@ loopd_create_goal({
   checks: ["npm test"],                    // mandatory if workspaceWrite:true (or configure defaultChecks)
   checkCwd: "/project/root",               // optional; writers default to project root, readers to artifactDir
   workspaceWrite: true,                    // default true; set false explicitly for artifact-only/read-only
-  write_scope: ["src/a.ts"],               // optional; OMIT to let loopd infer it from file names in the objective
+  write_scope: ["src/a.ts"],               // optional; exact files known at creation; OMIT for exclusive ownership
+  interactive: false,                     // autonomous, including cross-directory goals
   progressFile: ".opencode/loopd/progress.md", // optional; defaults to <artifactDir>/progress.md
   maxTurns: 50,                            // optional; ≥50 enforces FINAL REPORT REQUIRED
   maxNoProgress: 5,                        // optional; auto-block without progress
@@ -109,7 +110,9 @@ loopd_create_goal({
 
 Returns `ok:true` with `goalID`, `workerSessionID`, `artifactDir`, `agent`, `model`, `costBudget`, `checks`, `workspaceWrite`, `defaultsApplied:{agent,model,checks}`. On contract violation you get `ok:false` with `errorCode: "missing_agent"` or `"missing_checks"` or `"already active"` (writer serialization) or `"invalid_cost_budget"`.
 
-**Scope is inferred by default.** On scoped hosts, when the objective names files and you do not pass `write_scope`/`workspaceWrite`, loopd sets `write_scope` to those exact paths. That is what lets independent goals run at once instead of serializing on the whole workspace. Pass `write_scope` explicitly when the objective is vague or the real file set differs from the names in the objective, and `workspaceWrite:false` for artifact-only work (which never contends at all).
+**Scope is explicit authority.** Objective references never grant write permission: a named file may be reference material or something to preserve. Omit `write_scope` for legacy exclusive ownership. On enforcing hosts, supply all known exact workspace-relative source, documentation and build-output files in the creation call. Use `[]` for scoped exploration, then worker `claim_goal_scope` for discovered files. Owner `grant_write_scope` is for later expansion, not a required creation step. Unsupported hosts must omit `write_scope`. Use `workspaceWrite:false` only for artifact-only/read-only work.
+
+Approved command `cwd` is workspace-relative (`"."` for the project root), unlike absolute `directory` and `checkCwd`. Supply fixed `approvedCommands` at creation if scoped work needs raw processes. Use `run_goal_checks` for configured verification.
 
 The goal starts immediately. The user can monitor it via `/loop` (<leader>o). Plugin options `defaultAgent` / `defaultModel` / `defaultChecks` in `opencode.jsonc` can supply defaults so callers don’t have to repeat them.
 

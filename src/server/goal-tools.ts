@@ -51,11 +51,11 @@ export function goalTools(
         "model is any \"providerID/modelID\" (discover with `opencode models [provider]`). Omit both by default — when omitted, both inherit the CALLING session's live agent/model (read at creation), then plugin defaultAgent/defaultModel. " +
         "Only pass agent/model when the caller explicitly requests a different identity or the task needs it; explicit values freeze identity and break session upgrades. " +
         "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " +
-        "Workspace-writing goals require checks. On enforcing hosts, explicitly named objective files default to narrow enforced write_scope; use claim_goal_scope for additional files. [] explicitly opts into scoped exploration. " +
+        "Workspace-writing goals require checks. Scope is explicit authority, never inferred from objective text. Omit write_scope for exclusive ownership; supply known exact files at creation or [] for scoped exploration. " +
         (goalService.scopedExecution
-          ? "CURRENT HOST: enforced file scopes supported. Prefer exact disjoint write_scope files for parallel editing; named files are inferred when write_scope is omitted. Use [] to explore then claim_goal_scope. Scoped workers use structured edits and run_goal_checks, not arbitrary shell. "
+          ? "CURRENT HOST: enforced file scopes supported. Prefer exact disjoint write_scope files for parallel editing, supplied in this creation call. Use [] to explore then claim_goal_scope for newly discovered files; grant_write_scope is only for later expansion. Scoped workers use structured edits and run_goal_checks, not arbitrary shell. "
           : "CURRENT HOST: enforced file scopes UNSUPPORTED. Do not supply write_scope, including []; ordinary exclusive goals still work. Do not tell legacy workers to call claim_goal_scope. If enforced parallelism was explicitly required, explain the limitation rather than silently downgrade. ") +
-        "Monitor with the /loop dashboard's Goals tab (Tab/h to switch there if Commands is focused). " +
+        "Goals are autonomous by default in every directory; pass interactive:true only for owner-driven manual turns. Monitor with /loop (Tab switches views; h toggles history). " +
         "Pass directory (absolute path of an existing project) to create the goal in another project: state, artifacts, checks, and the worker session live there, driven by that project's plugin instance once it exists.",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
@@ -67,7 +67,7 @@ export function goalTools(
         checks: tool.schema.array(tool.schema.string()).optional().describe("Shell commands that must pass for completion to be accepted. E.g. [\"npm test\"]."),
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
         workspaceWrite: tool.schema.boolean().optional().describe("Whether this goal edits the shared project workspace. Defaults to true; explicitly set false for artifact-only/read-only work."),
-        write_scope: tool.schema.array(tool.schema.string()).optional().describe("Enforced exact-file ownership on supported hosts. Default: infer explicitly named files from the objective; otherwise legacy exclusive ownership. Supply exact workspace-relative files to override inference, or [] for scoped exploration. No globs. Unsupported hosts must omit this key. Never substitute workspaceWrite:false for coding to bypass protection."),
+        write_scope: tool.schema.array(tool.schema.string()).optional().describe("Enforced exact-file ownership on supported hosts. Omitted means legacy exclusive ownership, never objective inference. Supply known exact workspace-relative files at creation, or [] for scoped exploration with later worker claims. No globs. Unsupported hosts must omit this key. Never substitute workspaceWrite:false for coding to bypass protection."),
         approvedCommands: tool.schema.array(tool.schema.object({
           name: tool.schema.string(),
           command: tool.schema.string(),
@@ -84,8 +84,8 @@ export function goalTools(
         timeoutMs: tool.schema.number().optional().describe("Per-turn timeout in ms."),
         scheduleEveryMs: tool.schema.number().optional().describe("Interval in ms to auto-requeue the same goal after each completion. Minimum 1000. Enables repetitive dialogue reduction."),
         scheduleMaxRuns: tool.schema.number().optional().describe("Maximum total runs including the initial run. Undefined = unlimited. Requires scheduleEveryMs."),
-        interactive: tool.schema.boolean().optional().describe("Manual mode: the engine never starts turns on its own (no idle recovery, no retries). Every turn comes from explicit steering (:send, nudge, resume, retry). Use for interactive tasks where the worker stops and waits for the next input — the tick forcing a turn there wastes tokens and breaks the wait. Toggleable later via the dashboard :interactive command. Cross-directory goals default to true unless you pass false explicitly: a manager's standing loop must never self-complete into blocked on a foreign store."),
-        directory: tool.schema.string().optional().describe("Project directory this goal lives in (absolute path, must exist). Defaults to the current project. Cross-directory goals keep state, artifacts, checks, and their worker session in the target project; the target project's plugin instance drives them once they exist there. Cross-directory creation also defaults interactive:true (pass interactive:false to opt out)."),
+        interactive: tool.schema.boolean().optional().describe("Defaults to false (autonomous), including cross-directory goals. Pass true only for manual mode: the engine never starts turns on its own (no idle recovery or automatic retries). Explicit steering (:send, nudge, resume, retry) still starts work; manual mode does not mean the worker is currently idle. Toggle later via :interactive."),
+        directory: tool.schema.string().optional().describe("Project directory this goal lives in (absolute path, must exist). Defaults to the current project. State, artifacts, checks, and worker live in the target project. Directory selection does not change autonomous/manual mode; use interactive:true explicitly for manual turns."),
       },
       execute: async (args, context) => {
         const sessionID = context?.sessionID || hostSessionID
@@ -211,7 +211,6 @@ export function goalTools(
 
         try {
           const parentDefaults = await withParentIdentity(defaults, host, sessionID)
-          const isForeignDir = args.directory !== undefined
           const { goal, worker } = await goalService.start(goalDir, {
             name: args.name,
             objective: args.objective,
@@ -220,11 +219,7 @@ export function goalTools(
             costBudget,
             parentAgent: parentDefaults.parentAgent,
             parentModel: parentDefaults.parentModel,
-            // Managed staff never self-complete into blocked on a foreign
-            // store: cross-dir goals are manual unless the caller passes
-            // interactive:false explicitly. Standing loops then combine this
-            // with scheduleEveryMs without maxRuns.
-            ...((args.interactive === true || (isForeignDir && args.interactive !== false)) ? { interactive: true as const } : {}),
+            ...(args.interactive === true ? { interactive: true as const } : {}),
           })
           return {
             title: "Goal created",

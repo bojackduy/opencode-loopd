@@ -10,7 +10,6 @@ var __esm = (fn, res, err) => () => {
     throw err[0];
   return res;
 };
-var __require = import.meta.require;
 
 // src/domain/runtime.ts
 function createRuntimeState(goalID) {
@@ -2455,32 +2454,6 @@ init_state_repository();
 import { randomUUID as randomUUID6 } from "crypto";
 
 // src/application/goal-policy.ts
-function inferNamedFileWriteScope(objective, directory) {
-  const matches = objective.matchAll(/(?<![\w./:@-])(?:\.\/)?(?:[\w.-]+\/)*[\w.-]+\.(?:tsx?|jsx?|mjs|cjs|jsonc?|md|py|go|rs|java|kt|c|cc|cpp|h|hpp|cs|sh|ya?ml|toml|css|scss|html|sql|vue|svelte|xml|txt|proto|gradle|lock)\b/g);
-  let paths = [...new Set([...matches].map((match) => match[0].replace(/^\.\//, "")))].sort();
-  if (directory && paths.some((p) => p.includes("/"))) {
-    try {
-      const fs = __require("fs");
-      const path = __require("path");
-      const externalPrefix = /^(opencode-|fleet|voice|loopd)/i;
-      paths = paths.filter((p) => {
-        if (!p.includes("/"))
-          return true;
-        const top = p.split("/")[0];
-        if (externalPrefix.test(top)) {
-          try {
-            fs.statSync(path.join(directory, top));
-            return true;
-          } catch {
-            return false;
-          }
-        }
-        return true;
-      });
-    } catch {}
-  }
-  return paths.length ? paths : undefined;
-}
 function resolveGoalCreationConfig(input) {
   const requested = input.config || {};
   const defaults = input.defaults || {};
@@ -8562,11 +8535,6 @@ function createGoalService(host) {
     if (input.config?.approvedCommands !== undefined) {
       input.config = { ...input.config, approvedCommands: await canonicalGoalCommands(directory, input.config.approvedCommands) };
     }
-    if (host.scopedExecution && input.config?.workspaceWrite !== false && input.config?.write_scope === undefined) {
-      const inferred = inferNamedFileWriteScope(input.objective, directory);
-      if (inferred)
-        input.config = { ...input.config, write_scope: inferred };
-    }
     if (input.config?.write_scope !== undefined && !host.scopedExecution)
       throw new Error("Enforced file scopes are unsupported on this host. Use the guarded v2 tool execution surface; v1 retains legacy exclusivity only.");
     if (input.config?.fallbackModels?.length) {
@@ -10953,7 +10921,7 @@ var execAsync = promisify(execChild);
 function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
   return {
     loopd_create_goal: tool({
-      description: "Create a new background loop GOAL: an autonomous AI worker that loops turn-by-turn on a multi-step objective until deterministic checks pass or it needs you (contract: objective + checks + agent/model + workspaceWrite). " + "The engine spawns a dedicated worker session that does the work autonomously \u2014 it never runs in this chat. " + "Use this for AI reasoning work spanning multiple turns (implement a feature, fix a failing suite, research and write a report) \u2014 NOT for running a single process you just want to start, watch, and type into. " + "For that (dev servers, `npm test --watch`, REPLs, log tails, one-off scripts, interactive shells with a fullscreen terminal UI), use loopd_command_start instead: it is lighter-weight, has no agent/checks/turn loop, and is a raw OS process, not an AI worker. " + "Call this after clarifying the contract with the user. " + "Worker identity is free-form: agent is any OpenCode agent name (built-in, ~/.config/opencode/agents/*.md, or opencode.jsonc agent.* \u2014 discover with `opencode agent list`), " + 'model is any "providerID/modelID" (discover with `opencode models [provider]`). Omit both by default \u2014 when omitted, both inherit the CALLING session\'s live agent/model (read at creation), then plugin defaultAgent/defaultModel. ' + "Only pass agent/model when the caller explicitly requests a different identity or the task needs it; explicit values freeze identity and break session upgrades. " + "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " + "Workspace-writing goals require checks. On enforcing hosts, explicitly named objective files default to narrow enforced write_scope; use claim_goal_scope for additional files. [] explicitly opts into scoped exploration. " + (goalService.scopedExecution ? "CURRENT HOST: enforced file scopes supported. Prefer exact disjoint write_scope files for parallel editing; named files are inferred when write_scope is omitted. Use [] to explore then claim_goal_scope. Scoped workers use structured edits and run_goal_checks, not arbitrary shell. " : "CURRENT HOST: enforced file scopes UNSUPPORTED. Do not supply write_scope, including []; ordinary exclusive goals still work. Do not tell legacy workers to call claim_goal_scope. If enforced parallelism was explicitly required, explain the limitation rather than silently downgrade. ") + "Monitor with the /loop dashboard's Goals tab (Tab/h to switch there if Commands is focused). " + "Pass directory (absolute path of an existing project) to create the goal in another project: state, artifacts, checks, and the worker session live there, driven by that project's plugin instance once it exists.",
+      description: "Create a new background loop GOAL: an autonomous AI worker that loops turn-by-turn on a multi-step objective until deterministic checks pass or it needs you (contract: objective + checks + agent/model + workspaceWrite). " + "The engine spawns a dedicated worker session that does the work autonomously \u2014 it never runs in this chat. " + "Use this for AI reasoning work spanning multiple turns (implement a feature, fix a failing suite, research and write a report) \u2014 NOT for running a single process you just want to start, watch, and type into. " + "For that (dev servers, `npm test --watch`, REPLs, log tails, one-off scripts, interactive shells with a fullscreen terminal UI), use loopd_command_start instead: it is lighter-weight, has no agent/checks/turn loop, and is a raw OS process, not an AI worker. " + "Call this after clarifying the contract with the user. " + "Worker identity is free-form: agent is any OpenCode agent name (built-in, ~/.config/opencode/agents/*.md, or opencode.jsonc agent.* \u2014 discover with `opencode agent list`), " + 'model is any "providerID/modelID" (discover with `opencode models [provider]`). Omit both by default \u2014 when omitted, both inherit the CALLING session\'s live agent/model (read at creation), then plugin defaultAgent/defaultModel. ' + "Only pass agent/model when the caller explicitly requests a different identity or the task needs it; explicit values freeze identity and break session upgrades. " + "Host is the acceptance authority: checks must pass for complete_goal (free retry if rejected <3, blocked after 3). " + "Workspace-writing goals require checks. Scope is explicit authority, never inferred from objective text. Omit write_scope for exclusive ownership; supply known exact files at creation or [] for scoped exploration. " + (goalService.scopedExecution ? "CURRENT HOST: enforced file scopes supported. Prefer exact disjoint write_scope files for parallel editing, supplied in this creation call. Use [] to explore then claim_goal_scope for newly discovered files; grant_write_scope is only for later expansion. Scoped workers use structured edits and run_goal_checks, not arbitrary shell. " : "CURRENT HOST: enforced file scopes UNSUPPORTED. Do not supply write_scope, including []; ordinary exclusive goals still work. Do not tell legacy workers to call claim_goal_scope. If enforced parallelism was explicitly required, explain the limitation rather than silently downgrade. ") + "Goals are autonomous by default in every directory; pass interactive:true only for owner-driven manual turns. Monitor with /loop (Tab switches views; h toggles history). " + "Pass directory (absolute path of an existing project) to create the goal in another project: state, artifacts, checks, and the worker session live there, driven by that project's plugin instance once it exists.",
       args: {
         name: tool.schema.string().describe("Short goal name (used in the dashboard)."),
         objective: tool.schema.string().describe("What the goal should accomplish, in detail."),
@@ -10964,7 +10932,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         checks: tool.schema.array(tool.schema.string()).optional().describe('Shell commands that must pass for completion to be accepted. E.g. ["npm test"].'),
         checkCwd: tool.schema.string().optional().describe("Directory where completion checks run. Workspace-writing goals default to the project root."),
         workspaceWrite: tool.schema.boolean().optional().describe("Whether this goal edits the shared project workspace. Defaults to true; explicitly set false for artifact-only/read-only work."),
-        write_scope: tool.schema.array(tool.schema.string()).optional().describe("Enforced exact-file ownership on supported hosts. Default: infer explicitly named files from the objective; otherwise legacy exclusive ownership. Supply exact workspace-relative files to override inference, or [] for scoped exploration. No globs. Unsupported hosts must omit this key. Never substitute workspaceWrite:false for coding to bypass protection."),
+        write_scope: tool.schema.array(tool.schema.string()).optional().describe("Enforced exact-file ownership on supported hosts. Omitted means legacy exclusive ownership, never objective inference. Supply known exact workspace-relative files at creation, or [] for scoped exploration with later worker claims. No globs. Unsupported hosts must omit this key. Never substitute workspaceWrite:false for coding to bypass protection."),
         approvedCommands: tool.schema.array(tool.schema.object({
           name: tool.schema.string(),
           command: tool.schema.string(),
@@ -10981,8 +10949,8 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         timeoutMs: tool.schema.number().optional().describe("Per-turn timeout in ms."),
         scheduleEveryMs: tool.schema.number().optional().describe("Interval in ms to auto-requeue the same goal after each completion. Minimum 1000. Enables repetitive dialogue reduction."),
         scheduleMaxRuns: tool.schema.number().optional().describe("Maximum total runs including the initial run. Undefined = unlimited. Requires scheduleEveryMs."),
-        interactive: tool.schema.boolean().optional().describe("Manual mode: the engine never starts turns on its own (no idle recovery, no retries). Every turn comes from explicit steering (:send, nudge, resume, retry). Use for interactive tasks where the worker stops and waits for the next input \u2014 the tick forcing a turn there wastes tokens and breaks the wait. Toggleable later via the dashboard :interactive command. Cross-directory goals default to true unless you pass false explicitly: a manager's standing loop must never self-complete into blocked on a foreign store."),
-        directory: tool.schema.string().optional().describe("Project directory this goal lives in (absolute path, must exist). Defaults to the current project. Cross-directory goals keep state, artifacts, checks, and their worker session in the target project; the target project's plugin instance drives them once they exist there. Cross-directory creation also defaults interactive:true (pass interactive:false to opt out).")
+        interactive: tool.schema.boolean().optional().describe("Defaults to false (autonomous), including cross-directory goals. Pass true only for manual mode: the engine never starts turns on its own (no idle recovery or automatic retries). Explicit steering (:send, nudge, resume, retry) still starts work; manual mode does not mean the worker is currently idle. Toggle later via :interactive."),
+        directory: tool.schema.string().optional().describe("Project directory this goal lives in (absolute path, must exist). Defaults to the current project. State, artifacts, checks, and worker live in the target project. Directory selection does not change autonomous/manual mode; use interactive:true explicitly for manual turns.")
       },
       execute: async (args, context) => {
         const sessionID = context?.sessionID || hostSessionID;
@@ -11114,7 +11082,6 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         }
         try {
           const parentDefaults = await withParentIdentity(defaults, host, sessionID);
-          const isForeignDir = args.directory !== undefined;
           const { goal, worker } = await goalService.start(goalDir, {
             name: args.name,
             objective: args.objective,
@@ -11123,7 +11090,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
             costBudget,
             parentAgent: parentDefaults.parentAgent,
             parentModel: parentDefaults.parentModel,
-            ...args.interactive === true || isForeignDir && args.interactive !== false ? { interactive: true } : {}
+            ...args.interactive === true ? { interactive: true } : {}
           });
           return {
             title: "Goal created",

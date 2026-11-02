@@ -22,7 +22,6 @@ import { createWorkerManager, type WorkerManager, type WorkerSession, type Conti
 import type { LoopEvent } from "../domain/events"
 import { describeError, logServerEvent } from "../infrastructure/server-log"
 import { assertScopeAvailable, retireWorker, sweepStaleWorkspaceState, isStaleWorkspaceCall, isSyncStaleWorkspaceCall, reconcileTerminalWorkspaceCalls } from "./workspace-execution"
-import { inferNamedFileWriteScope } from "./goal-policy"
 import { canonicalGoalCommands } from "../infrastructure/goal-commands"
 
 /**
@@ -938,12 +937,8 @@ export function createGoalService(host: LoopHost): GoalService {
     if (input.config?.approvedCommands !== undefined) {
       input.config = { ...input.config, approvedCommands: await canonicalGoalCommands(directory, input.config.approvedCommands) }
     }
-    // Prefer enforceable, disjoint file ownership when the user explicitly
-    // names files. Do not silently enable scopes on the legacy host.
-    if (host.scopedExecution && input.config?.workspaceWrite !== false && input.config?.write_scope === undefined) {
-      const inferred = inferNamedFileWriteScope(input.objective, directory)
-      if (inferred) input.config = { ...input.config, write_scope: inferred }
-    }
+    // Scope is owner-supplied authority, not inferred from prose: objectives
+    // also name reference files and files that must remain untouched.
     // Reject malformed/unavailable alternatives before any worker or goal exists.
     if (input.config?.write_scope !== undefined && !host.scopedExecution) throw new Error("Enforced file scopes are unsupported on this host. Use the guarded v2 tool execution surface; v1 retains legacy exclusivity only.")
     if (input.config?.fallbackModels?.length) {
