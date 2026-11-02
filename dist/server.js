@@ -11151,7 +11151,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
       }
     }),
     get_goal: tool({
-      description: "Get the current goal contract and state. Call at the start of every turn to retrieve the objective, checks, limits, and recent failures (including HOST VERDICT if the last completion was rejected). Returns structured JSON with config and runtime (phase, runGeneration, rejectionCount). Owner-only tools (force_complete_goal, force_block_goal, loopd_release_workspace, nudge_goal, send_goal_input, pause/resume/clear and the other loopd_* owner verbs) are denied to worker sessions \u2014 ownership checks fail them closed. Workers act through worker tools only: get_goal, claim_goal_scope, run_goal_checks, await_quiescence, report_goal_progress, complete_goal, block_goal.",
+      description: "Worker-only: call ONLY from inside the worker session of an active goal \u2014 never from a parent/owner chat. Get the current goal contract and state. Call at the start of every turn to retrieve the objective, checks, limits, and recent failures (including HOST VERDICT if the last completion was rejected). Returns structured JSON with config and runtime (phase, runGeneration, rejectionCount). Owner-only tools (force_complete_goal, force_block_goal, loopd_release_workspace, nudge_goal, send_goal_input, pause/resume/clear and the other loopd_* owner verbs) are denied to worker sessions \u2014 ownership checks fail them closed. Workers act through worker tools only: get_goal, claim_goal_scope, run_goal_checks, await_quiescence, report_goal_progress, complete_goal, block_goal.",
       args: {},
       execute: async (_args, context) => {
         const state = await readState(dir);
@@ -11202,7 +11202,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
       }
     }),
     run_goal_checks: tool({
-      description: "Run only this goal's configured trusted checks under the workspace-wide exclusive operation lock. Source edits are denied while checks run; checks cannot start over in-flight writes. No arbitrary command argument. This is coordination, not an OS/filesystem sandbox. Use instead of shell for scoped verification.",
+      description: "Worker-only: call ONLY from inside the worker session of an active goal \u2014 never from a parent/owner chat. Run only this goal's configured trusted checks under the workspace-wide exclusive operation lock. Source edits are denied while checks run; checks cannot start over in-flight writes. No arbitrary command argument. This is coordination, not an OS/filesystem sandbox. Use instead of shell for scoped verification.",
       args: {},
       execute: async (_args, context) => {
         const workerID = context?.sessionID || hostSessionID;
@@ -11230,7 +11230,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
       }
     }),
     report_goal_progress: tool({
-      description: "Report meaningful progress (resets consecutiveFailures/noProgressCount). Call after durable state changes (file writes, verifications) \u2014 not after thinking. REQUIRED args: summary (what was accomplished) and next (the next concrete step); evidence is optional and may be omitted. The engine uses this to avoid force-finish.",
+      description: "Worker-only: call ONLY from inside the worker session of an active goal \u2014 never from a parent/owner chat. Parent sessions must NOT call this (steer with send_goal_input/nudge, or just reply to the user). Report meaningful progress (resets consecutiveFailures/noProgressCount). Call after durable state changes (file writes, verifications) \u2014 not after thinking. REQUIRED args: summary (what was accomplished) and next (the next concrete step); evidence is optional and may be omitted. The engine uses this to avoid force-finish.",
       args: {
         summary: tool.schema.string().describe("What was accomplished. Required."),
         next: tool.schema.string().describe("The next concrete step. Required."),
@@ -11241,7 +11241,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         const workerID = context?.sessionID || hostSessionID;
         const goal = findGoalByWorkerSession(state, workerID);
         if (!goal) {
-          return { title: "No goal", output: "No active goal to report progress for." };
+          throw new Error("report_goal_progress is worker-only: this session is not the worker of any goal. If you are the owner/parent, do not call this \u2014 steer with send_goal_input/nudge or reply to the user directly.");
         }
         if (goal.status !== "active") {
           return { title: "Invalid state", output: `Goal is ${goal.status}, not active. Cannot report progress.` };
@@ -11281,7 +11281,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
       }
     }),
     complete_goal: tool({
-      description: "Propose completion. Host runs checks from checkCwd (writers default to project root) \u2014 if any fail, host rejects (rejectionCount++, freeRetryPending if <3, blocked after 3 with HOST VERDICT). Only call when every requirement is proved with evidence; the host decides, not the model.",
+      description: "Worker-only: call ONLY from inside the worker session of an active goal \u2014 never from a parent/owner chat (owners use force_complete_goal only after manual verification). Propose completion. Host runs checks from checkCwd (writers default to project root) \u2014 if any fail, host rejects (rejectionCount++, freeRetryPending if <3, blocked after 3 with HOST VERDICT). Only call when every requirement is proved with evidence; the host decides, not the model.",
       args: {
         summary: tool.schema.string().describe("What was completed."),
         evidence: tool.schema.string().describe("Concrete evidence of completion.")
@@ -11291,7 +11291,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         const workerID = context?.sessionID || hostSessionID;
         const goal = findGoalByWorkerSession(state, workerID);
         if (!goal) {
-          return { title: "No goal", output: "No active goal to complete." };
+          throw new Error("complete_goal is worker-only: this session is not the worker of any goal. If you are the owner/parent, do not call this \u2014 use force_complete_goal only after manual verification.");
         }
         if (!canTransition(goal.status, "complete", "model")) {
           return { title: "Invalid transition", output: `Cannot complete goal in ${goal.status} state.` };
@@ -11515,7 +11515,7 @@ ${failureDetails.slice(0, 500)}`,
       }
     }),
     block_goal: tool({
-      description: "Mark blocked for a real external blocker (missing creds, contradictory objective vs checks). Use only when you cannot proceed \u2014 the engine will not auto-continue blocked goals until resume/retry.",
+      description: "Worker-only: call ONLY from inside the worker session of an active goal \u2014 never from a parent/owner chat (owners use force_block_goal for real blockers). Mark blocked for a real external blocker (missing creds, contradictory objective vs checks). Use only when you cannot proceed \u2014 the engine will not auto-continue blocked goals until resume/retry.",
       args: {
         reason: tool.schema.string().describe("Why the goal is blocked."),
         needed: tool.schema.string().describe("What is needed to unblock.")
@@ -11525,7 +11525,7 @@ ${failureDetails.slice(0, 500)}`,
         const workerID = context?.sessionID || hostSessionID;
         const goal = findGoalByWorkerSession(state, workerID);
         if (!goal) {
-          return { title: "No goal", output: "No active goal to block." };
+          throw new Error("block_goal is worker-only: this session is not the worker of any goal. If you are the owner/parent, do not call this \u2014 use force_block_goal for real blockers.");
         }
         if (goal.status === "blocked") {
           return { title: "Goal already blocked", output: JSON.stringify({

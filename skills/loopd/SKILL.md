@@ -181,6 +181,8 @@ First discover and validate the desired alternatives. `fallbackModels` defaults 
 
 ## Worker Tools (Running Inside the Goal)
 
+Every tool in this section is worker-only: callable ONLY from inside the worker session of an active goal. A parent/owner chat that calls one gets a hard error, not a silent no-op — if you are the owner, steer with `send_goal_input`/`nudge_goal` or reply to the user instead.
+
 These tools are available to the worker session doing the actual work:
 
 ### get_goal
@@ -597,7 +599,7 @@ Inside the **fullscreen terminal page** (reached via `o`): every keystroke forwa
 ## Safety Patterns
 
 1. **Always call `get_goal` first** — Read the full contract (objective + checks + limits + budgets) before doing any work. The `COMPLETION REVIEW` and `HOST VERDICT` in steering are authoritative.
-2. **Progress after durable changes** — Call `report_goal_progress` after file writes or verifications (resets `consecutiveFailures`/`noProgressCount`), not after thinking.
+2. **Progress after durable changes** — The worker calls `report_goal_progress` after file writes or verifications (resets `consecutiveFailures`/`noProgressCount`), not after thinking. Owners never call it.
 3. **Complete with evidence — host decides** — Never call `complete_goal` without concrete proof. The host will reject it if `checks` fail; you’ll get `Rejection #N` with exact `stderr` and a **free retry** (`budgetTurnCount` not charged for N<3). After 3 rejections the goal is `blocked`.
 4. **Block for real blockers only** — Don’t block for things you can figure out. If objective and `checks` appear contradictory, `block_goal` — don’t silently violate either.
 5. **Use checks for verification — mandatory for writers** — `workspaceWrite:true` goals **require** `checks` (explicit or `defaultChecks`). Checks run from `checkCwd` (writers → project root by default). `["npm test","bun run typecheck"]` is a good default.
