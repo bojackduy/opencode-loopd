@@ -5672,8 +5672,10 @@ function createLoopEngine(options) {
       if (type.startsWith("session.execution.") || type === "session.idle" || type === "session.status") {
         return await reconcileNativeExecution(goal, event.properties?.error);
       }
-      if (type === "message.updated" || type === "message.part.updated")
+      if (type === "message.updated" || type === "message.part.updated") {
+        await stampNativeActivity(goal, event);
         return false;
+      }
     }
     if (goal.interactive === true && type === "session.idle")
       return false;
@@ -5698,6 +5700,32 @@ function createLoopEngine(options) {
   }
   function eventSessionID(event) {
     return event.properties?.sessionID || event.properties?.info?.sessionID || event.properties?.part?.sessionID;
+  }
+  const nativeActivityStampAt = new Map;
+  const NATIVE_ACTIVITY_STAMP_MS = 5000;
+  async function stampNativeActivity(goal, event) {
+    const info = event.properties?.info;
+    const part = event.properties?.part;
+    if (!info && !part)
+      return;
+    const last = nativeActivityStampAt.get(goal.id) ?? 0;
+    if (Date.now() - last < NATIVE_ACTIVITY_STAMP_MS)
+      return;
+    await mutateState(directory, `native-activity:${goal.id}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goal.id);
+      const rt = s.runtimes.find((r) => r.goalID === goal.id);
+      if (!g || g.status !== "active" || g.workerSessionID !== goal.workerSessionID || !rt)
+        return s;
+      if (rt.phase !== "running" || !rt.activePromptMessageID)
+        return s;
+      const assistantID = rt.activeAssistantMessageID;
+      const matchesTurn = info ? info.id === rt.activePromptMessageID || info.role === "assistant" && info.parentID === rt.activePromptMessageID || assistantID !== undefined && info.id === assistantID : part !== undefined && (part.messageID === rt.activePromptMessageID || assistantID !== undefined && part.messageID === assistantID || part.id === rt.activePromptMessageID);
+      if (!matchesTurn)
+        return s;
+      Object.assign(rt, recordActivity(rt));
+      nativeActivityStampAt.set(goal.id, Date.now());
+      return s;
+    });
   }
   async function handleMessageActivity(goal, event) {
     let matched = false;

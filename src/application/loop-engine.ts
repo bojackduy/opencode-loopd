@@ -199,7 +199,10 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       if (type.startsWith("session.execution.") || type === "session.idle" || type === "session.status") {
         return await reconcileNativeExecution(goal, event.properties?.error)
       }
-      if (type === "message.updated" || type === "message.part.updated") return false
+      if (type === "message.updated" || type === "message.part.updated") {
+        await stampNativeActivity(goal, event)
+        return false
+      }
     }
 
     // Interactive (manual) goals: the engine never starts turns. Idle events
@@ -231,6 +234,47 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     return event.properties?.sessionID
       || event.properties?.info?.sessionID
       || event.properties?.part?.sessionID
+  }
+
+  // Throttle: streaming parts arrive many times per turn. Liveness only needs a
+  // fresh-enough stamp, so one write per goal per window is plenty.
+  const nativeActivityStampAt = new Map<string, number>()
+  const NATIVE_ACTIVITY_STAMP_MS = 5_000
+
+  /**
+   * Native hosts skip transcript/lease inference for message events, but the
+   * watchdogs still need real liveness. Without a stamp, a long working turn
+   * looks quiet (lastActivityAt frozen at turn start), and the idle-recovery
+   * watchdog re-prompts a BUSY worker every idleRecoverMs — interrupting work
+   * the engine itself just started. Stamp only: no lease, anchor, or completion
+   * inference.
+   */
+  async function stampNativeActivity(goal: any, event: any): Promise<void> {
+    const info = event.properties?.info
+    const part = event.properties?.part
+    if (!info && !part) return
+    const last = nativeActivityStampAt.get(goal.id) ?? 0
+    if (Date.now() - last < NATIVE_ACTIVITY_STAMP_MS) return
+    await mutateState(directory, `native-activity:${goal.id}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goal.id)
+      const rt = s.runtimes.find((r) => r.goalID === goal.id)
+      if (!g || g.status !== "active" || g.workerSessionID !== goal.workerSessionID || !rt) return s
+      if (rt.phase !== "running" || !rt.activePromptMessageID) return s
+      const assistantID = rt.activeAssistantMessageID
+      const matchesTurn = info
+        ? info.id === rt.activePromptMessageID
+          || (info.role === "assistant" && info.parentID === rt.activePromptMessageID)
+          || (assistantID !== undefined && info.id === assistantID)
+        : part !== undefined && (
+          part.messageID === rt.activePromptMessageID
+          || (assistantID !== undefined && part.messageID === assistantID)
+          || part.id === rt.activePromptMessageID
+        )
+      if (!matchesTurn) return s
+      Object.assign(rt, recordActivity(rt))
+      nativeActivityStampAt.set(goal.id, Date.now())
+      return s
+    })
   }
 
   async function handleMessageActivity(goal: any, event: any): Promise<boolean> {
