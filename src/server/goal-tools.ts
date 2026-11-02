@@ -358,7 +358,7 @@ export function goalTools(
 
     report_goal_progress: tool({
       description:
-        "Worker-only: call ONLY from inside the worker session of an active goal — never from a parent/owner chat. Parent sessions must NOT call this (steer with send_goal_input/nudge, or just reply to the user). Report meaningful progress (resets consecutiveFailures/noProgressCount). Call after durable state changes (file writes, verifications) — not after thinking. REQUIRED args: summary (what was accomplished) and next (the next concrete step); evidence is optional and may be omitted. The engine uses this to avoid force-finish.",
+        "ARGS: summary (required) + next (required) + evidence (optional). Worker-only: call ONLY from inside the worker session of an active goal — never from a parent/owner chat. Parent sessions must NOT call this (steer with send_goal_input/nudge, or just reply to the user). Report meaningful progress (resets consecutiveFailures/noProgressCount). Call after durable state changes (file writes, verifications) — not after thinking. The engine uses this to avoid force-finish.",
       args: {
         summary: tool.schema.string().describe("What was accomplished. Required."),
         next: tool.schema.string().describe("The next concrete step. Required."),
@@ -418,7 +418,7 @@ export function goalTools(
 
     complete_goal: tool({
       description:
-        "Worker-only: call ONLY from inside the worker session of an active goal — never from a parent/owner chat (owners use force_complete_goal only after manual verification). Propose completion. Host runs checks from checkCwd (writers default to project root) — if any fail, host rejects (rejectionCount++, freeRetryPending if <3, blocked after 3 with HOST VERDICT). Only call when every requirement is proved with evidence; the host decides, not the model.",
+        "ARGS: summary (required) + evidence (required). Worker-only: call ONLY from inside the worker session of an active goal — never from a parent/owner chat (owners use force_complete_goal only after manual verification). Propose completion. Host runs checks from checkCwd (writers default to project root) — if any fail, host rejects (rejectionCount++, freeRetryPending if <3, blocked after 3 with HOST VERDICT). Only call when every requirement is proved with evidence; the host decides, not the model.",
       args: {
         summary: tool.schema.string().describe("What was completed."),
         evidence: tool.schema.string().describe("Concrete evidence of completion."),
@@ -672,7 +672,7 @@ export function goalTools(
 
     block_goal: tool({
       description:
-        "Worker-only: call ONLY from inside the worker session of an active goal — never from a parent/owner chat (owners use force_block_goal for real blockers). Mark blocked for a real external blocker (missing creds, contradictory objective vs checks). Use only when you cannot proceed — the engine will not auto-continue blocked goals until resume/retry.",
+        "ARGS: reason (required) + needed (required). Worker-only: call ONLY from inside the worker session of an active goal — never from a parent/owner chat (owners use force_block_goal for real blockers). Mark blocked for a real external blocker (missing creds, contradictory objective vs checks). Use only when you cannot proceed — the engine will not auto-continue blocked goals until resume/retry.",
       args: {
         reason: tool.schema.string().describe("Why the goal is blocked."),
         needed: tool.schema.string().describe("What is needed to unblock."),
