@@ -6040,7 +6040,7 @@ function createLoopEngine(options) {
     const turnInspection = observed?.status === "idle" && runtime.activePromptMessageID ? await inspectPromptTurn(goal.workerSessionID, runtime.activePromptMessageID).catch(() => {
       return;
     }) : undefined;
-    const assistantInProgress = turnInspection?.assistantInProgress === true;
+    const assistantInProgress = turnInspection?.toolCallLoop === true;
     let retryWindow;
     let retryBlocked;
     const after = await mutateState(directory, `native.execution:${goal.id}`, async (s) => {
@@ -6164,7 +6164,7 @@ function createLoopEngine(options) {
     return await afterCompletedTurn(goal.id, goal);
   }
   async function inspectPromptTurn(workerSessionID, promptMessageID) {
-    const noMatch = { latestUserPrompt: false, assistantCompleted: false, assistantInProgress: false, outputless: false };
+    const noMatch = { latestUserPrompt: false, assistantCompleted: false, assistantInProgress: false, outputless: false, toolCallLoop: false };
     if (!workerSessionID)
       return noMatch;
     let messages;
@@ -6187,7 +6187,8 @@ function createLoopEngine(options) {
       latestUserPrompt: ordered.at(-1)?.messageID === promptMessageID,
       assistantCompleted,
       assistantInProgress: Boolean(latestAssistant) && !assistantCompleted && !outputless,
-      outputless
+      outputless,
+      toolCallLoop: latestAssistant?.finish === "tool-calls"
     };
   }
   async function handleSessionStatus(state, goal, event) {

@@ -656,7 +656,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     const turnInspection = observed?.status === "idle" && runtime.activePromptMessageID
       ? await inspectPromptTurn(goal.workerSessionID, runtime.activePromptMessageID).catch(() => undefined)
       : undefined
-    const assistantInProgress = turnInspection?.assistantInProgress === true
+    const assistantInProgress = turnInspection?.toolCallLoop === true
     let retryWindow: { elapsedMs: number; consecutiveFailures: number; runGeneration: number } | undefined
     let retryBlocked: { failures: number; message: string; notify: boolean } | undefined
     const after = await mutateState(directory, `native.execution:${goal.id}`, async (s) => {
@@ -799,8 +799,8 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
   async function inspectPromptTurn(
     workerSessionID: string | undefined,
     promptMessageID: string,
-  ): Promise<{ latestUserPrompt: boolean; assistantCompleted: boolean; assistantInProgress: boolean; outputless: boolean }> {
-    const noMatch = { latestUserPrompt: false, assistantCompleted: false, assistantInProgress: false, outputless: false }
+  ): Promise<{ latestUserPrompt: boolean; assistantCompleted: boolean; assistantInProgress: boolean; outputless: boolean; toolCallLoop: boolean }> {
+    const noMatch = { latestUserPrompt: false, assistantCompleted: false, assistantInProgress: false, outputless: false, toolCallLoop: false }
     if (!workerSessionID) return noMatch
     let messages
     try {
@@ -834,6 +834,9 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       assistantCompleted,
       assistantInProgress: Boolean(latestAssistant) && !assistantCompleted && !outputless,
       outputless,
+      // Explicit "the model is mid tool-loop" marker: the host reports idle
+      // between steps, and only this makes closing the turn unsafe.
+      toolCallLoop: latestAssistant?.finish === "tool-calls",
     }
   }
 
