@@ -2024,6 +2024,30 @@ export function createGoalService(host: LoopHost): GoalService {
     if (quotaHold) return rejected(goalID, "blocked", quotaHold)
     const guard = continuationGuard(preState, goalID)
     if (guard) return guard
+    // Gone-worker shortcut: a positively absent worker session can hold no
+    // live execution, so its runtime tracking is dead bookkeeping. Release it
+    // and point at resume (which attaches a fresh worker) instead of refusing
+    // with a generic unknown-status message that invites futile retries.
+    if (goal.workerSessionID && host.sessionKnown) {
+      let known: boolean | undefined
+      try { known = await host.sessionKnown(goal.workerSessionID) } catch { known = undefined }
+      if (known === false) {
+        await mutateState(directory, `goal.nudge.gone-worker:${goalID}`, async (s) => {
+          const rt = s.runtimes.find((r) => r.goalID === goalID)
+          if (rt) {
+            rt.phase = "idle"
+            rt.activeRunID = undefined
+            rt.idleCandidateAt = undefined
+            rt.activePromptMessageID = undefined
+            rt.activeToolCallIDs = []
+            rt.updatedAt = new Date().toISOString()
+          }
+          return s
+        })
+        await logServerEvent(directory, "goal.nudge.gone-worker", { goalID }).catch(() => {})
+        return rejected(goalID, "blocked", "Worker session is gone (host cannot resolve it); its reservations were released. Resume to attach a new worker session, then nudge if it stalls again.")
+      }
+    }
     const currentRun = preState.runtimes.find((rt) => rt.goalID === goalID)
     if (host.readExecution && goal.workerSessionID && currentRun?.phase === "running" && currentRun.activePromptAcceptedAt) {
       const prompt = currentRun.activePromptMessageID

@@ -49,6 +49,13 @@ Fixes (this change):
 Verification: `bun run typecheck`, `bun run build`, `git diff --check`,
 service restart, then a scratch writer goal created/completed/cleared live.
 
+Voice incident (2026-11-02): a read-only worker died without any after-hook,
+leaving a write fence; worker status stayed `unknown`, so neither the idle
+nor the absent path could fire, and nudge refused generically. Fix: the
+absent path now also prunes ticket holders/queue of gone sessions (probing
+their sessions even with no workspaceCall), fires fence awaits, and nudge
+short-circuits a positively-absent worker to "resume first" guidance.
+
 Residual risks: the v2 server context exposes no message-history API, so
 historical proof rests on idle status, not per-call terminal records; a
 worktree that copies another directory's state inherits its stale fences

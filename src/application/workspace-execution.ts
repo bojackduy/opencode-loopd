@@ -814,8 +814,12 @@ export async function releaseAbsentSessionWorkspaceCalls(directory: string, host
     !call.goalID ||
     !snapshot.goals.some((goal) => goal.id === call.goalID && !isTerminal(goal.status)),
   )
-  if (!orphaned.length) return 0
-  const sessions = [...new Set(orphaned.map((call) => call.sessionID))]
+  if (!orphaned.length && !(snapshot.writeTickets?.holders.length || snapshot.writeTickets?.queue.length)) return 0
+  const sessions = [...new Set([
+    ...orphaned.map((call) => call.sessionID),
+    ...(snapshot.writeTickets?.holders ?? []).map((h) => h.sessionID),
+    ...(snapshot.writeTickets?.queue ?? []).map((w) => w.sessionID),
+  ])]
   const known = new Map<string, boolean | undefined>()
   for (const sessionID of sessions) {
     try { known.set(sessionID, await host.sessionKnown(sessionID)) }
@@ -831,6 +835,17 @@ export async function releaseAbsentSessionWorkspaceCalls(directory: string, host
       released += 1
       return false
     })
+    // Ticket holders/queue entries of a gone session are dead executions:
+    // no live worker can hold them, and a replacement worker re-acquires on
+    // retry. Without this they fence checks forever on an active goal.
+    if (state.writeTickets) {
+      const holders = state.writeTickets.holders.length
+      state.writeTickets.holders = state.writeTickets.holders.filter((h) => !gone.has(h.sessionID))
+      released += holders - state.writeTickets.holders.length
+      const queued = state.writeTickets.queue.length
+      state.writeTickets.queue = state.writeTickets.queue.filter((w) => !gone.has(w.sessionID))
+      released += queued - state.writeTickets.queue.length
+    }
     // A fence was the only thing holding a closing goal open; now that it is
     // gone the flag must not outlive it.
     for (const goal of state.goals) {
@@ -846,6 +861,7 @@ export async function releaseAbsentSessionWorkspaceCalls(directory: string, host
       released,
       sessions: [...gone],
     }).catch(() => {})
+    await fireFenceAwaits(directory).catch(() => {})
   }
   return released
 }

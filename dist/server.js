@@ -2228,9 +2228,13 @@ async function releaseAbsentSessionWorkspaceCalls(directory, host) {
     return 0;
   const snapshot = await readState(directory);
   const orphaned = (snapshot.workspaceCalls ?? []).filter((call) => !call.goalID || !snapshot.goals.some((goal) => goal.id === call.goalID && !isTerminal(goal.status)));
-  if (!orphaned.length)
+  if (!orphaned.length && !(snapshot.writeTickets?.holders.length || snapshot.writeTickets?.queue.length))
     return 0;
-  const sessions = [...new Set(orphaned.map((call) => call.sessionID))];
+  const sessions = [...new Set([
+    ...orphaned.map((call) => call.sessionID),
+    ...(snapshot.writeTickets?.holders ?? []).map((h) => h.sessionID),
+    ...(snapshot.writeTickets?.queue ?? []).map((w) => w.sessionID)
+  ])];
   const known = new Map;
   for (const sessionID of sessions) {
     try {
@@ -2252,6 +2256,14 @@ async function releaseAbsentSessionWorkspaceCalls(directory, host) {
       released += 1;
       return false;
     });
+    if (state.writeTickets) {
+      const holders = state.writeTickets.holders.length;
+      state.writeTickets.holders = state.writeTickets.holders.filter((h) => !gone.has(h.sessionID));
+      released += holders - state.writeTickets.holders.length;
+      const queued = state.writeTickets.queue.length;
+      state.writeTickets.queue = state.writeTickets.queue.filter((w) => !gone.has(w.sessionID));
+      released += queued - state.writeTickets.queue.length;
+    }
     for (const goal of state.goals) {
       if (!goal.scopeClosing)
         continue;
@@ -2267,6 +2279,7 @@ async function releaseAbsentSessionWorkspaceCalls(directory, host) {
       released,
       sessions: [...gone]
     }).catch(() => {});
+    await fireFenceAwaits(directory).catch(() => {});
   }
   return released;
 }
@@ -9505,6 +9518,30 @@ function createGoalService(host) {
     const guard = continuationGuard(preState, goalID);
     if (guard)
       return guard;
+    if (goal.workerSessionID && host.sessionKnown) {
+      let known;
+      try {
+        known = await host.sessionKnown(goal.workerSessionID);
+      } catch {
+        known = undefined;
+      }
+      if (known === false) {
+        await mutateState(directory, `goal.nudge.gone-worker:${goalID}`, async (s) => {
+          const rt = s.runtimes.find((r) => r.goalID === goalID);
+          if (rt) {
+            rt.phase = "idle";
+            rt.activeRunID = undefined;
+            rt.idleCandidateAt = undefined;
+            rt.activePromptMessageID = undefined;
+            rt.activeToolCallIDs = [];
+            rt.updatedAt = new Date().toISOString();
+          }
+          return s;
+        });
+        await logServerEvent(directory, "goal.nudge.gone-worker", { goalID }).catch(() => {});
+        return rejected(goalID, "blocked", "Worker session is gone (host cannot resolve it); its reservations were released. Resume to attach a new worker session, then nudge if it stalls again.");
+      }
+    }
     const currentRun = preState.runtimes.find((rt) => rt.goalID === goalID);
     if (host.readExecution && goal.workerSessionID && currentRun?.phase === "running" && currentRun.activePromptAcceptedAt) {
       const prompt = currentRun.activePromptMessageID;
