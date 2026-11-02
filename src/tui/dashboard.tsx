@@ -439,8 +439,7 @@ export function LoopDashboard(props: Props) {
   const [projectIdx, setProjectIdx] = createSignal(0)
   const [projectBounds, setProjectBounds] = createSignal({ width: 32, rows: 6, top: 3 })
   let projectAnchor: BoxRenderable | undefined
-  let actionsAnchor: BoxRenderable | undefined
-  const [actionsBounds, setActionsBounds] = createSignal({ width: 32, rows: 6, top: 3 })
+  const [actionsBounds, setActionsBounds] = createSignal({ width: 32, rows: 6, top: -8 })
   const projectOptions = () => tab() === "commands" ? ["all", ...managedDirs()] : managedDirs()
   const projectCurrentScope = () => tab() === "commands" ? cmdScope() : projectScope()
   const projectLabel = (dir: string) => dir === "all" ? "All projects" : dir.split("/").pop() || dir
@@ -460,17 +459,24 @@ export function LoopDashboard(props: Props) {
     if (next.width !== projectBounds().width || next.rows !== projectBounds().rows || next.top !== projectBounds().top) setProjectBounds(next)
   }
 
-  function updateActionsBounds() {
-    if (!actionsOpen() || !actionsAnchor) return
-    const { width, height } = terminal()
-    const below = height - actionsAnchor.y - actionsAnchor.height - 1
-    const available = below >= 3 ? below : actionsAnchor.y - 1
-    const rows = Math.max(1, Math.min(6, available - 2))
-    const next = {
-      width: Math.max(1, Math.min(36, width - actionsAnchor.x - 2)),
-      rows,
-      top: below >= 3 ? actionsAnchor.height : -(Math.min(paletteVerbs().length, rows) + 2),
+  // TEMP-DIAG (remove after key investigation): echo popup keys to status.
+  function echoPopupKey(key: string) {
+    if (actionsOpen() || coordOpen() || detailsOpen() || showProjects()) {
+      setStatusText(`key:${key} mode:${mode()} acts:${actionsOpen()} det:${detailsOpen()} co:${coordOpen()}`)
     }
+  }
+
+  // The inspector sits at the dialog bottom, so the actions menu always
+  // opens ABOVE the anchor: terminal-relative "below" math mixes coordinate
+  // spaces (anchor.y is parent-relative) and misplaces the menu into clipped
+  // space. Width fits the longest label so rows never truncate mid-word.
+  function updateActionsBounds() {
+    if (!actionsOpen()) return
+    const verbs = paletteVerbs()
+    const content = verbs.reduce((m, v) => Math.max(m, v.label.length + v.key.length), 0)
+    const width = Math.min(40, Math.max(24, content + 9))
+    const rows = Math.max(1, Math.min(6, verbs.length))
+    const next = { width, rows, top: -(Math.min(verbs.length, rows) + 2) }
     const old = actionsBounds()
     if (next.width !== old.width || next.rows !== old.rows || next.top !== old.top) setActionsBounds(next)
   }
@@ -759,6 +765,7 @@ export function LoopDashboard(props: Props) {
     }
 
     const key = raw || seq || name
+    echoPopupKey(key) // TEMP-DIAG: remove with echoPopupKey after key investigation.
 
     // 1. Release confirmation modal
     if (pendingRelease()) {
@@ -2109,7 +2116,6 @@ export function LoopDashboard(props: Props) {
                     }}
                      onActions={() => actionsOpen() ? setActionsOpen(false) : openActions()}
                      actionsOpen={actionsOpen()}
-                     actionsAnchor={(el) => { actionsAnchor = el }}
                      onActionsLayout={updateActionsBounds}
                      actionsMenu={
                        <Show when={actionsOpen()}>

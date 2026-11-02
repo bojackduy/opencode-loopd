@@ -2841,11 +2841,10 @@ function LoopDashboard(props) {
     top: 3
   });
   let projectAnchor;
-  let actionsAnchor;
   const [actionsBounds, setActionsBounds] = createSignal({
     width: 32,
     rows: 6,
-    top: 3
+    top: -8
   });
   const projectOptions = () => tab() === "commands" ? ["all", ...managedDirs()] : managedDirs();
   const projectCurrentScope = () => tab() === "commands" ? cmdScope() : projectScope();
@@ -2869,20 +2868,22 @@ function LoopDashboard(props) {
     if (next.width !== projectBounds().width || next.rows !== projectBounds().rows || next.top !== projectBounds().top)
       setProjectBounds(next);
   }
+  function echoPopupKey(key) {
+    if (actionsOpen() || coordOpen() || detailsOpen() || showProjects()) {
+      setStatusText(`key:${key} mode:${mode()} acts:${actionsOpen()} det:${detailsOpen()} co:${coordOpen()}`);
+    }
+  }
   function updateActionsBounds() {
-    if (!actionsOpen() || !actionsAnchor)
+    if (!actionsOpen())
       return;
-    const {
-      width,
-      height
-    } = terminal();
-    const below = height - actionsAnchor.y - actionsAnchor.height - 1;
-    const available = below >= 3 ? below : actionsAnchor.y - 1;
-    const rows = Math.max(1, Math.min(6, available - 2));
+    const verbs = paletteVerbs();
+    const content = verbs.reduce((m, v) => Math.max(m, v.label.length + v.key.length), 0);
+    const width = Math.min(40, Math.max(24, content + 9));
+    const rows = Math.max(1, Math.min(6, verbs.length));
     const next = {
-      width: Math.max(1, Math.min(36, width - actionsAnchor.x - 2)),
+      width,
       rows,
-      top: below >= 3 ? actionsAnchor.height : -(Math.min(paletteVerbs().length, rows) + 2)
+      top: -(Math.min(verbs.length, rows) + 2)
     };
     const old = actionsBounds();
     if (next.width !== old.width || next.rows !== old.rows || next.top !== old.top)
@@ -3249,6 +3250,7 @@ function LoopDashboard(props) {
       return;
     }
     const key = raw || seq || name;
+    echoPopupKey(key);
     if (pendingRelease()) {
       if (key === "y" || isEnterKey(evt)) {
         prevent(evt);
@@ -5781,9 +5783,6 @@ function LoopDashboard(props) {
                   onActions: () => actionsOpen() ? setActionsOpen(false) : openActions(),
                   get actionsOpen() {
                     return actionsOpen();
-                  },
-                  actionsAnchor: (el) => {
-                    actionsAnchor = el;
                   },
                   onActionsLayout: updateActionsBounds,
                   get actionsMenu() {
