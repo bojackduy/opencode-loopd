@@ -647,6 +647,16 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
     const providerRetry = observed?.status === "unknown" && host.sessionStatus
       ? (await host.sessionStatus(goal.workerSessionID)) === "retry"
       : false
+    // The host can report idle between tool calls, while the assistant reply is
+    // still unfinished (finish === "tool-calls"). Closing the turn there
+    // re-prompts a MID-TURN worker: the model's next tool call is dropped and
+    // the transcript looks like the engine keeps nudging it. Only the transcript
+    // can tell "turn over" from "between steps", so consult it before closing.
+    // A failed read, or no assistant part yet, keeps the transport verdict.
+    const turnInspection = observed?.status === "idle" && runtime.activePromptMessageID
+      ? await inspectPromptTurn(goal.workerSessionID, runtime.activePromptMessageID).catch(() => undefined)
+      : undefined
+    const assistantInProgress = turnInspection?.assistantInProgress === true
     let retryWindow: { elapsedMs: number; consecutiveFailures: number; runGeneration: number } | undefined
     let retryBlocked: { failures: number; message: string; notify: boolean } | undefined
     const after = await mutateState(directory, `native.execution:${goal.id}`, async (s) => {
@@ -709,6 +719,7 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
         : inboxIDs.some((id) => !observed.deliveredMessageIDs?.includes(id)) && observed.outcome !== "interrupted" ? "undelivered-inbox"
         : !Number.isFinite(started) || !Number.isFinite(ended) || ended < started ? "invalid-terminal-time"
         : !ownsLatest ? "foreign-prompt"
+        : assistantInProgress ? "assistant-incomplete"
         : !observed.outcome ? "missing-outcome" : undefined
       if (reason) {
         rt.nativeReconcileBlocked = { reason, runGeneration: rt.runGeneration }

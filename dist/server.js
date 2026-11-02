@@ -6037,6 +6037,10 @@ function createLoopEngine(options) {
     let blocked;
     let outputlessRunID;
     const providerRetry = observed?.status === "unknown" && host.sessionStatus ? await host.sessionStatus(goal.workerSessionID) === "retry" : false;
+    const turnInspection = observed?.status === "idle" && runtime.activePromptMessageID ? await inspectPromptTurn(goal.workerSessionID, runtime.activePromptMessageID).catch(() => {
+      return;
+    }) : undefined;
+    const assistantInProgress = turnInspection?.assistantInProgress === true;
     let retryWindow;
     let retryBlocked;
     const after = await mutateState(directory, `native.execution:${goal.id}`, async (s) => {
@@ -6085,7 +6089,7 @@ function createLoopEngine(options) {
       const ended = Date.parse(observed?.idleAt ?? "");
       const inboxIDs = rt.nativeInboxMessageIDs ?? [];
       const ownsLatest = observed?.latestUserMessageID === rt.activePromptMessageID || inboxIDs.includes(observed?.latestUserMessageID ?? "");
-      const reason = rt.phase !== "running" ? "phase-not-running" : !rt.activeRunID || !rt.activePromptMessageID ? "missing-run-anchor" : observed?.status !== "idle" ? "host-not-idle" : s.workspaceOperation ? "workspace-operation" : s.workspaceCalls?.some((call) => call.goalID === goal.id) ? "workspace-call" : inboxIDs.some((id) => !observed.deliveredMessageIDs?.includes(id)) && observed.outcome !== "interrupted" ? "undelivered-inbox" : !Number.isFinite(started) || !Number.isFinite(ended) || ended < started ? "invalid-terminal-time" : !ownsLatest ? "foreign-prompt" : !observed.outcome ? "missing-outcome" : undefined;
+      const reason = rt.phase !== "running" ? "phase-not-running" : !rt.activeRunID || !rt.activePromptMessageID ? "missing-run-anchor" : observed?.status !== "idle" ? "host-not-idle" : s.workspaceOperation ? "workspace-operation" : s.workspaceCalls?.some((call) => call.goalID === goal.id) ? "workspace-call" : inboxIDs.some((id) => !observed.deliveredMessageIDs?.includes(id)) && observed.outcome !== "interrupted" ? "undelivered-inbox" : !Number.isFinite(started) || !Number.isFinite(ended) || ended < started ? "invalid-terminal-time" : !ownsLatest ? "foreign-prompt" : assistantInProgress ? "assistant-incomplete" : !observed.outcome ? "missing-outcome" : undefined;
       if (reason) {
         rt.nativeReconcileBlocked = { reason, runGeneration: rt.runGeneration };
         if (rt.nativeReconcileBlockedReasons?.runGeneration !== rt.runGeneration)
