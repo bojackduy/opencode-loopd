@@ -1083,6 +1083,20 @@ var PALETTE = {
   sky: "#38bdf8",
   tabActiveFg: "#11131a"
 };
+function paletteFor(t) {
+  const c = (v, fallback) => v ?? fallback;
+  return {
+    ...PALETTE,
+    base: c(t.background, PALETTE.base),
+    inset: c(t.backgroundPanel, PALETTE.inset),
+    rule: c(t.border, PALETTE.rule),
+    rowRule: c(t.borderSubtle, PALETTE.rowRule),
+    selectedBg: c(t.backgroundElement, PALETTE.selectedBg),
+    ink: c(t.text, PALETTE.ink),
+    muted: c(t.textMuted, PALETTE.muted),
+    tabActiveFg: c(t.background, PALETTE.tabActiveFg)
+  };
+}
 var ATTENTION_STATES = new Set(["blocked", "budget_limited", "usage_limited"]);
 function stateSymbol(status, manual) {
   if (status === "blocked" || status === "budget_limited" || status === "usage_limited")
@@ -1323,6 +1337,7 @@ function stateBadge(goal) {
   };
 }
 function GoalInspector(props) {
+  const PALETTE2 = paletteFor(props.theme);
   const m = () => props.model;
   const badge = () => stateBadge(m().goal);
   const proj = () => m().directory.split("/").pop() ?? m().directory;
@@ -1335,10 +1350,10 @@ function GoalInspector(props) {
     _$setProp(_el$, "paddingRight", 1);
     _$spread(_el$, _$mergeProps({
       get backgroundColor() {
-        return active ? PALETTE.cyan : PALETTE.base;
+        return active ? PALETTE2.cyan : PALETTE2.base;
       },
       get borderColor() {
-        return active ? PALETTE.cyan : PALETTE.rule;
+        return active ? PALETTE2.cyan : PALETTE2.rule;
       }
     }, {
       onMouseDown: onClick
@@ -1353,10 +1368,10 @@ function GoalInspector(props) {
     _$insert(_el$5, keyHint, _el$7);
     _$effect((_p$) => {
       var _v$ = {
-        fg: active ? PALETTE.tabActiveFg : PALETTE.ink,
+        fg: active ? PALETTE2.tabActiveFg : PALETTE2.ink,
         bold: active
       }, _v$2 = {
-        fg: active ? PALETTE.tabActiveFg : PALETTE.cyan,
+        fg: active ? PALETTE2.tabActiveFg : PALETTE2.cyan,
         bold: true
       };
       _v$ !== _p$.e && (_p$.e = _$setProp(_el$3, "style", _v$, _p$.e));
@@ -1423,12 +1438,12 @@ function GoalInspector(props) {
         _$insert(_el$26, () => m().blocked.needed.replace(/\s+/g, " ").slice(0, 90), null);
         _$effect((_p$) => {
           var _v$1 = {
-            fg: PALETTE.rose,
+            fg: PALETTE2.rose,
             bold: true
           }, _v$10 = {
-            fg: PALETTE.rose
+            fg: PALETTE2.rose
           }, _v$11 = {
-            fg: PALETTE.muted
+            fg: PALETTE2.muted
           };
           _v$1 !== _p$.e && (_p$.e = _$setProp(_el$23, "style", _v$1, _p$.e));
           _v$10 !== _p$.t && (_p$.t = _$setProp(_el$25, "style", _v$10, _p$.t));
@@ -1446,7 +1461,7 @@ function GoalInspector(props) {
         _$setProp(_el$28, "wrapMode", "word");
         _$insert(_el$29, () => (m().lastResult ?? "No progress reported yet \u2014 steer with [s] Send or [Enter] Actions.").replace(/\s+/g, " ").slice(0, 200));
         _$effect((_$p) => _$setProp(_el$29, "style", {
-          fg: PALETTE.muted
+          fg: PALETTE2.muted
         }, _$p));
         return _el$28;
       })();
@@ -1468,20 +1483,20 @@ function GoalInspector(props) {
       }
     }), null);
     _$effect((_p$) => {
-      var _v$3 = PALETTE.rule, _v$4 = PALETTE.inset, _v$5 = {
-        fg: PALETTE.cyan,
+      var { rule: _v$3, inset: _v$4 } = PALETTE2, _v$5 = {
+        fg: PALETTE2.cyan,
         bold: true
       }, _v$6 = {
-        fg: PALETTE.muted
+        fg: PALETTE2.muted
       }, _v$7 = {
-        fg: PALETTE.violet
+        fg: PALETTE2.violet
       }, _v$8 = {
         fg: badge().fg,
         bold: true
       }, _v$9 = {
-        fg: PALETTE.muted
+        fg: PALETTE2.muted
       }, _v$0 = {
-        fg: m().acting ? PALETTE.sage : PALETTE.ink
+        fg: m().acting ? PALETTE2.sage : PALETTE2.ink
       };
       _v$3 !== _p$.e && (_p$.e = _$setProp(_el$8, "borderColor", _v$3, _p$.e));
       _v$4 !== _p$.t && (_p$.t = _$setProp(_el$8, "backgroundColor", _v$4, _p$.t));
@@ -1506,6 +1521,7 @@ function GoalInspector(props) {
   })();
 }
 function GoalDetailsDrawer(props) {
+  const PALETTE2 = paletteFor(props.theme);
   const m = () => props.model;
   const g = () => m().goal;
   const badge = () => stateBadge(g());
@@ -1515,7 +1531,7 @@ function GoalDetailsDrawer(props) {
     const rt = m().runtime;
     return rt ? `${rt.budgetTurnCount}${maxTurns() ? `/${maxTurns()}` : ""} turns` : "0 turns";
   };
-  const dtRow = (icon, dt, dd, labelColor, valueColor = PALETTE.ink) => (() => {
+  const dtRow = (icon, dt, dd, labelColor, valueColor = PALETTE2.ink) => (() => {
     var _el$30 = _$createElement("box"), _el$31 = _$createElement("box"), _el$32 = _$createElement("text"), _el$33 = _$createElement("span"), _el$34 = _$createTextNode(` `), _el$35 = _$createElement("span"), _el$36 = _$createElement("box"), _el$37 = _$createElement("text"), _el$38 = _$createElement("span");
     _$insertNode(_el$30, _el$31);
     _$insertNode(_el$30, _el$36);
@@ -1587,7 +1603,7 @@ function GoalDetailsDrawer(props) {
         _$insertNode(_el$44, _el$46);
         _$insert(_el$44, proj, _el$46);
         _$effect((_$p) => _$setProp(_el$44, "style", {
-          fg: PALETTE.muted
+          fg: PALETTE2.muted
         }, _$p));
         return _el$44;
       }
@@ -1601,7 +1617,7 @@ function GoalDetailsDrawer(props) {
     _$setProp(_el$50, "height", 1);
     _$spread(_el$50, _$mergeProps({
       get backgroundColor() {
-        return PALETTE.base;
+        return PALETTE2.base;
       }
     }, {
       onMouseDown: () => props.onClose?.()
@@ -1622,9 +1638,9 @@ function GoalDetailsDrawer(props) {
     _$setProp(_el$58, "scrollX", false);
     _$setProp(_el$58, "scrollY", true);
     _$setProp(_el$58, "stickyScroll", false);
-    _$insert(_el$58, () => dtRow("\u2756", "agent/model", `${m().agentLabel} \xB7 ${m().modelLabel}`, PALETTE.sage, PALETTE.amber), _el$59);
-    _$insert(_el$58, () => dtRow("\u25C9", "budget/turns", `${formatCost(g().costUsed)} \xB7 ${turnsLabel()} \xB7 ${formatTokens(g().tokensUsed)} tok \xB7 ${formatDuration(g().timeUsedSeconds)}`, PALETTE.amber, PALETTE.sage), _el$59);
-    _$insert(_el$58, () => dtRow("\u25CE", "objective", g().objective.replace(/\s+/g, " "), PALETTE.cyan, PALETTE.ink), _el$59);
+    _$insert(_el$58, () => dtRow("\u2756", "agent/model", `${m().agentLabel} \xB7 ${m().modelLabel}`, PALETTE2.sage, PALETTE2.amber), _el$59);
+    _$insert(_el$58, () => dtRow("\u25C9", "budget/turns", `${formatCost(g().costUsed)} \xB7 ${turnsLabel()} \xB7 ${formatTokens(g().tokensUsed)} tok \xB7 ${formatDuration(g().timeUsedSeconds)}`, PALETTE2.amber, PALETTE2.sage), _el$59);
+    _$insert(_el$58, () => dtRow("\u25CE", "objective", g().objective.replace(/\s+/g, " "), PALETTE2.cyan, PALETTE2.ink), _el$59);
     _$insert(_el$58, () => dtRow("\u2B23", "scope", (() => {
       const writeable = g().config.workspaceWrite !== false;
       const scope = g().config.write_scope;
@@ -1635,9 +1651,9 @@ function GoalDetailsDrawer(props) {
       if (scope.length === 0)
         return "exploration only";
       return scope.join(", ");
-    })(), PALETTE.violet, PALETTE.violet), _el$59);
-    _$insert(_el$58, () => dtRow("\u2713", "checks", (g().config.checks ?? []).join(" \xB7 ") || "No source changes", PALETTE.sky, PALETTE.sky), _el$59);
-    _$insert(_el$58, () => dtRow("\u2699", "diagnostics", `goal: ${g().id} \xB7 worker: ${g().workerSessionID ?? "\u2014"} \xB7 owner: ${g().ownerSessionID ?? "\u2014"}`, PALETTE.muted, PALETTE.muted), _el$59);
+    })(), PALETTE2.violet, PALETTE2.violet), _el$59);
+    _$insert(_el$58, () => dtRow("\u2713", "checks", (g().config.checks ?? []).join(" \xB7 ") || "No source changes", PALETTE2.sky, PALETTE2.sky), _el$59);
+    _$insert(_el$58, () => dtRow("\u2699", "diagnostics", `goal: ${g().id} \xB7 worker: ${g().workerSessionID ?? "\u2014"} \xB7 owner: ${g().ownerSessionID ?? "\u2014"}`, PALETTE2.muted, PALETTE2.muted), _el$59);
     _$insertNode(_el$59, _el$60);
     _$setProp(_el$59, "flexDirection", "column");
     _$setProp(_el$59, "border", true);
@@ -1667,17 +1683,17 @@ function GoalDetailsDrawer(props) {
             _$insertNode(_el$67, _el$68);
             _$insert(_el$67, () => p.next.replace(/\s+/g, " "), null);
             _$effect((_$p) => _$setProp(_el$67, "style", {
-              fg: PALETTE.muted
+              fg: PALETTE2.muted
             }, _$p));
             return _el$67;
           }
         }), null);
         _$effect((_p$) => {
           var _v$22 = {
-            fg: PALETTE.sage,
+            fg: PALETTE2.sage,
             bold: true
           }, _v$23 = {
-            fg: PALETTE.ink
+            fg: PALETTE2.ink
           };
           _v$22 !== _p$.e && (_p$.e = _$setProp(_el$64, "style", _v$22, _p$.e));
           _v$23 !== _p$.t && (_p$.t = _$setProp(_el$66, "style", _v$23, _p$.t));
@@ -1699,7 +1715,7 @@ function GoalDetailsDrawer(props) {
           _$insertNode(_el$69, _el$70);
           _$insertNode(_el$70, _$createTextNode(`No recent events recorded yet.`));
           _$effect((_$p) => _$setProp(_el$70, "style", {
-            fg: PALETTE.muted
+            fg: PALETTE2.muted
           }, _$p));
           return _el$69;
         })();
@@ -1710,27 +1726,27 @@ function GoalDetailsDrawer(props) {
         _$setProp(_el$72, "wrapMode", "word");
         _$insert(_el$73, line);
         _$effect((_$p) => _$setProp(_el$73, "style", {
-          fg: PALETTE.muted
+          fg: PALETTE2.muted
         }, _$p));
         return _el$72;
       })()
     }), null);
     _$effect((_p$) => {
-      var _v$12 = PALETTE.cyan, _v$13 = PALETTE.inset, _v$14 = {
-        fg: PALETTE.cyan,
+      var { cyan: _v$12, inset: _v$13 } = PALETTE2, _v$14 = {
+        fg: PALETTE2.cyan,
         bold: true
       }, _v$15 = {
-        fg: PALETTE.muted
+        fg: PALETTE2.muted
       }, _v$16 = {
         fg: badge().fg,
         bold: true
       }, _v$17 = {
-        fg: PALETTE.amber,
+        fg: PALETTE2.amber,
         bold: true
       }, _v$18 = {
-        fg: PALETTE.muted
-      }, _v$19 = PALETTE.rule, _v$20 = PALETTE.base, _v$21 = {
-        fg: PALETTE.cyan,
+        fg: PALETTE2.muted
+      }, { rule: _v$19, base: _v$20 } = PALETTE2, _v$21 = {
+        fg: PALETTE2.cyan,
         bold: true
       };
       _v$12 !== _p$.e && (_p$.e = _$setProp(_el$39, "borderColor", _v$12, _p$.e));
@@ -1774,6 +1790,7 @@ import { memo as _$memo2 } from "@opentui/solid";
 import { createElement as _$createElement2 } from "@opentui/solid";
 import { For as For2, Show as Show2 } from "solid-js";
 function CoordinationPanel(props) {
+  const PALETTE = paletteFor(props.theme);
   const m = () => props.model;
   const tabBtn = (id, keyHint, label) => {
     const active = () => props.tab === id;
@@ -1911,7 +1928,7 @@ function CoordinationPanel(props) {
               _$setProp2(_el$41, "wrapMode", "none");
               _$insertNode2(_el$42, _$createTextNode2(`No active writes in this project.`));
               _$effect2((_p$) => {
-                var _v$11 = PALETTE.rule, _v$12 = PALETTE.base, _v$13 = {
+                var { rule: _v$11, base: _v$12 } = PALETTE, _v$13 = {
                   fg: PALETTE.muted
                 };
                 _v$11 !== _p$.e && (_p$.e = _$setProp2(_el$40, "borderColor", _v$11, _p$.e));
@@ -1950,7 +1967,7 @@ function CoordinationPanel(props) {
             _$insert2(_el$53, () => h.sessionID.slice(0, 14), _el$55);
             _$insert2(_el$53, () => h.age, null);
             _$effect2((_p$) => {
-              var _v$14 = PALETTE.rule, _v$15 = PALETTE.base, _v$16 = {
+              var { rule: _v$14, base: _v$15 } = PALETTE, _v$16 = {
                 fg: PALETTE.sage,
                 bold: true
               }, _v$17 = {
@@ -2001,7 +2018,7 @@ function CoordinationPanel(props) {
               _$setProp2(_el$57, "wrapMode", "none");
               _$insertNode2(_el$58, _$createTextNode2(`No queued write requests.`));
               _$effect2((_p$) => {
-                var _v$21 = PALETTE.rule, _v$22 = PALETTE.base, _v$23 = {
+                var { rule: _v$21, base: _v$22 } = PALETTE, _v$23 = {
                   fg: PALETTE.muted
                 };
                 _v$21 !== _p$.e && (_p$.e = _$setProp2(_el$56, "borderColor", _v$21, _p$.e));
@@ -2054,7 +2071,7 @@ function CoordinationPanel(props) {
             _$insertNode2(_el$71, _el$73);
             _$insert2(_el$71, () => q.waitsFor, _el$73);
             _$effect2((_p$) => {
-              var _v$24 = PALETTE.rule, _v$25 = PALETTE.base, _v$26 = {
+              var { rule: _v$24, base: _v$25 } = PALETTE, _v$26 = {
                 fg: PALETTE.amber,
                 bold: true
               }, _v$27 = {
@@ -2124,7 +2141,7 @@ function CoordinationPanel(props) {
               _$setProp2(_el$75, "wrapMode", "none");
               _$insertNode2(_el$76, _$createTextNode2(`\u25CF Workspace quiet \u2014 host checks can run immediately.`));
               _$effect2((_p$) => {
-                var _v$30 = PALETTE.rule, _v$31 = PALETTE.base, _v$32 = {
+                var { rule: _v$30, base: _v$31 } = PALETTE, _v$32 = {
                   fg: PALETTE.sage
                 };
                 _v$30 !== _p$.e && (_p$.e = _$setProp2(_el$74, "borderColor", _v$30, _p$.e));
@@ -2161,7 +2178,7 @@ function CoordinationPanel(props) {
               return () => _c$() ? ` \xB7 ${b.age}` : "";
             })(), _el$85);
             _$effect2((_p$) => {
-              var _v$33 = PALETTE.rule, _v$34 = PALETTE.base, _v$35 = {
+              var { rule: _v$33, base: _v$34 } = PALETTE, _v$35 = {
                 fg: PALETTE.amber,
                 bold: true
               }, _v$36 = {
@@ -2233,7 +2250,7 @@ function CoordinationPanel(props) {
               _$setProp2(_el$87, "wrapMode", "none");
               _$insertNode2(_el$88, _$createTextNode2(`No active or stale reservations in this project.`));
               _$effect2((_p$) => {
-                var _v$38 = PALETTE.rule, _v$39 = PALETTE.base, _v$40 = {
+                var { rule: _v$38, base: _v$39 } = PALETTE, _v$40 = {
                   fg: PALETTE.muted
                 };
                 _v$38 !== _p$.e && (_p$.e = _$setProp2(_el$86, "borderColor", _v$38, _p$.e));
@@ -2296,7 +2313,7 @@ function CoordinationPanel(props) {
             _$setProp2(_el$103, "wrapMode", "none");
             _$insertNode2(_el$104, _$createTextNode2(`Release reservation\u2026 [W]`));
             _$effect2((_p$) => {
-              var _v$41 = PALETTE.rule, _v$42 = PALETTE.base, _v$43 = {
+              var { rule: _v$41, base: _v$42 } = PALETTE, _v$43 = {
                 fg: r.live ? PALETTE.sage : PALETTE.rose,
                 bold: true
               }, _v$44 = {
@@ -2344,7 +2361,7 @@ function CoordinationPanel(props) {
     _$setProp2(_el$37, "wrapMode", "none");
     _$insertNode2(_el$38, _$createTextNode2(`Scope = permission \xB7 Ticket = current write \xB7 Verification waits for quiet \xB7 [W] release \xB7 [Esc] close`));
     _$effect2((_p$) => {
-      var _v$5 = PALETTE.cyan, _v$6 = PALETTE.inset, _v$7 = {
+      var { cyan: _v$5, inset: _v$6 } = PALETTE, _v$7 = {
         fg: PALETTE.cyan,
         bold: true
       }, _v$8 = {
@@ -2594,6 +2611,7 @@ function DashboardRow(props) {
   })();
 }
 function DashboardHeader(props) {
+  const PALETTE2 = paletteFor(props.theme);
   const tabBtn = (id, num, label) => {
     const active = () => props.tab === id;
     return (() => {
@@ -2605,7 +2623,7 @@ function DashboardHeader(props) {
       _$setProp3(_el$4, "height", 1);
       _$spread3(_el$4, _$mergeProps3({
         get backgroundColor() {
-          return _$memo3(() => !!active())() ? PALETTE.cyan : PALETTE.inset;
+          return _$memo3(() => !!active())() ? PALETTE2.cyan : PALETTE2.inset;
         }
       }, {
         onMouseDown: () => props.onSelectTab?.(id)
@@ -2619,9 +2637,9 @@ function DashboardHeader(props) {
       _$insert3(_el$9, label);
       _$effect3((_p$) => {
         var _v$ = {
-          fg: active() ? PALETTE.tabActiveFg : PALETTE.rule
+          fg: active() ? PALETTE2.tabActiveFg : PALETTE2.rule
         }, _v$2 = {
-          fg: active() ? PALETTE.tabActiveFg : PALETTE.muted,
+          fg: active() ? PALETTE2.tabActiveFg : PALETTE2.muted,
           bold: active()
         };
         _v$ !== _p$.e && (_p$.e = _$setProp3(_el$6, "style", _v$, _p$.e));
@@ -2668,7 +2686,7 @@ function DashboardHeader(props) {
     _$setProp3(_el$20, "paddingRight", 1);
     _$spread3(_el$20, _$mergeProps3({
       get backgroundColor() {
-        return PALETTE.base;
+        return PALETTE2.base;
       }
     }, () => ({
       onMouseDown: props.onBugReport
@@ -2695,19 +2713,19 @@ function DashboardHeader(props) {
     _$setProp3(_el$26, "wrapMode", "none");
     _$insert3(_el$27, () => props.mode.toUpperCase());
     _$effect3((_p$) => {
-      var _v$3 = PALETTE.inset, _v$4 = {
-        fg: PALETTE.cyan,
+      var _v$3 = PALETTE2.inset, _v$4 = {
+        fg: PALETTE2.cyan,
         bold: true
       }, _v$5 = {
-        fg: PALETTE.muted
+        fg: PALETTE2.muted
       }, _v$6 = {
-        fg: PALETTE.ink
+        fg: PALETTE2.ink
       }, _v$7 = {
-        fg: PALETTE.muted
+        fg: PALETTE2.muted
       }, _v$8 = {
-        fg: PALETTE.muted
+        fg: PALETTE2.muted
       }, _v$9 = {
-        fg: props.mode === "normal" ? PALETTE.muted : PALETTE.amber,
+        fg: props.mode === "normal" ? PALETTE2.muted : PALETTE2.amber,
         bold: props.mode !== "normal"
       };
       _v$3 !== _p$.e && (_p$.e = _$setProp3(_el$0, "backgroundColor", _v$3, _p$.e));
@@ -2732,6 +2750,7 @@ function DashboardHeader(props) {
 }
 function LoopDashboard(props) {
   const theme = () => props.api.theme.current;
+  const PALETTE2 = paletteFor(props.api.theme.current);
   const initial = props.restoredState;
   const [mode, setMode] = createSignal("normal");
   const [insertKind, setInsertKind] = createSignal("colon");
@@ -4386,27 +4405,27 @@ function LoopDashboard(props) {
   }
   const rowStateColor = (row) => {
     if (row.state === "blocked" || row.state === "budget_limited" || row.state === "usage_limited")
-      return PALETTE.rose;
+      return PALETTE2.rose;
     if (row.state === "active")
-      return row.manual ? PALETTE.amber : PALETTE.sage;
+      return row.manual ? PALETTE2.amber : PALETTE2.sage;
     if (row.state === "paused")
-      return PALETTE.violet;
+      return PALETTE2.violet;
     if (row.state === "complete")
-      return PALETTE.sky;
-    return PALETTE.muted;
+      return PALETTE2.sky;
+    return PALETTE2.muted;
   };
   const rowNameColor = (row, active) => {
     if (active)
-      return PALETTE.cyan;
+      return PALETTE2.cyan;
     if (row.state === "blocked" || row.state === "budget_limited" || row.state === "usage_limited")
-      return PALETTE.rose;
+      return PALETTE2.rose;
     if (row.state === "active")
-      return row.manual ? PALETTE.amber : PALETTE.sage;
+      return row.manual ? PALETTE2.amber : PALETTE2.sage;
     if (row.state === "paused")
-      return PALETTE.violet;
+      return PALETTE2.violet;
     if (row.state === "complete")
-      return PALETTE.sky;
-    return PALETTE.ink;
+      return PALETTE2.sky;
+    return PALETTE2.ink;
   };
   const coordStripSummary = () => {
     const cm = coordModel();
@@ -4522,23 +4541,23 @@ function LoopDashboard(props) {
         _$setProp3(_el$51, "wrapMode", "none");
         _$insertNode3(_el$52, _$createTextNode3(`[n / Esc] Cancel`));
         _$effect3((_p$) => {
-          var _v$0 = PALETTE.cyan, _v$1 = PALETTE.inset, _v$10 = {
-            fg: PALETTE.cyan,
+          var { cyan: _v$0, inset: _v$1 } = PALETTE2, _v$10 = {
+            fg: PALETTE2.cyan,
             bold: true
           }, _v$11 = {
-            fg: PALETTE.muted
+            fg: PALETTE2.muted
           }, _v$12 = {
-            fg: PALETTE.ink,
+            fg: PALETTE2.ink,
             bold: true
           }, _v$13 = {
-            fg: PALETTE.muted
+            fg: PALETTE2.muted
           }, _v$14 = {
-            fg: PALETTE.muted
-          }, _v$15 = PALETTE.cyan, _v$16 = PALETTE.base, _v$17 = {
-            fg: PALETTE.cyan,
+            fg: PALETTE2.muted
+          }, { cyan: _v$15, base: _v$16 } = PALETTE2, _v$17 = {
+            fg: PALETTE2.cyan,
             bold: true
-          }, _v$18 = PALETTE.rule, _v$19 = PALETTE.base, _v$20 = {
-            fg: PALETTE.muted
+          }, { rule: _v$18, base: _v$19 } = PALETTE2, _v$20 = {
+            fg: PALETTE2.muted
           };
           _v$0 !== _p$.e && (_p$.e = _$setProp3(_el$30, "borderColor", _v$0, _p$.e));
           _v$1 !== _p$.t && (_p$.t = _$setProp3(_el$30, "backgroundColor", _v$1, _p$.t));
@@ -4609,7 +4628,7 @@ function LoopDashboard(props) {
         _$setProp3(_el$60, "height", 1);
         _$spread3(_el$60, _$mergeProps3({
           get backgroundColor() {
-            return PALETTE.base;
+            return PALETTE2.base;
           }
         }, {
           onMouseDown: () => returnToNormalMode()
@@ -4650,36 +4669,36 @@ function LoopDashboard(props) {
         _$insertNode3(_el$81, _$createTextNode3(`Esc`));
         _$insertNode3(_el$83, _$createTextNode3(` to cancel`));
         _$effect3((_p$) => {
-          var _v$21 = PALETTE.cyan, _v$22 = PALETTE.inset, _v$23 = {
-            fg: PALETTE.cyan,
+          var { cyan: _v$21, inset: _v$22 } = PALETTE2, _v$23 = {
+            fg: PALETTE2.cyan,
             bold: true
           }, _v$24 = {
-            fg: PALETTE.muted
+            fg: PALETTE2.muted
           }, _v$25 = {
-            fg: PALETTE.amber,
+            fg: PALETTE2.amber,
             bold: true
           }, _v$26 = {
-            fg: PALETTE.muted
-          }, _v$27 = PALETTE.amber, _v$28 = PALETTE.base, _v$29 = {
-            fg: PALETTE.amber,
+            fg: PALETTE2.muted
+          }, { amber: _v$27, base: _v$28 } = PALETTE2, _v$29 = {
+            fg: PALETTE2.amber,
             bold: true
           }, _v$30 = {
-            fg: commandInput() ? PALETTE.ink : PALETTE.muted
+            fg: commandInput() ? PALETTE2.ink : PALETTE2.muted
           }, _v$31 = {
-            fg: PALETTE.cyan,
+            fg: PALETTE2.cyan,
             bold: true
           }, _v$32 = {
-            fg: PALETTE.muted
+            fg: PALETTE2.muted
           }, _v$33 = {
-            fg: PALETTE.ink,
+            fg: PALETTE2.ink,
             bold: true
           }, _v$34 = {
-            fg: PALETTE.muted
+            fg: PALETTE2.muted
           }, _v$35 = {
-            fg: PALETTE.ink,
+            fg: PALETTE2.ink,
             bold: true
           }, _v$36 = {
-            fg: PALETTE.muted
+            fg: PALETTE2.muted
           };
           _v$21 !== _p$.e && (_p$.e = _$setProp3(_el$54, "borderColor", _v$21, _p$.e));
           _v$22 !== _p$.t && (_p$.t = _$setProp3(_el$54, "backgroundColor", _v$22, _p$.t));
@@ -4750,7 +4769,7 @@ function LoopDashboard(props) {
         _$setProp3(_el$90, "height", 1);
         _$spread3(_el$90, _$mergeProps3({
           get backgroundColor() {
-            return PALETTE.base;
+            return PALETTE2.base;
           }
         }, {
           onMouseDown: () => setActionsOpen(false)
@@ -4781,10 +4800,10 @@ function LoopDashboard(props) {
               _$setProp3(_el$257, "paddingRight", 1);
               _$spread3(_el$257, _$mergeProps3({
                 get backgroundColor() {
-                  return _$memo3(() => !!active())() ? PALETTE.selectedBg : PALETTE.base;
+                  return _$memo3(() => !!active())() ? PALETTE2.selectedBg : PALETTE2.base;
                 },
                 get borderColor() {
-                  return _$memo3(() => !!active())() ? PALETTE.cyan : PALETTE.rule;
+                  return _$memo3(() => !!active())() ? PALETTE2.cyan : PALETTE2.rule;
                 }
               }, {
                 onMouseDown: () => void runPaletteVerb(v)
@@ -4801,13 +4820,13 @@ function LoopDashboard(props) {
               _$insert3(_el$262, () => v.key, _el$264);
               _$effect3((_p$) => {
                 var _v$94 = {
-                  fg: active() ? PALETTE.cyan : PALETTE.muted,
+                  fg: active() ? PALETTE2.cyan : PALETTE2.muted,
                   bold: true
                 }, _v$95 = {
-                  fg: PALETTE.ink,
+                  fg: PALETTE2.ink,
                   bold: active()
                 }, _v$96 = {
-                  fg: PALETTE.cyan
+                  fg: PALETTE2.cyan
                 };
                 _v$94 !== _p$.e && (_p$.e = _$setProp3(_el$259, "style", _v$94, _p$.e));
                 _v$95 !== _p$.t && (_p$.t = _$setProp3(_el$260, "style", _v$95, _p$.t));
@@ -4823,14 +4842,14 @@ function LoopDashboard(props) {
           }
         }));
         _$effect3((_p$) => {
-          var _v$37 = PALETTE.cyan, _v$38 = PALETTE.inset, _v$39 = {
-            fg: PALETTE.cyan,
+          var { cyan: _v$37, inset: _v$38 } = PALETTE2, _v$39 = {
+            fg: PALETTE2.cyan,
             bold: true
           }, _v$40 = {
-            fg: PALETTE.amber,
+            fg: PALETTE2.amber,
             bold: true
           }, _v$41 = {
-            fg: PALETTE.muted
+            fg: PALETTE2.muted
           };
           _v$37 !== _p$.e && (_p$.e = _$setProp3(_el$85, "borderColor", _v$37, _p$.e));
           _v$38 !== _p$.t && (_p$.t = _$setProp3(_el$85, "backgroundColor", _v$38, _p$.t));
@@ -4967,7 +4986,7 @@ function LoopDashboard(props) {
         _$setProp3(_el$103, "height", 1);
         _$spread3(_el$103, _$mergeProps3({
           get backgroundColor() {
-            return PALETTE.base;
+            return PALETTE2.base;
           }
         }, {
           onMouseDown: () => setShowHelp(false)
@@ -5040,60 +5059,60 @@ function LoopDashboard(props) {
         _$insertNode3(_el$164, _$createTextNode3(`Esc `));
         _$insertNode3(_el$166, _$createTextNode3(`Close active popup / filter, or close dashboard`));
         _$effect3((_p$) => {
-          var _v$42 = PALETTE.cyan, _v$43 = PALETTE.inset, _v$44 = {
-            fg: PALETTE.cyan,
+          var { cyan: _v$42, inset: _v$43 } = PALETTE2, _v$44 = {
+            fg: PALETTE2.cyan,
             bold: true
           }, _v$45 = {
-            fg: PALETTE.amber,
+            fg: PALETTE2.amber,
             bold: true
-          }, _v$46 = PALETTE.rule, _v$47 = PALETTE.base, _v$48 = {
-            fg: PALETTE.cyan
+          }, { rule: _v$46, base: _v$47 } = PALETTE2, _v$48 = {
+            fg: PALETTE2.cyan
           }, _v$49 = {
-            fg: PALETTE.ink
+            fg: PALETTE2.ink
           }, _v$50 = {
-            fg: PALETTE.cyan
+            fg: PALETTE2.cyan
           }, _v$51 = {
-            fg: PALETTE.ink
+            fg: PALETTE2.ink
           }, _v$52 = {
-            fg: PALETTE.cyan
+            fg: PALETTE2.cyan
           }, _v$53 = {
-            fg: PALETTE.ink
+            fg: PALETTE2.ink
           }, _v$54 = {
-            fg: PALETTE.cyan
+            fg: PALETTE2.cyan
           }, _v$55 = {
-            fg: PALETTE.ink
+            fg: PALETTE2.ink
           }, _v$56 = {
-            fg: PALETTE.cyan
+            fg: PALETTE2.cyan
           }, _v$57 = {
-            fg: PALETTE.ink
+            fg: PALETTE2.ink
           }, _v$58 = {
-            fg: PALETTE.cyan
+            fg: PALETTE2.cyan
           }, _v$59 = {
-            fg: PALETTE.ink
+            fg: PALETTE2.ink
           }, _v$60 = {
-            fg: PALETTE.cyan
+            fg: PALETTE2.cyan
           }, _v$61 = {
-            fg: PALETTE.ink
+            fg: PALETTE2.ink
           }, _v$62 = {
-            fg: PALETTE.cyan
+            fg: PALETTE2.cyan
           }, _v$63 = {
-            fg: PALETTE.ink
+            fg: PALETTE2.ink
           }, _v$64 = {
-            fg: PALETTE.cyan
+            fg: PALETTE2.cyan
           }, _v$65 = {
-            fg: PALETTE.ink
+            fg: PALETTE2.ink
           }, _v$66 = {
-            fg: PALETTE.cyan
+            fg: PALETTE2.cyan
           }, _v$67 = {
-            fg: PALETTE.ink
+            fg: PALETTE2.ink
           }, _v$68 = {
-            fg: PALETTE.cyan
+            fg: PALETTE2.cyan
           }, _v$69 = {
-            fg: PALETTE.ink
+            fg: PALETTE2.ink
           }, _v$70 = {
-            fg: PALETTE.cyan
+            fg: PALETTE2.cyan
           }, _v$71 = {
-            fg: PALETTE.ink
+            fg: PALETTE2.ink
           };
           _v$42 !== _p$.e && (_p$.e = _$setProp3(_el$98, "borderColor", _v$42, _p$.e));
           _v$43 !== _p$.t && (_p$.t = _$setProp3(_el$98, "backgroundColor", _v$43, _p$.t));
@@ -5204,7 +5223,7 @@ function LoopDashboard(props) {
               _$setProp3(_el$265, "paddingRight", 1);
               _$spread3(_el$265, _$mergeProps3({
                 get backgroundColor() {
-                  return _$memo3(() => !!active())() ? PALETTE.selectedBg : undefined;
+                  return _$memo3(() => !!active())() ? PALETTE2.selectedBg : undefined;
                 }
               }, {
                 onMouseDown: () => applyProjectChoice(d)
@@ -5222,13 +5241,13 @@ function LoopDashboard(props) {
               })(), null);
               _$effect3((_p$) => {
                 var _v$97 = {
-                  fg: active() ? PALETTE.cyan : PALETTE.muted,
+                  fg: active() ? PALETTE2.cyan : PALETTE2.muted,
                   bold: true
                 }, _v$98 = {
-                  fg: active() ? PALETTE.cyan : PALETTE.ink,
+                  fg: active() ? PALETTE2.cyan : PALETTE2.ink,
                   bold: active()
                 }, _v$99 = {
-                  fg: PALETTE.muted
+                  fg: PALETTE2.muted
                 };
                 _v$97 !== _p$.e && (_p$.e = _$setProp3(_el$267, "style", _v$97, _p$.e));
                 _v$98 !== _p$.t && (_p$.t = _$setProp3(_el$268, "style", _v$98, _p$.t));
@@ -5244,13 +5263,13 @@ function LoopDashboard(props) {
           }
         }), null);
         _$effect3((_p$) => {
-          var _v$72 = PALETTE.cyan, _v$73 = PALETTE.inset, _v$74 = {
-            fg: PALETTE.cyan,
+          var { cyan: _v$72, inset: _v$73 } = PALETTE2, _v$74 = {
+            fg: PALETTE2.cyan,
             bold: true
           }, _v$75 = {
-            fg: PALETTE.muted
+            fg: PALETTE2.muted
           }, _v$76 = {
-            fg: PALETTE.muted
+            fg: PALETTE2.muted
           };
           _v$72 !== _p$.e && (_p$.e = _$setProp3(_el$168, "borderColor", _v$72, _p$.e));
           _v$73 !== _p$.t && (_p$.t = _$setProp3(_el$168, "backgroundColor", _v$73, _p$.t));
@@ -5294,9 +5313,9 @@ function LoopDashboard(props) {
                 _$insert3(_el$273, scopeSummaryText);
                 _$effect3((_p$) => {
                   var _v$100 = {
-                    fg: PALETTE.muted
+                    fg: PALETTE2.muted
                   }, _v$101 = {
-                    fg: PALETTE.amber
+                    fg: PALETTE2.amber
                   };
                   _v$100 !== _p$.e && (_p$.e = _$setProp3(_el$271, "style", _v$100, _p$.e));
                   _v$101 !== _p$.t && (_p$.t = _$setProp3(_el$273, "style", _v$101, _p$.t));
@@ -5313,7 +5332,7 @@ function LoopDashboard(props) {
                 var _el$181 = _$createElement3("span");
                 _$insert3(_el$181, () => scopeSummaryCounts().needsAction);
                 _$effect3((_$p) => _$setProp3(_el$181, "style", {
-                  fg: PALETTE.amber,
+                  fg: PALETTE2.amber,
                   bold: true
                 }, _$p));
                 return _el$181;
@@ -5321,14 +5340,14 @@ function LoopDashboard(props) {
                 var _el$182 = _$createElement3("span");
                 _$insertNode3(_el$182, _$createTextNode3(` needs action \xB7 `));
                 _$effect3((_$p) => _$setProp3(_el$182, "style", {
-                  fg: PALETTE.muted
+                  fg: PALETTE2.muted
                 }, _$p));
                 return _el$182;
               })(), (() => {
                 var _el$184 = _$createElement3("span");
                 _$insert3(_el$184, () => scopeSummaryCounts().working);
                 _$effect3((_$p) => _$setProp3(_el$184, "style", {
-                  fg: PALETTE.amber,
+                  fg: PALETTE2.amber,
                   bold: true
                 }, _$p));
                 return _el$184;
@@ -5336,14 +5355,14 @@ function LoopDashboard(props) {
                 var _el$185 = _$createElement3("span");
                 _$insertNode3(_el$185, _$createTextNode3(` working \xB7 `));
                 _$effect3((_$p) => _$setProp3(_el$185, "style", {
-                  fg: PALETTE.muted
+                  fg: PALETTE2.muted
                 }, _$p));
                 return _el$185;
               })(), (() => {
                 var _el$187 = _$createElement3("span");
                 _$insert3(_el$187, () => scopeSummaryCounts().awaiting);
                 _$effect3((_$p) => _$setProp3(_el$187, "style", {
-                  fg: PALETTE.amber,
+                  fg: PALETTE2.amber,
                   bold: true
                 }, _$p));
                 return _el$187;
@@ -5351,7 +5370,7 @@ function LoopDashboard(props) {
                 var _el$188 = _$createElement3("span");
                 _$insertNode3(_el$188, _$createTextNode3(` awaiting input`));
                 _$effect3((_$p) => _$setProp3(_el$188, "style", {
-                  fg: PALETTE.muted
+                  fg: PALETTE2.muted
                 }, _$p));
                 return _el$188;
               })(), _$createComponent3(Show3, {
@@ -5363,14 +5382,14 @@ function LoopDashboard(props) {
                     var _el$190 = _$createElement3("span");
                     _$insertNode3(_el$190, _$createTextNode3(` \xB7 `));
                     _$effect3((_$p) => _$setProp3(_el$190, "style", {
-                      fg: PALETTE.muted
+                      fg: PALETTE2.muted
                     }, _$p));
                     return _el$190;
                   })(), (() => {
                     var _el$192 = _$createElement3("span");
                     _$insert3(_el$192, () => scopeSummaryCounts().paused);
                     _$effect3((_$p) => _$setProp3(_el$192, "style", {
-                      fg: PALETTE.amber,
+                      fg: PALETTE2.amber,
                       bold: true
                     }, _$p));
                     return _el$192;
@@ -5378,7 +5397,7 @@ function LoopDashboard(props) {
                     var _el$193 = _$createElement3("span");
                     _$insertNode3(_el$193, _$createTextNode3(` paused`));
                     _$effect3((_$p) => _$setProp3(_el$193, "style", {
-                      fg: PALETTE.muted
+                      fg: PALETTE2.muted
                     }, _$p));
                     return _el$193;
                   })()];
@@ -5391,7 +5410,7 @@ function LoopDashboard(props) {
                   var _el$195 = _$createElement3("span");
                   _$insertNode3(_el$195, _$createTextNode3(` \xB7 detail open (1 row)`));
                   _$effect3((_$p) => _$setProp3(_el$195, "style", {
-                    fg: PALETTE.muted
+                    fg: PALETTE2.muted
                   }, _$p));
                   return _el$195;
                 }
@@ -5408,7 +5427,7 @@ function LoopDashboard(props) {
               _$setProp3(_el$197, "wrapMode", "none");
               _$insert3(_el$198, () => statusText().slice(0, 48));
               _$effect3((_$p) => _$setProp3(_el$198, "style", {
-                fg: PALETTE.cyan
+                fg: PALETTE2.cyan
               }, _$p));
               return _el$197;
             }
@@ -5441,10 +5460,10 @@ function LoopDashboard(props) {
               _$setProp3(_el$201, "paddingRight", 1);
               _$spread3(_el$201, _$mergeProps3({
                 get borderColor() {
-                  return PALETTE.rule;
+                  return PALETTE2.rule;
                 },
                 get backgroundColor() {
-                  return PALETTE.inset;
+                  return PALETTE2.inset;
                 }
               }, {
                 onMouseDown: () => cycleScope(1)
@@ -5459,9 +5478,9 @@ function LoopDashboard(props) {
               _$insertNode3(_el$204, _$createTextNode3(` \u25BE [P]`));
               _$effect3((_p$) => {
                 var _v$77 = {
-                  fg: PALETTE.ink
+                  fg: PALETTE2.ink
                 }, _v$78 = {
-                  fg: PALETTE.muted
+                  fg: PALETTE2.muted
                 };
                 _v$77 !== _p$.e && (_p$.e = _$setProp3(_el$203, "style", _v$77, _p$.e));
                 _v$78 !== _p$.t && (_p$.t = _$setProp3(_el$204, "style", _v$78, _p$.t));
@@ -5481,10 +5500,10 @@ function LoopDashboard(props) {
           _$setProp3(_el$206, "width", 38);
           _$spread3(_el$206, _$mergeProps3({
             get borderColor() {
-              return _$memo3(() => !!(mode() === "insert" && insertKind() === "filter"))() ? PALETTE.amber : _$memo3(() => !!activeFilterQuery())() ? PALETTE.cyan : PALETTE.rule;
+              return _$memo3(() => !!(mode() === "insert" && insertKind() === "filter"))() ? PALETTE2.amber : _$memo3(() => !!activeFilterQuery())() ? PALETTE2.cyan : PALETTE2.rule;
             },
             get backgroundColor() {
-              return PALETTE.inset;
+              return PALETTE2.inset;
             }
           }, {
             onMouseDown: () => openFilterBox()
@@ -5499,28 +5518,28 @@ function LoopDashboard(props) {
                 var _el$274 = _$createElement3("span");
                 _$insertNode3(_el$274, _$createTextNode3(`/ `));
                 _$effect3((_$p) => _$setProp3(_el$274, "style", {
-                  fg: PALETTE.cyan
+                  fg: PALETTE2.cyan
                 }, _$p));
                 return _el$274;
               })(), (() => {
                 var _el$276 = _$createElement3("span");
                 _$insert3(_el$276, () => activeFilterQuery().slice(0, 26));
                 _$effect3((_$p) => _$setProp3(_el$276, "style", {
-                  fg: PALETTE.ink
+                  fg: PALETTE2.ink
                 }, _$p));
                 return _el$276;
               })(), (() => {
                 var _el$277 = _$createElement3("span");
                 _$insertNode3(_el$277, _$createTextNode3(` (Esc clear)`));
                 _$effect3((_$p) => _$setProp3(_el$277, "style", {
-                  fg: PALETTE.muted
+                  fg: PALETTE2.muted
                 }, _$p));
                 return _el$277;
               })()] : (() => {
                 var _el$279 = _$createElement3("span");
                 _$insertNode3(_el$279, _$createTextNode3(`/ filter workers or commands`));
                 _$effect3((_$p) => _$setProp3(_el$279, "style", {
-                  fg: PALETTE.muted
+                  fg: PALETTE2.muted
                 }, _$p));
                 return _el$279;
               })();
@@ -5530,7 +5549,7 @@ function LoopDashboard(props) {
                 var _el$208 = _$createElement3("span");
                 _$insertNode3(_el$208, _$createTextNode3(`/ `));
                 _$effect3((_$p) => _$setProp3(_el$208, "style", {
-                  fg: PALETTE.amber,
+                  fg: PALETTE2.amber,
                   bold: true
                 }, _$p));
                 return _el$208;
@@ -5538,14 +5557,14 @@ function LoopDashboard(props) {
                 var _el$210 = _$createElement3("span");
                 _$insert3(_el$210, commandInput);
                 _$effect3((_$p) => _$setProp3(_el$210, "style", {
-                  fg: PALETTE.ink
+                  fg: PALETTE2.ink
                 }, _$p));
                 return _el$210;
               })(), (() => {
                 var _el$211 = _$createElement3("span");
                 _$insertNode3(_el$211, _$createTextNode3(`\u2588`));
                 _$effect3((_$p) => _$setProp3(_el$211, "style", {
-                  fg: PALETTE.cyan,
+                  fg: PALETTE2.cyan,
                   bold: true
                 }, _$p));
                 return _el$211;
@@ -5559,10 +5578,10 @@ function LoopDashboard(props) {
           _$setProp3(_el$213, "paddingRight", 1);
           _$spread3(_el$213, _$mergeProps3({
             get borderColor() {
-              return _$memo3(() => !!showCompleted())() ? PALETTE.cyan : PALETTE.rule;
+              return _$memo3(() => !!showCompleted())() ? PALETTE2.cyan : PALETTE2.rule;
             },
             get backgroundColor() {
-              return PALETTE.inset;
+              return PALETTE2.inset;
             }
           }, {
             onMouseDown: () => setShowCompleted((v) => !v)
@@ -5572,7 +5591,7 @@ function LoopDashboard(props) {
           _$insertNode3(_el$215, _el$216);
           _$insert3(_el$215, () => showCompleted() ? "[\u2713]" : "[ ]", _el$216);
           _$effect3((_$p) => _$setProp3(_el$215, "style", {
-            fg: showCompleted() ? PALETTE.cyan : PALETTE.muted
+            fg: showCompleted() ? PALETTE2.cyan : PALETTE2.muted
           }, _$p));
           return _el$199;
         })(), _$createComponent3(Show3, {
@@ -5602,8 +5621,8 @@ function LoopDashboard(props) {
                     return () => _c$4() ? ` for "${activeFilterQuery()}"` : "";
                   })(), _el$285);
                   _$effect3((_p$) => {
-                    var _v$102 = PALETTE.rule, _v$103 = PALETTE.inset, _v$104 = {
-                      fg: PALETTE.muted
+                    var { rule: _v$102, inset: _v$103 } = PALETTE2, _v$104 = {
+                      fg: PALETTE2.muted
                     };
                     _v$102 !== _p$.e && (_p$.e = _$setProp3(_el$281, "borderColor", _v$102, _p$.e));
                     _v$103 !== _p$.t && (_p$.t = _$setProp3(_el$281, "backgroundColor", _v$103, _p$.t));
@@ -5668,7 +5687,7 @@ function LoopDashboard(props) {
                               return `loopd-group-${g.directory}`;
                             },
                             get backgroundColor() {
-                              return PALETTE.inset;
+                              return PALETTE2.inset;
                             },
                             onClick: () => setCollapsed((list) => toggleCollapsed(list, g.directory)),
                             get children() {
@@ -5678,7 +5697,7 @@ function LoopDashboard(props) {
                                 _$insert3(_el$286, () => collapsed().includes(g.directory) ? "\u25B8" : "\u25BE", _el$287);
                                 _$insert3(_el$286, () => g.shortName, null);
                                 _$effect3((_$p) => _$setProp3(_el$286, "style", {
-                                  fg: PALETTE.cyan,
+                                  fg: PALETTE2.cyan,
                                   bold: true
                                 }, _$p));
                                 return _el$286;
@@ -5693,7 +5712,7 @@ function LoopDashboard(props) {
                                 })(), _el$290);
                                 _$insert3(_el$288, () => g.working, _el$291);
                                 _$effect3((_$p) => _$setProp3(_el$288, "style", {
-                                  fg: PALETTE.muted
+                                  fg: PALETTE2.muted
                                 }, _$p));
                                 return _el$288;
                               })()];
@@ -5710,7 +5729,7 @@ function LoopDashboard(props) {
                             return rowIdFor(row.id);
                           },
                           get backgroundColor() {
-                            return _$memo3(() => !!isActive())() ? PALETTE.selectedBg : undefined;
+                            return _$memo3(() => !!isActive())() ? PALETTE2.selectedBg : undefined;
                           },
                           onClick: () => setSelected(item.index),
                           get children() {
@@ -5718,7 +5737,7 @@ function LoopDashboard(props) {
                               var _el$292 = _$createElement3("span");
                               _$insert3(_el$292, () => isActive() ? "> " : "  ");
                               _$effect3((_$p) => _$setProp3(_el$292, "style", {
-                                fg: PALETTE.cyan,
+                                fg: PALETTE2.cyan,
                                 bold: true
                               }, _$p));
                               return _el$292;
@@ -5734,7 +5753,7 @@ function LoopDashboard(props) {
                               var _el$294 = _$createElement3("span");
                               _$insertNode3(_el$294, _$createTextNode3(`  `));
                               _$effect3((_$p) => _$setProp3(_el$294, "style", {
-                                fg: PALETTE.muted
+                                fg: PALETTE2.muted
                               }, _$p));
                               return _el$294;
                             })(), (() => {
@@ -5749,14 +5768,14 @@ function LoopDashboard(props) {
                               var _el$297 = _$createElement3("span");
                               _$insertNode3(_el$297, _$createTextNode3(`  `));
                               _$effect3((_$p) => _$setProp3(_el$297, "style", {
-                                fg: PALETTE.muted
+                                fg: PALETTE2.muted
                               }, _$p));
                               return _el$297;
                             })(), (() => {
                               var _el$299 = _$createElement3("span");
                               _$insert3(_el$299, () => cols().activity);
                               _$effect3((_$p) => _$setProp3(_el$299, "style", {
-                                fg: row.state === "blocked" ? PALETTE.rose : PALETTE.ink
+                                fg: row.state === "blocked" ? PALETTE2.rose : PALETTE2.ink
                               }, _$p));
                               return _el$299;
                             })(), (() => {
@@ -5764,7 +5783,7 @@ function LoopDashboard(props) {
                               _$insertNode3(_el$300, _el$301);
                               _$insert3(_el$300, () => cols().updated, null);
                               _$effect3((_$p) => _$setProp3(_el$300, "style", {
-                                fg: PALETTE.muted
+                                fg: PALETTE2.muted
                               }, _$p));
                               return _el$300;
                             })()];
@@ -5776,9 +5795,9 @@ function LoopDashboard(props) {
                 }), null);
                 _$effect3((_p$) => {
                   var _v$79 = {
-                    fg: PALETTE.muted
+                    fg: PALETTE2.muted
                   }, _v$80 = {
-                    fg: PALETTE.rule
+                    fg: PALETTE2.rule
                   };
                   _v$79 !== _p$.e && (_p$.e = _$setProp3(_el$220, "style", _v$79, _p$.e));
                   _v$80 !== _p$.t && (_p$.t = _$setProp3(_el$228, "style", _v$80, _p$.t));
@@ -5879,8 +5898,8 @@ function LoopDashboard(props) {
                     return () => _c$6() ? ` (${hiddenFinishedCommands()} finished hidden \u2014 press [h] to show)` : "";
                   })(), _el$306);
                   _$effect3((_p$) => {
-                    var _v$105 = PALETTE.rule, _v$106 = PALETTE.inset, _v$107 = {
-                      fg: PALETTE.muted
+                    var { rule: _v$105, inset: _v$106 } = PALETTE2, _v$107 = {
+                      fg: PALETTE2.muted
                     };
                     _v$105 !== _p$.e && (_p$.e = _$setProp3(_el$302, "borderColor", _v$105, _p$.e));
                     _v$106 !== _p$.t && (_p$.t = _$setProp3(_el$302, "backgroundColor", _v$106, _p$.t));
@@ -5939,7 +5958,7 @@ function LoopDashboard(props) {
                             return `loopd-command-${cmd.id}`;
                           },
                           get backgroundColor() {
-                            return _$memo3(() => !!isActive())() ? PALETTE.selectedBg : undefined;
+                            return _$memo3(() => !!isActive())() ? PALETTE2.selectedBg : undefined;
                           },
                           onClick: () => setCmdSelected(i()),
                           get children() {
@@ -5947,7 +5966,7 @@ function LoopDashboard(props) {
                               var _el$307 = _$createElement3("span");
                               _$insert3(_el$307, () => isActive() ? "> " : "  ");
                               _$effect3((_$p) => _$setProp3(_el$307, "style", {
-                                fg: PALETTE.cyan,
+                                fg: PALETTE2.cyan,
                                 bold: true
                               }, _$p));
                               return _el$307;
@@ -5955,7 +5974,7 @@ function LoopDashboard(props) {
                               var _el$308 = _$createElement3("span");
                               _$insert3(_el$308, () => pad(cmd.title, 22));
                               _$effect3((_$p) => _$setProp3(_el$308, "style", {
-                                fg: PALETTE.ink,
+                                fg: PALETTE2.ink,
                                 bold: isActive()
                               }, _$p));
                               return _el$308;
@@ -5963,7 +5982,7 @@ function LoopDashboard(props) {
                               var _el$309 = _$createElement3("span");
                               _$insertNode3(_el$309, _$createTextNode3(`  `));
                               _$effect3((_$p) => _$setProp3(_el$309, "style", {
-                                fg: PALETTE.muted
+                                fg: PALETTE2.muted
                               }, _$p));
                               return _el$309;
                             })(), (() => {
@@ -5978,14 +5997,14 @@ function LoopDashboard(props) {
                               var _el$312 = _$createElement3("span");
                               _$insertNode3(_el$312, _$createTextNode3(`  `));
                               _$effect3((_$p) => _$setProp3(_el$312, "style", {
-                                fg: PALETTE.muted
+                                fg: PALETTE2.muted
                               }, _$p));
                               return _el$312;
                             })(), (() => {
                               var _el$314 = _$createElement3("span");
                               _$insert3(_el$314, () => pad(`${cmd.command} ${cmd.args.join(" ")}`.trim(), 36));
                               _$effect3((_$p) => _$setProp3(_el$314, "style", {
-                                fg: PALETTE.ink
+                                fg: PALETTE2.ink
                               }, _$p));
                               return _el$314;
                             })(), (() => {
@@ -5993,7 +6012,7 @@ function LoopDashboard(props) {
                               _$insertNode3(_el$315, _el$316);
                               _$insert3(_el$315, () => ageText(cmd.updatedAt, clock()), null);
                               _$effect3((_$p) => _$setProp3(_el$315, "style", {
-                                fg: PALETTE.muted
+                                fg: PALETTE2.muted
                               }, _$p));
                               return _el$315;
                             })()];
@@ -6005,9 +6024,9 @@ function LoopDashboard(props) {
                 }), null);
                 _$effect3((_p$) => {
                   var _v$81 = {
-                    fg: PALETTE.muted
+                    fg: PALETTE2.muted
                   }, _v$82 = {
-                    fg: PALETTE.rule
+                    fg: PALETTE2.rule
                   };
                   _v$81 !== _p$.e && (_p$.e = _$setProp3(_el$232, "style", _v$81, _p$.e));
                   _v$82 !== _p$.t && (_p$.t = _$setProp3(_el$243, "style", _v$82, _p$.t));
@@ -6072,10 +6091,10 @@ function LoopDashboard(props) {
                 _$setProp3(_el$335, "paddingRight", 1);
                 _$spread3(_el$335, _$mergeProps3({
                   get borderColor() {
-                    return PALETTE.rule;
+                    return PALETTE2.rule;
                   },
                   get backgroundColor() {
-                    return PALETTE.base;
+                    return PALETTE2.base;
                   }
                 }, {
                   onMouseDown: () => openSendModal()
@@ -6100,10 +6119,10 @@ function LoopDashboard(props) {
                 _$setProp3(_el$347, "paddingRight", 1);
                 _$spread3(_el$347, _$mergeProps3({
                   get borderColor() {
-                    return PALETTE.rule;
+                    return PALETTE2.rule;
                   },
                   get backgroundColor() {
-                    return PALETTE.base;
+                    return PALETTE2.base;
                   }
                 }, {
                   onMouseDown: () => void killSelectedCommand()
@@ -6119,10 +6138,10 @@ function LoopDashboard(props) {
                 _$setProp3(_el$353, "paddingRight", 1);
                 _$spread3(_el$353, _$mergeProps3({
                   get borderColor() {
-                    return PALETTE.rule;
+                    return PALETTE2.rule;
                   },
                   get backgroundColor() {
-                    return PALETTE.base;
+                    return PALETTE2.base;
                   }
                 }, {
                   onMouseDown: () => void restartSelectedCommand()
@@ -6133,36 +6152,36 @@ function LoopDashboard(props) {
                 _$insertNode3(_el$355, _$createTextNode3(`Restart `));
                 _$insertNode3(_el$357, _$createTextNode3(`[R]`));
                 _$effect3((_p$) => {
-                  var _v$108 = PALETTE.rule, _v$109 = PALETTE.inset, _v$110 = {
-                    fg: PALETTE.cyan,
+                  var { rule: _v$108, inset: _v$109 } = PALETTE2, _v$110 = {
+                    fg: PALETTE2.cyan,
                     bold: true
                   }, _v$111 = {
-                    fg: PALETTE.muted
+                    fg: PALETTE2.muted
                   }, _v$112 = {
                     fg: commandStatusColor(cmd().status),
                     bold: true
                   }, _v$113 = {
-                    fg: PALETTE.muted
+                    fg: PALETTE2.muted
                   }, _v$114 = {
-                    fg: PALETTE.ink
+                    fg: PALETTE2.ink
                   }, _v$115 = {
-                    fg: PALETTE.muted
+                    fg: PALETTE2.muted
                   }, _v$116 = {
-                    fg: PALETTE.ink
+                    fg: PALETTE2.ink
                   }, _v$117 = {
-                    fg: PALETTE.cyan
-                  }, _v$118 = PALETTE.rule, _v$119 = PALETTE.base, _v$120 = {
-                    fg: PALETTE.ink
+                    fg: PALETTE2.cyan
+                  }, { rule: _v$118, base: _v$119 } = PALETTE2, _v$120 = {
+                    fg: PALETTE2.ink
                   }, _v$121 = {
-                    fg: PALETTE.cyan
+                    fg: PALETTE2.cyan
                   }, _v$122 = {
-                    fg: PALETTE.ink
+                    fg: PALETTE2.ink
                   }, _v$123 = {
-                    fg: PALETTE.cyan
+                    fg: PALETTE2.cyan
                   }, _v$124 = {
-                    fg: PALETTE.ink
+                    fg: PALETTE2.ink
                   }, _v$125 = {
-                    fg: PALETTE.cyan
+                    fg: PALETTE2.cyan
                   };
                   _v$108 !== _p$.e && (_p$.e = _$setProp3(_el$317, "borderColor", _v$108, _p$.e));
                   _v$109 !== _p$.t && (_p$.t = _$setProp3(_el$317, "backgroundColor", _v$109, _p$.t));
@@ -6228,7 +6247,7 @@ function LoopDashboard(props) {
     _$setProp3(_el$248, "paddingRight", 1);
     _$spread3(_el$248, _$mergeProps3({
       get backgroundColor() {
-        return PALETTE.inset;
+        return PALETTE2.inset;
       }
     }, {
       onMouseDown: () => setCoordOpen((v) => !v)
@@ -6256,7 +6275,7 @@ function LoopDashboard(props) {
         _$setProp3(_el$253, "wrapMode", "none");
         _$insertNode3(_el$254, _$createTextNode3(`:`));
         _$effect3((_$p) => _$setProp3(_el$254, "style", {
-          fg: PALETTE.amber,
+          fg: PALETTE2.amber,
           bold: true
         }, _$p));
         return _el$253;
@@ -6281,11 +6300,11 @@ function LoopDashboard(props) {
       }
     });
     _$effect3((_p$) => {
-      var _v$83 = PALETTE.rule, _v$84 = PALETTE.base, _v$85 = PALETTE.base, _v$86 = {
-        fg: PALETTE.amber
+      var { rule: _v$83, base: _v$84, base: _v$85 } = PALETTE2, _v$86 = {
+        fg: PALETTE2.amber
       }, _v$87 = {
-        fg: PALETTE.cyan
-      }, _v$88 = PALETTE.inset, _v$89 = mode() === "insert" && insertKind() === "colon" ? "send <msg> | filter <text> | project <name> | release (Esc cancel)" : fitHintBar(FOOT_HINTS, hintCols()), _v$90 = PALETTE.muted, _v$91 = PALETTE.cyan, _v$92 = mode() === "insert" && insertKind() === "colon" ? PALETTE.ink : PALETTE.inset, _v$93 = PALETTE.inset;
+        fg: PALETTE2.cyan
+      }, _v$88 = PALETTE2.inset, _v$89 = mode() === "insert" && insertKind() === "colon" ? "send <msg> | filter <text> | project <name> | release (Esc cancel)" : fitHintBar(FOOT_HINTS, hintCols()), { muted: _v$90, cyan: _v$91 } = PALETTE2, _v$92 = mode() === "insert" && insertKind() === "colon" ? PALETTE2.ink : PALETTE2.inset, _v$93 = PALETTE2.inset;
       _v$83 !== _p$.e && (_p$.e = _$setProp3(_el$28, "borderColor", _v$83, _p$.e));
       _v$84 !== _p$.t && (_p$.t = _$setProp3(_el$28, "backgroundColor", _v$84, _p$.t));
       _v$85 !== _p$.a && (_p$.a = _$setProp3(_el$245, "backgroundColor", _v$85, _p$.a));

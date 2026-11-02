@@ -7,7 +7,7 @@
 import { For, Show, type JSX } from "solid-js"
 import type { TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import type { ScrollBoxRenderable } from "@opentui/core"
-import { PALETTE } from "./dashboard-presentation"
+import { paletteFor } from "./dashboard-presentation"
 
 export type CoordinationTab = "writes" | "verify" | "resv"
 
@@ -65,6 +65,7 @@ export function CoordinationPanel(props: {
   onClose?: () => void
   scrollRef?: (el: ScrollBoxRenderable | undefined) => void
 }): JSX.Element {
+  const PALETTE = paletteFor(props.theme)
   const m = () => props.model
   const tabBtn = (id: CoordinationTab, keyHint: string, label: string) => {
     const active = () => props.tab === id

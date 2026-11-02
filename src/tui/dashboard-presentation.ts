@@ -6,6 +6,7 @@
 
 import type { Goal } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
+import type { TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import { workerActivityLabel } from "../domain/status-labels"
 
 export type AttentionKind = "blocker" | "error" | "limit" | "stale" | "unreachable" | null
@@ -32,7 +33,24 @@ export interface ScopeSummary {
   done: number
 }
 
-export const PALETTE = {
+export interface DashboardPalette {
+  base: string
+  inset: string
+  rule: string
+  rowRule: string
+  selectedBg: string
+  ink: string
+  muted: string
+  cyan: string
+  amber: string
+  rose: string
+  sage: string
+  violet: string
+  sky: string
+  tabActiveFg: string
+}
+
+export const PALETTE: DashboardPalette = {
   base: "#242736",
   inset: "#1c1f2b",
   rule: "#4e5468",
@@ -48,6 +66,25 @@ export const PALETTE = {
   sky: "#38bdf8",
   tabActiveFg: "#11131a",
 } as const
+
+/** Surfaces + text follow the host theme so the dashboard sits inside the
+ * user's OpenCode theme instead of imposing its own dark-blue chrome.
+ * Semantic accents (cyan/amber/rose/sage/violet/sky) stay loopd-owned so
+ * status colors keep their meaning on any theme. */
+export function paletteFor(t: TuiThemeCurrent): DashboardPalette {
+  const c = (v: unknown, fallback: string) => (v ?? fallback) as unknown as string
+  return {
+    ...PALETTE,
+    base: c(t.background, PALETTE.base),
+    inset: c(t.backgroundPanel, PALETTE.inset),
+    rule: c(t.border, PALETTE.rule),
+    rowRule: c(t.borderSubtle, PALETTE.rowRule),
+    selectedBg: c(t.backgroundElement, PALETTE.selectedBg),
+    ink: c(t.text, PALETTE.ink),
+    muted: c(t.textMuted, PALETTE.muted),
+    tabActiveFg: c(t.background, PALETTE.tabActiveFg),
+  }
+}
 
 const ATTENTION_STATES = new Set(["blocked", "budget_limited", "usage_limited"])
 

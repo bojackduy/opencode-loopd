@@ -10,7 +10,7 @@ import type { ScrollBoxRenderable } from "@opentui/core"
 import type { Goal } from "../domain/goal"
 import type { GoalRuntimeState } from "../domain/runtime"
 import { formatCost, formatTokens, formatDuration } from "./dashboard"
-import { PALETTE, goalStatusShort } from "./dashboard-presentation"
+import { PALETTE, paletteFor, goalStatusShort } from "./dashboard-presentation"
 
 export interface InspectorModel {
   goal: Goal
@@ -55,6 +55,7 @@ export function GoalInspector(props: {
   onDetails: () => void
   onFocusProject?: () => void
 }): JSX.Element {
+  const PALETTE = paletteFor(props.theme)
   const m = () => props.model
   const badge = () => stateBadge(m().goal)
   const proj = () => m().directory.split("/").pop() ?? m().directory
@@ -146,6 +147,7 @@ export function GoalDetailsDrawer(props: {
   scrollRef?: (el: ScrollBoxRenderable | undefined) => void
   onClose?: () => void
 }): JSX.Element {
+  const PALETTE = paletteFor(props.theme)
   const m = () => props.model
   const g = () => m().goal
   const badge = () => stateBadge(g())

@@ -43,6 +43,7 @@ import { createDashboardRefresh } from "./dashboard-refresh"
 import { managedStorePath, resolveManagedDirs, statusAll, type ManagedDirStatus } from "../server/managed-status"
 import {
   PALETTE,
+  paletteFor,
   ROW_COLS,
   toRowModel,
   summarizeScope,
@@ -273,6 +274,7 @@ export function DashboardHeader(props: {
   onBugReport: () => void
   onSelectTab?: (tab: "project" | "fleet" | "commands") => void
 }): JSX.Element {
+  const PALETTE = paletteFor(props.theme)
   const tabBtn = (id: "project" | "fleet" | "commands", num: string, label: string) => {
     const active = () => props.tab === id
     return (
@@ -346,6 +348,7 @@ export function DashboardHeader(props: {
 
 export function LoopDashboard(props: Props) {
   const theme = () => props.api.theme.current
+  const PALETTE = paletteFor(props.api.theme.current)
   const initial = props.restoredState
   const [mode, setMode] = createSignal<Mode>("normal")
   const [insertKind, setInsertKind] = createSignal<InsertKind>("colon")
