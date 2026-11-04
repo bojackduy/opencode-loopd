@@ -79,6 +79,9 @@ export interface GoalRuntimeState {
   /** Active run ID already reported by the reconcile-stuck watchdog (notify once per run). */
   reconcileStuckNotifiedRunID?: string
 
+  /** Active run ID whose manual-mode turn end was already pushed to the owner. */
+  awaitingInputNotifiedRunID?: string
+
   /** When the worker run was manually aborted (TUI abort key); cleared on next lease. */
   workerAbortedAt?: string
 

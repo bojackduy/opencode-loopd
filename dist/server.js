@@ -6159,9 +6159,26 @@ function createLoopEngine(options) {
       return await handleSessionError(after, goal, { properties: { expectedRunID: completedRunID, runID: completedRunID, error: nativeError ?? { message: "OpenCode execution failed (reconciled native outcome)" } } });
     }
     await appendEvent(directory, { version: 1, eventID: randomUUID7(), goalID: goal.id, type: "run.completed", runID: completedRunID, timestamp: new Date().toISOString(), revision: after.revision });
-    if (goal.interactive)
+    if (goal.interactive) {
+      await notifyManualTurnEnded(goal, completedRunID);
       return true;
+    }
     return await afterCompletedTurn(goal.id, goal);
+  }
+  async function notifyManualTurnEnded(goal, runID) {
+    let fresh = false;
+    await mutateState(directory, `manual-turn-ended:${goal.id}`, async (s) => {
+      const rt = s.runtimes.find((r) => r.goalID === goal.id);
+      if (!rt || rt.awaitingInputNotifiedRunID === runID)
+        return s;
+      rt.awaitingInputNotifiedRunID = runID;
+      rt.updatedAt = new Date().toISOString();
+      fresh = true;
+      return s;
+    });
+    if (!fresh)
+      return;
+    await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}" finished its turn and is waiting for you (manual mode). Read it with read_goal_transcript, then reply with send_goal_input (bare words) or nudge_goal (full contract).`, goal.parentAgent).catch(() => {});
   }
   async function inspectPromptTurn(workerSessionID, promptMessageID) {
     const noMatch = { latestUserPrompt: false, assistantCompleted: false, assistantInProgress: false, outputless: false, toolCallLoop: false };

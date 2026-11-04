@@ -792,8 +792,35 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
       return await handleSessionError(after, goal, { properties: { expectedRunID: completedRunID, runID: completedRunID, error: nativeError ?? { message: "OpenCode execution failed (reconciled native outcome)" } } })
     }
     await appendEvent(directory, { version: 1, eventID: randomUUID(), goalID: goal.id, type: "run.completed", runID: completedRunID, timestamp: new Date().toISOString(), revision: after.revision } satisfies LoopEvent)
-    if (goal.interactive) return true
+    // Manual mode never starts the next turn, so a finished turn is a hand-off:
+    // the worker waits for the owner while the owner waits for the worker.
+    // Nothing else in the engine tells the owner that, so push it once per run.
+    if (goal.interactive) {
+      await notifyManualTurnEnded(goal, completedRunID)
+      return true
+    }
     return await afterCompletedTurn(goal.id, goal)
+  }
+
+  /** Tell the owner exactly once per run that a manual goal is parked on them. */
+  async function notifyManualTurnEnded(goal: any, runID: string): Promise<void> {
+    let fresh = false
+    await mutateState(directory, `manual-turn-ended:${goal.id}`, async (s) => {
+      const rt = s.runtimes.find((r) => r.goalID === goal.id)
+      if (!rt || rt.awaitingInputNotifiedRunID === runID) return s
+      rt.awaitingInputNotifiedRunID = runID
+      rt.updatedAt = new Date().toISOString()
+      fresh = true
+      return s
+    })
+    if (!fresh) return
+    await host
+      .notifyOwner(
+        goal.ownerSessionID,
+        `Loop goal "${goal.name}" finished its turn and is waiting for you (manual mode). Read it with read_goal_transcript, then reply with send_goal_input (bare words) or nudge_goal (full contract).`,
+        goal.parentAgent,
+      )
+      .catch(() => {})
   }
 
   async function inspectPromptTurn(
