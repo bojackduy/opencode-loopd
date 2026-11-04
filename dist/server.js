@@ -10912,9 +10912,96 @@ function appendVerificationAttempt(recent, attempt) {
 // src/server/goal-tools.ts
 import { exec as execChild } from "child_process";
 import { promisify } from "util";
+import { promises as fs9 } from "fs";
+import path10 from "path";
+init_server_log();
+
+// src/infrastructure/managed-dirs.ts
 import { promises as fs8 } from "fs";
 import path9 from "path";
-init_server_log();
+var REGISTRY_VERSION = 1;
+function registryFile(instanceDir) {
+  return path9.join(instanceDir, ".opencode", "loopd", "managed.json");
+}
+function normalizeDir(input) {
+  return path9.normalize(input);
+}
+function resolveEntry(instanceDir, entry) {
+  if (path9.isAbsolute(entry))
+    return normalizeDir(entry);
+  return normalizeDir(path9.resolve(instanceDir, entry));
+}
+async function readRegistry(instanceDir) {
+  try {
+    const raw = await fs8.readFile(registryFile(instanceDir), "utf8");
+    const parsed = JSON.parse(raw);
+    const dirs = Array.isArray(parsed.dirs) ? parsed.dirs.filter((d) => typeof d === "string" && d.trim().length > 0) : [];
+    return { version: REGISTRY_VERSION, dirs };
+  } catch (error) {
+    if (error?.code === "ENOENT")
+      return { version: REGISTRY_VERSION, dirs: [] };
+    throw error;
+  }
+}
+function parseManagedDirsEnv(envValue) {
+  const raw = envValue !== undefined ? envValue : process?.env?.LOOPD_MANAGED_DIRS;
+  if (typeof raw !== "string" || !raw)
+    return [];
+  const sep = path9.delimiter;
+  return raw.split(sep).map((s) => s.trim()).filter(Boolean);
+}
+async function resolveManagedDirs(instanceDir, opts = {}) {
+  const root = normalizeDir(path9.resolve(instanceDir));
+  const seen = new Set([root]);
+  const result = [root];
+  const push = (entry) => {
+    const trimmed = entry.trim();
+    if (!trimmed)
+      return;
+    const resolved = resolveEntry(root, trimmed);
+    if (!seen.has(resolved)) {
+      seen.add(resolved);
+      result.push(resolved);
+    }
+  };
+  const registry = await readRegistry(instanceDir);
+  for (const entry of registry.dirs)
+    push(entry);
+  for (const entry of parseManagedDirsEnv(opts.env))
+    push(entry);
+  for (const entry of opts.extra ?? [])
+    push(entry);
+  return result;
+}
+async function listManagedDirs(instanceDir) {
+  const root = normalizeDir(path9.resolve(instanceDir));
+  const seen = new Set([root]);
+  const result = [root];
+  const registry = await readRegistry(instanceDir);
+  for (const entry of registry.dirs) {
+    const resolved = resolveEntry(root, entry.trim());
+    if (!seen.has(resolved)) {
+      seen.add(resolved);
+      result.push(resolved);
+    }
+  }
+  return result;
+}
+async function addManagedDir(instanceDir, dir) {
+  if (typeof dir !== "string" || !dir.trim())
+    throw new Error("dir must be a non-empty path");
+  const root = normalizeDir(path9.resolve(instanceDir));
+  const resolved = resolveEntry(root, dir.trim());
+  const registry = await readRegistry(instanceDir);
+  const entries = registry.dirs.map((d) => resolveEntry(root, d.trim()));
+  if (!entries.includes(resolved))
+    entries.push(resolved);
+  const payload = JSON.stringify({ version: REGISTRY_VERSION, dirs: entries }, null, 2);
+  const target = registryFile(instanceDir);
+  await fs8.mkdir(path9.dirname(target), { recursive: true });
+  await fs8.writeFile(target, payload, "utf8");
+  return listManagedDirs(instanceDir);
+}
 
 // src/application/goal-scope.ts
 init_state_repository();
@@ -11073,7 +11160,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         }
         let goalDir = dir;
         if (args.directory !== undefined) {
-          if (typeof args.directory !== "string" || !path9.isAbsolute(args.directory)) {
+          if (typeof args.directory !== "string" || !path10.isAbsolute(args.directory)) {
             return {
               title: "Goal not created",
               output: JSON.stringify({
@@ -11084,7 +11171,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
             };
           }
           try {
-            const stat = await fs8.stat(args.directory);
+            const stat = await fs9.stat(args.directory);
             if (!stat.isDirectory()) {
               return {
                 title: "Goal not created",
@@ -11095,7 +11182,7 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
                 })
               };
             }
-            goalDir = await fs8.realpath(args.directory);
+            goalDir = await fs9.realpath(args.directory);
           } catch (error) {
             if (error?.code !== "ENOENT")
               throw error;
@@ -11137,6 +11224,11 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
             parentModel: parentDefaults.parentModel,
             ...args.interactive === true ? { interactive: true } : {}
           });
+          if (goalDir !== dir) {
+            try {
+              await addManagedDir(dir, goalDir);
+            } catch {}
+          }
           return {
             title: "Goal created",
             output: JSON.stringify({
@@ -11853,66 +11945,6 @@ function describeGoalState(status, phase, now = Date.now()) {
 // src/server/owner-tools.ts
 import { promises as fs10 } from "fs";
 import path11 from "path";
-
-// src/infrastructure/managed-dirs.ts
-import { promises as fs9 } from "fs";
-import path10 from "path";
-var REGISTRY_VERSION = 1;
-function registryFile(instanceDir) {
-  return path10.join(instanceDir, ".opencode", "loopd", "managed.json");
-}
-function normalizeDir(input) {
-  return path10.normalize(input);
-}
-function resolveEntry(instanceDir, entry) {
-  if (path10.isAbsolute(entry))
-    return normalizeDir(entry);
-  return normalizeDir(path10.resolve(instanceDir, entry));
-}
-async function readRegistry(instanceDir) {
-  try {
-    const raw = await fs9.readFile(registryFile(instanceDir), "utf8");
-    const parsed = JSON.parse(raw);
-    const dirs = Array.isArray(parsed.dirs) ? parsed.dirs.filter((d) => typeof d === "string" && d.trim().length > 0) : [];
-    return { version: REGISTRY_VERSION, dirs };
-  } catch (error) {
-    if (error?.code === "ENOENT")
-      return { version: REGISTRY_VERSION, dirs: [] };
-    throw error;
-  }
-}
-function parseManagedDirsEnv(envValue) {
-  const raw = envValue !== undefined ? envValue : process?.env?.LOOPD_MANAGED_DIRS;
-  if (typeof raw !== "string" || !raw)
-    return [];
-  const sep = path10.delimiter;
-  return raw.split(sep).map((s) => s.trim()).filter(Boolean);
-}
-async function resolveManagedDirs(instanceDir, opts = {}) {
-  const root = normalizeDir(path10.resolve(instanceDir));
-  const seen = new Set([root]);
-  const result = [root];
-  const push = (entry) => {
-    const trimmed = entry.trim();
-    if (!trimmed)
-      return;
-    const resolved = resolveEntry(root, trimmed);
-    if (!seen.has(resolved)) {
-      seen.add(resolved);
-      result.push(resolved);
-    }
-  };
-  const registry = await readRegistry(instanceDir);
-  for (const entry of registry.dirs)
-    push(entry);
-  for (const entry of parseManagedDirsEnv(opts.env))
-    push(entry);
-  for (const entry of opts.extra ?? [])
-    push(entry);
-  return result;
-}
-
-// src/server/owner-tools.ts
 function withTimeout2(promise, ms) {
   return Promise.race([
     promise,

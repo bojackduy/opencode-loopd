@@ -24,6 +24,7 @@ import {
   type GoalCreationDefaults,
 } from "../application/goal-policy"
 import { SERVER_LOG_FILE } from "../infrastructure/server-log"
+import { addManagedDir } from "../infrastructure/managed-dirs"
 import { claimGoalScope, GoalScopeConflictError } from "../application/goal-scope"
 import { withWorkspaceOperation } from "../application/workspace-execution"
 import { requestFenceAwait } from "../application/command-await"
@@ -221,6 +222,12 @@ export function goalTools(
             parentModel: parentDefaults.parentModel,
             ...(args.interactive === true ? { interactive: true as const } : {}),
           })
+          // A goal created in another directory keeps its own state root. That
+          // directory is invisible to every dashboard unless registered, so the
+          // goal runs while its owner sees nothing. Register it at creation.
+          if (goalDir !== dir) {
+            try { await addManagedDir(dir, goalDir) } catch { /* registry write is best-effort */ }
+          }
           return {
             title: "Goal created",
             output: JSON.stringify({
