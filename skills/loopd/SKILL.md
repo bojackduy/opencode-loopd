@@ -52,6 +52,22 @@ created → active → complete
 
 Only `active` goals own live worker runs. `blocked`/`paused`/`budget_limited` wait for an explicit owner transition (`resume`/`retry`/`nudge`). The loop is engine-driven, not parent-driven.
 
+### Autonomous goal vs manual (interactive) goal
+
+Both are the SAME primitive: one goal, one worker session, same checks, budgets and transcript. Only the scheduling policy differs, so pick by "who starts the next turn?"
+
+| Question | Answer | Mode |
+|---|---|---|
+| Does the objective have a checkable finish and no human decision needed mid-flight? | Let the engine drive | **omit `interactive`** (default) |
+| Will a human read each turn and decide the next step? | Owner drives | `interactive: true` |
+| Is it pair-programming / live approval / step-by-step review? | Owner drives | `interactive: true` |
+| Is it a long task you want retried, idle-recovered and force-finished automatically? | Engine drives | **omit `interactive`** |
+
+- **Autonomous:** engine starts every turn, retries failures, recovers stalled idle runs, enforces `maxTurns`/budgets.
+- **Manual:** engine NEVER starts a turn — no idle recovery, no retry-due turns. `send_goal_input`, `nudge_goal`, `resume_goal` and `retry_goal` still start work on request. Budget enforcement still runs. The owner is notified when a manual turn ends (hand-off back to you).
+- Manual is a scheduling choice, not proof of idleness: an active manual worker may be mid-turn.
+- Do NOT set `interactive: true` for an unattended background task. Nobody will send the next turn, so it silently parks. Toggle later with `:interactive` on the dashboard.
+
 **Manual (`interactive`) mode:** autonomous turns are the default, including when `directory` is supplied. Pass `interactive: true` only for owner-driven manual turns (or toggle `:interactive` on the dashboard). The engine then never starts turns on its own (no idle recovery, no retry-due turns). Explicit steering (`:send`, nudge, resume, retry) still starts work. Manual mode does not mean the worker is idle or awaiting input. Budget enforcement still runs. Toggle back with `:interactive` to re-enable auto.
 
 `abort_goal_worker` (TUI `A` / `abort_goal_worker` tool) aborts the worker *session only* — status stays the same, transcript remains browsable, the next active turn reuses the same session. Use it for compaction-spin or stuck runs that keep burning tokens without progress.
