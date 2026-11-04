@@ -210,7 +210,7 @@ export function ownerTools(options: OwnerToolsOptions) {
 
     inspect_background_goal: tool({
       description:
-        "Inspect a goal’s full contract, runtime, and live execution state: objective, config{agent,model,checks,checkCwd,workspaceWrite,limits}, progress, blocker, runtime{phase,runCount,budgetTurnCount,runGeneration,evaluatorRejectionCount,unknownStatusCount,lastActivityAt,activePromptMessageID}, plus live transcriptTail, activeToolCallIDs, progressHistory, artifactSummary, pendingInbox. Single-call follow-up for parent to see what child is actually doing.",
+        "Inspect a goal’s full contract, runtime, and live execution state: objective, config{agent,model,checks,checkCwd,workspaceWrite,limits}, progress, blocker, runtime{phase,runCount,budgetTurnCount,runGeneration,evaluatorRejectionCount,unknownStatusCount,lastActivityAt,activePromptMessageID}, plus live transcriptTail, activeToolCallIDs, progressHistory, artifactSummary, pendingInbox, and live.now{workerStatus, hostExecutionStatus, hostOutcome, runID, runGeneration, promptMessageID, assistantMessageID, turnStartedAt, lastActivityAt, leaseExpiresAt, leaseValid, lastAssistantText, lastAssistantAt} — the current turn, not just the last report. Single-call follow-up for parent to see what child is actually doing.",
       args: {
         goal_id: tool.schema.string().optional().describe("Goal ID. Omit to inspect the first active goal."),
         includeTranscript: tool.schema.boolean().optional().describe("Include live transcript tail (adds ~100ms). Default true. Set false for fast metadata-only."),
@@ -282,6 +282,34 @@ export function ownerTools(options: OwnerToolsOptions) {
         ] as const)
 
         const activeToolCallIDs = runtime?.activeToolCallIDs ?? []
+        // What the worker is doing NOW, not what it reported last turn. The host
+        // status is the only live truth we can ask for; everything else is
+        // bookkeeping that may lag a whole turn.
+        const [liveStatus, liveExecution] = await Promise.all([
+          goal.workerSessionID && host.sessionStatus
+            ? withTimeout(Promise.resolve(host.sessionStatus(goal.workerSessionID)), 900).catch(() => "unknown" as const)
+            : Promise.resolve(undefined),
+          goal.workerSessionID && host.readExecution
+            ? withTimeout(Promise.resolve(host.readExecution(goal.workerSessionID)), 1200).catch(() => null)
+            : Promise.resolve(null),
+        ])
+        const lastAssistant = (transcriptTail as any[] | null)?.filter((m: any) => m?.role === "assistant").at(-1)
+        const liveNow = {
+          workerStatus: liveStatus,
+          hostExecutionStatus: (liveExecution as any)?.status,
+          hostOutcome: (liveExecution as any)?.outcome,
+          latestUserMessageID: (liveExecution as any)?.latestUserMessageID,
+          runID: runtime?.activeRunID,
+          runGeneration: runtime?.runGeneration,
+          promptMessageID: runtime?.activePromptMessageID,
+          assistantMessageID: runtime?.activeAssistantMessageID,
+          turnStartedAt: runtime?.turnStartedAt,
+          lastActivityAt: runtime?.lastActivityAt,
+          leaseExpiresAt: runtime?.leaseExpiresAt,
+          leaseValid: runtime?.leaseExpiresAt ? Date.now() < Date.parse(runtime.leaseExpiresAt) : false,
+          lastAssistantText: lastAssistant ? String(lastAssistant.content || "").slice(0, 600) : undefined,
+          lastAssistantAt: lastAssistant?.timestamp,
+        }
 
         return {
           title: `Goal: ${goal.name}`,
@@ -342,6 +370,7 @@ export function ownerTools(options: OwnerToolsOptions) {
               nativeReconcileBlocked: runtime?.nativeReconcileBlocked,
               pendingToolCalls: activeToolCallIDs.length,
               lastActivityAge: runtime?.lastActivityAt ? `${Math.floor((Date.now() - Date.parse(runtime.lastActivityAt)) / 1000)}s ago` : undefined,
+              now: liveNow,
             },
             runtime: runtime ? {
               phase: runtime.phase,
