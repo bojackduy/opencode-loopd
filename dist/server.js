@@ -283,6 +283,14 @@ async function readState(directory) {
       const raw = await fs2.readFile(target, "utf8");
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object" && Array.isArray(parsed.goals)) {
+        const ownedBy = typeof parsed.directory === "string" ? path.resolve(parsed.directory) : undefined;
+        if (ownedBy && ownedBy !== path.resolve(directory)) {
+          const aside = `${target}.foreign-${Date.now()}`;
+          try {
+            await fs2.rename(target, aside);
+          } catch {}
+          return emptyState();
+        }
         return migrate(parsed);
       }
       return emptyState();
@@ -442,6 +450,7 @@ async function writeAtomic(target, contents) {
 }
 async function writeState(directory, state) {
   state.revision += 1;
+  state.directory = path.resolve(directory);
   const payload = JSON.stringify(state, null, 2);
   await writeAtomic(stateFile(directory), payload);
 }
@@ -13204,7 +13213,7 @@ function approvedCommandTools(options) {
 init_server_log();
 init_state_repository();
 // package.json
-var version = "1.14.6";
+var version = "1.14.7";
 
 // src/server/plugin.ts
 init_workspace_execution();

@@ -308,6 +308,7 @@ Owner tools act on the state root of the server process they run in. A goal crea
 - **Registration.** Add paths to `<workspace>/.opencode/loopd/managed.json` — `{"version":1,"dirs":["/abs/a","/abs/b"]}` — or set `LOOPD_MANAGED_DIRS=/abs/a:/abs/b`. Unregistered directories never appear in Fleet, so a lane goal looks "missing" until registered.
 - **A live instance per directory.** Mutations need that directory's loopd server; open the project once so it exists.
 - **From an agent tool, pass the path.** `inspect_background_goal({ goal_id, directory })`, `switch_goal_identity({ goal_id, model, directory })`, `nudge_goal({ goal_id, directory })`, `clear_goal({ goal_id, directory })`, and the rest accept an absolute `directory`. Results name the directory searched when the goal is not found.
+- **State files are workspace-stamped.** `state.json` records the absolute directory that owns it; a copy (lane worktree, repo snapshot, restored backup) is detected on read and moved aside as `state.json.foreign-<ts>` instead of reviving goals whose owner/worker sessions live elsewhere. Never copy `.opencode/loopd/state.json` into a new worktree.
 - **Never hand-edit another workspace's `state.json`.** The running server owns that file and rewrites it on the next mutation; the edit also skips model validation, deferred-switch handling and rollback.
 
 ### list_background_goals

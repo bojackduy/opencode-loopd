@@ -20,6 +20,9 @@ const CURRENT_VERSION = 10
 export interface StoreState {
   version: number
   revision: number
+  /** Absolute workspace this state belongs to. A mismatch means the file was
+   * copied here (lane worktree, repo snapshot), so its goals are not ours. */
+  directory?: string
   goals: Goal[]
   runtimes: GoalRuntimeState[]
   /** Command ledger for idempotency. Bounded to last 100 entries. */
@@ -222,6 +225,16 @@ export async function readState(directory: string): Promise<StoreState> {
       const raw = await fs.readFile(target, "utf8")
       const parsed = JSON.parse(raw)
       if (parsed && typeof parsed === "object" && Array.isArray(parsed.goals)) {
+        const ownedBy = typeof parsed.directory === "string" ? path.resolve(parsed.directory) : undefined
+        if (ownedBy && ownedBy !== path.resolve(directory)) {
+          // Copied state (lane worktree, snapshot, restored backup): its goals
+          // reference owners, workers and reservations from another directory.
+          // Reviving them here double-runs work and fences files that no local
+          // process holds. Preserve the file for forensics, start clean.
+          const aside = `${target}.foreign-${Date.now()}`
+          try { await fs.rename(target, aside) } catch {}
+          return emptyState()
+        }
         return migrate(parsed as StoreState)
       }
       return emptyState()
@@ -424,6 +437,10 @@ export async function writeState(
   state: StoreState,
 ): Promise<void> {
   state.revision += 1
+  // Stamp the owning workspace. A state file copied into a lane/worktree (or a
+  // repo snapshot) carries the original path, which is how readState detects a
+  // stale clone instead of reviving goals whose worker sessions live elsewhere.
+  state.directory = path.resolve(directory)
   const payload = JSON.stringify(state, null, 2)
   await writeAtomic(stateFile(directory), payload)
 }
