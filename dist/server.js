@@ -6689,6 +6689,10 @@ function createLoopEngine(options) {
                 return s;
               if (s.workspaceOperation || (s.workspaceCalls ?? []).some((call) => call.goalID === goal.id) || rt.activeToolCallIDs?.length)
                 return s;
+              if ((s.commandAwaits ?? []).some((a) => a.goalID === goal.id))
+                return s;
+              if ((s.fenceAwaits ?? []).some((a) => a.goalID === goal.id))
+                return s;
               clearedToolCalls = rt.activeToolCallIDs?.length ?? 0;
               Object.assign(rt, releaseLease(rt));
               rt.activeRunID = undefined;

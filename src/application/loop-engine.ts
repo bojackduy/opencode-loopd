@@ -1481,6 +1481,13 @@ export function createLoopEngine(options: LoopEngineOptions): LoopEngine {
               if (rt.phase !== "running") return s
               if (rt.runGeneration !== generation) return s
               if (s.workspaceOperation || (s.workspaceCalls ?? []).some((call) => call.goalID === goal.id) || rt.activeToolCallIDs?.length) return s
+              // A worker parked ON PURPOSE — waiting for a background command or
+              // for the fence to drain — reads exactly like a stalled one: idle
+              // host, no tool calls, no activity. Re-prompting it cancels the
+              // wait and loses the awaited evidence. Parked goals wake through
+              // their own await, so recovery must never touch them.
+              if ((s.commandAwaits ?? []).some((a) => a.goalID === goal.id)) return s
+              if ((((s as any).fenceAwaits ?? []) as Array<{ goalID: string }>).some((a) => a.goalID === goal.id)) return s
               clearedToolCalls = rt.activeToolCallIDs?.length ?? 0
               Object.assign(rt, releaseLease(rt))
               rt.activeRunID = undefined

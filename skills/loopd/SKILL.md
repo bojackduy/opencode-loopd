@@ -63,7 +63,8 @@ Both are the SAME primitive: one goal, one worker session, same checks, budgets 
 | Is it pair-programming / live approval / step-by-step review? | Owner drives | `interactive: true` |
 | Is it a long task you want retried, idle-recovered and force-finished automatically? | Engine drives | **omit `interactive`** |
 
-- **Autonomous:** engine starts every turn, retries failures, recovers stalled idle runs, enforces `maxTurns`/budgets.
+- **Autonomous:** engine starts every turn, retries failures, recovers stalled idle runs, enforces `maxTurns`/budgets. Recovery skips goals parked on an await (`loopd_command_await`, `await_quiescence`) — a parked worker is waiting on purpose, never stalled.
+- **Waiting is a tool call, not an ending.** If a worker needs a background command to finish, it must park with `loopd_command_await` (goal) or `await_quiescence` (fence). Ending the turn to "wait" gets it re-prompted immediately, because to the engine that is just another finished turn.
 - **Manual:** engine NEVER starts a turn — no idle recovery, no retry-due turns. `send_goal_input`, `nudge_goal`, `resume_goal` and `retry_goal` still start work on request. Budget enforcement still runs. The owner is notified when a manual turn ends (hand-off back to you).
 - Manual is a scheduling choice, not proof of idleness: an active manual worker may be mid-turn.
 - Do NOT set `interactive: true` for an unattended background task. Nobody will send the next turn, so it silently parks. Toggle later with `:interactive` on the dashboard.

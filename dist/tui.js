@@ -95,6 +95,14 @@ async function readState(directory) {
       const raw = await fs2.readFile(target, "utf8");
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object" && Array.isArray(parsed.goals)) {
+        const ownedBy = typeof parsed.directory === "string" ? path.resolve(parsed.directory) : undefined;
+        if (ownedBy && ownedBy !== path.resolve(directory)) {
+          const aside = `${target}.foreign-${Date.now()}`;
+          try {
+            await fs2.rename(target, aside);
+          } catch {}
+          return emptyState();
+        }
         return migrate(parsed);
       }
       return emptyState();
