@@ -11436,6 +11436,50 @@ function goalTools(dir, goalService, hostSessionID, defaults = {}, host) {
         };
       }
     }),
+    notify_owner: tool({
+      description: "ARGS: message (required) + detail (optional). Worker-only: call ONLY from inside the worker session of an active goal \u2014 never from a parent/owner chat (owners steer with send_goal_input/nudge). Push an informational note to the owner without changing goal state \u2014 use for mid-run FYI, a controversy to review, or 'I finished a step, take a look if you want more'. NOT for completion (use complete_goal) or real blockers (use block_goal). Persists lastAnnouncement on the goal and notifies the owner once.",
+      args: {
+        message: tool.schema.string().describe("Short headline for the owner."),
+        detail: tool.schema.string().optional().describe("Optional longer context (files, diffs, numbers).")
+      },
+      execute: async (args, context) => {
+        const state = await readState(dir);
+        const workerID = context?.sessionID || hostSessionID;
+        const goal = findGoalByWorkerSession(state, workerID);
+        if (!goal) {
+          throw new Error("notify_owner is worker-only: this session is not the worker of any goal.");
+        }
+        if (goal.status !== "active") {
+          return { title: "Invalid state", output: `Goal is ${goal.status}, not active. Cannot notify.` };
+        }
+        goal.lastAnnouncement = {
+          message: args.message,
+          detail: args.detail,
+          at: new Date().toISOString()
+        };
+        const runtime = state.runtimes.find((r) => r.goalID === goal.id);
+        if (runtime)
+          Object.assign(runtime, markProgress(runtime));
+        state.revision = (await persistWorkerMutation(dir, goal, runtime, ["active"])).revision;
+        await appendEvent(dir, {
+          version: 1,
+          eventID: randomUUID14(),
+          goalID: goal.id,
+          type: "goal.announcement",
+          message: args.message,
+          detail: args.detail,
+          timestamp: new Date().toISOString(),
+          revision: state.revision
+        });
+        if (goal.ownerSessionID && host) {
+          await host.notifyOwner(goal.ownerSessionID, `Loop goal "${goal.name}": ${args.message}${args.detail ? ` \u2014 ${args.detail}` : ""}`, goal.parentAgent).catch(() => {});
+        }
+        return {
+          title: "Owner notified",
+          output: JSON.stringify({ goalName: goal.name, message: args.message, at: goal.lastAnnouncement.at })
+        };
+      }
+    }),
     complete_goal: tool({
       description: "ARGS: summary (required) + evidence (required). Worker-only: call ONLY from inside the worker session of an active goal \u2014 never from a parent/owner chat (owners use force_complete_goal only after manual verification). Propose completion. Host runs checks from checkCwd (writers default to project root) \u2014 if any fail, host rejects (rejectionCount++, freeRetryPending if <3, blocked after 3 with HOST VERDICT). Only call when every requirement is proved with evidence; the host decides, not the model.",
       args: {
@@ -12297,6 +12341,7 @@ function ownerTools2(options) {
               lastActivityAge: runtime?.lastActivityAt ? `${Math.floor((Date.now() - Date.parse(runtime.lastActivityAt)) / 1000)}s ago` : undefined,
               now: liveNow
             },
+            lastAnnouncement: goal.lastAnnouncement,
             runtime: runtime ? {
               phase: runtime.phase,
               runCount: runtime.runCount,

@@ -36,6 +36,12 @@ export interface GoalProgressEvent extends BaseEvent {
   verifiedCount?: number
 }
 
+export interface GoalAnnouncementEvent extends BaseEvent {
+  type: "goal.announcement"
+  message: string
+  detail?: string
+}
+
 export interface GoalCompletedEvent extends BaseEvent {
   type: "goal.completed"
   summary: string
@@ -159,6 +165,7 @@ export type LoopEvent =
   | GoalCreatedEvent
   | GoalStatusChangedEvent
   | GoalProgressEvent
+  | GoalAnnouncementEvent
   | GoalCompletedEvent
   | GoalBlockedEvent
   | GoalClearedEvent

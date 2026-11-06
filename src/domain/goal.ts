@@ -126,6 +126,13 @@ export interface Goal {
     at: string
   }
 
+  /** Latest informational note the worker pushed to the owner (not progress, not a blocker). */
+  lastAnnouncement?: {
+    message: string
+    detail?: string
+    at: string
+  }
+
   createdAt: string
   updatedAt: string
 }

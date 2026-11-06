@@ -372,6 +372,7 @@ export function ownerTools(options: OwnerToolsOptions) {
               lastActivityAge: runtime?.lastActivityAt ? `${Math.floor((Date.now() - Date.parse(runtime.lastActivityAt)) / 1000)}s ago` : undefined,
               now: liveNow,
             },
+            lastAnnouncement: goal.lastAnnouncement,
             runtime: runtime ? {
               phase: runtime.phase,
               runCount: runtime.runCount,
