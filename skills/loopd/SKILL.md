@@ -346,6 +346,16 @@ Protected (scoped or read-only) goals fence the workspace for their **workers**,
 **Two prompt kinds:** engine/nudge turns carry full steering (contract, history, verification); `:send` / `send_goal_input` turns carry *only* your words. Short directives therefore fit small-context models where a 100k steering bundle would overflow.
 
 ## Owner Tools (Parent Chat)
+### Talking to another session (no goal, no loop machinery)
+
+Two owner tools that work on ANY session without creating a goal, attaching a worker, or touching scope/lease/checks. The session's own OpenCode permissions still gate writes.
+
+- `peek_session({ session_id, directory? })` — read-only visibility: is it a worker of some goal, owner of which, runtime state, live host status + last assistant text, fence holders, tickets, transcript tail, recent log events. Use instead of manual log/state archaeology.
+- `send_to_session({ session_id, text, directory? })` — send a bare turn to that session. No scope protection: two concurrent sends to the same session can interleave, so check status first (peek_session or `host.sessionStatus`). The session's own permissions still apply.
+
+Use these for direct session-to-session talk and for diagnosing a session you're handed. They do NOT register the session as a worker, do NOT enforce scopes, and do NOT run checks. For verified, scoped, budgeted work, create a goal and attach the session instead.
+
+
 
 All are filtered by `ownerSessionID` (only the session that created the goal sees it). They are the **parity surface** for TUI — every TUI action has an equivalent tool here, enforced by the interaction registry.
 

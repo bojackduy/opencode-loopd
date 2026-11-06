@@ -114,7 +114,8 @@ export interface LoopHost {
   listModels?(): Promise<ModelCatalog>
   /** v1 uses explicit next-prompt identity; v2 can update the idle session. */
   switchSessionModel?(sessionID: string, model: ModelRef): Promise<"applied" | "next-prompt" | "unsupported">
-  /**
+  /** Send a bare turn to any session (no goal, no lease, no checks). Debugging/steering only. */
+  promptSession?(sessionID: string, text: string): Promise<{ messageID?: string }>  /**
    * Create a worker session. Returns the session ID (v1 + legacy callers) or
    * a WorkerCreation carrying the ID plus v2 topology metadata. v1 and fake
    * hosts return the bare string; only the v2 host returns the object form.
@@ -273,6 +274,21 @@ export function createRealHost(client: any, directory: string): LoopHost {
       await logServerEvent(directory, "worker.prompted", { sessionID })
       // SDK may return the created message ID in response headers or body
       return { messageID: result?.data?.messageID }
+    },
+
+    async promptSession(sessionID: string, text: string) {
+      try {
+        const result = await withTimeout<any>(
+          client.session.promptAsync({ path: { id: sessionID }, body: { parts: [{ type: "text", text }] } }),
+          10_000,
+          "OpenCode session.promptAsync (direct)",
+        )
+        if (result?.error) return { messageID: undefined }
+        await logServerEvent(directory, "session.prompted", { sessionID })
+        return { messageID: result?.data?.messageID }
+      } catch {
+        return { messageID: undefined }
+      }
     },
 
     async readSession(sessionID) {
@@ -746,6 +762,17 @@ export function createV2Host(
       }), 30_000, "OpenCode v2 session.prompt (acceptance)")
       await logServerEvent(directory, "worker.prompted", { sessionID })
       return { messageID: (result as any)?.id }
+    },
+
+    async promptSession(sessionID: string, text: string) {
+      try {
+        const messageID = `msg_${randomUUID()}`
+        await withTimeout(context.session.prompt({ sessionID, id: messageID, text, delivery: "queue" }), 30_000, "OpenCode v2 session.prompt (direct)")
+        await logServerEvent(directory, "session.prompted", { sessionID })
+        return { messageID }
+      } catch {
+        return { messageID: undefined }
+      }
     },
 
     async readSession(sessionID) {

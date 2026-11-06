@@ -7147,6 +7147,17 @@ function createRealHost(client, directory) {
       await logServerEvent(directory, "worker.prompted", { sessionID });
       return { messageID: result?.data?.messageID };
     },
+    async promptSession(sessionID, text) {
+      try {
+        const result = await withTimeout(client.session.promptAsync({ path: { id: sessionID }, body: { parts: [{ type: "text", text }] } }), 1e4, "OpenCode session.promptAsync (direct)");
+        if (result?.error)
+          return { messageID: undefined };
+        await logServerEvent(directory, "session.prompted", { sessionID });
+        return { messageID: result?.data?.messageID };
+      } catch {
+        return { messageID: undefined };
+      }
+    },
     async readSession(sessionID) {
       try {
         const result = await withTimeout(client.session.get({ path: { id: sessionID } }), 1e4, "OpenCode session.get");
@@ -7503,6 +7514,16 @@ function createV2Host(context, statuses, options = {}) {
       }), 30000, "OpenCode v2 session.prompt (acceptance)");
       await logServerEvent(directory, "worker.prompted", { sessionID });
       return { messageID: result?.id };
+    },
+    async promptSession(sessionID, text) {
+      try {
+        const messageID = `msg_${randomUUID8()}`;
+        await withTimeout(context.session.prompt({ sessionID, id: messageID, text, delivery: "queue" }), 30000, "OpenCode v2 session.prompt (direct)");
+        await logServerEvent(directory, "session.prompted", { sessionID });
+        return { messageID };
+      } catch {
+        return { messageID: undefined };
+      }
     },
     async readSession(sessionID) {
       try {
@@ -12078,6 +12099,7 @@ function describeGoalState(status, phase, now = Date.now()) {
 // src/server/owner-tools.ts
 import { promises as fs10 } from "fs";
 import path11 from "path";
+init_server_log();
 function withTimeout2(promise, ms) {
   return Promise.race([
     promise,
@@ -12176,6 +12198,93 @@ function ownerTools2(options) {
         } catch (error) {
           return { title: "Attach failed", output: JSON.stringify({ ok: false, message: error instanceof Error ? error.message : String(error) }) };
         }
+      }
+    }),
+    send_to_session: tool2({
+      description: "Send a bare turn to ANY OpenCode session (no goal, no lease, no checks, no scope, no steering). Direct session-to-session talk: bypasses all loop machinery. Use when you need to talk to a session directly without creating/attaching a goal. The session's own permissions still gate writes; two concurrent sends to the same session can interleave, so check status first. Does not register it as a worker.",
+      args: {
+        session_id: tool2.schema.string().describe("Existing OpenCode session ID (ses_...)."),
+        text: tool2.schema.string().describe("The turn to send."),
+        directory: tool2.schema.string().optional().describe("Project directory override. Omit to use the instance directory.")
+      },
+      execute: async (args, context) => {
+        if (!context?.sessionID)
+          return { title: "No session", output: JSON.stringify({ ok: false, message: "No session context available." }) };
+        const target = resolveTargetDir(directory, args.directory);
+        const known = host.sessionKnown ? await host.sessionKnown(args.session_id).catch(() => {
+          return;
+        }) : undefined;
+        if (known === false)
+          return { title: "Unknown session", output: JSON.stringify({ ok: false, message: `Session ${args.session_id} is not known to the host.` }) };
+        const status = host.sessionStatus ? await host.sessionStatus(args.session_id).catch(() => "unknown") : undefined;
+        if (status === "busy")
+          return { title: "Busy", output: JSON.stringify({ ok: false, message: `Session ${args.session_id} is busy; queued text will be delivered by the host on next idle. Use peek_session to inspect.` }) };
+        const result = host.promptSession ? await host.promptSession(args.session_id, args.text).catch(() => ({ messageID: undefined })) : { messageID: undefined };
+        return { title: result?.messageID ? "Sent" : "Send failed", output: JSON.stringify({ ok: !!result?.messageID, session_id: args.session_id, directory: target, messageID: result?.messageID }) };
+      }
+    }),
+    peek_session: tool2({
+      description: "Read-only visibility into ANY session: is it a worker of some goal, owner of which, runtime state, live host status + last assistant text, fence holders, tickets, transcript tail. Use instead of manual log/state archaeology. Does not mutate. No loop machinery involved.",
+      args: {
+        session_id: tool2.schema.string().describe("OpenCode session ID (ses_...)."),
+        directory: tool2.schema.string().optional().describe("Project directory override. Omit to use the instance directory."),
+        includeTranscript: tool2.schema.boolean().optional().describe("Include live transcript tail (default true)."),
+        transcriptLimit: tool2.schema.number().optional().describe("Transcript messages to include (1-10, default 4).")
+      },
+      execute: async (args, context) => {
+        if (!context?.sessionID)
+          return { title: "No session", output: JSON.stringify({ ok: false, message: "No session context available." }) };
+        const target = resolveTargetDir(directory, args.directory);
+        const state = await readState(target);
+        const asWorker = state.goals.filter((g) => g.workerSessionID === args.session_id).map((g) => ({ id: g.id, name: g.name, status: g.status, ownerSessionID: g.ownerSessionID, topology: g.workerTopology }));
+        const asOwner = state.goals.filter((g) => g.ownerSessionID === args.session_id).map((g) => ({ id: g.id, name: g.name, status: g.status, workerSessionID: g.workerSessionID }));
+        const retired = (state.retiredWorkerSessions ?? []).includes(args.session_id);
+        const fences = (state.workspaceCalls ?? []).filter((c) => c.sessionID === args.session_id);
+        const tickets = (state.writeTickets?.holders ?? []).filter((h) => h.sessionID === args.session_id);
+        const [known, status, exec] = await Promise.all([
+          host.sessionKnown ? host.sessionKnown(args.session_id).catch(() => {
+            return;
+          }) : Promise.resolve(undefined),
+          host.sessionStatus ? host.sessionStatus(args.session_id).catch(() => "unknown") : Promise.resolve(undefined),
+          host.readExecution ? host.readExecution(args.session_id).catch(() => null) : Promise.resolve(null)
+        ]);
+        const includeTranscript = args.includeTranscript !== false;
+        const tLimit = Math.min(10, Math.max(1, args.transcriptLimit ?? 4));
+        const transcriptTail = includeTranscript && known !== false ? await withTimeout2(host.readMessages(args.session_id, tLimit), 1200).catch(() => null) : null;
+        let recentLog = [];
+        try {
+          const raw = await fs10.readFile(SERVER_LOG_FILE, "utf8");
+          const lines = raw.split(`
+`).filter(Boolean);
+          for (const line of lines.slice(-2000)) {
+            try {
+              const e = JSON.parse(line);
+              if (e?.sessionID !== args.session_id)
+                continue;
+              const { timestamp, event, ...rest } = e;
+              recentLog.push({ timestamp, event, extra: Object.keys(rest).length ? rest : undefined });
+            } catch {}
+          }
+          recentLog = recentLog.slice(-30);
+        } catch {}
+        return {
+          title: `Peek: ${args.session_id}`,
+          output: JSON.stringify({
+            ok: true,
+            session_id: args.session_id,
+            directory: target,
+            known,
+            workerStatus: status,
+            hostExecution: exec,
+            retired,
+            asWorkerOf: asWorker,
+            asOwnerOf: asOwner,
+            fences,
+            tickets,
+            transcriptTail: transcriptTail ? transcriptTail.map((m) => ({ role: m.role, content: String(m.content || "").slice(0, 300), timestamp: m.timestamp, messageID: m.messageID })) : undefined,
+            recentLog
+          }, null, 2)
+        };
       }
     }),
     list_background_goals: tool2({

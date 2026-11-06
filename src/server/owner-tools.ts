@@ -11,6 +11,7 @@ import { goalStatusLabel, phaseLabel, describeGoalState } from "../domain/status
 import { promises as fs } from "fs"
 import path from "path"
 import { resolveManagedDirs } from "../infrastructure/managed-dirs"
+import { SERVER_LOG_FILE } from "../infrastructure/server-log"
 
 export interface OwnerToolsOptions {
   directory: string
@@ -110,6 +111,89 @@ export function ownerTools(options: OwnerToolsOptions) {
           return { title: "Worker attached", output: JSON.stringify({ ok: true, ...result, message: `Session ${args.session_id} is now the worker for "${goal.name}". Send it work with send_goal_input or nudge_goal.` }) }
         } catch (error) {
           return { title: "Attach failed", output: JSON.stringify({ ok: false, message: error instanceof Error ? error.message : String(error) }) }
+        }
+      },
+    }),
+
+    send_to_session: tool({
+      description:
+        "Send a bare turn to ANY OpenCode session (no goal, no lease, no checks, no scope, no steering). Direct session-to-session talk: bypasses all loop machinery. Use when you need to talk to a session directly without creating/attaching a goal. The session's own permissions still gate writes; two concurrent sends to the same session can interleave, so check status first. Does not register it as a worker.",
+      args: {
+        session_id: tool.schema.string().describe("Existing OpenCode session ID (ses_...)."),
+        text: tool.schema.string().describe("The turn to send."),
+        directory: tool.schema.string().optional().describe("Project directory override. Omit to use the instance directory."),
+      },
+      execute: async (args, context) => {
+        if (!context?.sessionID) return { title: "No session", output: JSON.stringify({ ok: false, message: "No session context available." }) }
+        const target = resolveTargetDir(directory, args.directory)
+        const known = host.sessionKnown ? await host.sessionKnown(args.session_id).catch(() => undefined) : undefined
+        if (known === false) return { title: "Unknown session", output: JSON.stringify({ ok: false, message: `Session ${args.session_id} is not known to the host.` }) }
+        const status = host.sessionStatus ? await host.sessionStatus(args.session_id).catch(() => "unknown" as const) : undefined
+        if (status === "busy") return { title: "Busy", output: JSON.stringify({ ok: false, message: `Session ${args.session_id} is busy; queued text will be delivered by the host on next idle. Use peek_session to inspect.` }) }
+        const result = host.promptSession ? await host.promptSession(args.session_id, args.text).catch(() => ({ messageID: undefined })) : { messageID: undefined }
+        return { title: result?.messageID ? "Sent" : "Send failed", output: JSON.stringify({ ok: !!result?.messageID, session_id: args.session_id, directory: target, messageID: result?.messageID }) }
+      },
+    }),
+
+    peek_session: tool({
+      description:
+        "Read-only visibility into ANY session: is it a worker of some goal, owner of which, runtime state, live host status + last assistant text, fence holders, tickets, transcript tail. Use instead of manual log/state archaeology. Does not mutate. No loop machinery involved.",
+      args: {
+        session_id: tool.schema.string().describe("OpenCode session ID (ses_...)."),
+        directory: tool.schema.string().optional().describe("Project directory override. Omit to use the instance directory."),
+        includeTranscript: tool.schema.boolean().optional().describe("Include live transcript tail (default true)."),
+        transcriptLimit: tool.schema.number().optional().describe("Transcript messages to include (1-10, default 4)."),
+      },
+      execute: async (args, context) => {
+        if (!context?.sessionID) return { title: "No session", output: JSON.stringify({ ok: false, message: "No session context available." }) }
+        const target = resolveTargetDir(directory, args.directory)
+        const state = await readState(target)
+        const asWorker = state.goals.filter((g) => g.workerSessionID === args.session_id).map((g) => ({ id: g.id, name: g.name, status: g.status, ownerSessionID: g.ownerSessionID, topology: g.workerTopology }))
+        const asOwner = state.goals.filter((g) => g.ownerSessionID === args.session_id).map((g) => ({ id: g.id, name: g.name, status: g.status, workerSessionID: g.workerSessionID }))
+        const retired = (state.retiredWorkerSessions ?? []).includes(args.session_id)
+        const fences = (state.workspaceCalls ?? []).filter((c) => c.sessionID === args.session_id)
+        const tickets = (state.writeTickets?.holders ?? []).filter((h) => h.sessionID === args.session_id)
+        const [known, status, exec] = await Promise.all([
+          host.sessionKnown ? host.sessionKnown(args.session_id).catch(() => undefined) : Promise.resolve(undefined),
+          host.sessionStatus ? host.sessionStatus(args.session_id).catch(() => "unknown" as const) : Promise.resolve(undefined),
+          host.readExecution ? host.readExecution(args.session_id).catch(() => null) : Promise.resolve(null),
+        ])
+        const includeTranscript = args.includeTranscript !== false
+        const tLimit = Math.min(10, Math.max(1, args.transcriptLimit ?? 4))
+        const transcriptTail = includeTranscript && known !== false
+          ? await withTimeout(host.readMessages(args.session_id, tLimit), 1200).catch(() => null)
+          : null
+        let recentLog: Array<{ timestamp: string; event: string; extra?: Record<string, unknown> }> = []
+        try {
+          const raw = await fs.readFile(SERVER_LOG_FILE, "utf8")
+          const lines = raw.split("\n").filter(Boolean)
+          for (const line of lines.slice(-2000)) {
+            try {
+              const e = JSON.parse(line)
+              if (e?.sessionID !== args.session_id) continue
+              const { timestamp, event, ...rest } = e
+              recentLog.push({ timestamp, event, extra: Object.keys(rest).length ? rest : undefined })
+            } catch { /* skip */ }
+          }
+          recentLog = recentLog.slice(-30)
+        } catch { /* no log file */ }
+        return {
+          title: `Peek: ${args.session_id}`,
+          output: JSON.stringify({
+            ok: true,
+            session_id: args.session_id,
+            directory: target,
+            known,
+            workerStatus: status,
+            hostExecution: exec,
+            retired,
+            asWorkerOf: asWorker,
+            asOwnerOf: asOwner,
+            fences,
+            tickets,
+            transcriptTail: transcriptTail ? (transcriptTail as any[]).map((m: any) => ({ role: m.role, content: String(m.content || "").slice(0, 300), timestamp: m.timestamp, messageID: m.messageID })) : undefined,
+            recentLog,
+          }, null, 2),
         }
       },
     }),
