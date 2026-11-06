@@ -821,13 +821,21 @@ export function createV2Host(
           if (message.type !== "assistant") return []
           const created = message.time.created
           const completed = message.time.completed
+          const textParts = message.content
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+          const toolParts = message.content
+            .filter((part) => part.type === "tool")
+            .map((part) => {
+              const name = (part as any).tool || (part as any).name || "tool"
+              const input = (part as any).state?.input
+              const inputStr = input ? JSON.stringify(input).slice(0, 80) : ""
+              return inputStr ? `[${name}] ${inputStr}` : `[${name}]`
+            })
+          const content = [...textParts, ...toolParts].join("\n")
           return [{
             role: "assistant",
-            content: message.content
-              .filter((part) => part.type === "text")
-              .map((part) => part.text)
-              .join("\n"),
-            timestamp: new Date(completed ?? created).toISOString(),
+            content,
             messageID: message.id,
             parentMessageID,
             completedAt: completed ? new Date(completed).toISOString() : undefined,

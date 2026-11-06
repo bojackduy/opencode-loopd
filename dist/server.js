@@ -7566,11 +7566,18 @@ function createV2Host(context, statuses, options = {}) {
             return [];
           const created = message.time.created;
           const completed = message.time.completed;
+          const textParts = message.content.filter((part) => part.type === "text").map((part) => part.text);
+          const toolParts = message.content.filter((part) => part.type === "tool").map((part) => {
+            const name = part.tool || part.name || "tool";
+            const input = part.state?.input;
+            const inputStr = input ? JSON.stringify(input).slice(0, 80) : "";
+            return inputStr ? `[${name}] ${inputStr}` : `[${name}]`;
+          });
+          const content = [...textParts, ...toolParts].join(`
+`);
           return [{
             role: "assistant",
-            content: message.content.filter((part) => part.type === "text").map((part) => part.text).join(`
-`),
-            timestamp: new Date(completed ?? created).toISOString(),
+            content,
             messageID: message.id,
             parentMessageID,
             completedAt: completed ? new Date(completed).toISOString() : undefined,
@@ -9938,6 +9945,9 @@ function createGoalService(host) {
         rt.activeRunID = undefined;
         rt.idleCandidateAt = undefined;
         rt.activePromptMessageID = undefined;
+        rt.activePromptAcceptedAt = undefined;
+        rt.activeAssistantCompletedAt = undefined;
+        rt.activeAssistantMessageID = undefined;
         rt.activeToolCallIDs = [];
         rt.lastWorkerStatus = undefined;
         rt.updatedAt = new Date().toISOString();

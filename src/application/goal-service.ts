@@ -2432,6 +2432,9 @@ export function createGoalService(host: LoopHost): GoalService {
         rt.activeRunID = undefined
         rt.idleCandidateAt = undefined
         rt.activePromptMessageID = undefined
+        rt.activePromptAcceptedAt = undefined
+        rt.activeAssistantCompletedAt = undefined
+        rt.activeAssistantMessageID = undefined
         rt.activeToolCallIDs = []
         rt.lastWorkerStatus = undefined
         rt.updatedAt = new Date().toISOString()
