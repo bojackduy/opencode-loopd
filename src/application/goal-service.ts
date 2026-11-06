@@ -2412,7 +2412,13 @@ export function createGoalService(host: LoopHost): GoalService {
     if (!goal || !ownerSessionID || goal.ownerSessionID !== ownerSessionID) throw new Error("Goal not found or not owned by this session.")
     if (goal.status === "complete") throw new Error(`Cannot attach a worker to a ${goal.status} goal.`)
     const oldWorker = goal.workerSessionID
-    if (oldWorker && oldWorker !== newWorkerSessionID) retireWorker(state, goal)
+    if (oldWorker && oldWorker !== newWorkerSessionID) {
+      retireWorker(state, goal)
+      // Stop the old worker's in-flight turn so it does not keep burning
+      // tokens on work nobody wants. Best-effort: the fence above already
+      // denies its late writes even if the abort misses.
+      await host.abortSession(oldWorker).catch(() => {})
+    }
     await mutateState(directory, `goal.attach-worker:${goalID}`, async (s) => {
       const g = s.goals.find((item) => item.id === goalID)
       if (!g) return s

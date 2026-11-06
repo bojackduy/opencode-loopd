@@ -9920,8 +9920,10 @@ function createGoalService(host) {
     if (goal.status === "complete")
       throw new Error(`Cannot attach a worker to a ${goal.status} goal.`);
     const oldWorker = goal.workerSessionID;
-    if (oldWorker && oldWorker !== newWorkerSessionID)
+    if (oldWorker && oldWorker !== newWorkerSessionID) {
       retireWorker(state, goal);
+      await host.abortSession(oldWorker).catch(() => {});
+    }
     await mutateState(directory, `goal.attach-worker:${goalID}`, async (s) => {
       const g = s.goals.find((item) => item.id === goalID);
       if (!g)
