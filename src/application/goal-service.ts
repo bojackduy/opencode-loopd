@@ -90,6 +90,7 @@ class GoalDeliveryBlockedError extends Error {
 export interface GoalService {
   readonly scopedExecution: boolean
   switchIdentity(directory: string, goalID: GoalID, ownerSessionID: string, opts: { model?: string; agent?: string; resume?: boolean }): Promise<{ outcome: "applied" | "deferred" | "unsupported"; model?: string; agent?: string; resumed?: boolean }>
+  attachWorker(directory: string, goalID: GoalID, ownerSessionID: string, workerSessionID: string): Promise<{ goalID: GoalID; workerSessionID: string; previousWorkerSessionID?: string }>
   listAgents(): Promise<AgentCatalog>
   switchAgent(directory: string, goalID: GoalID, ownerSessionID: string, agent: string, opts?: { resume?: boolean }): Promise<{ outcome: "applied" | "deferred" | "unsupported"; agent: string; resumed?: boolean }>
   listModels(): Promise<ModelCatalog>
@@ -2401,5 +2402,45 @@ export function createGoalService(host: LoopHost): GoalService {
     return releaseWorkspaceUnlocked(directory, ownerSessionID, input)
   }
 
-  return { scopedExecution: host.scopedExecution === true, start, continueTurn, nudge, pause, resume, retry, clear, workspaceReservations, releaseWorkspace, grantApprovedCommand, grantWriteScope, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, observeProviderError, compact }
+  async function attachWorkerUnlocked(directory: string, goalID: GoalID, ownerSessionID: string, newWorkerSessionID: string) {
+    if (!host.sessionKnown) throw new Error("Host cannot verify sessions; attach unavailable.")
+    const known = await host.sessionKnown(newWorkerSessionID).catch(() => undefined)
+    if (known === false) throw new Error(`Session ${newWorkerSessionID} is not known to the host.`)
+    if (newWorkerSessionID === ownerSessionID) throw new Error("Owner session cannot be its own worker.")
+    const state = await readState(directory)
+    const goal = state.goals.find((g) => g.id === goalID)
+    if (!goal || !ownerSessionID || goal.ownerSessionID !== ownerSessionID) throw new Error("Goal not found or not owned by this session.")
+    if (goal.status === "complete") throw new Error(`Cannot attach a worker to a ${goal.status} goal.`)
+    const oldWorker = goal.workerSessionID
+    if (oldWorker && oldWorker !== newWorkerSessionID) retireWorker(state, goal)
+    await mutateState(directory, `goal.attach-worker:${goalID}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goalID)
+      if (!g) return s
+      g.workerSessionID = newWorkerSessionID
+      g.workerTopology = "attached"
+      g.nativeParentID = undefined
+      const rt = s.runtimes.find((r) => r.goalID === goalID)
+      if (rt) {
+        Object.assign(rt, releaseLease(rt))
+        rt.phase = "idle"
+        rt.activeRunID = undefined
+        rt.idleCandidateAt = undefined
+        rt.activePromptMessageID = undefined
+        rt.activeToolCallIDs = []
+        rt.lastWorkerStatus = undefined
+        rt.updatedAt = new Date().toISOString()
+      }
+      return s
+    })
+    goal.workerSessionID = newWorkerSessionID
+    goal.workerTopology = "attached"
+    await logServerEvent(directory, "goal.worker-attached", { goalID, from: oldWorker, to: newWorkerSessionID, ownerSessionID }).catch(() => {})
+    return { goalID, workerSessionID: newWorkerSessionID, previousWorkerSessionID: oldWorker }
+  }
+
+  function attachWorker(directory: string, goalID: GoalID, ownerSessionID: string, newWorkerSessionID: string) {
+    return withGoalOperation(goalID, () => attachWorkerUnlocked(directory, goalID, ownerSessionID, newWorkerSessionID))
+  }
+
+  return { scopedExecution: host.scopedExecution === true, start, continueTurn, nudge, pause, resume, retry, clear, workspaceReservations, releaseWorkspace, grantApprovedCommand, grantWriteScope, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, attachWorker, observeProviderError, compact }
 }

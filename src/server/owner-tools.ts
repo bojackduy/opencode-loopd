@@ -89,6 +89,31 @@ export function ownerTools(options: OwnerToolsOptions) {
       },
     }),
 
+    attach_worker_session: tool({
+      description:
+        "Attach an EXISTING OpenCode session as the worker of an owned goal, replacing the current worker. Use when you want a specific session (e.g. one a human is driving, or a lane's session) to do the work instead of the spawned worker. The goal, checks, budgets, scope and transcript are retained; the new session gains the worker tools and scope for this goal. The previous worker session is retired (its late tools are fenced). Requires the host to verify the session. For a goal living in another workspace pass its absolute path as `directory`. Does not start a turn — send_goal_input or nudge_goal afterward.",
+      args: {
+        goal_id: tool.schema.string().describe("Owned goal ID."),
+        session_id: tool.schema.string().describe("Existing OpenCode session ID (ses_...) to attach as worker."),
+        directory: tool.schema.string().optional().describe("Project directory override. Omit to use the instance directory."),
+      },
+      execute: async (args, context) => {
+        if (!context?.sessionID) return { title: "No session", output: JSON.stringify({ ok: false, message: "No session context available." }) }
+        const target = resolveTargetDir(directory, args.directory)
+        const state = await readState(target)
+        const goal = state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === context.sessionID)
+        if (!goal) {
+          return { title: "Attach denied", output: JSON.stringify({ ok: false, message: `Goal not found or not owned by this session in ${target}. If the goal lives in another workspace, pass its absolute path as directory.` }) }
+        }
+        try {
+          const result = await goalService.attachWorker(target, args.goal_id as GoalID, context.sessionID, args.session_id)
+          return { title: "Worker attached", output: JSON.stringify({ ok: true, ...result, message: `Session ${args.session_id} is now the worker for "${goal.name}". Send it work with send_goal_input or nudge_goal.` }) }
+        } catch (error) {
+          return { title: "Attach failed", output: JSON.stringify({ ok: false, message: error instanceof Error ? error.message : String(error) }) }
+        }
+      },
+    }),
+
     list_background_goals: tool({
       description:
         "List all active background goals owned by this session. Shows contract (name, status, phase, turn, last progress, blocker) — only goals with your ownerSessionID appear. Scope caveat: this reads only the server's own workspace state. A goal created in another directory (lane worktree, monorepo package, other project) is invisible here — pass that absolute path as `directory`, or use the dashboard Fleet tab, which merges every directory registered in `.opencode/loopd/managed.json` (or LOOPD_MANAGED_DIRS) and routes each action to that directory's server. Never hand-edit another workspace's state.json.",

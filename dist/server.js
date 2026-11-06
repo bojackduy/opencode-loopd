@@ -9903,7 +9903,54 @@ function createGoalService(host) {
   function releaseWorkspace(directory, ownerSessionID, input) {
     return releaseWorkspaceUnlocked(directory, ownerSessionID, input);
   }
-  return { scopedExecution: host.scopedExecution === true, start, continueTurn, nudge, pause, resume, retry, clear, workspaceReservations, releaseWorkspace, grantApprovedCommand, grantWriteScope, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, observeProviderError, compact };
+  async function attachWorkerUnlocked(directory, goalID, ownerSessionID, newWorkerSessionID) {
+    if (!host.sessionKnown)
+      throw new Error("Host cannot verify sessions; attach unavailable.");
+    const known = await host.sessionKnown(newWorkerSessionID).catch(() => {
+      return;
+    });
+    if (known === false)
+      throw new Error(`Session ${newWorkerSessionID} is not known to the host.`);
+    if (newWorkerSessionID === ownerSessionID)
+      throw new Error("Owner session cannot be its own worker.");
+    const state = await readState(directory);
+    const goal = state.goals.find((g) => g.id === goalID);
+    if (!goal || !ownerSessionID || goal.ownerSessionID !== ownerSessionID)
+      throw new Error("Goal not found or not owned by this session.");
+    if (goal.status === "complete")
+      throw new Error(`Cannot attach a worker to a ${goal.status} goal.`);
+    const oldWorker = goal.workerSessionID;
+    if (oldWorker && oldWorker !== newWorkerSessionID)
+      retireWorker(state, goal);
+    await mutateState(directory, `goal.attach-worker:${goalID}`, async (s) => {
+      const g = s.goals.find((item) => item.id === goalID);
+      if (!g)
+        return s;
+      g.workerSessionID = newWorkerSessionID;
+      g.workerTopology = "attached";
+      g.nativeParentID = undefined;
+      const rt = s.runtimes.find((r) => r.goalID === goalID);
+      if (rt) {
+        Object.assign(rt, releaseLease(rt));
+        rt.phase = "idle";
+        rt.activeRunID = undefined;
+        rt.idleCandidateAt = undefined;
+        rt.activePromptMessageID = undefined;
+        rt.activeToolCallIDs = [];
+        rt.lastWorkerStatus = undefined;
+        rt.updatedAt = new Date().toISOString();
+      }
+      return s;
+    });
+    goal.workerSessionID = newWorkerSessionID;
+    goal.workerTopology = "attached";
+    await logServerEvent(directory, "goal.worker-attached", { goalID, from: oldWorker, to: newWorkerSessionID, ownerSessionID }).catch(() => {});
+    return { goalID, workerSessionID: newWorkerSessionID, previousWorkerSessionID: oldWorker };
+  }
+  function attachWorker(directory, goalID, ownerSessionID, newWorkerSessionID) {
+    return withGoalOperation(goalID, () => attachWorkerUnlocked(directory, goalID, ownerSessionID, newWorkerSessionID));
+  }
+  return { scopedExecution: host.scopedExecution === true, start, continueTurn, nudge, pause, resume, retry, clear, workspaceReservations, releaseWorkspace, grantApprovedCommand, grantWriteScope, getWorker, getActiveWorkers, reconcile, accountUsage, abortWorker, sendUserMessage, setInteractive, listModels, switchModel, listAgents, switchAgent, switchIdentity, attachWorker, observeProviderError, compact };
 }
 
 // src/application/schedule-worker.ts
@@ -12092,6 +12139,30 @@ function ownerTools2(options) {
           const isHostError = error instanceof Error && /host|unsupported|unavailable/i.test(error.message);
           const hint = isHostError ? "Host unavailable to switch identity. Retry after host recovers; check loopd-server.log and loopd_list_models." : "Switch rejected: check loopd_list_models and inspect_background_goal for the specific blocker (ownership, model availability, or resume eligibility).";
           return { title: "Identity switch failed", output: JSON.stringify({ ok: false, message: `${hint} Existing goal/session retained.` }) };
+        }
+      }
+    }),
+    attach_worker_session: tool2({
+      description: "Attach an EXISTING OpenCode session as the worker of an owned goal, replacing the current worker. Use when you want a specific session (e.g. one a human is driving, or a lane's session) to do the work instead of the spawned worker. The goal, checks, budgets, scope and transcript are retained; the new session gains the worker tools and scope for this goal. The previous worker session is retired (its late tools are fenced). Requires the host to verify the session. For a goal living in another workspace pass its absolute path as `directory`. Does not start a turn \u2014 send_goal_input or nudge_goal afterward.",
+      args: {
+        goal_id: tool2.schema.string().describe("Owned goal ID."),
+        session_id: tool2.schema.string().describe("Existing OpenCode session ID (ses_...) to attach as worker."),
+        directory: tool2.schema.string().optional().describe("Project directory override. Omit to use the instance directory.")
+      },
+      execute: async (args, context) => {
+        if (!context?.sessionID)
+          return { title: "No session", output: JSON.stringify({ ok: false, message: "No session context available." }) };
+        const target = resolveTargetDir(directory, args.directory);
+        const state = await readState(target);
+        const goal = state.goals.find((g) => g.id === args.goal_id && g.ownerSessionID === context.sessionID);
+        if (!goal) {
+          return { title: "Attach denied", output: JSON.stringify({ ok: false, message: `Goal not found or not owned by this session in ${target}. If the goal lives in another workspace, pass its absolute path as directory.` }) };
+        }
+        try {
+          const result = await goalService.attachWorker(target, args.goal_id, context.sessionID, args.session_id);
+          return { title: "Worker attached", output: JSON.stringify({ ok: true, ...result, message: `Session ${args.session_id} is now the worker for "${goal.name}". Send it work with send_goal_input or nudge_goal.` }) };
+        } catch (error) {
+          return { title: "Attach failed", output: JSON.stringify({ ok: false, message: error instanceof Error ? error.message : String(error) }) };
         }
       }
     }),
