@@ -242,6 +242,17 @@ block_goal({
 })
 ```
 
+### notify_owner
+
+Push an informational note to the owner without changing goal state — NOT for completion (use complete_goal) or real blockers (use block_goal). Use for mid-run FYI, a controversy to review, or "I finished a step, take a look if you want more". Persists `lastAnnouncement` on the goal and notifies the owner once.
+
+```
+notify_owner({
+  message: "Short headline for the owner.",
+  detail: "Optional longer context (files, diffs, numbers)."
+})
+```
+
 ### Approved Commands and Managed Servers
 
 Workers and owners alike may use arbitrary shell: it is prompt-awareness only, never ticketed or fenced — recorded as uncontrolled (checks stay fenced until it exits). Structured writes stay scoped regardless of who makes them. Owners can additionally grant **named, immutable commands** at goal creation (`approvedCommands`) for repeatable, auditable execution. Authority is persisted on the goal and re-read on every call; it is never inferred from objective text.
