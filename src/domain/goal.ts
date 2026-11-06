@@ -18,7 +18,7 @@ export type GoalID = string & { readonly __brand: "GoalID" }
  * - "v2-native-child": forked native child of the owner session (v2 bridge).
  * - "v2-root-fallback": separate root session carrying loopd.parentID metadata.
  */
-export type WorkerTopology = "v1-child" | "v2-native-child" | "v2-root-fallback"
+export type WorkerTopology = "v1-child" | "v2-native-child" | "v2-root-fallback" | "attached"
 
 export interface Goal {
   id: GoalID

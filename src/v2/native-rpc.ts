@@ -86,7 +86,7 @@ export interface WorkerCreateFailure {
   preCreation: boolean
 }
 
-export type WorkerTopology = "v1-child" | "v2-native-child" | "v2-root-fallback"
+export type WorkerTopology = "v1-child" | "v2-native-child" | "v2-root-fallback" | "attached"
 
 // ─── Portable JSON-Schema definitions ────────────────────────────────────────
 // Kept as plain JSON Schema (type: "object") so both the server registrar
