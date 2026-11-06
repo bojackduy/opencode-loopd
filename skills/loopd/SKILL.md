@@ -242,7 +242,28 @@ block_goal({
 })
 ```
 
+### attach_worker_session
+
+Attach an EXISTING OpenCode session as the worker of an owned goal. Use it to turn a specific session (one a human is driving, a lane session, a session that needs your direct steering) into the worker instead of the spawned one. The goal, checks, budgets, scope and transcript are retained; the new session gains the worker tools and scoped writes for this goal. The previous worker is retired (its late tools are fenced) and its in-flight turn is aborted. Does NOT start a turn — send_goal_input or nudge_goal afterward.
+
+Caveats (observed in smoke test, 2026-11-06):
+- **Nudge may be blocked right after attach.** The dead-prompt guard can still see the previous worker's accepted-but-unconfirmed prompt (`OpenCode already accepted prompt … delivery unconfirmed`). The attached worker still runs via its inbox on the next engine tick, so do not panic; use `send_goal_input` (queued, delivered on next idle) instead of `nudge_goal` for the first turn.
+- **Transcripts show empty assistant content for tool-only turns.** `readMessages` captures text parts only; a worker that calls tools without prose shows blank assistant messages. `inspect_background_goal.live.now.lastAssistantText` is the same. Rely on tool-call IDs and `lastActivityAt` for liveness, not transcript text.
+- **Host status may read `unknown`** for an attached (non-child) session — the native projection is keyed to the spawned worker topology. Liveness is still tracked via `lastActivityAt` and `leaseValid`.
+- **The attached session keeps its own agent/model.** The goal's `config.agent`/`config.model` are display-only for an attached worker; do not assume the worker runs the goal's configured identity.
+- **Attach does not start a turn.** Always follow it with `send_goal_input` or `nudge_goal`.
+- **The replaced session stays browsable** (transcript intact) but is retired and fenced; its late writes are denied.
+
+```
+attach_worker_session({
+  goal_id: "<owned goal>",
+  session_id: "ses_...",        // existing session
+  directory: "/abs/project"     // only if the goal lives in another workspace
+})
+```
+
 ### notify_owner
+
 
 Push an informational note to the owner without changing goal state — NOT for completion (use complete_goal) or real blockers (use block_goal). Use for mid-run FYI, a controversy to review, or "I finished a step, take a look if you want more". Persists `lastAnnouncement` on the goal and notifies the owner once.
 
